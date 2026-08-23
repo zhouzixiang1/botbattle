@@ -36,6 +36,8 @@ from .schema import (
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
+    CONTEST_IDENTITY_SOURCE_LEGACY,
+    CONTEST_IDENTITY_SOURCE_REGISTRATION,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
     CONTEST_REST,
@@ -118,6 +120,40 @@ class RankedBotSelectionBusyError(ValueError):
     """Changing the ranked representative would cross an active rated lifecycle."""
 
 
+class BotDeletedError(ValueError):
+    """An owner mutation targeted a retained, logically deleted Bot identity."""
+
+
+class BotOwnerDeleteBusyError(ValueError):
+    """Logical deletion would cross an active execution or contest lifecycle."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+
+
+class ContestRealNameRosterForbidden(ValueError):
+    """A proxy roster write lacks the participant consent required for PII capture."""
+
+    MESSAGE = "实名赛事仅允许参赛者本人报名，组织者不可代报名"
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
+class ContestRosterWriteValidationError(ValueError):
+    """Roster validation failed after the Store acquired its writer lock.
+
+    The non-PII gate bit lets an authorized API audit the actual identity mode
+    used by the failed transaction instead of an earlier autocommit view.
+    """
+
+    def __init__(self, message: str, *, identity_required_at_commit: bool) -> None:
+        super().__init__(message)
+        self.identity_required_at_commit = bool(identity_required_at_commit)
+
+
 @dataclass
 class _OfflineCutoverGuard:
     """Process-local proof that the DB dispatcher flock is exclusively held."""
@@ -164,6 +200,56 @@ def offline_cutover_path_guard(database_path: str | os.PathLike[str]):
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+_CONTEST_IDENTITY_PROFILE_FIELDS = (
+    "real_name",
+    "phone",
+    "school",
+    "student_id",
+)
+
+
+def _registration_identity_tx(
+    conn: sqlite3.Connection,
+    contest_id: int,
+    user_id: int,
+    *,
+    captured_at: str,
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    """Freeze a complete registration profile inside the entry write transaction.
+
+    Non-real-name contests deliberately persist six NULLs.  Existing real-name
+    entries also remain NULL after migration; their explicitly labelled legacy
+    fallback is a private read-model concern, not a fabricated snapshot.
+    """
+    contest = conn.execute(
+        "SELECT require_real_name FROM contests WHERE id=?", (contest_id,)
+    ).fetchone()
+    if not contest:
+        raise ValueError("赛事不存在")
+    if not int(contest["require_real_name"] or 0):
+        return (None, None, None, None, None, None)
+    user = conn.execute(
+        "SELECT real_name,phone,school,student_id FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    values = tuple(
+        str(user[field] or "").strip() if user is not None else ""
+        for field in _CONTEST_IDENTITY_PROFILE_FIELDS
+    )
+    if not all(values):
+        raise ValueError(
+            "本赛事要求实名，参赛者须先填写完整实名信息（姓名/手机号/学校/学号）"
+        )
+    return (
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        captured_at,
+        CONTEST_IDENTITY_SOURCE_REGISTRATION,
+    )
 
 
 def _version_in_cutover_manifest_tx(
@@ -271,6 +357,63 @@ _UNIQUE_CONTEST_ENTRY_SQL = (
 )
 
 
+def _contest_identity_projection_sql(
+    *,
+    entry_alias: str = "e",
+    user_alias: str = "u",
+    gate_sql: str | None = None,
+) -> str:
+    """Private identity projection, optionally gated inside the same SQL row.
+
+    ``gate_sql`` must be a trusted internal SQL predicate from the same SELECT
+    (normally the joined contest's ``require_real_name``).  Wrapping every
+    projected value prevents a stale preliminary gate read from authorizing PII
+    fetched from a newer entry/profile snapshot.
+    """
+
+    def gated(expression: str) -> str:
+        if gate_sql is None:
+            return expression
+        return f"CASE WHEN {gate_sql} THEN ({expression}) ELSE NULL END"
+
+    raw_source = (
+        f"CASE WHEN {entry_alias}.identity_source="
+        f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"THEN '{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"WHEN {entry_alias}.identity_source IS NULL "
+        f"THEN '{CONTEST_IDENTITY_SOURCE_LEGACY}' ELSE NULL END"
+    )
+    projected: list[str] = []
+    completeness_terms: list[str] = []
+    for field in _CONTEST_IDENTITY_PROFILE_FIELDS:
+        snapshot = f"{entry_alias}.{field}_snapshot"
+        current = f"{user_alias}.{field}"
+        value = (
+            f"CASE WHEN {entry_alias}.identity_source="
+            f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' THEN {snapshot} "
+            f"WHEN {entry_alias}.identity_source IS NULL THEN {current} "
+            "ELSE NULL END"
+        )
+        projected.append(f"{gated(value)} AS {field}")
+        completeness_terms.append(f"TRIM(COALESCE(({value}),''))<>''")
+    completeness = (
+        f"CASE WHEN {' AND '.join(completeness_terms)} THEN 1 ELSE 0 END"
+    )
+    captured_at = (
+        f"CASE WHEN {entry_alias}.identity_source="
+        f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"THEN {entry_alias}.identity_captured_at ELSE NULL END"
+    )
+    projected.extend(
+        (
+            f"{gated(raw_source)} AS identity_source",
+            f"{gated(captured_at)} AS identity_captured_at",
+            f"{gated(completeness)} AS identity_complete",
+        )
+    )
+    return ", ".join(projected)
+
+
 def _apply_effective_entry_ids(row: dict, *fields: tuple[str, str]) -> dict:
     for public_field, projection_field in fields:
         if row.get(public_field) is None:
@@ -312,6 +455,81 @@ def _delete_social_target(
         "DELETE FROM likes WHERE target_type=? AND target_id=?",
         (target_type, tid),
     )
+
+
+def _require_live_contest_bot_tx(
+    conn: sqlite3.Connection, bot_id: int
+) -> None:
+    live = conn.execute(
+        "SELECT 1 FROM bots WHERE id=? AND owner_deleted_at IS NULL "
+        "AND is_active=1",
+        (int(bot_id),),
+    ).fetchone()
+    if live is None:
+        raise ValueError("Bot 当前已停用或删除，不能加入赛事")
+
+
+def _require_contest_without_owner_deleted_bot_tx(
+    conn: sqlite3.Connection, contest_id: int
+) -> None:
+    """Reject a live-state transition that would publish a tombstoned Bot.
+
+    Ordinary inactive Bots keep their established contest semantics.  This
+    guard is deliberately limited to owner tombstones: a draft roster may
+    retain a deleted historical identity, but it cannot cross into a live
+    contest state afterwards.
+    """
+
+    deleted = conn.execute(
+        "SELECT 1 FROM contest_entries entry JOIN bots b ON b.id=entry.bot_id "
+        "WHERE entry.contest_id=? AND b.owner_deleted_at IS NOT NULL "
+        "UNION ALL "
+        "SELECT 1 FROM contest_pairings pairing JOIN bots b "
+        "ON b.id=pairing.bot_a_id WHERE pairing.contest_id=? "
+        "AND b.owner_deleted_at IS NOT NULL "
+        "UNION ALL "
+        "SELECT 1 FROM contest_pairings pairing JOIN bots b "
+        "ON b.id=pairing.bot_b_id WHERE pairing.contest_id=? "
+        "AND b.owner_deleted_at IS NOT NULL LIMIT 1",
+        (int(contest_id), int(contest_id), int(contest_id)),
+    ).fetchone()
+    if deleted is not None:
+        raise ValueError("赛事名册或对阵包含已删除 Bot，不能进入开放或运行状态")
+
+
+def _require_live_contest_pairing_bots_tx(
+    conn: sqlite3.Connection,
+    contest_id: int,
+    bot_a_id: int | None,
+    bot_b_id: int | None,
+) -> None:
+    """Reject tombstoned seats only when writing into a live contest."""
+
+    contest = conn.execute(
+        "SELECT status FROM contests WHERE id=?", (int(contest_id),)
+    ).fetchone()
+    if contest is None:
+        raise ValueError("赛事不存在")
+    if contest["status"] not in (
+        CONTEST_OPEN,
+        CONTEST_PUBLISHED,
+        CONTEST_RUNNING,
+        CONTEST_REST,
+    ):
+        return
+    bot_ids = [
+        int(bot_id) for bot_id in (bot_a_id, bot_b_id) if bot_id is not None
+    ]
+    if not bot_ids:
+        return
+    marks = ",".join("?" for _ in bot_ids)
+    deleted = conn.execute(
+        f"SELECT 1 FROM bots WHERE id IN ({marks}) "
+        "AND owner_deleted_at IS NOT NULL LIMIT 1",
+        bot_ids,
+    ).fetchone()
+    if deleted is not None:
+        raise ValueError("未结束赛事的对阵不能引用已删除 Bot")
 
 
 def _delete_user_likes(conn: sqlite3.Connection, user_id: int) -> None:
@@ -1224,6 +1442,120 @@ def _ensure_trigger(
         or _normalize_schema_sql(str(installed[0][1] or "")) != desired
     ):
         raise RuntimeError(f"trigger verification failed after install: {name}")
+
+
+def _install_bot_owner_delete_triggers(conn: sqlite3.Connection) -> None:
+    """Give upgraded databases the same tombstone invariant as fresh schema.
+
+    SQLite cannot add a table-level CHECK to an existing table without a risky
+    rebuild.  Canonical BEFORE triggers therefore guard both creation and every
+    later mutation, including direct maintenance SQL and writes from another
+    application process.
+    """
+
+    insert_name = "trg_bots_owner_deleted_guard_insert"
+    _ensure_trigger(
+        conn,
+        insert_name,
+        f"CREATE TRIGGER {insert_name} BEFORE INSERT ON bots "
+        "WHEN NEW.owner_deleted_at IS NOT NULL "
+        "AND (NEW.is_active<>0 OR NEW.is_ranked<>0) "
+        "BEGIN SELECT RAISE(ABORT, 'deleted Bot must be inactive and unranked'); END",
+    )
+    update_name = "trg_bots_owner_deleted_guard_update"
+    _ensure_trigger(
+        conn,
+        update_name,
+        f"CREATE TRIGGER {update_name} "
+        "BEFORE UPDATE OF owner_deleted_at,is_active,is_ranked ON bots "
+        "WHEN (OLD.owner_deleted_at IS NOT NULL "
+        "AND NEW.owner_deleted_at IS NOT OLD.owner_deleted_at) OR "
+        "(NEW.owner_deleted_at IS NOT NULL "
+        "AND (NEW.is_active<>0 OR NEW.is_ranked<>0)) "
+        "BEGIN SELECT RAISE(ABORT, 'deleted Bot tombstone invariant'); END",
+    )
+
+
+def _install_contest_entry_live_bot_triggers(conn: sqlite3.Connection) -> None:
+    """Close register/delete races at the final contest roster write boundary."""
+
+    predicate = (
+        "NEW.bot_id IS NOT NULL AND NOT EXISTS("
+        "SELECT 1 FROM bots live_bot WHERE live_bot.id=NEW.bot_id "
+        "AND live_bot.owner_deleted_at IS NULL AND live_bot.is_active=1)"
+    )
+    insert_name = "trg_contest_entries_live_bot_insert"
+    _ensure_trigger(
+        conn,
+        insert_name,
+        f"CREATE TRIGGER {insert_name} BEFORE INSERT ON contest_entries "
+        f"WHEN {predicate} "
+        "BEGIN SELECT RAISE(ABORT, 'contest entry Bot must be active'); END",
+    )
+    update_name = "trg_contest_entries_live_bot_update"
+    _ensure_trigger(
+        conn,
+        update_name,
+        f"CREATE TRIGGER {update_name} BEFORE UPDATE OF bot_id ON contest_entries "
+        f"WHEN {predicate} "
+        "BEGIN SELECT RAISE(ABORT, 'contest entry Bot must be active'); END",
+    )
+
+
+def _install_contest_live_state_bot_trigger(conn: sqlite3.Connection) -> None:
+    """Prevent a draft tombstone from being published by any SQL writer."""
+
+    name = "trg_contests_live_state_deleted_bot_guard"
+    deleted_reference = (
+        "EXISTS(SELECT 1 FROM contest_entries entry JOIN bots b "
+        "ON b.id=entry.bot_id WHERE entry.contest_id=NEW.id "
+        "AND b.owner_deleted_at IS NOT NULL) OR "
+        "EXISTS(SELECT 1 FROM contest_pairings pairing JOIN bots b "
+        "ON b.id=pairing.bot_a_id WHERE pairing.contest_id=NEW.id "
+        "AND b.owner_deleted_at IS NOT NULL) OR "
+        "EXISTS(SELECT 1 FROM contest_pairings pairing JOIN bots b "
+        "ON b.id=pairing.bot_b_id WHERE pairing.contest_id=NEW.id "
+        "AND b.owner_deleted_at IS NOT NULL)"
+    )
+    _ensure_trigger(
+        conn,
+        name,
+        f"CREATE TRIGGER {name} BEFORE UPDATE OF status ON contests "
+        "WHEN NEW.status IN ('open','published','running','rest') AND ("
+        f"{deleted_reference}) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'live contest cannot reference owner-deleted Bot'); END",
+    )
+
+    live_contest = (
+        "EXISTS(SELECT 1 FROM contests c WHERE c.id=NEW.contest_id "
+        "AND c.status IN ('open','published','running','rest'))"
+    )
+    deleted_seat = (
+        "((NEW.bot_a_id IS NOT NULL AND EXISTS(SELECT 1 FROM bots a "
+        "WHERE a.id=NEW.bot_a_id AND a.owner_deleted_at IS NOT NULL)) OR "
+        "(NEW.bot_b_id IS NOT NULL AND EXISTS(SELECT 1 FROM bots b "
+        "WHERE b.id=NEW.bot_b_id AND b.owner_deleted_at IS NOT NULL)))"
+    )
+    pairing_insert = "trg_contest_pairings_live_bot_insert"
+    _ensure_trigger(
+        conn,
+        pairing_insert,
+        f"CREATE TRIGGER {pairing_insert} BEFORE INSERT ON contest_pairings "
+        f"WHEN {live_contest} AND {deleted_seat} "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'live contest pairing cannot reference owner-deleted Bot'); END",
+    )
+    pairing_update = "trg_contest_pairings_live_bot_update"
+    _ensure_trigger(
+        conn,
+        pairing_update,
+        f"CREATE TRIGGER {pairing_update} "
+        "BEFORE UPDATE OF contest_id,bot_a_id,bot_b_id ON contest_pairings "
+        f"WHEN {live_contest} AND {deleted_seat} "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'live contest pairing cannot reference owner-deleted Bot'); END",
+    )
 
 
 def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
@@ -2414,6 +2746,12 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             ("seed", "INTEGER NOT NULL DEFAULT 0"),
             ("eliminated", "INTEGER NOT NULL DEFAULT 0"),
             ("dispatched_at", "TEXT"),
+            ("real_name_snapshot", "TEXT"),
+            ("phone_snapshot", "TEXT"),
+            ("school_snapshot", "TEXT"),
+            ("student_id_snapshot", "TEXT"),
+            ("identity_captured_at", "TEXT"),
+            ("identity_source", "TEXT"),
         ):
             _add_col(conn, "contest_entries", col, decl)
 
@@ -2430,6 +2768,7 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
 
     if "bots" in tables:
         _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+        _add_col(conn, "bots", "owner_deleted_at", "TEXT")
         # Botzone 运行模式（上传时标明，runner 据此选传输路径）
         _add_col(
             conn,
@@ -2665,8 +3004,12 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "  # SET NULL：删 bot 留 entry
             "registered_at TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', "
             "seed INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0, "
-            "dispatched_at TEXT)",
-            "contest_id, user_id, bot_id, registered_at, group_id, seed, eliminated, dispatched_at",
+            "dispatched_at TEXT, real_name_snapshot TEXT, phone_snapshot TEXT, "
+            "school_snapshot TEXT, student_id_snapshot TEXT, identity_captured_at TEXT, "
+            "identity_source TEXT)",
+            "contest_id, user_id, bot_id, registered_at, group_id, seed, eliminated, "
+            "dispatched_at, real_name_snapshot, phone_snapshot, school_snapshot, "
+            "student_id_snapshot, identity_captured_at, identity_source",
         ),
         "contest_pairings": (
             "CREATE TABLE {n}_new ("
@@ -3610,6 +3953,29 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
     )
     _ensure_game_contract_state(conn, fresh_schema=fresh_schema)
     _ensure_ranked_bot_selection(conn, fresh_schema=fresh_schema)
+    # Install owner-tombstone guards only after every legacy table rebuild and
+    # the ranked-Bot migration have completed.  Very old ``bots`` tables do not
+    # yet have ``is_ranked``; installing a trigger that references NEW.is_ranked
+    # before that column exists makes any intervening ALTER TABLE fail.  Entry
+    # and pairing rebuilds likewise drop their table-owned triggers, so the
+    # migration tail is the one canonical installation boundary for both fresh
+    # and upgraded schemas.
+    current_tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "bots" in current_tables:
+        _install_bot_owner_delete_triggers(conn)
+        if "contest_entries" in current_tables:
+            _install_contest_entry_live_bot_triggers(conn)
+        if {
+            "contests",
+            "contest_entries",
+            "contest_pairings",
+        } <= current_tables:
+            _install_contest_live_state_bot_trigger(conn)
     _install_rated_overlap_triggers(conn)
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
@@ -3893,7 +4259,9 @@ class Store:
                 "matches_played": 0, "rated_bots": 0,
             }
             d["bot_count"] = c.execute(
-                "SELECT COUNT(*) FROM bots WHERE owner_id=?", (uid,)
+                "SELECT COUNT(*) FROM bots WHERE owner_id=? "
+                "AND owner_deleted_at IS NULL",
+                (uid,),
             ).fetchone()[0]
             return d
 
@@ -4339,12 +4707,15 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             bot = c.execute(
                 "SELECT b.id,b.owner_id,b.game_id,b.protocol_version,b.is_active,"
+                "b.owner_deleted_at,"
                 "u.is_active AS owner_active FROM bots b "
                 "JOIN users u ON u.id=b.owner_id WHERE b.id=?",
                 (int(bot_id),),
             ).fetchone()
             if bot is None or int(bot["owner_id"]) != int(owner_id):
                 raise ValueError("只能为自己的 Bot 建立本地连接")
+            if bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再创建本地连接")
             if int(bot["is_active"] or 0) != 1:
                 raise ValueError("请先启用这个 Bot")
             if int(bot["owner_active"] or 0) != 1:
@@ -5534,6 +5905,196 @@ class Store:
                 c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone()
             )
 
+    def update_admin_bot(self, bot_id: int, **fields: Any) -> dict | None:
+        """Apply an admin edit without racing owner deletion into a 500.
+
+        Display metadata remains editable for historical tombstones.  Only an
+        activation attempt is rejected, and the tombstone check shares the
+        same ``BEGIN IMMEDIATE`` transaction as the update.
+        """
+
+        allowed = {
+            "display_name",
+            "description",
+            "os",
+            "arch",
+            "format",
+            "binary_path",
+            "current_version",
+            "is_active",
+            "is_builtin",
+            "game_id",
+            "runtime_mode",
+            "updated_at",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            if bot is None:
+                return None
+            if bot["owner_deleted_at"] is not None and bool(
+                clean.get("is_active")
+            ):
+                raise BotDeletedError("Bot 已删除，不能重新启用")
+
+            projection_guard = (
+                self._rating_projection_mutation_guard_tx(c)
+                if "is_active" in clean
+                else None
+            )
+            if clean:
+                if "updated_at" not in clean:
+                    clean["updated_at"] = _now()
+                sets = ",".join(f"{key}=?" for key in clean)
+                c.execute(
+                    f"UPDATE bots SET {sets} WHERE id=?",
+                    (*clean.values(), int(bot_id)),
+                )
+            if "is_active" in clean and not bool(clean["is_active"]):
+                now = _now()
+                c.execute(
+                    "UPDATE local_ai_agents SET status='revoked',"
+                    "connection_generation=connection_generation+1,connected_at=NULL,"
+                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
+                    (now, now, int(bot_id)),
+                )
+                c.execute(
+                    "UPDATE local_ai_leases SET status='released',released_at=?,"
+                    "terminal_reason='bot_disabled' WHERE status='active' "
+                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
+                    (now, int(bot_id)),
+                )
+            if projection_guard is not None:
+                self._advance_rating_projection_state_tx(c, projection_guard)
+            return _row(
+                c.execute(
+                    "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+                ).fetchone()
+            )
+
+    def update_owned_bot(
+        self, owner_id: int, bot_id: int, **fields: Any
+    ) -> dict:
+        """Atomically apply an owner mutation only to a live inventory row."""
+
+        allowed = {"display_name", "description", "is_active"}
+        sets = [f"{key}=?" for key in fields if key in allowed]
+        vals = [value for key, value in fields.items() if key in allowed]
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            if bot is None:
+                raise LookupError("bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise PermissionError("无权修改他人的 Bot")
+            if bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再修改")
+
+            projection_guard = (
+                self._rating_projection_mutation_guard_tx(c)
+                if "is_active" in fields
+                else None
+            )
+            if sets:
+                if "updated_at" not in fields:
+                    sets.append("updated_at=?")
+                    vals.append(_now())
+                vals.extend((int(bot_id), int(owner_id)))
+                changed = c.execute(
+                    f"UPDATE bots SET {','.join(sets)} "
+                    "WHERE id=? AND owner_id=? AND owner_deleted_at IS NULL",
+                    vals,
+                )
+                if changed.rowcount != 1:
+                    raise BotDeletedError("Bot 已删除，不能再修改")
+            if "is_active" in fields and not bool(fields["is_active"]):
+                now = _now()
+                c.execute(
+                    "UPDATE local_ai_agents SET status='revoked',"
+                    "connection_generation=connection_generation+1,connected_at=NULL,"
+                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
+                    (now, now, int(bot_id)),
+                )
+                c.execute(
+                    "UPDATE local_ai_leases SET status='released',released_at=?,"
+                    "terminal_reason='bot_disabled' WHERE status='active' "
+                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
+                    (now, int(bot_id)),
+                )
+            if projection_guard is not None:
+                self._advance_rating_projection_state_tx(c, projection_guard)
+            return _row(
+                c.execute("SELECT * FROM bots WHERE id=?", (int(bot_id),)).fetchone()
+            )
+
+    def publish_uploaded_bot(self, owner_id: int, bot_id: int) -> dict:
+        """Atomically publish a staged first version and fill an empty rank slot.
+
+        The binary/version commit happens before this final visibility boundary.
+        Taking the write lock before re-reading the tombstone makes publication
+        linearizable with owner deletion across processes: deletion either sees
+        the active Bot, or publication observes ``owner_deleted_at`` and refuses
+        to revive it.
+        """
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            if bot is None:
+                raise LookupError("bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise PermissionError("无权发布他人的 Bot")
+            if bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能发布上传版本")
+            if int(bot["current_version"] or 0) <= 0:
+                raise ValueError("Bot 首版尚未提交，不能发布")
+
+            guard = self._rating_projection_mutation_guard_tx(c)
+            now = _now()
+            activated = c.execute(
+                "UPDATE bots SET is_active=1,updated_at=? "
+                "WHERE id=? AND owner_id=? AND owner_deleted_at IS NULL",
+                (now, int(bot_id), int(owner_id)),
+            )
+            if activated.rowcount != 1:  # pragma: no cover - write lock invariant
+                raise BotDeletedError("Bot 已删除，不能发布上传版本")
+
+            current = c.execute(
+                "SELECT id FROM bots WHERE owner_id=? AND game_id=? "
+                "AND is_ranked=1",
+                (int(owner_id), str(bot["game_id"])),
+            ).fetchone()
+            if current is None:
+                candidate = self._ranked_bot_candidate_tx(
+                    c, owner_id=int(owner_id), bot_id=int(bot_id)
+                )
+                if candidate is None:
+                    raise ValueError("Bot 当前不可运行，不能发布")
+                selected = c.execute(
+                    "UPDATE bots SET is_ranked=1,updated_at=? "
+                    "WHERE id=? AND owner_id=? AND game_id=? AND is_active=1 "
+                    "AND owner_deleted_at IS NULL",
+                    (
+                        now,
+                        int(bot_id),
+                        int(owner_id),
+                        str(bot["game_id"]),
+                    ),
+                )
+                if selected.rowcount != 1:  # pragma: no cover - write lock invariant
+                    raise RuntimeError("排位 Bot 原子派遣失败")
+            self._advance_rating_projection_state_tx(c, guard)
+            return _row(
+                c.execute("SELECT * FROM bots WHERE id=?", (int(bot_id),)).fetchone()
+            )
+
     @staticmethod
     def _ranked_bot_candidate_tx(
         c: sqlite3.Connection, *, owner_id: int, bot_id: int
@@ -5542,7 +6103,11 @@ class Store:
             "SELECT * FROM bots WHERE id=? AND owner_id=?",
             (int(bot_id), int(owner_id)),
         ).fetchone()
-        if bot is None or int(bot["is_active"] or 0) != 1:
+        if (
+            bot is None
+            or bot["owner_deleted_at"] is not None
+            or int(bot["is_active"] or 0) != 1
+        ):
             return None
         if (
             str(bot["binary_path"] or "").strip() == ""
@@ -5656,6 +6221,8 @@ class Store:
                 raise LookupError("bot 不存在")
             if int(target["owner_id"]) != int(owner_id):
                 raise PermissionError("无权修改他人的 Bot")
+            if target["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再修改")
             current = c.execute(
                 "SELECT * FROM bots WHERE owner_id=? AND game_id=? AND is_ranked=1",
                 (int(owner_id), str(target["game_id"])),
@@ -5732,6 +6299,8 @@ class Store:
                 raise LookupError("bot 不存在")
             if int(bot["owner_id"]) != int(owner_id):
                 raise PermissionError("无权修改他人的 Bot")
+            if bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再修改")
             if int(bot["is_ranked"] or 0) != 1:
                 return {
                     "bot": _row(bot),
@@ -5771,14 +6340,197 @@ class Store:
                 "changed": True,
             }
 
+    def owner_delete_bot(self, owner_id: int, bot_id: int) -> dict:
+        """Remove one Bot from its owner's inventory without erasing history.
+
+        The tombstone, queue convergence, ranking withdrawal, and local-agent
+        revocation share one ``BEGIN IMMEDIATE`` boundary.  A claim/version
+        commit in another process therefore lands wholly before deletion (and
+        is observed as busy) or wholly after it (and sees an inactive deleted
+        identity).
+        """
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            if bot is None:
+                raise LookupError("bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise PermissionError("无权删除他人的 Bot")
+
+            # Repeated owner DELETE is a successful no-op.  Returning the same
+            # durable transport identities lets a retry close the in-memory
+            # sockets even if the first request was cancelled after DB commit.
+            if bot["owner_deleted_at"] is not None:
+                public_ids = [
+                    str(row[0])
+                    for row in c.execute(
+                        "SELECT public_id FROM local_ai_agents "
+                        "WHERE bot_id=? ORDER BY id",
+                        (int(bot_id),),
+                    ).fetchall()
+                ]
+                return {
+                    "bot": _row(bot),
+                    "changed": False,
+                    "cancelled_queued_jobs": 0,
+                    "invalidated_retryable_jobs": 0,
+                    "revoked_local_ai_public_ids": public_ids,
+                }
+
+            active_contest = c.execute(
+                "SELECT c.id FROM contests c WHERE c.status IN (?,?,?,?) AND ("
+                "EXISTS(SELECT 1 FROM contest_entries entry "
+                "WHERE entry.contest_id=c.id AND entry.bot_id=?) OR "
+                "EXISTS(SELECT 1 FROM contest_pairings pairing "
+                "WHERE pairing.contest_id=c.id "
+                "AND ? IN (pairing.bot_a_id,pairing.bot_b_id))) LIMIT 1",
+                (
+                    CONTEST_OPEN,
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    int(bot_id),
+                    int(bot_id),
+                ),
+            ).fetchone()
+            if active_contest is not None:
+                raise BotOwnerDeleteBusyError(
+                    "bot_busy",
+                    "Bot 仍在未结束赛事中，请联系赛事组织者移出名册，或等待赛事结束",
+                )
+
+            if self._ranked_bot_busy_tx(
+                c, bot_id=int(bot_id), game_id=str(bot["game_id"])
+            ):
+                raise BotOwnerDeleteBusyError(
+                    "ranking_busy",
+                    "Bot 仍有进行中或待结算的计分对局",
+                )
+
+            active_job = c.execute(
+                "SELECT 1 FROM execution_jobs WHERE status IN "
+                "('starting','running','settling') "
+                "AND ? IN (bot_a_id,bot_b_id) LIMIT 1",
+                (int(bot_id),),
+            ).fetchone()
+            if active_job is not None:
+                raise BotOwnerDeleteBusyError(
+                    "bot_busy", "Bot 仍有正在执行或收尾的对局"
+                )
+            for game_id in _all_game_ids():
+                table = _matches_table(game_id)
+                if c.execute(
+                    f"SELECT 1 FROM {table} WHERE status IN (?,?) "
+                    "AND ? IN (bot_a_id,bot_b_id) LIMIT 1",
+                    (STATUS_PENDING, STATUS_RUNNING, int(bot_id)),
+                ).fetchone() is not None:
+                    raise BotOwnerDeleteBusyError(
+                        "bot_busy", "Bot 仍有待开始或进行中的对局"
+                    )
+
+            now = _now()
+            queued_rows = c.execute(
+                "SELECT id,auto_decision_id FROM execution_jobs "
+                "WHERE status='queued' AND ? IN (bot_a_id,bot_b_id) ORDER BY id",
+                (int(bot_id),),
+            ).fetchall()
+            queued_ids = [int(row["id"]) for row in queued_rows]
+            if queued_ids:
+                marks = ",".join("?" for _ in queued_ids)
+                c.execute(
+                    "UPDATE execution_jobs SET status='cancelled',cancel_requested=1,"
+                    "retryable=0,terminal_reason='bot_owner_deleted',"
+                    "last_error='bot_owner_deleted',next_attempt_at=NULL,terminal_at=? "
+                    f"WHERE status='queued' AND id IN ({marks})",
+                    (now, *queued_ids),
+                )
+                decision_ids = [
+                    int(row["auto_decision_id"])
+                    for row in queued_rows
+                    if row["auto_decision_id"] is not None
+                ]
+                if decision_ids:
+                    decision_marks = ",".join("?" for _ in decision_ids)
+                    c.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                        "terminal_reason='bot_owner_deleted',terminal_at=? "
+                        f"WHERE lifecycle='queued' AND id IN ({decision_marks})",
+                        (now, *decision_ids),
+                    )
+
+            invalidated_retryable = c.execute(
+                "UPDATE execution_jobs SET retryable=0,next_attempt_at=NULL "
+                "WHERE status='interrupted' AND retryable=1 "
+                "AND ? IN (bot_a_id,bot_b_id)",
+                (int(bot_id),),
+            ).rowcount
+
+            active_agents = c.execute(
+                "SELECT id,public_id FROM local_ai_agents "
+                "WHERE bot_id=? AND status='active' ORDER BY id",
+                (int(bot_id),),
+            ).fetchall()
+            agent_ids = [int(row["id"]) for row in active_agents]
+            if agent_ids:
+                marks = ",".join("?" for _ in agent_ids)
+                c.execute(
+                    "UPDATE local_ai_agents SET status='revoked',"
+                    "connection_generation=connection_generation+1,connected_at=NULL,"
+                    f"disconnected_at=?,updated_at=? WHERE id IN ({marks})",
+                    (now, now, *agent_ids),
+                )
+                c.execute(
+                    "UPDATE local_ai_leases SET status='released',released_at=?,"
+                    f"terminal_reason='bot_owner_deleted' WHERE status='active' "
+                    f"AND agent_id IN ({marks})",
+                    (now, *agent_ids),
+                )
+
+            projection_guard = (
+                self._rating_projection_mutation_guard_tx(c)
+                if int(bot["is_active"] or 0) or int(bot["is_ranked"] or 0)
+                else None
+            )
+            changed = c.execute(
+                "UPDATE bots SET owner_deleted_at=?,is_active=0,is_ranked=0,"
+                "updated_at=? WHERE id=? AND owner_id=? "
+                "AND owner_deleted_at IS NULL",
+                (now, now, int(bot_id), int(owner_id)),
+            )
+            if changed.rowcount != 1:  # pragma: no cover - write lock invariant
+                raise RuntimeError("Bot 删除 tombstone 原子写入失败")
+            if projection_guard is not None:
+                self._advance_rating_projection_state_tx(c, projection_guard)
+            updated = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            return {
+                "bot": _row(updated),
+                "changed": True,
+                "cancelled_queued_jobs": len(queued_ids),
+                "invalidated_retryable_jobs": int(invalidated_retryable),
+                "revoked_local_ai_public_ids": [
+                    str(row["public_id"]) for row in active_agents
+                ],
+            }
+
     def delete_bot(self, bot_id: int) -> bool:
         # 注意：此处不做一般「活跃引用」业务校验——那是 admin_delete_bot
         # 端点的职责。不过 retired version 是规则迁移的不可删审计证据，任何
-        # Store 入口都不得借 bots→bot_versions CASCADE 绕过这一硬边界。
+        # Store 入口都不得借 bots→bot_versions CASCADE 绕过这一硬边界；owner
+        # 墓碑也只能由显式 admin hard-delete 流程删除，不能被通用清理旁路。
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
+            bot = c.execute(
+                "SELECT owner_deleted_at FROM bots WHERE id=?", (bot_id,)
+            ).fetchone()
+            if bot is None:
                 return False
+            if bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已由 owner 删除，禁止通用硬删除")
             if _cutover_audit_version_count_tx(c, bot_id=bot_id):
                 raise ValueError("规则迁移版本是不可删除审计证据，禁止删除 Bot")
             _delete_social_target(c, "bot", bot_id)
@@ -5795,11 +6547,13 @@ class Store:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             bot = c.execute(
-                "SELECT id,game_id,is_active,current_version FROM bots WHERE id=?",
+                "SELECT id,game_id,is_active,current_version,owner_deleted_at "
+                "FROM bots WHERE id=?",
                 (bot_id,),
             ).fetchone()
             if (
                 bot is None
+                or bot["owner_deleted_at"] is not None
                 or int(bot["is_active"] or 0) != 0
                 or int(bot["current_version"] or 0) != 0
                 or c.execute(
@@ -5959,6 +6713,7 @@ class Store:
         owner_id: int | None = None,
         *,
         active_only: bool = True,
+        include_owner_deleted: bool = True,
         include_builtin: bool = True,
         runnable_only: bool = False,
         game_id: str | None = None,
@@ -5975,6 +6730,8 @@ class Store:
                 params.append(owner_id)
             if active_only:
                 sql += " AND is_active=1"
+            if not include_owner_deleted:
+                sql += " AND owner_deleted_at IS NULL"
             if runnable_only:
                 sql += " AND format=? AND os=? AND arch=?"
                 params.extend((
@@ -6020,18 +6777,26 @@ class Store:
         version: int | None = None,
     ) -> dict:
         require_supported_binary_metadata(format, os, arch)
-        if runtime_mode is None:
-            # 沿用 bot 当前的运行模式（回滚/补传时不强制改模式）
-            runtime_mode = self.get_bot(bot_id) or {}
-            runtime_mode = runtime_mode.get("runtime_mode") or DEFAULT_RUNTIME_MODE
-        if runtime_mode not in VALID_RUNTIME_MODES:
+        if runtime_mode is not None and runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"非法 runtime_mode: {runtime_mode}")
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             bot_row = c.execute(
-                "SELECT game_id FROM bots WHERE id=?", (bot_id,)
+                "SELECT game_id,owner_deleted_at,runtime_mode FROM bots WHERE id=?",
+                (bot_id,),
             ).fetchone()
             if bot_row is None:
                 raise ValueError("bot 不存在")
+            if bot_row["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再上传版本")
+            if runtime_mode is None:
+                # Resolve the inherited mode only after taking the write lock,
+                # so it belongs to the same snapshot as the tombstone check.
+                runtime_mode = (
+                    bot_row["runtime_mode"] or DEFAULT_RUNTIME_MODE
+                )
+            if runtime_mode not in VALID_RUNTIME_MODES:
+                raise ValueError(f"非法 runtime_mode: {runtime_mode}")
             active_contract = _active_game_contract_tx(c, bot_row["game_id"])
             protocol = str(
                 protocol_version or active_contract["protocol_version"]
@@ -6076,10 +6841,14 @@ class Store:
     def delete_bot_version(self, bot_id: int, version: int) -> bool:
         """删除非当前、非规则迁移审计、未被执行冻结的普通版本。"""
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             # 先读当前版本，判定删的是否是当前版本
             cur_bot = c.execute(
-                "SELECT current_version FROM bots WHERE id=?", (bot_id,)
+                "SELECT current_version,owner_deleted_at FROM bots WHERE id=?",
+                (bot_id,),
             ).fetchone()
+            if cur_bot and cur_bot["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，历史版本不能删除")
             is_current = cur_bot and cur_bot["current_version"] == version
 
             version_row = c.execute(
@@ -6117,15 +6886,19 @@ class Store:
         用于 MyBots「回滚到此版本」。版本不存在返回 None。
         """
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute(
                 "SELECT v.version,v.binary_path,v.os,v.arch,v.format,v.runtime_mode,"
-                "v.protocol_version,v.retired_at,b.game_id FROM bot_versions v "
+                "v.protocol_version,v.retired_at,b.game_id,b.owner_deleted_at "
+                "FROM bot_versions v "
                 "JOIN bots b ON b.id=v.bot_id "
                 "WHERE v.bot_id=? AND v.version=?",
                 (bot_id, version),
             ).fetchone()
             if not row:
                 return None
+            if row["owner_deleted_at"] is not None:
+                raise BotDeletedError("Bot 已删除，不能再切换版本")
             active_contract = _active_game_contract_tx(c, row["game_id"])
             if row["retired_at"] is not None:
                 raise ValueError("该版本已退役，不可回滚")
@@ -11005,11 +11778,28 @@ class Store:
         sets = [f"{k}=?" for k in clean]
         vals = list(clean.values())
         with self._tx() as c:
+            # ``require_real_name`` controls whether private PII may be read.
+            # Status transitions also re-check every referenced Bot before a
+            # draft contest can become live.  Serialize either mutation before
+            # the first SELECT so both guards share the writer linearization
+            # point with concurrent entry insertion and owner deletion.
+            if "status" in clean or "require_real_name" in clean:
+                c.execute("BEGIN IMMEDIATE")
             current = c.execute(
                 "SELECT * FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
             if not current:
                 return None
+            if (
+                "require_real_name" in clean
+                and int(clean["require_real_name"] or 0)
+                != int(current["require_real_name"] or 0)
+                and c.execute(
+                    "SELECT 1 FROM contest_entries WHERE contest_id=? LIMIT 1",
+                    (contest_id,),
+                ).fetchone()
+            ):
+                raise ValueError("赛事已有报名，不能修改实名要求")
             # A partial time PATCH is only meaningful after merging the stored
             # values.  Validate that complete candidate before the single UPDATE,
             # so an invalid schedule cannot partially write another field.
@@ -11039,6 +11829,13 @@ class Store:
                     raise ValueError(
                         f"赛事处于 {cur_status} 态，不能取消（仅 draft/open/published 可取消）"
                     )
+                if new_status in (
+                    CONTEST_OPEN,
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                ):
+                    _require_contest_without_owner_deleted_bot_tx(c, contest_id)
             if sets:
                 vals.append(contest_id)
                 c.execute(
@@ -11214,10 +12011,21 @@ class Store:
 
     def add_entry(self, contest_id: int, user_id: int, bot_id: int) -> dict:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            _require_live_contest_bot_tx(c, bot_id)
+            # sqlite3's default deferred mode does not start a transaction for
+            # SELECT.  Reserve the writer before reading the contest/profile so
+            # the six identity columns and the entry share one linearization point.
+            registered_at = _now()
+            identity = _registration_identity_tx(
+                c, contest_id, user_id, captured_at=registered_at
+            )
             cur = c.execute(
                 "INSERT INTO contest_entries(contest_id, user_id, bot_id, "
-                "registered_at) VALUES(?,?,?,?)",
-                (contest_id, user_id, bot_id, _now()),
+                "registered_at, real_name_snapshot, phone_snapshot, school_snapshot, "
+                "student_id_snapshot, identity_captured_at, identity_source) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (contest_id, user_id, bot_id, registered_at, *identity),
             )
             eid = cur.lastrowid
             return _row(
@@ -11239,15 +12047,31 @@ class Store:
         后续副作用。
         """
         with self._tx() as c:
+            # Must precede the contest-status, duplicate and identity reads.
+            # _tx() itself deliberately does not BEGIN, and this method is not
+            # called from another Store transaction, so this is not nested.
+            c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,require_real_name FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
             if not contest or contest["status"] != CONTEST_OPEN:
                 raise ValueError("比赛未开放报名")
+            _require_live_contest_bot_tx(c, bot_id)
+            if c.execute(
+                "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
+                (contest_id, user_id),
+            ).fetchone():
+                raise ValueError("该用户在此比赛中已报名")
+            registered_at = _now()
+            identity = _registration_identity_tx(
+                c, contest_id, user_id, captured_at=registered_at
+            )
             cur = c.execute(
-                "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
-                "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
-                (contest_id, user_id, bot_id, _now()),
+                "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at, "
+                "real_name_snapshot, phone_snapshot, school_snapshot, student_id_snapshot, "
+                "identity_captured_at, identity_source) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(contest_id, user_id) DO NOTHING",
+                (contest_id, user_id, bot_id, registered_at, *identity),
             )
             if cur.rowcount != 1:
                 raise ValueError("该用户在此比赛中已报名")
@@ -11258,24 +12082,68 @@ class Store:
             )
 
     def add_contest_roster_entries(
-        self, contest_id: int, entries: list[tuple[int, int]]
-    ) -> tuple[list[dict], list[int]]:
-        """组织者/admin 批量新增名册；状态复核与整批写入同一事务。"""
+        self,
+        contest_id: int,
+        entries: list[tuple[int, int]],
+        *,
+        allow_real_name_override: bool = False,
+        return_identity_required: bool = False,
+    ) -> tuple[list[dict], list[int]] | tuple[list[dict], list[int], bool]:
+        """Add a proxy roster atomically, with explicit admin PII override.
+
+        A real-name contest may only use this proxy path when an already
+        authorized admin caller passes ``allow_real_name_override=True``.  Normal
+        self-registration uses :meth:`add_contest_entry_once` instead.  The Store
+        repeats this gate after acquiring the database writer lock so an API or
+        Manager pre-check cannot be invalidated by another process toggling the
+        contest's identity requirement.
+        """
         with self._tx() as c:
+            # Reserve the writer before every contest/duplicate/identity SELECT.
+            # See add_contest_entry_once: _tx() has not opened a transaction here.
+            c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,require_real_name FROM contests WHERE id=?",
+                (contest_id,),
             ).fetchone()
             if not contest:
                 raise ValueError("赛事不存在")
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
+            if (
+                int(contest["require_real_name"] or 0)
+                and not allow_real_name_override
+            ):
+                raise ContestRealNameRosterForbidden()
             added: list[dict] = []
             skipped: list[int] = []
             for user_id, bot_id in entries:
+                _require_live_contest_bot_tx(c, bot_id)
+                if c.execute(
+                    "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
+                    (contest_id, user_id),
+                ).fetchone():
+                    skipped.append(user_id)
+                    continue
+                registered_at = _now()
+                try:
+                    identity = _registration_identity_tx(
+                        c, contest_id, user_id, captured_at=registered_at
+                    )
+                except ValueError as exc:
+                    raise ContestRosterWriteValidationError(
+                        str(exc),
+                        identity_required_at_commit=bool(
+                            int(contest["require_real_name"] or 0)
+                        ),
+                    ) from exc
                 cur = c.execute(
-                    "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
-                    "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
-                    (contest_id, user_id, bot_id, _now()),
+                    "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at, "
+                    "real_name_snapshot, phone_snapshot, school_snapshot, "
+                    "student_id_snapshot, identity_captured_at, identity_source) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(contest_id, user_id) DO NOTHING",
+                    (contest_id, user_id, bot_id, registered_at, *identity),
                 )
                 if cur.rowcount != 1:
                     skipped.append(user_id)
@@ -11283,7 +12151,12 @@ class Store:
                 added.append(_row(c.execute(
                     "SELECT * FROM contest_entries WHERE id=?", (cur.lastrowid,)
                 ).fetchone()))
-            return added, skipped
+            result = (added, skipped)
+            if return_identity_required:
+                # This bit was read after BEGIN IMMEDIATE and therefore names
+                # the same linearization point as every captured snapshot.
+                return (*result, bool(int(contest["require_real_name"] or 0)))
+            return result
 
     def delete_contest_roster_entry(self, contest_id: int, user_id: int) -> bool:
         """组织者/admin 删除名册；状态复核与 DELETE 同一事务。"""
@@ -11306,6 +12179,9 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            if "bot_id" in fields:
+                c.execute("BEGIN IMMEDIATE")
+                _require_live_contest_bot_tx(c, int(fields["bot_id"]))
             if sets:
                 vals.extend([contest_id, user_id])
                 c.execute(
@@ -11369,6 +12245,10 @@ class Store:
         scheduled_at: str | None = None,
     ) -> dict:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            _require_live_contest_pairing_bots_tx(
+                c, contest_id, bot_a_id, bot_b_id
+            )
             cur = c.execute(
                 "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
                 "entry_b_id, bot_a_id, bot_b_id, bot_a_version_id, bot_b_version_id, "
@@ -11908,57 +12788,115 @@ class Store:
             return result
 
     def contest_entries_named(
-        self, contest_id: int, *, page: int | None = None, per_page: int = 50,
+        self,
+        contest_id: int,
+        *,
+        page: int | None = None,
+        per_page: int = 50,
+        include_identity: bool = False,
     ) -> list[dict] | dict:
-        """返回报名（带 bot 名/owner 名 + seed/group/eliminated + 实名信息）。
+        """Return named entries; private identity is opt-in and contest-gated.
 
         LEFT JOIN bots：bot_id 现可为 NULL（删 bot 后保留 entry，P0 SET NULL）。
-        实名字段（real_name/phone/school/student_id）随行返回——**调用方（api 层）负责
-        对非组织者脱敏**（contest_detail 仅组织者可见；export 端点组织者 gated）。
+        默认查询不读取实名列。只有调用方显式请求且赛事本身要求实名时，才投影
+        报名快照；历史 NULL 快照明确标为 current_profile_legacy 并回退当前资料。
+        非实名赛事即使调用方误传 include_identity=True 也不会读取或返回 PII。
         ``page`` 为 None 时返回 list（旧契约）；给定时返回分页 dict。
         """
         with self._tx() as c:
+            identity_columns = ""
+            identity_join = ""
+            if include_identity:
+                gate = "COALESCE(identity_gate.require_real_name,0)=1"
+                identity_columns = (
+                    ", identity_gate.require_real_name AS _identity_required, "
+                    + _contest_identity_projection_sql(gate_sql=gate)
+                )
+                identity_join = (
+                    "JOIN contests identity_gate "
+                    "ON identity_gate.id=e.contest_id "
+                )
             sql = (
-                "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
+                "SELECT e.id,e.contest_id,e.user_id,e.bot_id,e.registered_at,"
+                "e.group_id,e.seed,e.eliminated,e.dispatched_at, "
+                "b.name AS bot_name, b.display_name AS bot_display, "
                 "b.game_id, u.username AS username, u.username AS owner_name, "
-                "u.display_name AS owner_display, "
-                "u.real_name, u.phone, u.school, u.student_id "
-                "FROM contest_entries e "
-                "LEFT JOIN bots b ON e.bot_id=b.id "
+                "u.display_name AS owner_display"
+                + identity_columns
+                + " FROM contest_entries e "
+                + identity_join
+                + "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at"
             )
             params = (contest_id,)
+
+            def finalize_identity(row: dict) -> dict:
+                identity_required = bool(
+                    int(row.pop("_identity_required", 0) or 0)
+                )
+                if not identity_required:
+                    for field in (
+                        *_CONTEST_IDENTITY_PROFILE_FIELDS,
+                        "identity_source",
+                        "identity_captured_at",
+                        "identity_complete",
+                    ):
+                        row.pop(field, None)
+                return row
+
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 rows, total = _paginate(c, sql, params, page=page, per_page=pp)
+                if include_identity:
+                    rows = [finalize_identity(row) for row in rows]
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
-            return [_row(r) for r in c.execute(sql, params).fetchall()]
+            rows = [_row(r) for r in c.execute(sql, params).fetchall()]
+            return (
+                [finalize_identity(row) for row in rows]
+                if include_identity
+                else rows
+            )
 
     def list_contest_export(self, contest_id: int) -> list[dict]:
-        """合并导出：一行 per 报名者 = 报名信息（实名）+ 结果排名 + 战绩。
+        """Private export rows with stable identities, provenance and results.
 
-        LEFT JOIN official_results：未完赛/未出排名者 rank/points 列为 NULL（仍出现）。
-        stage_results 取末阶段（official_results.stage_idx）。供组织者导出 CSV。
+        Real-name fields are selected only for a real-name contest.  New entries
+        use their immutable registration snapshot; legacy entries use an explicit
+        current-profile fallback.  For unfinished contests, the latest persisted
+        stage result remains visible without being mislabeled as an official rank.
         """
         with self._tx() as c:
+            gate = "COALESCE(identity_gate.require_real_name,0)=1"
+            identity_columns = _contest_identity_projection_sql(gate_sql=gate)
             rows = c.execute(
-                "SELECT e.id AS entry_id, e.seed, e.group_id, e.eliminated, e.registered_at, "
-                "u.username AS owner_name, u.display_name AS owner_display, "
-                "u.real_name, u.phone, u.school, u.student_id, "
+                "SELECT e.id AS entry_id,e.user_id,e.bot_id,e.seed,e.group_id,"
+                "e.eliminated,e.registered_at, "
+                "identity_gate.require_real_name AS identity_required, "
+                "u.username,u.display_name AS user_display,"
+                "u.username AS owner_name,u.display_name AS owner_display, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
-                "r.rank, r.points, r.awarded, r.stage_idx, "
-                "sr.wins, sr.draws, sr.losses, sr.delta_total "
+                + identity_columns + ", "
+                "r.rank,COALESCE(r.points,sr.points) AS points,r.awarded,"
+                "COALESCE(r.stage_idx,sr.stage_idx) AS stage_idx,sr.stage_key, "
+                "sr.wins,sr.draws,sr.losses,sr.delta_total, "
+                "CASE WHEN r.entry_id IS NOT NULL THEN 'official' "
+                "WHEN sr.entry_id IS NOT NULL THEN 'stage' ELSE 'none' END AS result_source "
                 "FROM contest_entries e "
+                "JOIN contests identity_gate ON identity_gate.id=e.contest_id "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN contest_official_results r "
                 "  ON r.entry_id=e.id AND r.contest_id=e.contest_id "
                 "LEFT JOIN contest_stage_results sr "
                 "  ON sr.entry_id=e.id AND sr.contest_id=e.contest_id "
-                "  AND sr.stage_idx=r.stage_idx "
+                "  AND sr.stage_idx=COALESCE(r.stage_idx,("
+                "    SELECT MAX(latest.stage_idx) FROM contest_stage_results latest "
+                "    WHERE latest.contest_id=e.contest_id AND latest.entry_id=e.id"
+                "  )) "
                 "WHERE e.contest_id=? "
-                "ORDER BY CASE WHEN r.rank IS NULL THEN 999999 ELSE r.rank END, e.seed",
+                "ORDER BY CASE WHEN r.rank IS NULL THEN 999999 ELSE r.rank END,"
+                "CASE WHEN e.seed=0 THEN 999999 ELSE e.seed END,e.id",
                 (contest_id,),
             ).fetchall()
             return [_row(r) for r in rows]
@@ -11986,6 +12924,20 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            if {"bot_a_id", "bot_b_id"}.intersection(fields):
+                c.execute("BEGIN IMMEDIATE")
+                current = c.execute(
+                    "SELECT contest_id,bot_a_id,bot_b_id FROM contest_pairings "
+                    "WHERE id=?",
+                    (int(pairing_id),),
+                ).fetchone()
+                if current is not None:
+                    _require_live_contest_pairing_bots_tx(
+                        c,
+                        int(current["contest_id"]),
+                        fields.get("bot_a_id", current["bot_a_id"]),
+                        fields.get("bot_b_id", current["bot_b_id"]),
+                    )
             if sets:
                 vals.append(pairing_id)
                 c.execute(

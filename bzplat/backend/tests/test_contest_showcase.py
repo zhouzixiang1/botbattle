@@ -80,7 +80,7 @@ def _rollback_seed_fixture(tmp_path, *, with_match: bool = False):
             player["id"], f"showcase_gomoku_{index:02d}",
             description="合成演示 LongRunning 五子棋 Bot",
             binary_path="", format="elf", os="linux", arch="amd64",
-            game_id="gomoku", runtime_mode="longrunning", is_active=0,
+            game_id="gomoku", runtime_mode="longrunning", is_active=1,
         )
         binary = upload_root / str(bot["id"]) / "v1" / "bot.bin"
         binary.parent.mkdir(parents=True)
@@ -128,6 +128,10 @@ def _rollback_seed_fixture(tmp_path, *, with_match: bool = False):
         store.update_contest_pairing(
             pairing["id"], status="completed", match_id=match_id,
         )
+    # Showcase generation temporarily activates its private Bots while it
+    # builds the roster/matches, then restores the frozen public-inactive state.
+    for bot in bots:
+        store.update_bot(bot["id"], is_active=0)
     return store, upload_root, organizer, players, bots, contest, match_id
 
 
@@ -844,7 +848,7 @@ def test_strict_profile_rejects_pairing_frozen_to_old_version(tmp_path):
         bot = store.create_bot(
             owner["id"], f"frozen_profile_bot_{index}", binary_path="",
             format="elf", os="linux", arch="amd64", game_id="gomoku",
-            runtime_mode="longrunning", is_active=0,
+            runtime_mode="longrunning", is_active=1,
         )
         bot_versions = []
         for version_number, raw in ((1, old_raw), (2, profile_raw)):
@@ -874,6 +878,8 @@ def test_strict_profile_rejects_pairing_frozen_to_old_version(tmp_path):
         bot_a_version_id=versions[0][0]["id"],
         bot_b_version_id=versions[1][1]["id"],
     )
+    for bot in bots:
+        store.update_bot(bot["id"], is_active=0)
     with pytest.raises(ShowcaseSeedError, match="冻结版本不属于审核 manifest"):
         _verify_frozen_profile_versions(
             store,

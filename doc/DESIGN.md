@@ -143,7 +143,7 @@ SQLite 单文件（默认 `botzone.db`）；fresh schema 同时包含全局执�
 | 表 | 用途 | 关键列 |
 |----|------|--------|
 | `users` | 用户 | id/username/email/password_hash/role/display_name/bio/avatar/xp/level/last_active_at + **实名信息**（real_name/phone/school/student_id，可选，不公开） |
-| `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_active/is_ranked；partial unique index 保证每个 `(owner_id,game_id)` 至多一个排位代表 |
+| `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_active/is_ranked/owner_deleted_at；partial unique index 保证每个 `(owner_id,game_id)` 至多一个排位代表；`UNIQUE(owner_id,name)` 继续覆盖墓碑行，名称暂不可复用 |
 | `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**） | id/bot_a_id/bot_b_id/owner_id/contest_id/winner/reason/match_type/status/game_id/**`match_config`(JSON 配置)**/**`result`(JSON 结果)**/human_user_id/human_seat/match_seed/technical_loss/likes_count/views_count；三表结构一致，配置/结果走游戏无关的双 JSON 列，不保留游戏专属结果列 |
 | `matches_index` | 对局定位 | id(PK)/game_id——get_match(id) 先查此表定位到哪张 matches_<game> |
 | `match_debug_sessions` | 私有调试批次 | match_id(PK/FK→matches_index CASCADE)/entry_count/total_bytes/dropped_count/created_at/updated_at；只允许终态 Bot-vs-Bot 批量写 |
@@ -194,6 +194,15 @@ completed 对局的 `winner` 为空时返回 `blocked`，赛事保持 running，
 - 演示棋力是明确合成的三档确定性矩阵：四组各复用 tactical/steady/foundation 一名，双循环固定形成 8/4/0 分；不使用时间/随机数，也不把它描述为 12 种自然棋力。严格验收逐局检查真实回放、同一有序 Bot 对跨快照轨迹一致和 Top 8 七场均决胜。策略 manifest 单独版本化，partial 旧图禁止原地换策略。
 - 专用 Bot 文件只允许落在固定名 `bot_uploads_showcase/` 的 namespace marker 目录；严格 seed/verify 要求目录树与 `bot_versions` 的 `<bot_id>/vN/bot.bin` 精确相等且每级均非符号链接，并逐 pairing 核对实际冻结版本的 manifest checksum/size/path/磁盘 hash。rollback 使用更窄且可重入的删除归属门禁并在写前冻结删除计划：允许预期文件/回放/已删 match 或 version 缺失、坏积分、partial key 和 Bot active 位，但拒绝 active Match、未知文件、符号链接、演示用户的外部对局身份引用、外部来源赛事引用和越界路径；展示质量验证永不参与破坏性清理。seed 中断恢复只删除已证明属于该合成赛事的 aborted 行，并经正常 `starts_at/scheduled_at` 闸门重派，不提前启动未来排期。
 
+### 3.1.2 Bot owner 逻辑删除契约
+
+- **不可逆身份墓碑**：owner 的 `DELETE /api/bots/{id}` 不再等价于普通停用，也不硬删实体，而是首次写入非空 `owner_deleted_at`，并强制 `is_active=0/is_ranked=0`。墓碑不可清空、改写或重新激活；重复 DELETE 是幂等成功并返回 `changed=false`。Bot 行继续占用 `(owner_id,name)` 唯一键，因此本轮不允许复用已删 Bot 的名称。
+- **单事务收敛**：`BotManager` 的 per-Bot 版本锁与 Store 的 `BEGIN IMMEDIATE` 共同包住最终检查和写入。成功删除在同一事务内停用、退排，取消涉及该 Bot 且未被 live 赛事屏障阻断的全部 queued execution job（`terminal_reason=bot_owner_deleted`）及其 queued auto decision，清除 interrupted job 的通用重试资格与 `next_attempt_at`，撤销 active Local AI agent、递增连接代次并释放 active lease；事务提交后 API 再按持久 `public_id` 关闭进程内连接。首版二进制/版本先隐藏提交，再由一个 `BEGIN IMMEDIATE` 事务原子激活并填补空排位席位；若 owner 删除先提交，发布返回 `bot_deleted`，异常清理不得硬删墓碑或清理已提交二进制。Bot/version commit、队列 claim 或赛事写入与删除竞态时，只允许完整落在墓碑之前或之后，不存在部分删除。
+- **在途与赛事屏障**：任一 `starting/running/settling` execution job、任一游戏表中的 pending/running Match、rated completed 但尚未 settlement 的 Match，或 `open/published/running/rest` 赛事的名册/对阵引用都会返回 HTTP 409（`bot_busy` 或 `ranking_busy`），且墓碑、排位、队列、Local AI/lease 均零写。`draft` 赛事引用允许 owner 删除，以保留组织者尚未发布的编排工作；但包含墓碑 Bot 的 draft 不得再进入 `open/published/running/rest`。
+- **SQLite 最终防线**：fresh schema 的 CHECK 与 fresh/migrated 库共同安装的 canonical triggers 保证墓碑只能与 inactive+unranked 共存且一经写入不可变；赛事报名 insert/update 必须引用 active 且未删除 Bot；赛事状态 trigger 禁止带墓碑名册/对阵引用的 draft 转为 live，live 赛事的 pairing insert/update 也拒绝墓碑座位。Store 的报名、批量名册、换 Bot、对阵与状态转换同时使用 `BEGIN IMMEDIATE` 复核，应用门禁与直接 SQL 门禁保持同一语义。
+- **读模型与资产保留**：`GET /api/bots/mine` 完全隐藏 owner 墓碑；公开详情、历史对局、排行榜/评分历史与赛事历史仍保留原 Bot 身份，只投影 `is_deleted=true`，不得泄漏精确删除时间。admin Bot 投影额外返回精确 `owner_deleted_at`，但也不能重新启用墓碑。Bot 行、全部 `bot_versions` 与二进制、Match/Replay、评分/历史、赛事引用、私有调试及规则 cutover 审计资产都不因 owner 删除而清理。
+- **后续写入与审计**：owner 的资料修改、启停、排位选择/退出、版本上传/回滚/删除以及 Local AI 创建统一以 HTTP 409 `bot_deleted` 拒绝；不能把墓碑当 inactive Bot 恢复。DELETE 的持久事务、进程内 Local AI transport 撤销与审计属于同一可排空协程，客户端在 worker 启动后断开也必须完成三者再传播取消。每次 DELETE 的成功、幂等重试和失败都写 `bot_owner_delete` 安全审计，记录 actor/target/result 与有界状态码/计数，不记录版本路径、令牌等敏感内容。
+
 ### 3.2 社交/互动表
 
 | 表 | 用途 |
@@ -228,7 +237,7 @@ completed 对局的 `winner` 为空时返回 `blocked`，赛事保持 running，
 | `sessions` | 会话（token, user_id, expires_at，认证核心） |
 | `platform_settings` | 站点文案等仍允许网页维护的 KV；历史 runtime/模板/auto/daily-cap 键不参与运行并在迁移中删除 |
 | `contest_templates` | 历史只读表；不再 seed/对账，现行模板只从 `games/<game>/templates.py` 经注册表聚合 |
-| `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；bot FK = SET NULL（删 Bot 留报名） |
+| `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；三个 entry 写入口都在任何赛事/重复/资料读取前取得 `BEGIN IMMEDIATE`，拿锁后才生成 `registered_at`，实名赛新报名由同一线性点冻结 `real_name/phone/school/student_id` 四项快照与 `identity_captured_at/identity_source=registration_profile`，非实名赛六列恒为 NULL；`contests.require_real_name` 仅零报名时可变，有 entry 后不可翻转；bot FK = SET NULL（删 Bot 留报名） |
 | `contest_pairings` | 赛事对阵（entry_a_id/entry_b_id 身份键 + bot_a_id/bot_b_id SET NULL）—— P0：pairing 快照 entry 身份 |
 | `contest_stage_results` | 阶段成绩（entry_id 唯一键 + bot_id SET NULL + 原始分差累计 `delta_total`）——唯一键 (contest_id, stage_idx, entry_id) |
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws/samples）；`samples` 的权威值恒等于胜+负+平 |
@@ -243,6 +252,10 @@ completed 对局的 `winner` 为空时返回 `blocked`，赛事保持 running，
 
 ### 3.4 迁移机制
 `Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
+
+**Bot owner 墓碑增量迁移**：旧库只为 `bots` 增加 nullable `owner_deleted_at`，不回填或猜测历史停用行。fresh 与 migrated 库均通过同一 canonical trigger 安装器守护墓碑不可逆、inactive+unranked、赛事报名活 Bot、draft→live 门禁以及 live pairing 墓碑座位门禁；定义校验与二次打开遵循既有 trigger schema-idempotency 机制，不重写 Bot、版本、赛事或历史对局资产。
+
+**赛事实名快照增量迁移**：`contest_entries` 幂等增加四项 nullable 快照列及采集时间、来源列；新库 DDL 与所有历史表重建模板保持同构。迁移不读取 `users` 当前资料、不回填旧报名，因此旧实名赛 entry 六列仍为 NULL。只有实名赛的组织者/admin 私有读模型可回退该用户的当前资料，并明确返回 `identity_source=current_profile_legacy`、`identity_captured_at=NULL`；这是“历史报名的当前资料回退”，不是认证结果或报名时快照。非实名赛事即使调用方请求私有投影，也不读取或返回用户实名字段。
 
 **communications 增量迁移**：只新建上述 10 张表，并为 `notifications` 补一个可空投影列/部分唯一索引。不回填、不改写、不删除任何旧 `notifications`、`email_templates`、`email_outbox` 或其他业务行，也不把旧通知伪造为新 conversation。旧模板自定义正文原样保留；官方 verify/reset/welcome 的新执行路径固定使用代码版本。迁移必须以二次打开、`integrity_check`、`foreign_key_check` 和旧表全行哈希/行数不变作为验收边界。
 迁移还会删除多态社交表中已失去用户或目标的孤儿行、按真实 likes 重算每场对局的
@@ -277,12 +290,12 @@ aborted 的自由文本/旧管理员码归一到稳定原因码，避免运行�
 日常挑战允许节能与本地 Bot 混合。启动时仅取得 dispatcher flock 的实例重置遗留在线态并释放旧租约；
 不回填原始令牌，也不把历史任务猜成用户端本地 Bot。
 
-**trigger schema-idempotency**：当前 39 个现行 trigger 统一经 `_ensure_trigger` 安装。helper 先校验
+**trigger schema-idempotency**：当前 46 个现行 trigger（新增 Bot 墓碑 insert/update、赛事报名 live-Bot insert/update、赛事 draft→live 墓碑引用门禁、live pairing 墓碑座位 insert/update 门禁）统一经 `_ensure_trigger` 安装。helper 先校验
 identifier 与 `sqlite_master.type`，再以规范化 SQL 比较定义；同定义时零 `DROP/CREATE`、
 `schema_version` 不变，缺失或过期定义只修复一次，创建后再读回复核。与表/索引同名或创建后定义
 不吻合会抛错，由 Store 外层迁移事务整体回滚。仅已退役的 advance trigger 保留一次性 `DROP`。
 这里保证的是 trigger 定义与业务数据的**逻辑幂等**；Store 打开仍有其他迁移 DML，不能承诺整个 DB
-文件的 SHA-256、mtime 或字节完全不变，也不能把“39 个 trigger 零 DDL”等同于整次打开 zero-write。
+文件的 SHA-256、mtime 或字节完全不变，也不能把“46 个 trigger 零 DDL”等同于整次打开 zero-write。
 
 迁移按终局时间与 match ID 为旧 settlement 固化连续序号，分类每局评分资格但绝不自动重放；任何已存在的 schema
 升级后都保持 `legacy-unverified`。只有连接前完全没有业务表的真正新建库，才会在同一初始化事务内
@@ -321,13 +334,14 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 排行与元数据：`GET /api/leaderboard`、`/api/levels/info`、`/api/site/info`。排行榜 `game_id` 必填且未知值 fail closed，不跨游戏混排；公开排名资格唯一读取 `runtime/config.py::RANKING_MIN_RATED_MATCHES`，与 auto bootstrap lane 解耦。`rating_delta` 只等于同 Bot、同游戏当前 rating 与上一条历史快照之差；最近对局须同时通过 history reason、matches_index 游戏、物理表 completed 行及 Bot 座位四项校验
 - 执行队列：`GET /api/execution-queue` 返回 dispatcher 状态、match slots/sandbox units、active/queued 白名单；不返回内部 DB id、version id、path/checksum/token/match_config/decision id。公开暂停原因是有界安全诊断。主机 CPU/内存余量只进入管理员 runtime 诊断；永久资源不足的排队项返回稳定 code 与用户可读原因，界面显示原因并隐藏不成立的有限 ETA，不能暗示会自动降档或很快开赛
 - 搜索：`GET /api/search`
-- 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
+- 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`。详情的 `entries` 与 `my_entry` 均使用正向字段白名单；访客/参赛者永不取得实名或内部快照列。只有 `require_real_name=true` 且当前用户是赛事组织者/admin 时，详情才附加四项私有实名、`identity_source/identity_captured_at/identity_complete`，并固定 `private, no-store, max-age=0`、`Pragma: no-cache`、`Vary: Authorization, Cookie`、`Referrer-Policy: no-referrer` 与 `nosniff`。非实名赛事不因组织者/admin 身份投影当前用户 PII
+- 公开正式成绩：`GET /api/contests/{id}/official-results?format=json|csv` 永远只消费公开结果白名单，不包含实名、联系方式、学校、学号、快照或来源字段；CSV 继续使用 `contest-{id}-results.csv` 与既有 10 列，并对用户控制的名称/奖项做公式注入防护
 - Wiki：`GET /api/wiki`
 - Bug 反馈：`POST /api/feedback/bugs`；访客必须通过图形验证码与独立 IP 限流，成功响应含追踪令牌并固定 `no-store/no-referrer`。请求是严格 JSON，附件不得 base64 混入，只能在创建后用独立 multipart 端点上传
 - **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
 
 ### 4.2 鉴权端点（require_user，登录玩家）
-- Bot 管理：`GET /api/bots/mine` 是 owner 库存视图，同时返回 active 与 inactive Bot，使停用后仍可查看和重新启用；公开 `/api/bots/public` 仍只返回 active 且可执行的 Bot。写入端点为 `POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`。每个 `(owner_id,game_id)` 另有至多一个 `is_ranked=true` 排位代表：该游戏首个通过预检并激活的 Bot 在空席时自动派遣，owner 可用 `PUT /api/bots/{id}/ranking` 原子切换、用 `DELETE` 退出；停用和版本更新不隐式释放席位，切换不复制或重置任何历史评分。切换事务会拒绝涉及原代表的 starting/running/settling 或 completed-unsettled 计分生命周期，并原子取消其尚未 claim 的旧计分请求及 auto decision；partial unique index 是跨进程最终防线。新建与版本上传共享 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES=100 MiB`，ASGI 请求体硬顶额外保留 1 MiB multipart 信封；两条前端写入口都以 XHR 报告真实传输进度，并在 request body 传完后切换到独立“服务端预检”阶段，不能把等待 ELF/协议预检伪装成仍在上传。上传冻结发送时的账号与 Bearer；账号、Bot 或弹窗变化会终止旧 XHR，迟到成功/失败不得刷新新账号、弹提示或用旧 401 清除新会话。
+- Bot 管理：`GET /api/bots/mine` 是 owner 的未删除库存视图，同时返回 active 与普通 inactive Bot，使停用后仍可查看和重新启用；owner 墓碑完全隐藏。公开 `/api/bots/public` 仍只返回 active 且可执行的 Bot，历史详情以 `is_deleted` 表示墓碑而不返回 `owner_deleted_at`。写入端点为 `POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`；其中 Bot DELETE 使用 §3.1.2 的不可逆、原子、幂等契约，不能作为停用/恢复开关。每个 `(owner_id,game_id)` 另有至多一个 `is_ranked=true` 排位代表：该游戏首个通过预检并激活的 Bot 在空席时自动派遣，owner 可用 `PUT /api/bots/{id}/ranking` 原子切换、用 `DELETE /api/bots/{id}/ranking` 退出；停用和版本更新不隐式释放席位，切换不复制或重置任何历史评分。切换事务会拒绝涉及原代表的 starting/running/settling 或 completed-unsettled 计分生命周期，并原子取消其尚未 claim 的旧计分请求及 auto decision；partial unique index 是跨进程最终防线。新建与版本上传共享 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES=100 MiB`，ASGI 请求体硬顶额外保留 1 MiB multipart 信封；两条前端写入口都以 XHR 报告真实传输进度，并在 request body 传完后切换到独立“服务端预检”阶段，不能把等待 ELF/协议预检伪装成仍在上传。上传冻结发送时的账号与 Bearer；账号、Bot 或弹窗变化会终止旧 XHR，迟到成功/失败不得刷新新账号、弹提示或用旧 401 清除新会话。
 - 本地 Bot：`GET /api/local-ai/agents` 列出本人连接，`POST /api/local-ai/agents` 创建并仅一次返回 token，`POST /api/local-ai/agents/{public_id}/rotate` 轮换，`DELETE` 撤销；`GET /api/local-ai/client` 下载不含凭据的参考连接器。所有响应私有且 `no-store`，连接令牌只通过环境变量和 Authorization header 使用，不进入 URL。
 - 对局请求：`POST /api/matches/challenge` 与 `/api/matches/human` 均返回 HTTP 202 的持久 request，而不是立即返回 Match。响应给 `public_id`、真实 `ahead_jobs/ahead_sandbox_units`、双容量向量和注明动态的 ETA 区间；Match 只在 claim 时出现。Bot-vs-Bot 的内部位置 0 对普通用户仍要求 owner 相同；管理员可从公开的全站 active+runnable Bot 中选择，但显式版本仍须属于所选 Bot，且活跃性、二进制完整性与游戏一致性继续 fail closed。挑战允许所有 active+runnable Bot 练习，同 bot、同 owner、自博弈、人机、赛事以及任一方不是该 owner/game 当前排位代表时均冻结为中性；只有不同 owner 的两个当前代表可计分。创建时冻结资格，claim 前还会复核代表身份，切换后遗留请求以 `ranking_entry_changed` 收敛而不启动 Match；`ranked_bot_not_selected` 是未派遣练习 Bot 的统一公开原因。人机公开契约固定 `human_seat=1`。挑战页按游戏显示双方：德州“玩家 1/2”、五子棋“开局提案方/交换决策方”、点格棋“红方/蓝方”；五子棋黑白归属只按权威 `seat_colors` 展示，不能从座位推断
 - 请求管理：`GET /api/execution-requests/{public_id}` 查询；`DELETE` 取消本人 manual/human；管理员可取消更广来源，其中 queued contest 取消会把 pairing 保持为 `pending + match_id=NULL` 并将 `scheduled_at` 至少后移 30 秒，避免 scheduler 立即重建同一请求；`POST /retry` 仅重试可重试的 interrupted request。终态旧 Match 是不可变审计，新 attempt 使用同一 public request 但新 Match id
@@ -336,17 +350,19 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
 - 通信：`GET /api/communications/{inbox,sent}`、`GET /api/communications/threads/{public_id}`、`POST .../{read,reply}`；只允许已登录用户读取/回复自己的 participant thread，无用户任意私信创建 API。用户与管理员的私有 thread 详情响应统一固定 `no-store/no-referrer`。旧 `GET /api/notifications`、`POST /read`、`/read-all` 继续读兼容投影；`GET/PUT /api/notification-prefs` 四字段唯一类型为 boolean
 - Bug 追踪：`GET /api/feedback/bugs`、`GET /api/feedback/bugs/{public_id}`；登录用户只能读自己提交的反馈，认证列表与详情同样固定 `no-store/no-referrer`。访客以创建时一次性返回的追踪令牌访问 `GET /api/feedback/bugs/{public_id}/track` 并在同一线程 `POST .../track/reply`；创建/追踪/回复响应均 `no-store/no-referrer`，未授权、错误/缺失 token 与不存在统一 404。附件上传为独立 multipart 路由，下载为 `GET .../attachments/{attachment_public_id}`；登录 owner/admin 或持令牌访客才可读写，服务端二次校验路径、大小与 SHA-256。访客 token 授权只在请求没有认证用户时成立；即使同一请求误带另一账号的 Authorization 也统一 404，绝不把访客附件归到该账号。当前附件契约保留原始图片字节以便完整性复查，本轮不做 EXIF 重编码/剥离；界面继续提示不要上传含隐私的截图，EXIF 清理留作独立安全增强
-- 赛事：`POST /api/contests/{id}/register`
+- 赛事：`POST /api/contests/{id}/register` 只允许本人报名。实名赛在 Manager 做完整性提示后，Store 仍先取得 SQLite 写锁，再读取赛事门禁与四项资料、生成时间并提交 entry 快照；并发资料修改只能完整落在线性点之前或报名 commit 之后，不能留下“旧资料快照 + 新资料先提交”的中间状态。`require_real_name` 的变化使用同一写锁且有任何 entry 时拒绝；考虑到删掉最后 entry 后仍存在合法改旗窗口，`contest_entries_named` 与私有导出不依赖前置门禁 SELECT，而在投影 entry 的同一 SQL 快照内 JOIN contest，并对四项身份、来源、采集时间与完整性逐列 `CASE require_real_name`。报名后修改个人资料不改变既有 entry。`register`/`dispatch` 返回的 `entry` 与详情 `my_entry` 共用公开正向白名单，不能因底层 `SELECT *` 新增快照列而泄漏
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`。前端 AuthProvider 以单调代次串行化 `/me`、登录与退出的共享状态投影；初始 `/me` 的迟到 200/401 都不能覆盖或清除其后建立的新账号会话。
 
 ### 4.3 组织者端点（require_organizer 或 admin）
 - `POST /api/contests`（创建赛事）
 - `POST /api/contests/{id}/{open,start,resume,advance}`（赛事推进，require_organizer）
+- `POST /api/contests/{id}/entries`、`/entries/bulk` 与 admin 批量入口是唯一代报名路径。非实名赛维持组织者现场补录语义；实名赛必须由参赛者本人走 `/register` 表达同意，普通 organizer 的单条与批量（含 `assign_all`）在 API、Manager、Store 三层 fail closed 为 403，写入前拒绝且零 entry/零快照。admin 可在通用两路或专用 admin 批量路由显式 override，仍须逐项满足资料完整、Bot 归属/游戏/可用性与名册状态；批量缺资料项不静默消失，响应给出 `identity_incomplete_count`、`identity_incomplete_users` 与逐项 `skipped` 原因。admin override 的成功审计使用 Store 在 `BEGIN IMMEDIATE` 后读取、与实际快照同一线性点的实名门禁，不使用 API 的前置赛事视图；同一事务内的实名校验失败通过无 PII 专用异常携带该门禁，确保并发 0→1 后回滚也记录 `result=fail + real_name_override=1`。业务失败、缺字段、非法 ID、非法/不匹配游戏同样审计 actor、contest、entry/user/Bot ID 或计数与 reason code，普通 organizer 拒绝也审计。所有审计绝不写姓名、电话、学校、学号或快照值
+- `GET /api/contests/{id}/export?format=csv` 是组织者/admin 私有名单导出。省略 `schema`（或 `schema=1`）保留 16 列 v1 与 `contest-{id}-export.csv`；`schema=2` 使用 `contest-{id}-participants-v2.csv`，以中英双语表头给出稳定 entry/user/Bot ID、账号/显示名、报名实名与来源、阶段/成绩/中文状态。v2 的空 seed 留空，手机号/学号前置 ASCII apostrophe 以保留前导零并避免科学计数，所有用户控制字符串统一防表格公式注入。成功及 400/401/403/404 错误均使用详情同款私有禁止缓存/引用/嗅探头；错误响应没有下载文件名。审计仅记录 actor、contest、schema、行数、是否排除实名与 legacy 行数，绝不记录 PII
 - 注：`register`/`dispatch` 为 require_user（报名/换 Bot 由登录用户发起）
 
 ### 4.4 管理员端点（require_admin）
 - 用户管理：`GET /api/admin/users`、`POST /role`、`PATCH/DELETE /api/admin/users/{id}`、`/sessions`
-- Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
+- Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；admin Bot 列表/修改响应对墓碑明确返回 `is_deleted=true` 与精确 `owner_deleted_at`，但 PATCH 仍不得重新激活 owner 墓碑；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
 - 本地 Bot 连接：`GET /api/admin/local-ai/agents` 分页查看 owner/Bot/游戏/在线状态，`DELETE /api/admin/local-ai/agents/{public_id}` 撤销异常连接；管理员不读取 token/hash，也不能代用户创建或轮换凭据。
 - **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段。管理员赛事时间按状态收口：`draft` 可改开放/截止/开赛时间，`open` 只能改未来的截止/开赛时间，`published` 只能改开赛时间，其余状态只读；所有 PATCH 与旧值合并后整体验证，非法请求零部分写。`published` 改开赛时间时，只有尚未有任何 `match_id` 才可在同一事务中按发布时的轮次错峰规则重排当前阶段 pending pairing；显式 `starts_at:null` 同步清空逐场排期，一旦有对局绑定即拒绝整次修改。管理端排期表不为缺失字段生成当前时间等假默认值，空报名时间显式保存为 `NULL`；“按时间自动开赛”关闭时必须提交 `starts_at: null`，与未提交该字段（保留旧值）严格区分。已被任何对局、报名或对阵引用的用户/Bot 只能停用、不能由管理员硬删，避免 `SET NULL/CASCADE` 永久抹掉历史参赛身份；只有从未参赛且无引用的实体允许硬删。`published` 赛事删除表示先取消尚未开打排期再删除，`running/rest`、`finished`、已有正式榜或仍有 active match 时拒绝删除。
 - **赛事删除与持久队列**：`published` 即使尚未绑定 Match，只要仍有 `queued/starting/running/settling` execution request 也必须拒绝删除；不能让 pairing 的级联删除留下仍可被 dispatcher claim 的孤儿 job。
@@ -488,6 +504,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 | **Bot debug 泄漏/XSS/资源放大** | stdout 行 64 KiB；debug 单条/深度/节点/容器/每座位/整场多级硬顶，NFC+控制/bidi/ANSI 清理和敏感信息脱敏；独立表与鉴权 API、`no-store`、纯文本/JSON 渲染；公共 result/replay/SSE/WS/log 全部不承载 debug |
 | **公开对局日志越权/注入/伪完整** | 只导出单场终态 canonical public replay 与公开 match 正向白名单；同快照验证原始尾项已经持久化，活动/未知/损坏/未落稳均 409；JSON attachment 使用 `no-store + nosniff` 和有界 ASCII 文件名，确定性序列化；私有 debug、stdout/stderr、路径、执行配置和令牌零进入，已下线 bulk 数据集端点保持 404 |
 | **公开记录越权/注入** | 单场 exporter 只接收公开 match 正向白名单、canonical public replay 与快照时间，禁止读取 Bot 文件/版本路径、冻结执行配置、令牌或私有 debug；活动局和尚待响应请求不导出，终局中已经脱敏的历史交互事件可按公共回放保留且继续受字段白名单约束。响应 `no-store + nosniff`，ASCII 文件名先清洗再进入 `Content-Disposition`。Gomoku JSON v1 明确是平台格式；附件未给出组委会电子格式时不宣称官方或外部软件兼容 |
+| **赛事名单 PII 越权/漂移/表格注入** | 非实名赛详情与任何 schema 导出都不读取当前实名资料；`require_real_name` 仅零报名可改，三个 entry 入口与开关变化都先取 `BEGIN IMMEDIATE`，有 entry 后拒绝翻转。读模型仍防御删最后 entry→改旗→重插窗口：身份七列与 `identity_required` 在同一 JOIN SQL 快照内门控，v2 完整性及审计只使用该行门禁。实名赛新 entry 在同一线性点冻结快照；普通 organizer 无权替他人形成 PII 快照，admin override 才可代报名且成功审计读取实际写入门禁；legacy 只在授权私有读边界以 `current_profile_legacy` 回退且采集时间为空。公开正式榜永不消费 PII。私有详情/导出使用 `private, no-store + Vary + no-referrer + nosniff`，CSV 手机/学号强制文本、全部可控字符串防公式注入 |
 | **接口滥用** | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s、captcha 60/60s、其他 120/60s），`BZ_RATE_LIMIT` 可关；Uvicorn 不改写 ASGI peer，`BZ_TRUST_PROXY=1` 时也仅允许 `BZ_TRUSTED_PROXY_CIDRS` 内 socket peer 提供合法 X-Real-IP/XFF，直连 LAN 伪造头仍按真实 peer 分桶 |
 | **暴力破解** | 图形验证码（注册/登录）；登录失败不区分用户名/密码错误 |
 | **密码泄露** | 密码 hash 存储（非明文）；自助重置请求对不存在账号保持统一响应，邮箱重置码以单事务 CAS 消费，并在同一事务更新密码、撤销该用户全部 session，竞争请求仅一方成功且任一步失败整体回滚；管理员没有返回重置 credential 的 API |
@@ -503,6 +520,6 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **`logs/access.log`**：HTTP 访问日志（`AccessLogMiddleware`，含真实 IP + 方法 + 路径 + 状态 + 耗时）。
 - **`logs/audit.log`**：安全审计日志（`audit_log()` 辅助，敏感操作含 actor+IP+action+result；`result=fail` 升 WARNING）。
 
-埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、私有对局 debug 读取（只记 actor/match/结果/条数，不记内容）、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间修改、改角色。运行参数和赛制模板无管理写入口，因此不产生对应写审计。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）；后端按结构化首行聚合多行记录后再筛选，确保 ERROR/关键字筛选仍包含 traceback 和对局上下文，响应只返回安全文件名而不泄漏服务器绝对路径。验证码日志脱敏（SMTP 未配置时不打明文）。
+埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、owner Bot 逻辑删除（`bot_owner_delete` 的成功/幂等/失败）、对局创建、人类对战、私有对局 debug 读取（只记 actor/match/结果/条数，不记内容）、赛事创建/私有名单导出（只记 schema、行数与来源计数，不记 PII）、实名赛普通 organizer 代报名拒绝与 admin override 全结果（只记 contest、entry/user/Bot ID、计数和 reason code）、admin 删用户/bot/赛事/赛事报名、赛事状态/时间修改、改角色。运行参数和赛制模板无管理写入口，因此不产生对应写审计。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）；后端按结构化首行聚合多行记录后再筛选，确保 ERROR/关键字筛选仍包含 traceback 和对局上下文，响应只返回安全文件名而不泄漏服务器绝对路径。验证码日志脱敏（SMTP 未配置时不打明文）。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

@@ -59,10 +59,35 @@ def test_owner_delete_bot(tmp_path):
     h1 = {"Authorization": f"Bearer {t1}"}
     r = c.delete(f"/api/bots/{bid}", headers=h1)
     assert r.status_code == 200
-    # 软删：is_active=0（私有 bot 功能已下线，不再有 is_public 字段）
-    b = c.get(f"/api/bots/{bid}").json()["bot"]
+    assert r.json() == {"ok": True, "changed": True}
+
+    # Owner tombstone hides the Bot from inventory while preserving its public
+    # historical identity without exposing the exact deletion timestamp.
+    mine = c.get("/api/bots/mine?page=1&per_page=20", headers=h1)
+    assert mine.status_code == 200
+    assert mine.json()["bots"] == []
+    assert mine.json()["total"] == 0
+    b = c.get(f"/api/bots/{bid}", headers=h1).json()["bot"]
     assert b["is_active"] in (0, False)
+    assert b["is_ranked"] in (0, False)
+    assert b["is_deleted"] is True
+    assert b["runnable"] is False
+    assert b["unsupported_reason"] == "Bot 已删除"
+    assert "owner_deleted_at" not in b
     assert "is_public" not in b
+
+    repeated = c.delete(f"/api/bots/{bid}", headers=h1)
+    assert repeated.status_code == 200
+    assert repeated.json() == {"ok": True, "changed": False}
+
+    for method, path, payload in (
+        ("patch", f"/api/bots/{bid}", {"display_name": "revive"}),
+        ("post", f"/api/bots/{bid}/active?active=true", None),
+        ("put", f"/api/bots/{bid}/ranking", None),
+    ):
+        blocked = getattr(c, method)(path, json=payload, headers=h1)
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"]["code"] == "bot_deleted"
 
 
 def test_other_user_cannot_delete(tmp_path):

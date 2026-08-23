@@ -19,7 +19,12 @@ from ..bots.classify import (
     classify_binary,
     require_supported_binary,
 )
-from ..store import RankedBotSelectionBusyError, Store
+from ..store import (
+    BotDeletedError,
+    BotOwnerDeleteBusyError,
+    RankedBotSelectionBusyError,
+    Store,
+)
 from ..runtime.limits import MAX_BOT_UPLOAD_BYTES
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,11 @@ class BotManager:
             lock = self._bot_locks.setdefault(bot_id, RLock())
         with lock:
             yield
+
+    @staticmethod
+    def _require_owner_live(bot: dict) -> None:
+        if bot.get("owner_deleted_at") is not None:
+            raise BotError("bot_deleted", "Bot 已删除，不能再修改")
 
     def create_from_upload(
         self,
@@ -129,17 +139,33 @@ class BotManager:
                 game_id=gid,
                 binary_runner=binary_runner,
             )
-            self.store.update_bot(bot["id"], is_active=1)
-            self.store.select_ranked_bot(owner_id, bot["id"], if_empty=True)
-        except Exception:
-            self.purge_bot_files(bot["id"])
-            if not self.store.delete_unpublished_bot(bot["id"]):
-                # Unexpected references/side effects must not be blessed by the
-                # narrow staging rollback.  Generic hard delete remains
-                # deliberately fail-closed for the rating projection.
-                self.store.delete_bot(bot["id"])
+            return self.store.publish_uploaded_bot(owner_id, bot["id"])
+        except Exception as exc:
+            # Owner deletion is an irreversible history boundary.  Re-read it
+            # before cleanup, then rely on both hard-delete helpers to re-check
+            # under BEGIN IMMEDIATE so a later cross-process DELETE cannot race
+            # this branch into purging a committed version or its binary.
+            latest = self.store.get_bot(bot["id"])
+            if latest and latest.get("owner_deleted_at") is not None:
+                raise BotError(
+                    "bot_deleted", "Bot 已删除；已提交的版本与二进制保留为历史"
+                ) from exc
+            try:
+                removed = self.store.delete_unpublished_bot(bot["id"])
+                if not removed:
+                    # Unexpected references/side effects must not be blessed by
+                    # the narrow staging rollback.  Generic hard delete remains
+                    # deliberately fail-closed for projections and tombstones.
+                    removed = self.store.delete_bot(bot["id"])
+            except BotDeletedError as deleted_exc:
+                raise BotError(
+                    "bot_deleted", "Bot 已删除；已提交的版本与二进制保留为历史"
+                ) from deleted_exc
+            # Delete DB identity first.  Only a confirmed hard delete (or an
+            # already absent row) authorizes removal of the filesystem asset.
+            if removed or self.store.get_bot(bot["id"]) is None:
+                self.purge_bot_files(bot["id"])
             raise
-        return self.store.get_bot(bot["id"])
 
     def upload_version(
         self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = "",
@@ -149,6 +175,7 @@ class BotManager:
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
             raise BotError("not_found", "bot 不存在")
+        self._require_owner_live(bot)
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = _classify_upload(raw)
@@ -160,6 +187,7 @@ class BotManager:
             bot = self.store.get_bot(bot_id)
             if not bot or bot["owner_id"] != owner_id:
                 raise BotError("not_found", "bot 不存在")
+            self._require_owner_live(bot)
             rmode = (
                 runtime_mode or bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE
             ).strip().lower()
@@ -293,18 +321,21 @@ class BotManager:
                         )
                 temp_dir.replace(dest_dir)
                 promoted = True
-                self.store.add_bot_version(
-                    bot_id,
-                    binary_path=str(dest),
-                    upload_note=upload_note,
-                    checksum=checksum,
-                    size_bytes=len(raw),
-                    os=info.os,
-                    arch=info.arch,
-                    format=info.format,
-                    runtime_mode=runtime_mode,
-                    version=version,
-                )
+                try:
+                    self.store.add_bot_version(
+                        bot_id,
+                        binary_path=str(dest),
+                        upload_note=upload_note,
+                        checksum=checksum,
+                        size_bytes=len(raw),
+                        os=info.os,
+                        arch=info.arch,
+                        format=info.format,
+                        runtime_mode=runtime_mode,
+                        version=version,
+                    )
+                except BotDeletedError as exc:
+                    raise BotError("bot_deleted", str(exc)) from exc
             except Exception:
                 if promoted:
                     shutil.rmtree(dest_dir, ignore_errors=True)
@@ -983,6 +1014,7 @@ class BotManager:
                 raise BotError("not_found", "bot 不存在")
             if bot["owner_id"] != owner_id:
                 raise BotError("forbidden", "无权修改他人的 Bot")
+            self._require_owner_live(bot)
             target = next(
                 (
                     row
@@ -1021,6 +1053,8 @@ class BotManager:
                 raise BotError("version_unavailable", "版本二进制文件不可用") from exc
             try:
                 result = self.store.set_current_version(bot_id, version)
+            except BotDeletedError as exc:
+                raise BotError("bot_deleted", str(exc)) from exc
             except ValueError as exc:
                 raise BotError("protocol_incompatible", str(exc)) from exc
             # Per-bot lock makes disappearance impossible unless the DB itself was
@@ -1052,6 +1086,7 @@ class BotManager:
         return self.store.list_bots(
             owner_id=owner_id,
             active_only=False,
+            include_owner_deleted=False,
             game_id=game_id,
             page=page,
             per_page=per_page,
@@ -1114,6 +1149,7 @@ class BotManager:
                 raise BotError("not_found", "bot 不存在")
             if int(bot["owner_id"]) != int(owner_id):
                 raise BotError("forbidden", "无权修改他人的 Bot")
+            self._require_owner_live(bot)
             if not bot.get("is_active"):
                 raise BotError("ranking_unavailable", "Bot 当前未启用，不能参加排位")
             self._require_activatable(bot)
@@ -1123,6 +1159,8 @@ class BotManager:
                 raise BotError("not_found", str(exc)) from exc
             except PermissionError as exc:
                 raise BotError("forbidden", str(exc)) from exc
+            except BotDeletedError as exc:
+                raise BotError("bot_deleted", str(exc)) from exc
             except RankedBotSelectionBusyError as exc:
                 raise BotError("ranking_busy", str(exc)) from exc
             except ValueError as exc:
@@ -1130,14 +1168,23 @@ class BotManager:
 
     def clear_ranked(self, bot_id: int, owner_id: int) -> dict:
         """Withdraw the current representative without deleting its history."""
-        try:
-            return self.store.clear_ranked_bot(owner_id, bot_id)
-        except LookupError as exc:
-            raise BotError("not_found", str(exc)) from exc
-        except PermissionError as exc:
-            raise BotError("forbidden", str(exc)) from exc
-        except RankedBotSelectionBusyError as exc:
-            raise BotError("ranking_busy", str(exc)) from exc
+        with self._bot_version_lock(bot_id):
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise BotError("not_found", "bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise BotError("forbidden", "无权修改他人的 Bot")
+            self._require_owner_live(bot)
+            try:
+                return self.store.clear_ranked_bot(owner_id, bot_id)
+            except LookupError as exc:
+                raise BotError("not_found", str(exc)) from exc
+            except PermissionError as exc:
+                raise BotError("forbidden", str(exc)) from exc
+            except BotDeletedError as exc:
+                raise BotError("bot_deleted", str(exc)) from exc
+            except RankedBotSelectionBusyError as exc:
+                raise BotError("ranking_busy", str(exc)) from exc
 
     def patch_owner(self, bot_id: int, owner_id: int, **fields) -> dict:
         """Apply an owner edit without allowing activation of an unsupported file."""
@@ -1147,12 +1194,29 @@ class BotManager:
                 raise BotError("not_found", "bot 不存在")
             if bot["owner_id"] != owner_id:
                 raise BotError("forbidden", "无权修改他人的 Bot")
+            self._require_owner_live(bot)
             if bool(fields.get("is_active")):
                 self._require_activatable(bot)
-            result = self.store.update_bot(bot_id, **fields)
-            if result is None:
-                raise BotError("not_found", "bot 不存在")
-            return result
+            try:
+                return self.store.update_owned_bot(owner_id, bot_id, **fields)
+            except LookupError as exc:
+                raise BotError("not_found", str(exc)) from exc
+            except PermissionError as exc:
+                raise BotError("forbidden", str(exc)) from exc
+            except BotDeletedError as exc:
+                raise BotError("bot_deleted", str(exc)) from exc
+
+    def delete_owner(self, bot_id: int, owner_id: int) -> dict:
+        """Apply the irreversible owner tombstone under the version lock."""
+        with self._bot_version_lock(bot_id):
+            try:
+                return self.store.owner_delete_bot(owner_id, bot_id)
+            except LookupError as exc:
+                raise BotError("not_found", str(exc)) from exc
+            except PermissionError as exc:
+                raise BotError("forbidden", str(exc)) from exc
+            except BotOwnerDeleteBusyError as exc:
+                raise BotError(exc.code, exc.message) from exc
 
     def patch_admin(self, bot_id: int, **fields) -> dict:
         """Apply an admin edit without bypassing the executable-target gate."""
@@ -1160,9 +1224,16 @@ class BotManager:
             bot = self.store.get_bot(bot_id)
             if not bot:
                 raise BotError("not_found", "bot 不存在")
+            if bot.get("owner_deleted_at") is not None and bool(
+                fields.get("is_active")
+            ):
+                raise BotError("bot_deleted", "Bot 已删除，不能重新启用")
             if bool(fields.get("is_active")):
                 self._require_activatable(bot)
-            result = self.store.update_bot(bot_id, **fields)
+            try:
+                result = self.store.update_admin_bot(bot_id, **fields)
+            except BotDeletedError as exc:
+                raise BotError("bot_deleted", str(exc)) from exc
             if result is None:
                 raise BotError("not_found", "bot 不存在")
             return result
