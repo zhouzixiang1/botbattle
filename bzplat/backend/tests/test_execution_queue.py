@@ -23,6 +23,7 @@ from bzplat.backend.matches.execution_queue import (
     ExecutionDispatcher,
 )
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
+from bzplat.backend.runtime import limits as runtime_limits
 from bzplat.backend.runtime.docker_supervisor import (
     ATTEMPT_LABEL,
     CANONICAL_DOCKER_HOST,
@@ -46,6 +47,14 @@ from bzplat.backend.runtime.binary_runner import (
 from bzplat.backend.runtime.limits import HostResourceBudget, PLATFORM_LOW_PROFILE
 from bzplat.backend.runtime.local_ai import LocalAIHub
 from bzplat.backend.runtime.local_ai_service import LocalAIService
+from bzplat.backend.runtime.config import (
+    AUTO_MATCH_COOLDOWN_SECONDS,
+    AUTO_MATCH_CONTEST_GUARD_SECONDS,
+    AUTO_MATCH_IDLE_GRACE_SECONDS,
+    AUTO_MATCH_SCHEDULER_POLICY_VERSION,
+    EXECUTION_AUTO_ACTIVE_LIMIT,
+    EXECUTION_AUTO_LOOKAHEAD,
+)
 from bzplat.backend.store import Store, rating_projection_digests
 from bzplat.backend.store.execution import (
     ExecutionInvariantError,
@@ -54,6 +63,8 @@ from bzplat.backend.store.execution import (
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
 from bzplat.backend.store.schema import (
+    AUTO_IDLE_POLICY_CUTOVER_REASON,
+    AUTO_YIELD_FOREGROUND_REASON,
     EXECUTION_SOURCE_AUTO,
     EXECUTION_SOURCE_CONTEST,
     EXECUTION_SOURCE_HUMAN,
@@ -220,6 +231,32 @@ def _claim(store: Store, *, slots: int = 2, units: int = 4) -> dict | None:
         aging_seconds=60,
         user_active_limit=1,
         contest_share_slots=1,
+    )
+
+
+def _make_auto_ready(store: Store) -> None:
+    old = (datetime.now() - timedelta(minutes=20)).isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET dispatch_policy_version=?,"
+            "next_eligible_at=?,gate_reason='idle_grace' WHERE singleton=1",
+            (AUTO_MATCH_SCHEDULER_POLICY_VERSION, old),
+        )
+        conn.execute(
+            "UPDATE execution_jobs SET terminal_at=? WHERE terminal_at IS NOT NULL",
+            (old,),
+        )
+
+
+def _claim_auto(store: Store, *, slots: int = 2, units: int = 4) -> dict | None:
+    _make_auto_ready(store)
+    return store.executions.claim_next(
+        max_match_slots=slots,
+        max_sandbox_units=units,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=1,
+        claim_class="auto",
     )
 
 
@@ -807,7 +844,7 @@ def test_claim_version_loss_has_truthful_retry_and_auto_lifecycle(queue_store):
             (auto_pair[0]["version_id"],),
         )
 
-    assert _claim(store, slots=1, units=2) is None
+    assert _claim_auto(store) is None
     cancelled = store.executions.get(automatic["public_id"])
     assert cancelled["status"] == "cancelled"
     assert cancelled["retryable"] == 0
@@ -962,6 +999,25 @@ def test_auto_refill_bootstrap_lane_prioritizes_low_sample_bots(queue_store):
     }
 
 
+def test_auto_refill_clamps_internal_target_to_one(queue_store):
+    store = queue_store
+    for index in range(4):
+        _bot(store, f"refill-clamp-{index}")
+    _verify_projection(store)
+    _make_auto_ready(store)
+
+    result = store.executions.refill_auto(
+        target_queued=99,
+        bootstrap_target_matches=10,
+    )
+
+    assert result["inserted"] == 1
+    assert result["queued"] == EXECUTION_AUTO_LOOKAHEAD == 1
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE source='auto' AND status='queued'"
+    ).fetchone()[0] == 1
+
+
 def test_finalize_never_releases_capacity_for_non_terminal_match(queue_store):
     pair = (_bot(queue_store, "finalize-a"), _bot(queue_store, "finalize-b"))
     queued = _enqueue_pair(queue_store, pair)
@@ -1013,7 +1069,7 @@ def test_terminal_runtime_retryability_is_owned_by_request_source(queue_store):
         source=EXECUTION_SOURCE_AUTO,
         owner_user_id=None,
     )
-    auto_claim = _claim(store, slots=1, units=2)
+    auto_claim = _claim_auto(store)
     assert auto_claim is not None
     store.update_match(
         auto_claim["current_match_id"],
@@ -1228,7 +1284,7 @@ def test_global_match_and_sandbox_limits_include_human_units(queue_store):
     assert _claim(store, slots=2, units=20) is None
 
 
-def test_dispatcher_claims_manual_human_contest_and_auto_in_one_capacity_model(
+def test_dispatcher_claims_foreground_sources_and_holds_auto_outside_idle_policy(
     queue_store,
 ):
     store = queue_store
@@ -1304,13 +1360,11 @@ def test_dispatcher_claims_manual_human_contest_and_auto_in_one_capacity_model(
         manual["public_id"],
         human_job["public_id"],
         contest_job["public_id"],
-        automatic["public_id"],
     ]
     expected_sources = [
         EXECUTION_SOURCE_MANUAL,
         EXECUTION_SOURCE_HUMAN,
         EXECUTION_SOURCE_CONTEST,
-        EXECUTION_SOURCE_AUTO,
     ]
 
     for index, expected_id in enumerate(expected_jobs):
@@ -1344,6 +1398,11 @@ def test_dispatcher_claims_manual_human_contest_and_auto_in_one_capacity_model(
             int(claimed["attempt_count"]),
         )
         assert store.executions.finalize_ready() == 1
+
+    assert asyncio.run(dispatcher.run_once())["claimed"] == 0
+    held_auto = store.executions.get(automatic["public_id"])
+    assert held_auto["status"] == "cancelled"
+    assert held_auto["terminal_reason"] == AUTO_IDLE_POLICY_CUTOVER_REASON
 
     capacity = store.executions.snapshot(
         max_match_slots=1,
@@ -1408,10 +1467,10 @@ def test_priority_aging_auto_switch_and_contest_share(queue_store):
         owner_user_id=None,
     )
     assert _claim(store, slots=3, units=6)["public_id"] == manual["public_id"]
-    # One contest share is already active and a non-contest request waits, so
-    # the automatic request is chosen instead of a second contest request.
-    assert _claim(store, slots=3, units=6)["public_id"] == automatic["public_id"]
-    assert store.executions.get(second_contest["public_id"])["status"] == "queued"
+    # Auto is outside the foreground contest-share class. Once the only manual
+    # request has claimed, it cannot reserve the remaining slot from a contest.
+    assert _claim(store, slots=3, units=6)["public_id"] == second_contest["public_id"]
+    assert store.executions.get(automatic["public_id"])["status"] == "queued"
 
     # The switch only holds automatic dispatch; it does not cancel or hide it.
     auto_held = _enqueue_pair(
@@ -1442,6 +1501,1400 @@ def test_priority_aging_auto_switch_and_contest_share(queue_store):
     assert store.executions._effective_priority(
         auto_row, now=datetime.now(), aging_seconds=60
     ) > 40
+
+
+@pytest.mark.parametrize(
+    "foreground_source",
+    [
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+        EXECUTION_SOURCE_CONTEST,
+    ],
+)
+def test_idle_only_foreground_enqueue_yields_queued_and_active_auto(
+    queue_store, foreground_source
+):
+    store = queue_store
+    bots = [_bot(store, f"idle-yield-{index}") for index in range(6)]
+    active_request = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    waiting_request = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    active = _claim_auto(store)
+    assert active and active["public_id"] == active_request["public_id"]
+
+    if foreground_source == EXECUTION_SOURCE_MANUAL:
+        foreground = _enqueue_pair(store, (bots[4], bots[5]))
+    elif foreground_source == EXECUTION_SOURCE_HUMAN:
+        human = store.create_user(
+            "idle-yield-human",
+            "idle-yield-human@example.test",
+            "hash",
+        )
+        foreground = store.executions.enqueue(
+            source=EXECUTION_SOURCE_HUMAN,
+            owner_user_id=human["id"],
+            game_id="holdem",
+            match_type=TYPE_HUMAN,
+            bot_a_id=bots[4]["bot_id"],
+            bot_b_id=bots[4]["bot_id"],
+            bot_a_version_id=bots[4]["version_id"],
+            bot_b_version_id=None,
+            human_user_id=human["id"],
+            human_seat=1,
+        )
+    else:
+        contest = store.create_contest(
+            "Idle yield contest",
+            bots[4]["user_id"],
+            status="running",
+            game_id="holdem",
+        )
+        pairing = store.add_pairing(
+            contest["id"],
+            bots[4]["bot_id"],
+            bots[5]["bot_id"],
+            bot_a_version_id=bots[4]["version_id"],
+            bot_b_version_id=bots[5]["version_id"],
+        )
+        foreground = store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[4]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[4]["bot_id"],
+            bot_b_id=bots[5]["bot_id"],
+            bot_a_version_id=bots[4]["version_id"],
+            bot_b_version_id=bots[5]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+
+    yielding = store.executions.get(active_request["public_id"])
+    cancelled = store.executions.get(waiting_request["public_id"])
+    assert yielding["status"] == "starting"
+    assert yielding["cancel_requested"] == 1
+    assert yielding["terminal_reason"] == "auto_yield_foreground"
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["retryable"] == 0
+    assert cancelled["terminal_reason"] == "auto_yield_foreground"
+    assert store.executions.get(foreground["public_id"])["status"] == "queued"
+    scheduler = store.executions.snapshot(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        aging_seconds=60,
+    )["auto_scheduler"]
+    assert scheduler["state"] == (
+        "contest_guard"
+        if foreground_source == EXECUTION_SOURCE_CONTEST
+        else "foreground_busy"
+    )
+    assert scheduler["reason"] == "auto_yield_foreground"
+    public_request = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=2, max_sandbox_units=4
+    ).public_request(foreground["public_id"])
+    assert public_request is not None
+    assert public_request["ahead_jobs"] == 0
+    assert public_request["ahead_sandbox_units"] == 0
+    assert public_request["eta"]["min_seconds"] == 0
+
+    store.executions.set_auto_enabled(False)
+    disabled = store.executions.snapshot(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        aging_seconds=60,
+    )["auto_scheduler"]
+    assert disabled["state"] == "disabled"
+    assert disabled["reason"] == AUTO_YIELD_FOREGROUND_REASON
+
+
+def test_idle_only_showcase_enqueue_does_not_yield_auto(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"showcase-no-yield-{index}") for index in range(6)]
+    active_request = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    waiting_request = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    assert _claim_auto(store)["public_id"] == active_request["public_id"]
+    contest = store.create_contest(
+        "Showcase does not preempt",
+        bots[4]["user_id"],
+        status="running",
+        game_id="holdem",
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET showcase_key='idle-only-showcase' WHERE id=?",
+            (contest["id"],),
+        )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[4]["bot_id"],
+        bots[5]["bot_id"],
+        bot_a_version_id=bots[4]["version_id"],
+        bot_b_version_id=bots[5]["version_id"],
+    )
+    store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[4]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[4]["bot_id"],
+        bot_b_id=bots[5]["bot_id"],
+        bot_a_version_id=bots[4]["version_id"],
+        bot_b_version_id=bots[5]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    active = store.executions.get(active_request["public_id"])
+    queued = store.executions.get(waiting_request["public_id"])
+    assert (active["status"], active["cancel_requested"]) == ("starting", 0)
+    assert queued["status"] == "queued"
+    assert store.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]["state"] == "running"
+
+
+def test_idle_only_foreground_retry_yields_queued_and_active_auto(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"retry-yield-{index}") for index in range(6)]
+    retrying = _enqueue_pair(store, (bots[4], bots[5]))
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "terminal_reason='transient',terminal_at=?,next_attempt_at=NULL "
+            "WHERE public_id=?",
+            (
+                (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds"),
+                retrying["public_id"],
+            ),
+        )
+    active_request = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    waiting_request = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    assert _claim_auto(store)["public_id"] == active_request["public_id"]
+
+    retried = store.executions.retry(
+        retrying["public_id"], owner_user_id=bots[4]["user_id"]
+    )
+    assert retried["status"] == "queued"
+    active = store.executions.get(active_request["public_id"])
+    waiting = store.executions.get(waiting_request["public_id"])
+    assert (active["status"], active["cancel_requested"], active["terminal_reason"]) == (
+        "starting",
+        1,
+        "auto_yield_foreground",
+    )
+    assert (waiting["status"], waiting["terminal_reason"]) == (
+        "cancelled",
+        "auto_yield_foreground",
+    )
+
+
+def test_idle_only_aging_and_contest_share_never_consider_auto(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"idle-order-{index}") for index in range(8)]
+    manual = _enqueue_pair(store, (bots[0], bots[1]))
+    automatic = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET created_at=? WHERE public_id=?",
+            (
+                (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds"),
+                automatic["public_id"],
+            ),
+        )
+    assert _claim(store, slots=2, units=4)["public_id"] == manual["public_id"]
+    assert store.executions.get(automatic["public_id"])["status"] == "queued"
+
+    store.update_match(
+        store.executions.get(manual["public_id"])["current_match_id"],
+        status="aborted",
+        reason="platform_error",
+    )
+    store.executions.mark_cleanup_confirmed(manual["public_id"], 1)
+    assert store.executions.finalize_ready() == 1
+    contest = store.create_contest(
+        "Auto is not a contest-share peer",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[offset]["bot_id"],
+            bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+        )
+        for offset in (4, 6)
+    ]
+    contest_jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[0]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[offset]["bot_id"],
+            bot_b_id=bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairings[index]["id"],
+        )
+        for index, offset in enumerate((4, 6))
+    ]
+    queued_auto = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    assert _claim(store, slots=3, units=6)["public_id"] == contest_jobs[0]["public_id"]
+    assert _claim(store, slots=3, units=6)["public_id"] == contest_jobs[1]["public_id"]
+    assert store.executions.get(queued_auto["public_id"])["status"] == "queued"
+    reconciled = store.executions.reconcile_auto_scheduler_policy()
+    assert reconciled["queued_cancelled"] == 1
+    assert store.executions.get(queued_auto["public_id"])["status"] == "cancelled"
+
+
+def test_idle_only_policy_reconcile_toggle_guard_and_public_contract(queue_store):
+    store = queue_store
+    pair = (_bot(store, "idle-policy-a"), _bot(store, "idle-policy-b"))
+    legacy = _enqueue_pair(
+        store,
+        pair,
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    first = store.executions.reconcile_auto_scheduler_policy()
+    assert first["changed"] is True
+    assert first["queued_cancelled"] == 1
+    assert store.executions.get(legacy["public_id"])["terminal_reason"] == (
+        AUTO_IDLE_POLICY_CUTOVER_REASON
+    )
+    second = store.executions.reconcile_auto_scheduler_policy()
+    assert second["changed"] is False
+    assert second["queued_cancelled"] == 0
+    assert second["next_eligible_at"] == first["next_eligible_at"]
+
+    _make_auto_ready(store)
+    store.executions.set_auto_enabled(False)
+    disabled = store.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]
+    assert disabled["state"] == "disabled"
+    store.executions.set_auto_enabled(True)
+    enabled = store.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]
+    assert enabled["state"] == "cooldown"
+    assert enabled["reason"] == "idle_grace"
+
+    contest = store.create_contest(
+        "Real contest guard",
+        pair[0]["user_id"],
+        status="running",
+        game_id="holdem",
+    )
+    guarded = store.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]
+    assert guarded["state"] == "contest_guard"
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET showcase_key='idle-policy-showcase' WHERE id=?",
+            (contest["id"],),
+        )
+    assert store.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]["state"] == "cooldown"
+
+    public = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=2, max_sandbox_units=4
+    ).public_snapshot()["auto_scheduler"]
+    assert set(public) == {
+        "mode",
+        "state",
+        "reason",
+        "idle_required_seconds",
+        "cooldown_seconds",
+        "max_active",
+        "queued_target",
+        "next_eligible_at",
+    }
+    assert public["mode"] == "idle_only"
+    assert public["idle_required_seconds"] == AUTO_MATCH_IDLE_GRACE_SECONDS
+    assert public["cooldown_seconds"] == AUTO_MATCH_COOLDOWN_SECONDS
+    assert public["max_active"] == EXECUTION_AUTO_ACTIVE_LIMIT
+    assert public["queued_target"] == EXECUTION_AUTO_LOOKAHEAD
+
+
+def test_idle_only_policy_cutover_yields_legacy_active_and_queued_once(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"idle-cutover-{index}") for index in range(4)]
+    active_request = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == active_request["public_id"]
+    queued_request = _enqueue_pair(
+        store,
+        (bots[2], bots[3]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET dispatch_policy_version='',"
+            "next_eligible_at=NULL,gate_reason='idle_grace' WHERE singleton=1"
+        )
+
+    first = store.executions.reconcile_auto_scheduler_policy()
+    assert first["changed"] is True
+    assert first["queued_cancelled"] == 1
+    assert first["active_yielding"] == 1
+    active = store.executions.get(active_request["public_id"])
+    queued = store.executions.get(queued_request["public_id"])
+    assert (active["status"], active["cancel_requested"], active["terminal_reason"]) == (
+        "starting",
+        1,
+        AUTO_IDLE_POLICY_CUTOVER_REASON,
+    )
+    assert (queued["status"], queued["terminal_reason"]) == (
+        "cancelled",
+        AUTO_IDLE_POLICY_CUTOVER_REASON,
+    )
+    assert first["auto_scheduler"]["state"] == "yielding"
+    assert first["auto_scheduler"]["reason"] == AUTO_IDLE_POLICY_CUTOVER_REASON
+
+    second = store.executions.reconcile_auto_scheduler_policy()
+    assert second["changed"] is False
+    assert second["queued_cancelled"] == 0
+    assert second["active_yielding"] == 0
+    assert second["next_eligible_at"] == first["next_eligible_at"]
+    assert second["auto_scheduler"]["state"] == "yielding"
+    assert second["auto_scheduler"]["reason"] == AUTO_IDLE_POLICY_CUTOVER_REASON
+    assert sanitize_public_match(
+        {"status": "aborted", "reason": AUTO_IDLE_POLICY_CUTOVER_REASON}
+    )["reason"] == AUTO_IDLE_POLICY_CUTOVER_REASON
+
+
+@pytest.mark.parametrize(
+    "observed_events",
+    [[], [{"type": "match_start"}]],
+    ids=["no-events", "eventful"],
+)
+def test_idle_only_policy_cutover_precedes_startup_recovery(
+    queue_store,
+    observed_events,
+):
+    store = queue_store
+    bots = [_bot(store, f"idle-startup-cutover-{index}") for index in range(2)]
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            bots[0],
+            bots[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+    store.update_match(match_id, status="running")
+    store.upsert_replay(match_id, json.dumps(observed_events))
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET dispatch_policy_version='',"
+            "next_eligible_at=NULL,gate_reason='idle_grace' WHERE singleton=1"
+        )
+    _verify_projection(store)
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        auto_capability_enabled=True,
+    )
+
+    async def exercise() -> dict:
+        started = await dispatcher.start()
+        await dispatcher.stop()
+        await dispatcher.close()
+        return started
+
+    started = asyncio.run(exercise())
+    assert started["outcome"] == "running"
+    assert started["auto_reconciled"]["changed"] is True
+    assert started["auto_reconciled"]["active_yielding"] == 1
+    assert started["recovered"] == {
+        "requeued": 0,
+        "interrupted": 0,
+        "settling": 1,
+    }
+    match = store.get_match(match_id)
+    assert (match["status"], match["reason"]) == (
+        "aborted",
+        AUTO_IDLE_POLICY_CUTOVER_REASON,
+    )
+    replay = json.loads(
+        store._conn.execute(
+            "SELECT events_json FROM match_replays WHERE match_id=?", (match_id,)
+        ).fetchone()["events_json"]
+    )
+    assert replay == [
+        *observed_events,
+        {"type": "error", "reason": AUTO_IDLE_POLICY_CUTOVER_REASON},
+    ]
+    attempt = store._conn.execute(
+        "SELECT status,terminal_reason FROM execution_job_attempts "
+        "WHERE job_id=? AND match_id=?",
+        (claimed["id"], match_id),
+    ).fetchone()
+    assert tuple(attempt) == ("settling", AUTO_IDLE_POLICY_CUTOVER_REASON)
+    assert store.executions.finalize_ready() == 1
+    terminal = store.executions.get(automatic["public_id"])
+    assert (terminal["status"], terminal["terminal_reason"], terminal["retryable"]) == (
+        "cancelled",
+        AUTO_IDLE_POLICY_CUTOVER_REASON,
+        0,
+    )
+    decision = store._conn.execute(
+        "SELECT lifecycle,terminal_reason FROM auto_match_decisions WHERE id=?",
+        (decision_id,),
+    ).fetchone()
+    assert tuple(decision) == ("aborted", AUTO_IDLE_POLICY_CUTOVER_REASON)
+    assert store.executions.finalize_ready() == 0
+
+
+@pytest.mark.parametrize(
+    ("match_status", "match_reason", "expected_job", "expected_decision"),
+    [
+        ("completed", "completed", "completed", "completed"),
+        ("aborted", "platform_error", "interrupted", "aborted"),
+    ],
+)
+def test_idle_only_startup_cutover_preserves_terminal_match_winner(
+    queue_store,
+    match_status,
+    match_reason,
+    expected_job,
+    expected_decision,
+):
+    store = queue_store
+    bots = [
+        _bot(store, f"idle-terminal-{match_status}-{index}")
+        for index in range(2)
+    ]
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            bots[0],
+            bots[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+    update: dict[str, object] = {
+        "status": match_status,
+        "reason": match_reason,
+        "ended_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if match_status == "completed":
+        update.update(
+            winner=0,
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1,
+            },
+        )
+    store.update_match(match_id, **update)
+    store.upsert_replay(match_id, json.dumps([{"type": "match_end"}]))
+    with store._tx() as conn:
+        # Model a legacy/crash snapshot whose Match terminal commit won before
+        # its still-active execution projection was compensated.
+        conn.execute(
+            "UPDATE execution_jobs SET status='starting',settling_at=NULL,"
+            "cleanup_state='none' WHERE public_id=?",
+            (automatic["public_id"],),
+        )
+        conn.execute(
+            "UPDATE execution_job_attempts SET status='starting' "
+            "WHERE job_id=? AND match_id=?",
+            (claimed["id"], match_id),
+        )
+        conn.execute(
+            "UPDATE auto_match_fair_state SET dispatch_policy_version='',"
+            "next_eligible_at=NULL,gate_reason='idle_grace' WHERE singleton=1"
+        )
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        auto_capability_enabled=True,
+    )
+
+    async def exercise() -> dict:
+        started = await dispatcher.start()
+        await dispatcher.stop()
+        await dispatcher.close()
+        return started
+
+    started = asyncio.run(exercise())
+    assert started["auto_reconciled"]["active_yielding"] == 1
+    assert started["recovered"]["settling"] == 1
+    recovered_match = store.get_match(match_id)
+    assert (recovered_match["status"], recovered_match["reason"]) == (
+        match_status,
+        match_reason,
+    )
+    job_before_finalize = store.executions.get(automatic["public_id"])
+    assert (
+        job_before_finalize["status"],
+        job_before_finalize["cancel_requested"],
+        job_before_finalize["terminal_reason"],
+    ) == ("settling", 0, "")
+    assert store.executions.finalize_ready() == 1
+    terminal = store.executions.get(automatic["public_id"])
+    assert (terminal["status"], terminal["terminal_reason"], terminal["retryable"]) == (
+        expected_job,
+        match_reason,
+        0,
+    )
+    decision = store._conn.execute(
+        "SELECT lifecycle,terminal_reason FROM auto_match_decisions WHERE id=?",
+        (decision_id,),
+    ).fetchone()
+    assert tuple(decision) == (expected_decision, match_reason)
+
+
+def test_idle_only_published_contest_guard_matches_dispatch_due_contract(queue_store):
+    store = queue_store
+    pair = (_bot(store, "published-guard-a"), _bot(store, "published-guard-b"))
+    _make_auto_ready(store)
+    contest = store.create_contest(
+        "Published guard boundary",
+        pair[0]["user_id"],
+        status="published",
+        starts_at=None,
+        game_id="holdem",
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        pair[0]["bot_id"],
+        pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+        scheduled_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+    def scheduler_state() -> str:
+        return store.executions.snapshot(
+            max_match_slots=2,
+            max_sandbox_units=4,
+            aging_seconds=60,
+        )["auto_scheduler"]["state"]
+
+    # `starts_at=NULL` is the platform's explicit "wait for manual start"
+    # contract. A pairing timestamp alone is not dispatchable and must not
+    # reserve the automatic lane indefinitely.
+    assert scheduler_state() == "ready"
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET starts_at='2099-01-01T00:00:00' WHERE id=?",
+            (contest["id"],),
+        )
+    assert scheduler_state() == "ready"
+
+    due = (datetime.now() + timedelta(seconds=120)).isoformat(timespec="seconds")
+    outside_window = (
+        datetime.now() + timedelta(seconds=AUTO_MATCH_CONTEST_GUARD_SECONDS + 60)
+    ).isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET starts_at=? WHERE id=?", (due, contest["id"])
+        )
+        conn.execute(
+            "UPDATE contest_pairings SET scheduled_at=? WHERE id=?",
+            (outside_window, pairing["id"]),
+        )
+    assert scheduler_state() == "ready"
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET scheduled_at=? WHERE id=?",
+            (due, pairing["id"]),
+        )
+    assert scheduler_state() == "contest_guard"
+
+
+def test_idle_only_contest_guard_exit_starts_full_persistent_grace(tmp_path):
+    path = str(tmp_path / "contest-guard-transition.db")
+    first = Store(path)
+    first.executions.resume()
+    _make_auto_ready(first)
+    organizer = first.create_user(
+        "guard-transition-owner",
+        "guard-transition-owner@example.test",
+        "hash",
+    )
+    contest = first.create_contest(
+        "Persistent contest guard",
+        organizer["id"],
+        status="running",
+        game_id="holdem",
+    )
+    entered = first.executions.reconcile_auto_scheduler_policy()
+    assert entered["auto_scheduler"]["state"] == "contest_guard"
+    changes_after_entry = first._conn.total_changes
+    still_guarded = first.executions.reconcile_auto_scheduler_policy()
+    assert still_guarded["auto_scheduler"]["state"] == "contest_guard"
+    assert first._conn.total_changes == changes_after_entry
+    first.executions.set_auto_enabled(False)
+    first.executions.set_auto_enabled(True)
+    with first._tx() as conn:
+        assert conn.execute(
+            "SELECT gate_reason FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()[0] == "busy"
+        # Simulate a guard that has remained active well beyond the original
+        # deadline. The busy marker, not this stale timestamp, is authoritative.
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_eligible_at=? WHERE singleton=1",
+            ((datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds"),),
+        )
+    first.close()
+
+    reopened = Store(path)
+    with reopened._tx() as conn:
+        assert conn.execute(
+            "SELECT gate_reason FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()[0] == "busy"
+        conn.execute(
+            "UPDATE contests SET status='finished' WHERE id=?", (contest["id"],)
+        )
+    # Fail closed before the dispatcher consumes the persisted busy->idle edge.
+    assert reopened.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]["state"] == "cooldown"
+    transition_started = datetime.now()
+    exited = reopened.executions.reconcile_auto_scheduler_policy()
+    assert exited["changed"] is False
+    assert exited["auto_scheduler"]["state"] == "cooldown"
+    next_eligible = datetime.fromisoformat(str(exited["next_eligible_at"]))
+    assert 298 <= (next_eligible - transition_started).total_seconds() <= 301
+    with reopened._tx() as conn:
+        assert conn.execute(
+            "SELECT gate_reason FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()[0] == "idle_grace"
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_eligible_at=? WHERE singleton=1",
+            (
+                (
+                    datetime.now()
+                    + timedelta(seconds=AUTO_MATCH_IDLE_GRACE_SECONDS - 1)
+                ).isoformat(timespec="seconds"),
+            ),
+        )
+    assert reopened.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]["state"] == "cooldown"
+    with reopened._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_eligible_at=? WHERE singleton=1",
+            ((datetime.now() - timedelta(seconds=1)).isoformat(timespec="seconds"),),
+        )
+    assert reopened.executions.snapshot(
+        max_match_slots=2, max_sandbox_units=4, aging_seconds=60
+    )["auto_scheduler"]["state"] == "ready"
+    reopened.close()
+
+
+def test_idle_only_auto_requires_reserved_capacity_and_has_one_active(
+    queue_store, monkeypatch
+):
+    store = queue_store
+    pair = (_bot(store, "idle-capacity-a"), _bot(store, "idle-capacity-b"))
+    automatic = _enqueue_pair(
+        store,
+        pair,
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    _make_auto_ready(store)
+    claim_args = {
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+        "claim_class": "auto",
+    }
+    assert store.executions.claim_next(
+        max_match_slots=1, max_sandbox_units=4, **claim_args
+    ) is None
+    assert store.executions.claim_next(
+        max_match_slots=2, max_sandbox_units=3, **claim_args
+    ) is None
+    assert runtime_limits.maximum_execution_match_resource_snapshot()[0] == 2
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            runtime_limits,
+            "maximum_execution_match_resource_snapshot",
+            lambda: (3, 4000, 4096),
+        )
+        assert store.executions.claim_next(
+            max_match_slots=2,
+            max_sandbox_units=4,
+            max_host_cpu_millis=6000,
+            max_host_memory_mb=5120,
+            **claim_args,
+        ) is None
+    assert store.executions.claim_next(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=5999,
+        max_host_memory_mb=5120,
+        **claim_args,
+    ) is None
+    assert store.executions.claim_next(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=6000,
+        max_host_memory_mb=5119,
+        **claim_args,
+    ) is None
+    claimed = store.executions.claim_next(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=6000,
+        max_host_memory_mb=5120,
+        **claim_args,
+    )
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+
+    another = _enqueue_pair(
+        store,
+        (_bot(store, "idle-capacity-c"), _bot(store, "idle-capacity-d")),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    _make_auto_ready(store)
+    assert store.executions.claim_next(
+        max_match_slots=2, max_sandbox_units=4, **claim_args
+    ) is None
+    assert store.executions.get(another["public_id"])["status"] == "queued"
+
+
+def test_idle_only_dispatcher_preempts_auto_with_dedicated_reason(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"idle-preempt-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed_auto = _claim_auto(store)
+    assert claimed_auto and claimed_auto["public_id"] == automatic["public_id"]
+    foreground = _enqueue_pair(store, (bots[2], bots[3]))
+
+    class PreemptingOrchestrator:
+        def __init__(self) -> None:
+            self.started: list[str] = []
+            self.abort_reasons: list[str] = []
+
+        async def abort_execution_match(self, match_id: str, *, reason: str) -> None:
+            self.abort_reasons.append(reason)
+            store.abort_match_if_active(match_id, reason=reason)
+            current = store.executions.get_by_match(match_id)
+            store.executions.mark_cleanup_confirmed(
+                current["public_id"], int(current["attempt_count"])
+            )
+
+        async def abort_match(self, _match_id: str) -> None:
+            raise AssertionError("foreground yield must not use admin abort")
+
+        def start_execution_job(self, job: dict) -> None:
+            self.started.append(str(job["public_id"]))
+
+    orch = PreemptingOrchestrator()
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        auto_capability_enabled=True,
+    )
+    result = asyncio.run(dispatcher.run_once())
+    assert result["finalized"] == 1
+    assert orch.abort_reasons == ["auto_yield_foreground"]
+    assert orch.started == [foreground["public_id"]]
+    terminal = store.executions.get(automatic["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["retryable"] == 0
+    assert terminal["terminal_reason"] == "auto_yield_foreground"
+    match = store.get_match(claimed_auto["current_match_id"])
+    assert match["status"] == "aborted"
+    assert match["reason"] == "auto_yield_foreground"
+    assert sanitize_public_match(match)["reason"] == "auto_yield_foreground"
+
+
+def test_idle_only_unstarted_auto_claim_honors_concurrent_foreground_yield(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"idle-rollback-auto-{index}") for index in range(4)]
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            bots[0],
+            bots[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+
+    foreground = _enqueue_pair(store, (bots[2], bots[3]))
+    yielding = store.executions.get(automatic["public_id"])
+    assert (yielding["status"], yielding["cancel_requested"]) == ("starting", 1)
+    assert yielding["terminal_reason"] == "auto_yield_foreground"
+    # The foreground request may itself disappear before the runner task-start
+    # failure is compensated.  The committed yield intent must still win.
+    store.executions.request_cancel(
+        foreground["public_id"], owner_user_id=bots[2]["user_id"]
+    )
+
+    assert store.executions.rollback_unstarted_claim(
+        automatic["public_id"], reason="task_start:RuntimeError"
+    )
+    terminal = store.executions.get(automatic["public_id"])
+    assert (
+        terminal["status"],
+        terminal["cancel_requested"],
+        terminal["cleanup_state"],
+        terminal["retryable"],
+        terminal["current_match_id"],
+        terminal["terminal_reason"],
+    ) == (
+        "cancelled",
+        1,
+        "confirmed",
+        0,
+        None,
+        "auto_yield_foreground",
+    )
+    attempt = store._conn.execute(
+        "SELECT status,terminal_reason FROM execution_job_attempts "
+        "WHERE job_id=? AND match_id=?",
+        (int(terminal["id"]), match_id),
+    ).fetchone()
+    assert tuple(attempt) == ("cancelled", "auto_yield_foreground")
+    decision = store._conn.execute(
+        "SELECT lifecycle,match_id,terminal_reason FROM auto_match_decisions "
+        "WHERE id=?",
+        (decision_id,),
+    ).fetchone()
+    assert tuple(decision) == ("cancelled", None, "auto_yield_foreground")
+    assert store.get_match(match_id) is None
+    assert store.executions.rollback_unstarted_claim(
+        automatic["public_id"], reason="task_start:RuntimeError"
+    ) is False
+
+
+@pytest.mark.parametrize("source", [EXECUTION_SOURCE_MANUAL, EXECUTION_SOURCE_HUMAN])
+def test_unstarted_foreground_claim_honors_concurrent_cancel(queue_store, source):
+    store = queue_store
+    if source == EXECUTION_SOURCE_HUMAN:
+        owner, _bot_row, queued = _enqueue_human(store, "rollback-cancel")
+        owner_id = int(owner["id"])
+    else:
+        pair = (
+            _bot(store, "rollback-cancel-manual-a"),
+            _bot(store, "rollback-cancel-manual-b"),
+        )
+        owner_id = int(pair[0]["user_id"])
+        queued = _enqueue_pair(store, pair, owner_user_id=owner_id)
+    claimed = _claim(store)
+    assert claimed and claimed["public_id"] == queued["public_id"]
+    match_id = claimed["current_match_id"]
+    store.executions.request_cancel(queued["public_id"], owner_user_id=owner_id)
+
+    assert store.executions.rollback_unstarted_claim(
+        queued["public_id"], reason="task_start:RuntimeError"
+    )
+    terminal = store.executions.get(queued["public_id"])
+    assert (
+        terminal["status"],
+        terminal["cancel_requested"],
+        terminal["cleanup_state"],
+        terminal["retryable"],
+        terminal["current_match_id"],
+        terminal["terminal_reason"],
+    ) == ("cancelled", 1, "confirmed", 0, None, "user_cancelled")
+    attempt = store._conn.execute(
+        "SELECT status,terminal_reason FROM execution_job_attempts "
+        "WHERE job_id=? AND match_id=?",
+        (int(terminal["id"]), match_id),
+    ).fetchone()
+    assert tuple(attempt) == ("cancelled", "user_cancelled")
+    assert store.get_match(match_id) is None
+
+
+def test_idle_only_natural_completion_wins_yield_race_exactly_once(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"idle-completion-wins-{index}") for index in range(4)]
+    _verify_projection(store)
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            bots[0],
+            bots[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+
+    foreground = _enqueue_pair(store, (bots[2], bots[3]))
+    assert store.executions.get(automatic["public_id"])["cancel_requested"] == 1
+    completed = store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        reason="completed",
+        result={
+            "rounds_played": 1,
+            "deltas": [1, -1],
+            "normalized_delta": 0.01,
+        },
+        ended_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+    class NotificationProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def notify_both_owners(self, *_args, **_kwargs) -> None:
+            self.calls += 1
+
+    notifier = NotificationProbe()
+    orch = MatchOrchestrator(
+        store,
+        runner=SimpleNamespace(runner=SimpleNamespace()),
+        max_concurrent=1,
+    )
+    orch.notifier = notifier
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        auto_capability_enabled=False,
+    )
+
+    # The terminal Match committed first.  A later cancellation pass must not
+    # overwrite it, and repeated post-processing must remain exactly once.
+    asyncio.run(dispatcher._process_cancellations())
+    assert store.get_match(match_id)["status"] == "completed"
+    asyncio.run(
+        orch._safe_postprocess_completed_match(completed, match_id, 0, 1, -1)
+    )
+    asyncio.run(
+        orch._safe_postprocess_completed_match(completed, match_id, 0, 1, -1)
+    )
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM match_rating_settlements WHERE match_id=?",
+        (match_id,),
+    ).fetchone()[0] == 1
+    assert notifier.calls == 1
+
+    store.executions.mark_cleanup_confirmed(
+        automatic["public_id"], int(claimed["attempt_count"])
+    )
+    assert store.executions.finalize_ready() == 1
+    assert store.executions.finalize_ready() == 0
+    assert store.executions.get(automatic["public_id"])["status"] == "completed"
+    decision = store._conn.execute(
+        "SELECT lifecycle FROM auto_match_decisions WHERE id=?", (decision_id,)
+    ).fetchone()
+    assert decision["lifecycle"] == "completed"
+    assert store._conn.execute(
+        "SELECT COALESCE(SUM(served_count),0) FROM auto_match_owner_service"
+    ).fetchone()[0] == 2
+    assert store._conn.execute(
+        "SELECT COALESCE(SUM(served_count),0) FROM auto_match_bot_service"
+    ).fetchone()[0] == 2
+    assert store.executions.get(foreground["public_id"])["status"] == "queued"
+
+
+@pytest.mark.parametrize("commit_first", ["foreground", "auto"])
+def test_idle_only_enqueue_and_auto_claim_linearize_across_connections(
+    tmp_path, commit_first, monkeypatch
+):
+    path = str(tmp_path / f"idle-linearize-{commit_first}.db")
+    first = Store(path)
+    first.executions.resume()
+    bots = [_bot(first, f"linearize-{commit_first}-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        first,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    _make_auto_ready(first)
+    second = Store(path)
+    outcome: dict[str, object] = {}
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+    contender_called = threading.Event()
+
+    if commit_first == "foreground":
+        original_insert = second.executions._insert_job_tx
+
+        def held_insert(*args, **kwargs):
+            inserted = original_insert(*args, **kwargs)
+            if kwargs.get("source") == EXECUTION_SOURCE_MANUAL:
+                lock_entered.set()
+                assert release_lock.wait(timeout=2)
+            return inserted
+
+        monkeypatch.setattr(second.executions, "_insert_job_tx", held_insert)
+    else:
+        original_match_insert = first.executions._insert_match_tx
+
+        def held_match_insert(conn, *, job, match_id):
+            original_match_insert(conn, job=job, match_id=match_id)
+            lock_entered.set()
+            assert release_lock.wait(timeout=2)
+
+        monkeypatch.setattr(
+            first.executions, "_insert_match_tx", held_match_insert
+        )
+
+    def claim() -> None:
+        contender_called.set()
+        outcome["claim"] = first.executions.claim_next(
+            max_match_slots=2,
+            max_sandbox_units=4,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+            claim_class="auto",
+        )
+
+    def enqueue() -> None:
+        contender_called.set()
+        outcome["foreground"] = second.executions.enqueue(
+            source=EXECUTION_SOURCE_MANUAL,
+            owner_user_id=bots[2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CHALLENGE,
+            bot_a_id=bots[2]["bot_id"],
+            bot_b_id=bots[3]["bot_id"],
+            bot_a_version_id=bots[2]["version_id"],
+            bot_b_version_id=bots[3]["version_id"],
+        )
+
+    preferred = threading.Thread(
+        target=enqueue if commit_first == "foreground" else claim
+    )
+    contender = threading.Thread(
+        target=claim if commit_first == "foreground" else enqueue
+    )
+    preferred.start()
+    assert lock_entered.wait(timeout=2)
+    contender_called.clear()
+    contender.start()
+    assert contender_called.wait(timeout=2)
+    # The preferred connection still owns BEGIN IMMEDIATE here. Releasing its
+    # lock fixes the commit order; the other connection can only observe the
+    # fully committed foreground-yield or auto-claim state.
+    release_lock.set()
+    threads = [preferred, contender]
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+    auto_after = first.executions.get(automatic["public_id"])
+    if commit_first == "foreground":
+        assert outcome["claim"] is None
+        assert auto_after["status"] == "cancelled"
+    else:
+        assert outcome["claim"]["public_id"] == automatic["public_id"]
+        assert auto_after["status"] == "starting"
+        assert auto_after["cancel_requested"] == 1
+    assert auto_after["terminal_reason"] == "auto_yield_foreground"
+    assert first.executions.get(outcome["foreground"]["public_id"])["status"] == (
+        "queued"
+    )
+    second.close()
+    first.close()
+
+
+@pytest.mark.parametrize(
+    "yield_reason",
+    ["auto_yield_foreground", AUTO_IDLE_POLICY_CUTOVER_REASON],
+)
+def test_idle_only_real_orchestrator_yield_has_exact_cleanup_and_no_side_effects(
+    queue_store, yield_reason,
+):
+    store = queue_store
+    bots = [_bot(store, f"real-yield-{index}") for index in range(4)]
+    _verify_projection(store)
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            bots[0],
+            bots[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+
+    class CleanupProbe:
+        supervisor = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def cleanup_execution(self, scope) -> None:
+            self.calls += 1
+            scope.mark_cleanup_confirmed()
+
+    class NotificationProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def notify_both_owners(self, *_args, **_kwargs) -> None:
+            self.calls += 1
+
+    cleanup = CleanupProbe()
+    notifier = NotificationProbe()
+    orch = MatchOrchestrator(
+        store,
+        runner=SimpleNamespace(runner=cleanup),
+        max_concurrent=1,
+    )
+    orch.notifier = notifier
+    foreground_holder: dict[str, dict] = {}
+
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+
+        async def blocked_inner(_match_id, *, execution_scope=None) -> None:
+            assert execution_scope is not None
+            entered.set()
+            await blocked.wait()
+
+        orch._MatchOrchestrator__run_match_inner = blocked_inner
+        orch.start_execution_job(claimed)
+        task = orch._tasks[match_id]
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        if yield_reason == "auto_yield_foreground":
+            foreground_holder["job"] = _enqueue_pair(store, (bots[2], bots[3]))
+        else:
+            with store._tx() as conn:
+                conn.execute(
+                    "UPDATE auto_match_fair_state SET dispatch_policy_version='' "
+                    "WHERE singleton=1"
+                )
+            reconciled = store.executions.reconcile_auto_scheduler_policy()
+            assert reconciled["active_yielding"] == 1
+        with pytest.raises(ValueError, match="reason is not allowed"):
+            await orch.abort_execution_match(match_id, reason="admin_aborted")
+        aborted = await orch.abort_execution_match(
+            match_id, reason=yield_reason
+        )
+        assert aborted["status"] == "aborted"
+        assert task.cancelled()
+
+    asyncio.run(exercise())
+    assert cleanup.calls == 1
+    settling = store.executions.get(automatic["public_id"])
+    assert settling["status"] == "settling"
+    assert settling["cleanup_state"] == "confirmed"
+    assert store.executions.finalize_ready() == 1
+    terminal = store.executions.get(automatic["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["terminal_reason"] == yield_reason
+    decision = store._conn.execute(
+        "SELECT lifecycle,terminal_reason FROM auto_match_decisions WHERE id=?",
+        (decision_id,),
+    ).fetchone()
+    assert tuple(decision) == ("aborted", yield_reason)
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM match_rating_settlements WHERE match_id=?",
+        (match_id,),
+    ).fetchone()[0] == 0
+    assert store._conn.execute(
+        "SELECT COALESCE(SUM(served_count),0) FROM auto_match_owner_service"
+    ).fetchone()[0] == 0
+    assert store._conn.execute(
+        "SELECT COALESCE(SUM(served_count),0) FROM auto_match_bot_service"
+    ).fetchone()[0] == 0
+    assert store._conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 0
+    assert store._conn.execute(
+        "SELECT COALESCE(SUM(xp),0) FROM users WHERE id IN (?,?,?,?)",
+        tuple(bot["user_id"] for bot in bots),
+    ).fetchone()[0] == 0
+    replay_events = json.loads(store.get_replay(match_id)["events_json"])
+    terminal_event = {"type": "error", "reason": yield_reason}
+    assert replay_events[-1] == terminal_event
+    assert replay_events.count(terminal_event) == 1
+    assert notifier.calls == 0
+    if foreground_holder:
+        assert store.executions.get(
+            foreground_holder["job"]["public_id"]
+        )["status"] == "queued"
 
 
 def test_contest_share_never_leaves_capacity_idle(queue_store):
@@ -2709,6 +4162,43 @@ def test_crash_recovery_never_revives_eventful_match(queue_store):
     assert third["current_match_id"] not in {first_match, second_match}
 
 
+def test_crash_recovery_preserves_auto_yield_reason_exactly_once(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"yield-recovery-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+    store.upsert_replay(match_id, json.dumps([{"type": "match_start"}]))
+
+    _enqueue_pair(store, (bots[2], bots[3]))
+    yielding = store.executions.get(automatic["public_id"])
+    assert yielding["cancel_requested"] == 1
+    assert yielding["terminal_reason"] == AUTO_YIELD_FOREGROUND_REASON
+
+    first = store.executions.recover_after_namespace_cleanup()
+    second = store.executions.recover_after_namespace_cleanup()
+    assert first["settling"] == 1
+    assert second["settling"] == 1
+    assert store.get_match(match_id)["reason"] == AUTO_YIELD_FOREGROUND_REASON
+    terminal_event = {"type": "error", "reason": AUTO_YIELD_FOREGROUND_REASON}
+    events = json.loads(store.get_replay(match_id)["events_json"])
+    assert events.count(terminal_event) == 1
+
+    assert store.executions.finalize_ready() == 1
+    assert store.executions.finalize_ready() == 0
+    assert store.executions.get(automatic["public_id"])["status"] == "cancelled"
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM match_rating_settlements WHERE match_id=?",
+        (match_id,),
+    ).fetchone()[0] == 0
+
+
 def test_repeated_runtime_recovery_uses_persistent_exponential_backoff(
     queue_store,
 ):
@@ -2723,7 +4213,7 @@ def test_repeated_runtime_recovery_uses_persistent_exponential_backoff(
     )
 
     for failure_count, expected_delay in ((1, 1), (2, 2), (3, 4)):
-        claimed = _claim(store, slots=1, units=2)
+        claimed = _claim_auto(store)
         assert claimed and claimed["public_id"] == job["public_id"]
         store.executions.mark_cleanup_pending(
             job["public_id"], f"runtime failure {failure_count}"
@@ -2744,7 +4234,7 @@ def test_repeated_runtime_recovery_uses_persistent_exponential_backoff(
         assert expected_delay - 1 <= observed_delay <= expected_delay + 1
 
         store.executions.resume()
-        assert _claim(store, slots=1, units=2) is None
+        assert _claim_auto(store) is None
         if failure_count < 3:
             with store._tx() as conn:
                 conn.execute(
@@ -3392,7 +4882,7 @@ def test_auto_eventful_crash_requeues_and_public_projection_is_whitelisted(queue
         source=EXECUTION_SOURCE_AUTO,
         owner_user_id=None,
     )
-    claimed = _claim(store, slots=1, units=2)
+    claimed = _claim_auto(store)
     assert claimed["public_id"] == automatic["public_id"]
     match_id = claimed["current_match_id"]
     store.update_match(match_id, status="running")
@@ -5589,6 +7079,26 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
         conn.execute("INSERT INTO auto_match_control VALUES(1,0)")
         conn.execute("CREATE TABLE auto_match_dispatcher(singleton INTEGER)")
         conn.execute("CREATE TABLE auto_match_daily_claims(match_id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE auto_match_fair_state_legacy ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton=1),"
+            "next_game_idx INTEGER NOT NULL DEFAULT 0 CHECK (next_game_idx>=0),"
+            "next_lane INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),"
+            "revision INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),"
+            "bootstrap_version INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (bootstrap_version>=0),updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO auto_match_fair_state_legacy("
+            "singleton,next_game_idx,next_lane,revision,bootstrap_version,updated_at) "
+            "SELECT singleton,next_game_idx,next_lane,revision,bootstrap_version,"
+            "updated_at FROM auto_match_fair_state"
+        )
+        conn.execute("DROP TABLE auto_match_fair_state")
+        conn.execute(
+            "ALTER TABLE auto_match_fair_state_legacy "
+            "RENAME TO auto_match_fair_state"
+        )
     legacy.set_setting("auto_match_daily_cap", "5")
     legacy.set_setting("auto_match_enabled", "1")
     legacy.close()
@@ -5663,6 +7173,20 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
         assert "claim_dispatcher_token" not in {
             row[1] for row in conn.execute("PRAGMA table_info(auto_match_decisions)")
         }
+        assert {
+            "dispatch_policy_version",
+            "next_eligible_at",
+            "gate_reason",
+        } <= {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(auto_match_fair_state)")
+        }
+        assert tuple(
+            conn.execute(
+                "SELECT dispatch_policy_version,next_eligible_at,gate_reason "
+                "FROM auto_match_fair_state WHERE singleton=1"
+            ).fetchone()
+        ) == ("", None, "idle_grace")
         business_after = {
             "match": tuple(conn.execute(
                 "SELECT * FROM matches_holdem WHERE id='business-match'"
@@ -5681,6 +7205,36 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
     assert migrated.get_setting("auto_match_daily_cap") is None
     assert migrated.get_setting("auto_match_enabled") is None
     assert migrated.get_auto_match_enabled() is False
+    recovered = migrated.executions.recover_after_namespace_cleanup()
+    assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
+    first_reconcile = migrated.executions.reconcile_auto_scheduler_policy()
+    assert first_reconcile["changed"] is True
+    assert first_reconcile["queued_cancelled"] == 2
+    assert first_reconcile["active_yielding"] == 0
+    assert first_reconcile["auto_scheduler"]["state"] == "disabled"
+    assert first_reconcile["auto_scheduler"]["reason"] == "auto_disabled"
+    with migrated._tx() as conn:
+        assert [tuple(row) for row in conn.execute(
+            "SELECT status,terminal_reason FROM execution_jobs ORDER BY id"
+        ).fetchall()] == [
+            ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+            ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+        ]
+        assert [tuple(row) for row in conn.execute(
+            "SELECT lifecycle,terminal_reason FROM auto_match_decisions ORDER BY id"
+        ).fetchall()] == [
+            ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+            ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+        ]
+        assert conn.execute(
+            "SELECT dispatch_policy_version FROM auto_match_fair_state "
+            "WHERE singleton=1"
+        ).fetchone()[0] == AUTO_MATCH_SCHEDULER_POLICY_VERSION
+        assert conn.execute(
+            "SELECT 1 FROM matches_index WHERE id='legacy-active-match'"
+        ).fetchone() is None
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     migrated.close()
 
     reopened = Store(path)
@@ -5688,17 +7242,17 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
     assert reopened._conn.execute(
         "SELECT COUNT(*) FROM execution_job_attempts"
     ).fetchone()[0] == 1
-    active_after_reopen = reopened._conn.execute(
-        "SELECT status,current_match_id,claimed_at,cleanup_state,last_error "
-        "FROM execution_jobs WHERE current_match_id='legacy-active-match'"
-    ).fetchone()
-    assert tuple(active_after_reopen) == (
-        "settling",
-        "legacy-active-match",
-        "2026-08-09T12:02:00",
-        "pending",
-        "legacy_execution_unscoped",
-    )
+    second_reconcile = reopened.executions.reconcile_auto_scheduler_policy()
+    assert second_reconcile["changed"] is False
+    assert second_reconcile["queued_cancelled"] == 0
+    assert second_reconcile["active_yielding"] == 0
+    assert second_reconcile["next_eligible_at"] == first_reconcile["next_eligible_at"]
+    assert [tuple(row) for row in reopened._conn.execute(
+        "SELECT status,terminal_reason FROM execution_jobs ORDER BY id"
+    ).fetchall()] == [
+        ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+        ("cancelled", AUTO_IDLE_POLICY_CUTOVER_REASON),
+    ]
     control_after_reopen = reopened.executions.control()
     assert control_after_reopen["dispatcher_state"] == "paused"
     assert control_after_reopen["accepting"] == 1

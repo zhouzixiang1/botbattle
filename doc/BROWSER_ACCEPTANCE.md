@@ -71,7 +71,7 @@
 | A-04 | 管理员 | 日志文件/级别/关键字/traceback；快速切换邮箱收件/发件/站内信会话、群发/Bug 详情；预览途中修改群发字段再批准；取消/失败重试，Bug 状态/回复 | 无绝对路径或敏感诊断泄漏；迟到详情/预览不得覆盖当前选择或表单，批准 token 必须绑定当前 fingerprint；取消后不显示不可执行重试，completed 等待全部渠道终态；长日志/主题/正文可滚动且不产生根溢出，群发不是“修改邮件模板”的替代入口 |
 | A-05 | 管理员 | 查询运行参数与赛制模板来源 | 只读 `source=code, mutable=false`，写接口不存在 |
 | A-06 | 管理员 | 审计 Bot 对战与人类对战终局 debug 读取 | no-store；audit 仅含 actor/match/结果/条数，不含 Bot 内容 |
-| A-07 | 管理员 | Dashboard 关闭/开启自动 producer；查看 paused 原因并执行“清场并恢复” | 只变更 `execution_control.auto_enabled`，关闭后 manual/human/contest 仍可入队且在途 auto 自然结束；恢复必须触发本 instance label 清理，Docker 不确定时仍 paused，不得只改 UI/DB 标志 |
+| A-07 | 管理员 | Dashboard 关闭/开启闲时排位；查看前台/赛事/冷却/运行状态；查看 paused 原因并执行“清场并恢复” | 开启只变更 `execution_control.auto_enabled`，界面明确“启用不等于立即运行”、5 分钟空闲/冷却、最多 1 场/1 候选与前台优先；关闭后 manual/human/contest 仍可入队且在途 auto 自然结束。恢复必须触发本 instance label 清理，Docker 不确定时仍 paused，不得只改 UI/DB 标志 |
 
 ## 4. 自动化落点
 
@@ -85,9 +85,9 @@
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
 | `contest-export-identity.spec.ts` | O-03 与 A-02 的赛事导出/名册权限子集：实名参赛者经真实 UI `/register` 本人报名，组织者详情/v2 的 `registration_profile`、`identity_captured_at` 及改资料后快照稳定；普通组织者 UI 与伪造单条/批量 POST 门禁，admin 在独立赛事的受审计例外；公开成绩与组织者 v2 真实下载、29 列及稳定 ID/展示名/实名快照、公式注入与文本数字保护、非实名/公开导出零 PII；320px 零根溢出、44px 触控、键盘下载，同一断言由 Chromium/Firefox/WebKit 执行并监控 Console/Network |
 | `contest-scoring-clarity.spec.ts` | 瑞士轮 3/1/0、真实 W/D/L 与轮空分列、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下两张宽表的具名横滚区域可聚焦且页面零根溢出 |
-| `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、自动 producer strict boolean、全来源队列与长文本滚动 |
+| `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、闲时排位 strict boolean 开关及顶层 `auto_scheduler` 状态、前台优先/单场单候选文案、全来源队列与长文本滚动 |
 | `leaderboard-density.spec.ts` | 四角色共同读取排行榜且逐 context 核对匿名或 username/role；1440/1024/768/390、无 SummaryStrip、长文本、公开排名/计分样本分区、全来源双槽上限队列、上下滚动、滚动中可操作的 Radix tabs、慢响应切游戏清旧列表；普通表头无 page-sticky 属性，前三名与表头零交叠且中心命中自身，移动首项可见、无根横溢出与 Console/Network |
-| `execution-queue.spec.ts` | U-04 的 202 持久请求、同一 public_id 轮询/刷新恢复、queued 取消、interrupted 重试、Match 出现后跳转；普通用户任一位置 owner-only、完整座位状态交换、`my_seat=1` 精确 POST 与管理员全站 picker；排行榜全来源双槽上限队列、安全暂停/离线与公开字段白名单。测试文件存在不等于目标 HEAD 已执行通过 |
+| `execution-queue.spec.ts` | U-04 的 202 持久请求、同一 public_id 轮询/刷新恢复、queued 取消、interrupted 重试、Match 出现后跳转；普通用户任一位置 owner-only、完整座位状态交换、`my_seat=1` 精确 POST 与管理员全站 picker；排行榜队列显示闲时调度状态，auto 无前台序号且不计 ETA，在途让路显示“正在安全取消 / 自动排位为前台任务让路”；仍守护安全暂停/离线与公开字段白名单。测试文件存在不等于目标 HEAD 已执行通过 |
 
 全局执行队列重构还必须在目标 HEAD 上确认下列真浏览器证据，未执行前均为“待验证”：
 
@@ -95,10 +95,10 @@
   离线后恢复；claim 返回 `match_id` 后只跳转一次。
 - queued 取消、active 危险确认/安全收敛、interrupted 重试三条分支分别检查 UI、Network、最终状态，
   并确认 active 清理前全局容量不提前回升、旧 attempt 不被改写。
-- 混合 manual/human/contest/auto 队列展示须核对 source、aging 后顺序、2 个 match slots 与 4 个 sandbox units；
+- 混合 manual/human/contest/auto 队列展示须核对 source、前台内 aging 后顺序、2 个 match slots 与 4 个 sandbox units；
   每个 job 仍占 1 match slot，人机只计 1 sandbox unit，赛事份额 1 不得显示或计算成额外物理槽。公开投影不得出现
-  DB id、版本 id、路径、checksum、token 或 match_config。
-- 管理端切 auto 只影响自动 producer；paused 恢复按钮须经过确认，并在模拟 Docker 清理不确定时仍显示
+  auto 须无前台数字顺位，不计入用户请求的 `ahead_jobs`/ETA，并显示最多 1 场/1 候选与让路原因。公开投影不得出现 DB id、版本 id、路径、checksum、token 或 match_config。
+- 管理端切 auto 只影响闲时生产能力，开启不等于立即运行；顶层 `auto_scheduler` 的 disabled/foreground_busy/contest_guard/cooldown/ready/yielding/running 须有可见文字与 `aria-live`，稳定机器原因码不直出。paused 恢复按钮须经过确认，并在模拟 Docker 清理不确定时仍显示
   paused/重试时间。Console、普通 HTTP Network、轮询收敛与后端日志同时检查。
 
 自动化的 DOM/像素尺寸断言不能替代逐图视觉判断：发布候选必须对页面矩阵的首屏/中段/页尾截图逐张做图片识别复核，并在 Chromium/Firefox/WebKit 的差异页面抽查牌桌比例、长代码滚动、移动端 Dialog 和日期控件。发现大面积无效留白、组件尺寸失衡、跨页风格漂移、不自然换行、文字越界或滚动后结构失衡时，必须回到统一组件/token 修复后重拍；任何未执行项写“待验证”，不能从相邻用例推定通过。

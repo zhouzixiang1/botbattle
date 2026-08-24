@@ -19,6 +19,14 @@ from bzplat.backend.runtime.binary_integrity import (
     BinaryIntegrityCacheKey,
     require_binary_file_integrity,
 )
+from bzplat.backend.runtime.config import (
+    AUTO_MATCH_COOLDOWN_SECONDS,
+    AUTO_MATCH_CONTEST_GUARD_SECONDS,
+    AUTO_MATCH_IDLE_GRACE_SECONDS,
+    AUTO_MATCH_SCHEDULER_POLICY_VERSION,
+    EXECUTION_AUTO_ACTIVE_LIMIT,
+    EXECUTION_AUTO_LOOKAHEAD,
+)
 from .db import (
     _active_game_contract_tx,
     _all_game_ids,
@@ -28,6 +36,8 @@ from .db import (
     _row,
 )
 from .schema import (
+    AUTO_IDLE_POLICY_CUTOVER_REASON,
+    AUTO_YIELD_FOREGROUND_REASON,
     EXECUTION_ACTIVE_STATES,
     EXECUTION_CANCELLED,
     EXECUTION_COMPLETED,
@@ -76,6 +86,13 @@ _PLATFORM_ENVIRONMENTS = frozenset(
 _MANUAL_ENVIRONMENTS = frozenset(
     {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_REMOTE_LOCAL}
 )
+_FOREGROUND_SOURCES = frozenset(
+    {EXECUTION_SOURCE_MANUAL, EXECUTION_SOURCE_HUMAN, EXECUTION_SOURCE_CONTEST}
+)
+_AUTO_YIELD_REASONS = frozenset(
+    {AUTO_IDLE_POLICY_CUTOVER_REASON, AUTO_YIELD_FOREGROUND_REASON}
+)
+_AUTO_GATE_BUSY = "busy"
 
 
 class ExecutionQueueClosed(ValueError):
@@ -167,6 +184,329 @@ class ExecutionRepository:
         except Exception:
             # A volatile hub lookup must never tear down the durable dispatcher.
             return False
+
+    @staticmethod
+    def _foreground_where(alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        return (
+            f"({prefix}source IN ('manual','human') OR "
+            f"({prefix}source='contest' AND NOT EXISTS ("
+            "SELECT 1 FROM contests auto_showcase "
+            f"WHERE auto_showcase.id={prefix}contest_id "
+            "AND auto_showcase.showcase_key IS NOT NULL)))"
+        )
+
+    @classmethod
+    def _foreground_busy_tx(cls, conn: sqlite3.Connection) -> bool:
+        queued_or_active = bool(
+            conn.execute(
+                "SELECT 1 FROM execution_jobs j WHERE "
+                + cls._foreground_where("j")
+                + " AND j.status IN ('queued','starting','running','settling') "
+                "LIMIT 1"
+            ).fetchone()
+        )
+        return queued_or_active or cls._contest_guard_tx(conn)
+
+    @staticmethod
+    def _contest_guard_tx(conn: sqlite3.Connection) -> bool:
+        protection_horizon = (
+            datetime.now() + timedelta(seconds=AUTO_MATCH_CONTEST_GUARD_SECONDS)
+        ).isoformat(timespec="seconds")
+        return bool(
+            conn.execute(
+                "SELECT 1 FROM contests c WHERE c.showcase_key IS NULL AND ("
+                "c.status IN ('running','rest') OR (c.status='published' "
+                "AND c.starts_at IS NOT NULL AND c.starts_at<=? AND EXISTS ("
+                "SELECT 1 FROM contest_pairings p WHERE p.contest_id=c.id "
+                "AND p.status='pending' AND p.match_id IS NULL "
+                "AND (p.scheduled_at IS NULL OR p.scheduled_at<=?)))) LIMIT 1",
+                (protection_horizon, protection_horizon),
+            ).fetchone()
+        )
+
+    @classmethod
+    def _latest_foreground_terminal_tx(
+        cls, conn: sqlite3.Connection
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT MAX(j.terminal_at) AS terminal_at FROM execution_jobs j WHERE "
+            + cls._foreground_where("j")
+            + " AND j.status IN ('completed','cancelled','interrupted')"
+        ).fetchone()
+        value = str(row["terminal_at"] or "") if row is not None else ""
+        return value or None
+
+    @classmethod
+    def _advance_auto_gate_tx(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        seconds: int,
+        reason: str,
+        now: datetime | None = None,
+    ) -> str:
+        if reason not in {"idle_grace", "cooldown"}:
+            raise ValueError(f"unknown auto gate reason: {reason}")
+        current = conn.execute(
+            "SELECT next_eligible_at,gate_reason FROM auto_match_fair_state "
+            "WHERE singleton=1"
+        ).fetchone()
+        if current is None:
+            raise ExecutionInvariantError("auto fair singleton missing")
+        target = (now or datetime.now()) + timedelta(seconds=max(0, int(seconds)))
+        existing = _parse_time(current["next_eligible_at"])
+        if cls._foreground_busy_tx(conn):
+            next_eligible = max(existing, target).isoformat(timespec="seconds")
+            next_reason = _AUTO_GATE_BUSY
+        elif existing > target:
+            next_eligible = existing.isoformat(timespec="seconds")
+            next_reason = (
+                reason
+                if str(current["gate_reason"] or "") == _AUTO_GATE_BUSY
+                else str(current["gate_reason"] or "idle_grace")
+            )
+        else:
+            next_eligible = target.isoformat(timespec="seconds")
+            next_reason = reason
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_eligible_at=?,gate_reason=?,"
+            "updated_at=? WHERE singleton=1",
+            (next_eligible, next_reason, _now()),
+        )
+        return next_eligible
+
+    @staticmethod
+    def _mark_auto_busy_tx(
+        conn: sqlite3.Connection, *, now: datetime | None = None
+    ) -> str:
+        current = conn.execute(
+            "SELECT next_eligible_at,gate_reason FROM auto_match_fair_state "
+            "WHERE singleton=1"
+        ).fetchone()
+        if current is None:
+            raise ExecutionInvariantError("auto fair singleton missing")
+        existing = _parse_time(current["next_eligible_at"])
+        if (
+            str(current["gate_reason"] or "") == _AUTO_GATE_BUSY
+            and existing != datetime.min
+        ):
+            return existing.isoformat(timespec="seconds")
+        target = (now or datetime.now()) + timedelta(
+            seconds=AUTO_MATCH_IDLE_GRACE_SECONDS
+        )
+        next_eligible = max(existing, target).isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_eligible_at=?,gate_reason=?,"
+            "updated_at=? WHERE singleton=1",
+            (next_eligible, _AUTO_GATE_BUSY, _now()),
+        )
+        return next_eligible
+
+    @staticmethod
+    def _yield_auto_jobs_tx(
+        conn: sqlite3.Connection, *, reason: str
+    ) -> dict[str, int]:
+        if reason not in _AUTO_YIELD_REASONS:
+            raise ValueError("unsupported automatic execution yield reason")
+        terminal = _now()
+        queued_decisions = [
+            int(row["auto_decision_id"])
+            for row in conn.execute(
+                "SELECT auto_decision_id FROM execution_jobs WHERE source='auto' "
+                "AND status='queued' AND auto_decision_id IS NOT NULL"
+            ).fetchall()
+        ]
+        if queued_decisions:
+            marks = ",".join("?" for _ in queued_decisions)
+            conn.execute(
+                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                "terminal_reason=?,terminal_at=? WHERE lifecycle='queued' "
+                f"AND id IN ({marks})",
+                (reason, terminal, *queued_decisions),
+            )
+        queued = conn.execute(
+            "UPDATE execution_jobs SET status='cancelled',cancel_requested=1,"
+            "retryable=0,next_attempt_at=NULL,terminal_reason=?,last_error='',"
+            "terminal_at=? WHERE source='auto' AND status='queued'",
+            (reason, terminal),
+        ).rowcount
+        active = conn.execute(
+            "UPDATE execution_jobs SET cancel_requested=1,terminal_reason=? "
+            "WHERE source='auto' AND status IN ('starting','running') "
+            "AND cancel_requested=0",
+            (reason,),
+        ).rowcount
+        return {"queued_cancelled": int(queued), "active_yielding": int(active)}
+
+    @classmethod
+    def _yield_auto_to_foreground_tx(
+        cls, conn: sqlite3.Connection
+    ) -> dict[str, Any]:
+        outcome: dict[str, Any] = cls._yield_auto_jobs_tx(
+            conn, reason=AUTO_YIELD_FOREGROUND_REASON
+        )
+        outcome["next_eligible_at"] = cls._mark_auto_busy_tx(conn)
+        return outcome
+
+    @classmethod
+    def _auto_scheduler_tx(cls, conn: sqlite3.Connection) -> dict[str, Any]:
+        control = conn.execute(
+            "SELECT auto_enabled FROM execution_control WHERE singleton=1"
+        ).fetchone()
+        fair = conn.execute(
+            "SELECT * FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()
+        if control is None or fair is None:
+            raise ExecutionInvariantError("auto scheduler singleton missing")
+
+        active = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE source='auto' "
+                "AND status IN ('starting','running','settling')"
+            ).fetchone()[0]
+        )
+        queued = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE source='auto' "
+                "AND status='queued' AND cancel_requested=0"
+            ).fetchone()[0]
+        )
+        yielding = conn.execute(
+            "SELECT terminal_reason FROM execution_jobs WHERE source='auto' "
+            "AND status IN ('starting','running','settling') "
+            "AND cancel_requested=1 AND terminal_reason IN (?,?) "
+            "ORDER BY id LIMIT 1",
+            tuple(sorted(_AUTO_YIELD_REASONS)),
+        ).fetchone()
+        yielding_reason = (
+            str(yielding["terminal_reason"] or "") if yielding is not None else ""
+        )
+        contest_guard = cls._contest_guard_tx(conn)
+        foreground_busy = cls._foreground_busy_tx(conn)
+        candidates: list[tuple[datetime, str]] = []
+        persisted = _parse_time(fair["next_eligible_at"])
+        if persisted != datetime.min:
+            candidates.append(
+                (persisted, str(fair["gate_reason"] or "idle_grace"))
+            )
+        latest_foreground = cls._latest_foreground_terminal_tx(conn)
+        if latest_foreground:
+            candidates.append(
+                (
+                    _parse_time(latest_foreground)
+                    + timedelta(seconds=AUTO_MATCH_IDLE_GRACE_SECONDS),
+                    "idle_grace",
+                )
+            )
+        latest_auto = conn.execute(
+            "SELECT MAX(terminal_at) AS terminal_at FROM execution_jobs "
+            "WHERE source='auto' AND status IN ('completed','cancelled','interrupted')"
+        ).fetchone()
+        latest_auto_terminal = (
+            str(latest_auto["terminal_at"] or "") if latest_auto is not None else ""
+        )
+        if latest_auto_terminal:
+            candidates.append(
+                (
+                    _parse_time(latest_auto_terminal)
+                    + timedelta(seconds=AUTO_MATCH_COOLDOWN_SECONDS),
+                    "cooldown",
+                )
+            )
+        next_dt, gate_reason = max(candidates, default=(datetime.min, "idle_grace"))
+        busy_marker = str(fair["gate_reason"] or "") == _AUTO_GATE_BUSY
+        next_eligible_at = (
+            next_dt.isoformat(timespec="seconds") if next_dt != datetime.min else None
+        )
+        now = datetime.now()
+        if not bool(int(control["auto_enabled"] or 0)):
+            # Turning the producer off does not create a new cancellation, but
+            # it must not hide a yield that already won the enqueue/claim race.
+            state, reason = "disabled", yielding_reason or "auto_disabled"
+        elif foreground_busy:
+            state = "contest_guard" if contest_guard else "foreground_busy"
+            reason = yielding_reason or (
+                "contest_guard" if contest_guard else "foreground_queued_or_active"
+            )
+        elif yielding_reason:
+            state, reason = "yielding", yielding_reason
+        elif active:
+            state, reason = "running", "auto_running"
+        elif busy_marker:
+            state, reason = "cooldown", "idle_grace"
+        elif now < next_dt:
+            state = "cooldown"
+            reason = "auto_cooldown" if gate_reason == "cooldown" else "idle_grace"
+        else:
+            state, reason = "ready", "idle_ready"
+        return {
+            "mode": "idle_only",
+            "state": state,
+            "reason": reason,
+            "idle_required_seconds": AUTO_MATCH_IDLE_GRACE_SECONDS,
+            "cooldown_seconds": AUTO_MATCH_COOLDOWN_SECONDS,
+            "max_active": EXECUTION_AUTO_ACTIVE_LIMIT,
+            "queued_target": EXECUTION_AUTO_LOOKAHEAD,
+            "next_eligible_at": next_eligible_at,
+            "active_count": active,
+            "queued_count": queued,
+            "policy_version": str(fair["dispatch_policy_version"] or ""),
+        }
+
+    def reconcile_auto_scheduler_policy(self) -> dict[str, Any]:
+        """Install the idle-only generation once and reconcile legacy backlog."""
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            fair = conn.execute(
+                "SELECT dispatch_policy_version,gate_reason "
+                "FROM auto_match_fair_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if fair is None:
+                raise ExecutionInvariantError("auto fair singleton missing")
+            changed = (
+                str(fair["dispatch_policy_version"] or "")
+                != AUTO_MATCH_SCHEDULER_POLICY_VERSION
+            )
+            yielded = {"queued_cancelled": 0, "active_yielding": 0}
+            foreground_busy = self._foreground_busy_tx(conn)
+            if changed:
+                yielded = self._yield_auto_jobs_tx(
+                    conn, reason=AUTO_IDLE_POLICY_CUTOVER_REASON
+                )
+                next_eligible = self._advance_auto_gate_tx(
+                    conn,
+                    seconds=AUTO_MATCH_IDLE_GRACE_SECONDS,
+                    reason="idle_grace",
+                )
+                conn.execute(
+                    "UPDATE auto_match_fair_state SET dispatch_policy_version=?,"
+                    "updated_at=? WHERE singleton=1",
+                    (AUTO_MATCH_SCHEDULER_POLICY_VERSION, _now()),
+                )
+                if foreground_busy:
+                    next_eligible = self._mark_auto_busy_tx(conn)
+            else:
+                next_eligible = None
+                if foreground_busy:
+                    yielded = self._yield_auto_jobs_tx(
+                        conn, reason=AUTO_YIELD_FOREGROUND_REASON
+                    )
+                    next_eligible = self._mark_auto_busy_tx(conn)
+                elif str(fair["gate_reason"] or "") == _AUTO_GATE_BUSY:
+                    next_eligible = self._advance_auto_gate_tx(
+                        conn,
+                        seconds=AUTO_MATCH_IDLE_GRACE_SECONDS,
+                        reason="idle_grace",
+                    )
+            scheduler = self._auto_scheduler_tx(conn)
+            return {
+                "changed": changed,
+                **yielded,
+                "next_eligible_at": next_eligible or scheduler["next_eligible_at"],
+                "auto_scheduler": scheduler,
+            }
 
     @staticmethod
     def _backoff_contest_pairing_tx(
@@ -693,6 +1033,12 @@ class ExecutionRepository:
                 "WHERE singleton=1",
                 (1 if enabled else 0, _now()),
             )
+            if enabled and not bool(int(current["auto_enabled"] or 0)):
+                self._advance_auto_gate_tx(
+                    conn,
+                    seconds=AUTO_MATCH_IDLE_GRACE_SECONDS,
+                    reason="idle_grace",
+                )
         return bool(enabled)
 
     # ------------------------------------------------------------------
@@ -1250,7 +1596,7 @@ class ExecutionRepository:
                     ).fetchone()
                     if human:
                         raise ValueError("你已有一场人类对局请求，请先结束")
-            return self._insert_job_tx(
+            inserted = self._insert_job_tx(
                 conn,
                 source=source,
                 owner_user_id=owner_user_id,
@@ -1273,6 +1619,19 @@ class ExecutionRepository:
                 public_id=public_id,
                 idempotency_fingerprint=idempotency_fingerprint,
             )
+            if source in _FOREGROUND_SOURCES:
+                is_showcase = False
+                if source == EXECUTION_SOURCE_CONTEST:
+                    contest = conn.execute(
+                        "SELECT showcase_key FROM contests WHERE id=?",
+                        (contest_id,),
+                    ).fetchone()
+                    is_showcase = bool(
+                        contest is not None and contest["showcase_key"] is not None
+                    )
+                if not is_showcase:
+                    self._yield_auto_to_foreground_tx(conn)
+            return inserted
 
     @staticmethod
     def _assert_idempotent_match(
@@ -1346,9 +1705,9 @@ class ExecutionRepository:
     @staticmethod
     def _effective_priority(row: dict, *, now: datetime, aging_seconds: int) -> int:
         age = max(0.0, (now - _parse_time(row.get("created_at"))).total_seconds())
-        # Aging is deliberately unbounded.  A finite priority offset means an
-        # old automatic job eventually outranks every request arriving after it,
-        # even under a permanently saturated foreground stream.
+        # Aging is deliberately unbounded *within the selected claim class*.
+        # Foreground and automatic work are ordered in separate passes, so an
+        # old auto request can never use this bonus to cross that class boundary.
         bonus = int(age // max(1, aging_seconds))
         return int(row.get("priority") or 0) + bonus
 
@@ -1358,6 +1717,7 @@ class ExecutionRepository:
         *,
         aging_seconds: int,
         include_held_auto: bool = False,
+        allowed_sources: frozenset[str] | None = None,
     ) -> list[dict]:
         control = conn.execute(
             "SELECT auto_enabled FROM execution_control WHERE singleton=1"
@@ -1371,9 +1731,12 @@ class ExecutionRepository:
                 "AND cancel_requested=0 AND (next_attempt_at IS NULL OR next_attempt_at<=?)",
                 (due,),
             ).fetchall()
-            if include_held_auto
-            or auto_enabled
-            or row["source"] != EXECUTION_SOURCE_AUTO
+            if (allowed_sources is None or row["source"] in allowed_sources)
+            and (
+                include_held_auto
+                or auto_enabled
+                or row["source"] != EXECUTION_SOURCE_AUTO
+            )
         ]
         now = datetime.now()
         rows.sort(
@@ -1573,14 +1936,23 @@ class ExecutionRepository:
                 max_host_cpu_millis=max_host_cpu_millis,
                 max_host_memory_mb=max_host_memory_mb,
             )
-            ordered = self._ordered_queued_tx(
+            foreground = self._ordered_queued_tx(
                 conn,
                 aging_seconds=aging_seconds,
                 include_held_auto=True,
+                allowed_sources=_FOREGROUND_SOURCES,
             )
-            dispatchable = self._ordered_queued_tx(
-                conn, aging_seconds=aging_seconds
+            automatic = self._ordered_queued_tx(
+                conn,
+                aging_seconds=aging_seconds,
+                include_held_auto=True,
+                allowed_sources=frozenset({EXECUTION_SOURCE_AUTO}),
             )
+            ordered = foreground + automatic
+            scheduler = self._auto_scheduler_tx(conn)
+            dispatchable = list(foreground)
+            if scheduler["state"] == "ready":
+                dispatchable.extend(automatic)
             if game_id is not None:
                 ordered = [row for row in ordered if row["game_id"] == game_id]
                 dispatchable = [
@@ -1627,6 +1999,7 @@ class ExecutionRepository:
                 "target": projected_target,
                 "ahead_jobs": ahead_jobs,
                 "ahead_sandbox_units": ahead_units,
+                "auto_scheduler": scheduler,
             }
 
     def contest_has_active_jobs(self, contest_id: int) -> bool:
@@ -1764,6 +2137,7 @@ class ExecutionRepository:
         aging_seconds: int,
         user_active_limit: int,
         contest_share_slots: int,
+        claim_class: str = "foreground",
         max_host_cpu_millis: int | None = None,
         max_host_memory_mb: int | None = None,
     ) -> dict | None:
@@ -1780,6 +2154,16 @@ class ExecutionRepository:
                 or launch["state"] != "idle"
             ):
                 return None
+            if claim_class not in {"foreground", "auto"}:
+                raise ValueError(f"unknown execution claim class: {claim_class}")
+            if claim_class == "auto":
+                scheduler = self._auto_scheduler_tx(conn)
+                if (
+                    scheduler["state"] != "ready"
+                    or int(scheduler["active_count"])
+                    >= EXECUTION_AUTO_ACTIVE_LIMIT
+                ):
+                    return None
             capacity = self._capacity_tx(
                 conn,
                 max_match_slots=max_match_slots,
@@ -1792,11 +2176,29 @@ class ExecutionRepository:
                 or capacity["running_matches"] >= capacity["max_match_slots"]
             ):
                 return None
+            if claim_class == "auto" and (
+                capacity["max_match_slots"] < 2
+                or capacity["max_sandbox_units"] < 4
+                or capacity["occupied_match_slots"] != 0
+                or capacity["running_matches"] != 0
+                or capacity["untracked_running_matches"] != 0
+            ):
+                return None
             queued = self._ordered_queued_tx(
-                conn, aging_seconds=aging_seconds
+                conn,
+                aging_seconds=aging_seconds,
+                allowed_sources=(
+                    frozenset({EXECUTION_SOURCE_AUTO})
+                    if claim_class == "auto"
+                    else _FOREGROUND_SOURCES
+                ),
             )
             non_contest_waiting = any(
-                row["source"] != EXECUTION_SOURCE_CONTEST for row in queued
+                row["source"] in {
+                    EXECUTION_SOURCE_MANUAL,
+                    EXECUTION_SOURCE_HUMAN,
+                }
+                for row in queued
             )
             active_contest = int(
                 conn.execute(
@@ -1807,8 +2209,8 @@ class ExecutionRepository:
             selected: dict | None = None
             invalid_job_ids: set[int] = set()
             projection_ready: bool | None = None
-            # First preserve the configured contest share while any runnable
-            # foreground/automatic work exists.  If that pass finds no runnable
+            # First preserve the configured contest share while runnable
+            # manual/human work exists.  If that pass finds no runnable
             # non-contest job, relax only the share gate so capacity never sits
             # idle behind a temporarily blocked owner/rating/version request.
             for relax_contest_share in (False, True):
@@ -1872,6 +2274,27 @@ class ExecutionRepository:
                         raise ExecutionInvariantError(
                             "execution resource profile snapshot mismatch"
                         )
+                    if claim_class == "auto":
+                        from bzplat.backend.runtime.limits import (
+                            maximum_execution_match_resource_snapshot,
+                        )
+
+                        (
+                            reserve_sandbox_units,
+                            reserve_cpu_millis,
+                            reserve_memory_mb,
+                        ) = maximum_execution_match_resource_snapshot()
+                        if (
+                            int(job["sandbox_units"]) + int(reserve_sandbox_units)
+                            > capacity["max_sandbox_units"]
+                            or int(job.get("host_cpu_millis") or 0)
+                            + int(reserve_cpu_millis)
+                            > capacity["max_host_cpu_millis"]
+                            or int(job.get("host_memory_mb") or 0)
+                            + int(reserve_memory_mb)
+                            > capacity["max_host_memory_mb"]
+                        ):
+                            continue
                     if (
                         int(job["sandbox_units"])
                         + capacity["used_sandbox_units"]
@@ -2349,6 +2772,11 @@ class ExecutionRepository:
                     "dispatched_at=NULL,last_attempt_error='manual_retry' WHERE id=?",
                     (int(job["auto_decision_id"]),),
                 )
+            if job["source"] in {
+                EXECUTION_SOURCE_MANUAL,
+                EXECUTION_SOURCE_HUMAN,
+            }:
+                self._yield_auto_to_foreground_tx(conn)
             return dict(
                 conn.execute(
                     "SELECT * FROM execution_jobs WHERE id=?", (int(job["id"]),)
@@ -2396,13 +2824,41 @@ class ExecutionRepository:
                 attempt_no=int(job["attempt_count"]),
                 reason=str(reason),
             )
+            cancel_reason = ""
+            if int(job.get("cancel_requested") or 0):
+                persisted_reason = str(job.get("terminal_reason") or "")
+                cancel_reason = (
+                    persisted_reason
+                    if persisted_reason in _AUTO_YIELD_REASONS
+                    else "user_cancelled"
+                )
             conn.execute(
-                "UPDATE execution_job_attempts SET status='interrupted',"
+                "UPDATE execution_job_attempts SET status=?,"
                 "terminal_at=?,terminal_reason=? WHERE job_id=? AND match_id=?",
-                (now, str(reason)[:200], int(job["id"]), match_id),
+                (
+                    "cancelled" if cancel_reason else "interrupted",
+                    now,
+                    cancel_reason or str(reason)[:200],
+                    int(job["id"]),
+                    match_id,
+                ),
             )
             failure_count = int(job.get("failure_count") or 0) + 1
-            if job["source"] in {
+            if cancel_reason:
+                conn.execute(
+                    "UPDATE execution_jobs SET status='cancelled',"
+                    "current_match_id=NULL,cleanup_state='confirmed',retryable=0,"
+                    "last_error='',terminal_reason=?,terminal_at=?,"
+                    "next_attempt_at=NULL WHERE id=?",
+                    (cancel_reason, now, int(job["id"])),
+                )
+                if job["source"] == EXECUTION_SOURCE_AUTO:
+                    self._advance_auto_gate_tx(
+                        conn,
+                        seconds=AUTO_MATCH_COOLDOWN_SECONDS,
+                        reason="cooldown",
+                    )
+            elif job["source"] in {
                 EXECUTION_SOURCE_MANUAL,
                 EXECUTION_SOURCE_HUMAN,
             }:
@@ -2447,11 +2903,19 @@ class ExecutionRepository:
                         ),
                     )
             if job.get("auto_decision_id") is not None:
-                conn.execute(
-                    "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                    "dispatched_at=NULL,last_attempt_error=? WHERE id=?",
-                    (str(reason)[:200], int(job["auto_decision_id"])),
-                )
+                if cancel_reason:
+                    conn.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                        "match_id=NULL,terminal_reason=?,terminal_at=? WHERE id=?",
+                        (cancel_reason, now, int(job["auto_decision_id"])),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='queued',"
+                        "match_id=NULL,dispatched_at=NULL,last_attempt_error=? "
+                        "WHERE id=?",
+                        (str(reason)[:200], int(job["auto_decision_id"])),
+                    )
             return True
 
     @staticmethod
@@ -2478,6 +2942,7 @@ class ExecutionRepository:
     def recover_after_namespace_cleanup(self) -> dict:
         """Recover active requests only after the exact instance label is zero."""
         recovered = {"requeued": 0, "interrupted": 0, "settling": 0}
+        auto_recovered = False
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             launch = self._docker_launch_tx(conn)
@@ -2491,6 +2956,9 @@ class ExecutionRepository:
             ).fetchall()
             for raw in jobs:
                 job = dict(raw)
+                auto_recovered = auto_recovered or (
+                    job["source"] == EXECUTION_SOURCE_AUTO
+                )
                 self._release_local_agent_leases_tx(
                     conn,
                     public_id=str(job["public_id"]),
@@ -2533,10 +3001,79 @@ class ExecutionRepository:
                             datetime.now() + timedelta(seconds=delay)
                         ).isoformat(timespec="seconds")
                 if match["status"] in (STATUS_COMPLETED, STATUS_ABORTED):
+                    # A terminal Match is the durable winner of a crash race.
+                    # Reconcile may have attached a scheduler-yield marker to
+                    # the still-active job immediately before recovery read the
+                    # already-terminal Match.  Preserve a genuine prior yield,
+                    # but do not reinterpret natural completion or an
+                    # unrelated abort as a scheduler cancellation.
+                    persisted_reason = str(job.get("terminal_reason") or "")
+                    match_reason = str(match["reason"] or "")
+                    if (
+                        job["source"] == EXECUTION_SOURCE_AUTO
+                        and int(job.get("cancel_requested") or 0)
+                        and persisted_reason in _AUTO_YIELD_REASONS
+                        and (
+                            match["status"] == STATUS_COMPLETED
+                            or match_reason != persisted_reason
+                        )
+                    ):
+                        conn.execute(
+                            "UPDATE execution_jobs SET cancel_requested=0,"
+                            "terminal_reason='' WHERE id=?",
+                            (int(job["id"]),),
+                        )
                     conn.execute(
                         "UPDATE execution_jobs SET status='settling',settling_at=?,"
                         "cleanup_state='confirmed' WHERE id=?",
                         (_now(), int(job["id"])),
+                    )
+                    recovered["settling"] += 1
+                    continue
+                if (
+                    job["source"] == EXECUTION_SOURCE_AUTO
+                    and int(job.get("cancel_requested") or 0)
+                    and str(job.get("terminal_reason") or "")
+                    in _AUTO_YIELD_REASONS
+                ):
+                    yield_reason = str(job["terminal_reason"])
+                    now = _now()
+                    conn.execute(
+                        f"UPDATE {table} SET status='aborted',reason=?,ended_at=? "
+                        "WHERE id=? AND status IN ('pending','running')",
+                        (yield_reason, now, match_id),
+                    )
+                    terminal_event = {"type": "error", "reason": yield_reason}
+                    if not events or events[-1] != terminal_event:
+                        events.append(terminal_event)
+                    conn.execute(
+                        "UPDATE match_replays SET events_json=?,updated_at=? "
+                        "WHERE match_id=?",
+                        (
+                            json.dumps(
+                                events,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            now,
+                            match_id,
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE execution_jobs SET status='settling',settling_at=?,"
+                        "cleanup_state='confirmed' WHERE id=?",
+                        (now, int(job["id"])),
+                    )
+                    conn.execute(
+                        "UPDATE execution_job_attempts SET status='settling',"
+                        "events_observed=?,terminal_reason=? "
+                        "WHERE job_id=? AND match_id=?",
+                        (
+                            1 if events else 0,
+                            yield_reason,
+                            int(job["id"]),
+                            match_id,
+                        ),
                     )
                     recovered["settling"] += 1
                     continue
@@ -2699,6 +3236,12 @@ class ExecutionRepository:
                         (now, next_failure_count, int(job["id"])),
                     )
                     recovered["interrupted"] += 1
+            if auto_recovered:
+                self._advance_auto_gate_tx(
+                    conn,
+                    seconds=AUTO_MATCH_COOLDOWN_SECONDS,
+                    reason="cooldown",
+                )
         return recovered
 
     def finalize_ready(self) -> int:
@@ -2799,6 +3342,28 @@ class ExecutionRepository:
                                 "terminal_at=?,terminal_reason=? WHERE id=?",
                                 (terminal, reason, int(job["auto_decision_id"])),
                             )
+                if job["source"] == EXECUTION_SOURCE_AUTO:
+                    self._advance_auto_gate_tx(
+                        conn,
+                        seconds=AUTO_MATCH_COOLDOWN_SECONDS,
+                        reason="cooldown",
+                    )
+                elif job["source"] in {
+                    EXECUTION_SOURCE_MANUAL,
+                    EXECUTION_SOURCE_HUMAN,
+                } or (
+                    job["source"] == EXECUTION_SOURCE_CONTEST
+                    and not conn.execute(
+                        "SELECT 1 FROM contests WHERE id=? "
+                        "AND showcase_key IS NOT NULL",
+                        (job.get("contest_id"),),
+                    ).fetchone()
+                ):
+                    self._advance_auto_gate_tx(
+                        conn,
+                        seconds=AUTO_MATCH_IDLE_GRACE_SECONDS,
+                        reason="idle_grace",
+                    )
                 finalized += 1
         return finalized
 
@@ -2812,6 +3377,9 @@ class ExecutionRepository:
         bootstrap_target_matches: int,
     ) -> dict:
         inserted = 0
+        effective_target = min(
+            max(0, int(target_queued)), EXECUTION_AUTO_LOOKAHEAD
+        )
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             control = conn.execute(
@@ -2819,6 +3387,13 @@ class ExecutionRepository:
             ).fetchone()
             if not control or int(control["auto_enabled"] or 0) != 1:
                 return {"outcome": "disabled", "inserted": 0}
+            scheduler = self._auto_scheduler_tx(conn)
+            if scheduler["state"] != "ready":
+                return {
+                    "outcome": scheduler["state"],
+                    "inserted": 0,
+                    "auto_scheduler": scheduler,
+                }
             projection = self.store._rating_projection_status_tx(conn)
             if not projection["ready"]:
                 return {
@@ -2844,7 +3419,7 @@ class ExecutionRepository:
                 ).fetchall()
                 if row[0]
             )
-            while queued_count < max(0, int(target_queued)) and games:
+            while queued_count < effective_target and games:
                 candidates = self.store._auto_queue_candidates_tx(conn)
                 healthy_candidates: list[dict] = []
                 for candidate in candidates:

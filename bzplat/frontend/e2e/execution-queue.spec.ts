@@ -61,26 +61,36 @@ function queueSnapshot(includeHostResources = false) {
     dispatcher: {
       state: 'starting',
       accepting: false,
-      auto_enabled: true,
+      auto_enabled: false,
       pause_reason: '',
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 1, capacity: 1 },
-      sandbox_units: { used: 1, capacity: 2 },
+      match_slots: { used: 1, capacity: 2 },
+      sandbox_units: { used: 2, capacity: 4 },
       ...(includeHostResources ? {
-        host_cpu_millis: { used: 3_000, capacity: 8_000 },
-        host_memory_mb: { used: 2_560, capacity: 8_192 },
+        host_cpu_millis: { used: 2_000, capacity: 8_000 },
+        host_memory_mb: { used: 1_024, capacity: 8_192 },
       } : {}),
       running_matches: 1,
     },
-    active: [{
-      ...job(),
+    active: [job({
       // A defensive UI projection must never render unexpected private fields.
       binary_path: '/private/bot_uploads/secret-bot',
       checksum: 'TOP-SECRET-CHECKSUM',
       owner_name: 'PRIVATE-OWNER-NAME',
-    }],
+      public_id: 'public-auto-yielding',
+      source: 'auto',
+      status: 'running',
+      game_id: 'gomoku',
+      match_type: 'ladder',
+      match_id: 'auto-yielding-match',
+      sandbox_units: 2,
+      rated: true,
+      rating_reason: 'eligible',
+      cancel_requested: true,
+      reason: 'auto_yield_foreground',
+    })],
     queued: [job({
       public_id: 'public-job-2',
       source: 'manual',
@@ -94,7 +104,36 @@ function queueSnapshot(includeHostResources = false) {
       capacity_blocked_reason: '该对局需要 4 核 CPU 和 4 GiB 内存；当前主机资源不足，请求会保留排队且不会降档',
     })],
     queued_count: 1,
+    auto_scheduler: {
+      mode: 'idle_only',
+      state: 'disabled',
+      reason: 'auto_yield_foreground',
+      idle_required_seconds: 300,
+      cooldown_seconds: 300,
+      max_active: 1,
+      queued_target: 1,
+      next_eligible_at: null,
+    },
   }
+}
+
+async function mockEmptyLeaderboard(page: Page) {
+  await page.route('**/api/leaderboard?**', async (route) => {
+    const gameId = new URL(route.request().url()).searchParams.get('game_id') || 'holdem'
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        leaderboard: [],
+        game_id: gameId,
+        ranking_min_matches: 10,
+        summary: { total: 0, eligible: 0, sample: 0, last_rated_at: null },
+        page: 1,
+        per_page: 50,
+        total: 0,
+      }),
+    })
+  })
 }
 
 function requestSnapshot(
@@ -851,8 +890,8 @@ test('admin queue shows compact host capacity while remaining mobile-safe', asyn
 
   await page.goto('/#/admin')
   const panel = page.getByTestId('execution-queue-panel')
-  await expect(panel.locator('[data-testid="host-cpu-capacity"]:visible')).toContainText('3 核 / 8 核')
-  await expect(panel.locator('[data-testid="host-memory-capacity"]:visible')).toContainText('2560 MiB / 8 GiB')
+  await expect(panel.locator('[data-testid="host-cpu-capacity"]:visible')).toContainText('2 核 / 8 核')
+  await expect(panel.locator('[data-testid="host-memory-capacity"]:visible')).toContainText('1 GiB / 8 GiB')
   const capacityRows = await panel.locator('dl[aria-label="执行容量"]:visible > div').evaluateAll((items) => (
     items.map((item) => Math.round(item.getBoundingClientRect().top))
   ))
@@ -978,6 +1017,7 @@ test('202 challenge request survives refresh, retries, and cancels exactly once'
 
   const card = page.getByTestId('execution-request-card')
   await expect(card).toContainText('排队中')
+  await expect(card).toContainText('前方 2 项前台任务；闲时排位不计入此顺位')
   await expect(card).toContainText('当前主机资源不足，请求会保留排队且不会降档')
   await expect(card).not.toContainText('动态预计等待')
   expect(challengePosts).toBe(1)
@@ -1268,28 +1308,105 @@ test('a pre-POST visibility read cannot invalidate an accepted challenge', async
   ))).toBeUndefined()
 })
 
+test('legacy queue response stays neutral until the idle-only scheduler contract arrives', async ({ page }) => {
+  const network = await mockBase(page, false)
+  await mockEmptyLeaderboard(page)
+  const legacySnapshot: Record<string, unknown> = queueSnapshot()
+  delete legacySnapshot.auto_scheduler
+  legacySnapshot.active = [job()]
+  legacySnapshot.queued = [job({
+    public_id: 'legacy-manual-queued',
+    source: 'manual',
+    status: 'queued',
+    match_type: 'manual',
+    match_id: null,
+  })]
+  legacySnapshot.queued_count = 1
+
+  await page.route('**/api/execution-queue', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(legacySnapshot),
+  }))
+
+  await page.goto('/#/leaderboard')
+  const panel = page.getByTestId('execution-queue-panel')
+  const status = panel.getByTestId('auto-scheduler-status')
+  await expect(status).toContainText('闲时排位：策略同步中')
+  await expect(status).toContainText('当前服务尚未返回闲时排位调度状态')
+  await expect(panel).toContainText('闲时排位策略状态正在同步，以当前队列为准')
+  await expect(panel).not.toContainText('用户挑战、人机和赛事始终优先')
+  await expect(status).not.toContainText('最多 1 场')
+  await expect(status).not.toContainText('安全让路')
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('auto-only ready queue keeps candidates outside foreground numbering', async ({ page }) => {
+  const network = await mockBase(page, false)
+  await mockEmptyLeaderboard(page)
+  const readySnapshot = queueSnapshot()
+  readySnapshot.dispatcher = {
+    state: 'running',
+    accepting: true,
+    auto_enabled: true,
+    pause_reason: '',
+    retry_at: null,
+  }
+  readySnapshot.capacity = {
+    match_slots: { used: 0, capacity: 2 },
+    sandbox_units: { used: 0, capacity: 4 },
+    running_matches: 0,
+  }
+  readySnapshot.active = []
+  readySnapshot.queued = [job({
+    public_id: 'ready-auto-candidate',
+    source: 'auto',
+    status: 'queued',
+    game_id: 'gomoku',
+    match_type: 'ladder',
+    match_id: null,
+    sandbox_units: 2,
+    rated: true,
+    rating_reason: 'eligible',
+  })]
+  readySnapshot.queued_count = 1
+  readySnapshot.auto_scheduler = {
+    mode: 'idle_only',
+    state: 'ready',
+    reason: 'idle_ready',
+    idle_required_seconds: 300,
+    cooldown_seconds: 300,
+    max_active: 1,
+    queued_target: 1,
+    next_eligible_at: null,
+  }
+
+  await page.route('**/api/execution-queue', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(readySnapshot),
+  }))
+
+  await page.goto('/#/leaderboard')
+  const panel = page.getByTestId('execution-queue-panel')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('闲时排位：闲时就绪')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText(
+    '闲时门禁已满足，仍等待候选、评分与资源安全门',
+  )
+  const autoRow = panel.locator('li:visible').filter({ hasText: '等待平台闲时' })
+  await expect(autoRow).toContainText('等待平台闲时，不占前台顺位')
+  await expect(autoRow).not.toContainText('#')
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
 test('public queue keeps stale data private and recovers from slow/error/offline at 390px', async ({ page, context }) => {
   test.setTimeout(60_000)
   await page.setViewportSize({ width: 390, height: 844 })
   const monitor = monitorBrowser(page)
   const network = await mockBase(page, false)
-
-  await page.route('**/api/leaderboard?**', async (route) => {
-    const gameId = new URL(route.request().url()).searchParams.get('game_id') || 'holdem'
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        leaderboard: [],
-        game_id: gameId,
-        ranking_min_matches: 10,
-        summary: { total: 0, eligible: 0, sample: 0, last_rated_at: null },
-        page: 1,
-        per_page: 50,
-        total: 0,
-      }),
-    })
-  })
+  await mockEmptyLeaderboard(page)
 
   let calls = 0
   let inFlight = 0
@@ -1331,12 +1448,19 @@ test('public queue keeps stale data private and recovers from slow/error/offline
   await expect(timestamp).toBeVisible()
   expect(await timestamp.evaluate((element) => element.closest('[aria-live]'))).toBeNull()
   expect((await panel.locator('[aria-live]').allTextContents()).join(' ')).not.toContain('上次更新')
-  await expect(panel.getByRole('link', { name: '进入观赛' })).toHaveAttribute(
+  await expect(panel.locator('a[href="#/match/auto-yielding-match"]:visible')).toHaveAttribute(
     'href',
-    '#/match/human-public-match',
+    '#/match/auto-yielding-match',
   )
-  await expect(panel).toContainText('人机对战，不计平台排行榜')
+  await expect(panel).toContainText('自动排位')
   await expect(panel).toContainText('同一所有者，不计平台排行榜')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('闲时排位：安全收口中')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('自动排位为前台任务让路')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('最多 1 场、1 个候选')
+  await expect(panel).toContainText('用户挑战、人机和赛事始终优先')
+  await expect(panel).toContainText('闲时排位不计入前台顺位或 ETA')
+  const yieldingAutoRow = panel.locator('li:visible').filter({ hasText: '自动排位为前台任务让路' })
+  await expect(yieldingAutoRow).toContainText('正在安全取消')
   await expect(panel).toContainText('当前主机资源不足，请求会保留排队且不会降档')
   await expect(panel.getByTestId('host-cpu-capacity')).toHaveCount(0)
   await expect(panel.getByTestId('host-memory-capacity')).toHaveCount(0)
@@ -1346,7 +1470,7 @@ test('public queue keeps stale data private and recovers from slow/error/offline
 
   await expect(panel.getByText('temporary queue outage')).toBeVisible({ timeout: 12_000 })
   await expect(panel).toContainText('以下保留上次成功获取的数据')
-  await expect(panel.getByRole('link', { name: '进入观赛' })).toBeVisible()
+  await expect(panel.locator('a[href="#/match/auto-yielding-match"]:visible')).toBeVisible()
   expect(maxInFlight).toBe(1)
 
   await panel.getByRole('button', { name: '立即重试', exact: true }).click()

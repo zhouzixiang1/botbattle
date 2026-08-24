@@ -3940,6 +3940,19 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
                 f"ALTER TABLE auto_match_fair_state DROP COLUMN "
                 f"{_dead_auto_fair_column}"
             )
+    _add_col(
+        conn,
+        "auto_match_fair_state",
+        "dispatch_policy_version",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _add_col(conn, "auto_match_fair_state", "next_eligible_at", "TEXT")
+    _add_col(
+        conn,
+        "auto_match_fair_state",
+        "gate_reason",
+        "TEXT NOT NULL DEFAULT 'idle_grace'",
+    )
     _ensure_match_rating_policy_identity(conn)
     _classify_legacy_match_rating_policies(conn)
     conn.execute("DROP TABLE IF EXISTS auto_match_daily_claims")

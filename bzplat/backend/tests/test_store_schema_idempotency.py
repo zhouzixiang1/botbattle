@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bzplat.backend.runtime.config import AUTO_MATCH_SCHEDULER_POLICY_VERSION
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import _ensure_trigger
 from bzplat.backend.store.schema import VALID_GAME_IDS
@@ -226,6 +227,22 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
         entry_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(contest_entries)")
         }
+        auto_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(auto_match_fair_state)"
+            )
+        }
+        auto_state = conn.execute(
+            "SELECT dispatch_policy_version,next_eligible_at,gate_reason "
+            "FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()
+        assert {"dispatch_policy_version", "next_eligible_at", "gate_reason"} <= (
+            auto_columns
+        )
+        assert auto_state == ("", None, "idle_grace")
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert {
         "real_name_snapshot",
         "phone_snapshot",
@@ -239,6 +256,68 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     assert triggers_after == triggers_before
     _assert_rating_trigger_contract(triggers_after)
     _assert_owner_delete_trigger_contract(triggers_after)
+
+
+def test_auto_scheduler_gate_columns_migrate_and_reconcile_idempotently(tmp_path):
+    db_path = (tmp_path / "legacy-auto-scheduler-gate.db").resolve()
+    legacy = Store(str(db_path))
+    legacy.close()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE auto_match_fair_state_legacy ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton=1),"
+            "next_game_idx INTEGER NOT NULL DEFAULT 0 CHECK (next_game_idx>=0),"
+            "next_lane INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),"
+            "revision INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),"
+            "bootstrap_version INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (bootstrap_version>=0),"
+            "updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO auto_match_fair_state_legacy("
+            "singleton,next_game_idx,next_lane,revision,bootstrap_version,updated_at) "
+            "SELECT singleton,next_game_idx,next_lane,revision,bootstrap_version,"
+            "updated_at FROM auto_match_fair_state"
+        )
+        conn.execute("DROP TABLE auto_match_fair_state")
+        conn.execute(
+            "ALTER TABLE auto_match_fair_state_legacy "
+            "RENAME TO auto_match_fair_state"
+        )
+
+    migrated = Store(str(db_path))
+    with migrated._tx() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(auto_match_fair_state)")
+        }
+        assert {"dispatch_policy_version", "next_eligible_at", "gate_reason"} <= (
+            columns
+        )
+        assert tuple(
+            conn.execute(
+                "SELECT dispatch_policy_version,next_eligible_at,gate_reason "
+                "FROM auto_match_fair_state WHERE singleton=1"
+            ).fetchone()
+        ) == ("", None, "idle_grace")
+    reconciled = migrated.executions.reconcile_auto_scheduler_policy()
+    assert reconciled["changed"] is True
+    installed = migrated._conn.execute(
+        "SELECT dispatch_policy_version,next_eligible_at,gate_reason "
+        "FROM auto_match_fair_state WHERE singleton=1"
+    ).fetchone()
+    assert installed["dispatch_policy_version"] == AUTO_MATCH_SCHEDULER_POLICY_VERSION
+    assert installed["next_eligible_at"] is not None
+    assert installed["gate_reason"] == "idle_grace"
+    migrated.close()
+
+    reopened = Store(str(db_path))
+    second = reopened.executions.reconcile_auto_scheduler_policy()
+    assert second["changed"] is False
+    assert second["next_eligible_at"] == installed["next_eligible_at"]
+    assert reopened._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
 
 
 def test_legacy_contest_entries_gain_nullable_identity_columns_idempotently(tmp_path):

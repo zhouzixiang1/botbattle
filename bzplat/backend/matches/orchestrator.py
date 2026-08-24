@@ -51,6 +51,8 @@ from bzplat.backend.store.public_contract import (
     sanitize_public_match,
 )
 from bzplat.backend.store.schema import (
+    AUTO_IDLE_POLICY_CUTOVER_REASON,
+    AUTO_YIELD_FOREGROUND_REASON,
     DEFAULT_RUNTIME_MODE,
     REGISTERED_ENGINES,
     STATUS_ABORTED,
@@ -947,14 +949,32 @@ class MatchOrchestrator:
         if operation is not None:
             self._admin_abort_operations.add(operation)
         try:
-            return await self._abort_match_owned(match_id)
+            return await self._abort_match_owned(match_id, reason="admin_aborted")
         finally:
             if operation is not None:
                 self._admin_abort_operations.discard(operation)
 
-    async def _abort_match_owned(self, match_id: str) -> dict:
+    async def abort_execution_match(self, match_id: str, *, reason: str) -> dict:
+        """Abort an auto attempt only for scheduler-owned yield reasons."""
+        if reason not in {
+            AUTO_IDLE_POLICY_CUTOVER_REASON,
+            AUTO_YIELD_FOREGROUND_REASON,
+        }:
+            raise ValueError("execution abort reason is not allowed")
+        job = self.store.executions.get_by_match(match_id)
+        if job is None or job.get("source") != "auto":
+            raise ValueError("only an automatic execution may use scheduler abort")
+        operation = asyncio.current_task()
+        if operation is not None:
+            self._admin_abort_operations.add(operation)
+        try:
+            return await self._abort_match_owned(match_id, reason=reason)
+        finally:
+            if operation is not None:
+                self._admin_abort_operations.discard(operation)
+
+    async def _abort_match_owned(self, match_id: str, *, reason: str) -> dict:
         """取消/drain 编排器拥有的任务并稳定落 aborted，终态不可倒退。"""
-        reason = "admin_aborted"
         match = self.store.get_match(match_id)
         if not match:
             raise ValueError("对局不存在")

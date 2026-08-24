@@ -94,7 +94,9 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 按 8 vCPU / 16 GiB 基准固定全站对局并发硬顶 2、全站 sandbox capacity 4、action timeout、全局执行 aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；每个 job 仍占 1 match slot，赛事共享份额 1 只是混排公平门禁，不是额外容量。自动排位只是 `source=auto` producer，仅 `execution_control.auto_enabled` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数。`runtime/limits.py` 以追加式历史 registry 管理 Docker 资源档位：日常节能/自动排位/人机 Bot 侧及上传预检使用每 Bot `1 CPU / 512 MiB`，锦标赛固定每 Bot `2 CPU / 2 GiB`，`remote_local`/human 不占平台沙箱；execution job 入队时冻结环境、档位版本与资源向量，claim/Match/runner 不得降档或改绑到当前同名规格。最重两场赛事共 8 CPU / 8 GiB；队列外上传预检可短时再占 1 CPU / 512 MiB，因此双槽是饱和上限而非严格 CPU 无超售/低延迟保证。主机准入再取进程 affinity、逻辑 CPU、cgroup 祖先配额、物理内存与 cgroup 内存上限的共同最小值，显式注入只能收紧，不能把硬顶放大到 2 以上。Bot 文件上限固定 100 MiB。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
+- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 按 8 vCPU / 16 GiB 基准固定全站对局并发硬顶 2、全站 sandbox capacity 4、action timeout、前台执行 aging/用户上限、自动排位 300 秒空闲与冷却门禁/单场单候选上限/bootstrap 目标、公开排名资格、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；每个 job 仍占 1 match slot，赛事共享份额 1 只在 manual/human 与 contest 前台之间生效，不是额外容量。自动排位只是严格闲时的 `source=auto` 后台 producer，仅 `execution_control.auto_enabled` 管理员总开关可变；开启不等于立即运行，auto 不参与跨来源 aging、不计入前台 ETA，并在运行时保留至少 1 个 match slot。公平策略/队列长度/冷却不是运行时参数。`runtime/limits.py` 以追加式历史 registry 管理 Docker 资源档位：日常节能/自动排位/人机 Bot 侧及上传预检使用每 Bot `1 CPU / 512 MiB`，锦标赛固定每 Bot `2 CPU / 2 GiB`，`remote_local`/human 不占平台沙箱；execution job 入队时冻结环境、档位版本与资源向量，claim/Match/runner 不得降档或改绑到当前同名规格。最重两场赛事共 8 CPU / 8 GiB；队列外上传预检可短时再占 1 CPU / 512 MiB，因此双槽是饱和上限而非严格 CPU 无超售/低延迟保证。主机准入再取进程 affinity、逻辑 CPU、cgroup 祖先配额、物理内存与 cgroup 内存上限的共同最小值，显式注入只能收紧，不能把硬顶放大到 2 以上。Bot 文件上限固定 100 MiB。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
+
+- **闲时自动排位收口与迁移**：任一前台成功入队/重试会在同一 `BEGIN IMMEDIATE` 中取消 queued auto、让在途 auto 以 `auto_yield_foreground` 安全收口；真实赛事 guard 由 dispatcher 下一次 reconcile 事务做同样收口，auto claim 自身事务会重查 guard 以防穿透。单纯关闭管理员开关不抢占在途局。`auto_match_fair_state` 追加 `dispatch_policy_version/next_eligible_at/gate_reason` 三列以幂等升级且持久冷却；首次 `idle-only-v1` 对账取消遗留 queued auto、让在途 auto 以专用 `auto_idle_policy_cutover` 收口，并重新计 300 秒空闲窗，不得误记为有前台到达。
 
 ## 架构分层（编辑时切勿越界）
 
@@ -133,7 +135,7 @@ store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填�
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
-store/      自动排位：仅作为 `source=auto` producer 写入全局执行队列；每个 owner/game 只消费当前唯一 `is_ranked` 排位代表，游戏/lane/owner/pair/座位轮转与永久 decision 审计不形成第二套 admission、dispatcher 或物理 fence，唯一开关是 `execution_control.auto_enabled`
+store/      自动排位：仅作为严格闲时的 `source=auto` 后台 producer 写入全局执行队列；前台清空、两槽全空并连续 300 秒后至多生成 1 个候选/运行 1 场，结束后重新冷却，auto 不参与跨来源 aging 或前台 ETA；每个 owner/game 只消费当前唯一 `is_ranked` 排位代表，游戏/lane/owner/pair/座位轮转与永久 decision 审计不形成第二套 dispatcher 或物理容量池，唯一开关是 `execution_control.auto_enabled`
 ```
 
 **前端架构（bzplat/frontend，React 19 + Vite 8 + Tailwind v4 + shadcn/ui）**：

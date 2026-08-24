@@ -82,6 +82,26 @@ export interface ExecutionMaintenanceSnapshot {
   readiness_unavailable?: string[]
 }
 
+export type AutoSchedulerState =
+  | 'disabled'
+  | 'foreground_busy'
+  | 'contest_guard'
+  | 'cooldown'
+  | 'ready'
+  | 'yielding'
+  | 'running'
+
+export interface AutoSchedulerSnapshot {
+  mode: 'idle_only'
+  state: AutoSchedulerState
+  reason: string
+  idle_required_seconds: number
+  cooldown_seconds: number
+  max_active: number
+  queued_target: number
+  next_eligible_at?: string | null
+}
+
 export interface ExecutionQueueSnapshot {
   dispatcher: {
     state: string
@@ -96,6 +116,8 @@ export interface ExecutionQueueSnapshot {
   queued: ExecutionQueueJob[]
   queued_count: number
   maintenance?: ExecutionMaintenanceSnapshot
+  /** Optional while older servers roll forward to the idle-only contract. */
+  auto_scheduler?: AutoSchedulerSnapshot
 }
 
 export interface ExecutionRequestSnapshot {
@@ -148,6 +170,134 @@ const RATING_REASON_LABEL: Record<string, string> = {
   remote_local: '本地 Bot 练习，不计平台排行榜',
   ranked_bot_not_selected: '至少一方未派遣参榜，不计平台排行榜',
   eligible: '计入平台排行榜',
+}
+
+const EXECUTION_REASON_LABEL: Record<string, string> = {
+  auto_yield_foreground: '自动排位为前台任务让路',
+  auto_idle_policy_cutover: '自动排位策略升级后收口',
+}
+
+const AUTO_SCHEDULER_REASON_LABEL: Record<string, string> = {
+  auto_disabled: '管理员已关闭闲时排位',
+  foreground_queued_or_active: '等待用户挑战、人机或赛事任务完成',
+  contest_guard: '真实赛事运行、休息或临近开赛，暂不启动自动排位',
+  idle_ready: '闲时门禁已满足，仍等待候选、评分与资源安全门',
+  auto_running: '正在执行一场闲时排位',
+  auto_yield_foreground: '自动排位为前台任务让路',
+  auto_idle_policy_cutover: '自动排位策略升级后收口',
+}
+
+export interface AutoSchedulerPresentation {
+  label: string
+  detail: string
+}
+
+function minutes(seconds: number | undefined, fallback: number): number {
+  return Math.max(
+    1,
+    Math.ceil(typeof seconds === 'number' && Number.isFinite(seconds) ? seconds / 60 : fallback),
+  )
+}
+
+/**
+ * Keep old snapshots readable during a rolling deploy, while preferring the
+ * server-owned idle scheduler state whenever it is available.
+ */
+export function autoSchedulerPresentation(
+  snapshot: ExecutionQueueSnapshot,
+): AutoSchedulerPresentation {
+  const scheduler = snapshot.auto_scheduler
+  if (!scheduler) {
+    return {
+      label: '策略同步中',
+      detail: '当前服务尚未返回闲时排位调度状态；正在兼容同步，请以现有队列为准',
+    }
+  }
+
+  const idleMinutes = minutes(scheduler.idle_required_seconds, 5)
+  const cooldownMinutes = minutes(scheduler.cooldown_seconds, 5)
+  const maxActive = Math.max(1, Number(scheduler.max_active || 1))
+  const queuedTarget = Math.max(1, Number(scheduler.queued_target || 1))
+  const limits = `最多 ${maxActive} 场、${queuedTarget} 个候选`
+  const reason = scheduler.reason === 'idle_grace'
+    ? `正在等待连续空闲 ${idleMinutes} 分钟`
+    : scheduler.reason === 'auto_cooldown'
+      ? `上一场自动排位后正在冷却 ${cooldownMinutes} 分钟`
+      : scheduler.reason
+        ? AUTO_SCHEDULER_REASON_LABEL[scheduler.reason] || ''
+        : ''
+  const activeAuto = snapshot.active.some((job) => job.source === 'auto')
+  const foregroundBusy = [...snapshot.active, ...snapshot.queued]
+    .some((job) => job.source !== 'auto')
+
+  if (
+    scheduler?.state === 'yielding'
+    || scheduler?.reason === 'auto_yield_foreground'
+    || scheduler?.reason === 'auto_idle_policy_cutover'
+  ) {
+    return {
+      label: '安全收口中',
+      detail: `${reason || '自动排位正在安全收口'}；精确清理后释放容量；${limits}`,
+    }
+  }
+
+  if (!snapshot.dispatcher.auto_enabled || scheduler?.state === 'disabled') {
+    return {
+      label: '已关闭',
+      detail: activeAuto
+        ? `不再启动新局；当前自动局自然结束；${limits}`
+        : `不再生成或启动新的闲时排位；${limits}`,
+    }
+  }
+
+  switch (scheduler?.state) {
+    case 'foreground_busy':
+      return {
+        label: '前台优先',
+        detail: `${reason || '等待用户挑战、人机或赛事任务完成'}；${limits}`,
+      }
+    case 'contest_guard':
+      return {
+        label: '赛事保护',
+        detail: `${reason || '真实赛事期间不启动自动排位'}；${limits}`,
+      }
+    case 'cooldown': {
+      const next = scheduler.next_eligible_at
+        ? `；最早 ${fmtTime(scheduler.next_eligible_at)}`
+        : ''
+      return {
+        label: '等待闲时',
+        detail: `${reason || `等待连续空闲或冷却 ${cooldownMinutes} 分钟`}${next}；${limits}`,
+      }
+    }
+    case 'ready':
+      return {
+        label: '闲时就绪',
+        detail: `闲时门禁已满足，仍等待候选、评分与资源安全门；${limits}`,
+      }
+    case 'running':
+      return {
+        label: '闲时运行中',
+        detail: `${reason || '当前正在运行'}；${limits}，前台到达时会安全让路并保留一个运行位`,
+      }
+    default:
+      if (activeAuto) {
+        return {
+          label: '闲时运行中',
+          detail: `${limits}，前台到达时会安全让路并保留一个运行位`,
+        }
+      }
+      if (foregroundBusy) {
+        return {
+          label: '前台优先',
+          detail: `等待用户挑战、人机或赛事任务完成；${limits}`,
+        }
+      }
+      return {
+        label: '等待闲时',
+        detail: `启用不等于立即运行；连续空闲 ${idleMinutes} 分钟后开始；${limits}`,
+      }
+  }
 }
 
 function dispatcherLabel(state: string, accepting: boolean, maintenance = false): string {
@@ -230,6 +380,7 @@ function capacityBlockedReason(job: ExecutionQueueJob): string {
 function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }) {
   const active = job.status === 'starting' || job.status === 'running' || job.status === 'settling'
   const blockedReason = capacityBlockedReason(job)
+  const executionReason = EXECUTION_REASON_LABEL[job.reason]
   return (
     <li className="min-w-0 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -259,7 +410,9 @@ function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
         <span>{job.sandbox_units === 0 ? '不占用平台运行位' : `占用 ${job.sandbox_units} 个平台 Bot 运行位`}</span>
         <span>{job.rated ? '计入平台排行榜' : RATING_REASON_LABEL[job.rating_reason] || '不计平台排行榜'}</span>
+        {job.source === 'auto' && job.status === 'queued' && <span>等待平台闲时，不占前台顺位</span>}
         {job.cancel_requested && <span>正在安全取消</span>}
+        {executionReason && <span>{executionReason}</span>}
       </div>
       {blockedReason && (
         <p className="mt-1.5 flex min-w-0 items-start gap-1.5 text-xs text-warning-foreground" role="status">
@@ -300,6 +453,12 @@ export function ExecutionQueuePanel({
   const hidden = Math.max(0, (snapshot?.queued.length || 0) - queued.length)
   const maintenance = Boolean(snapshot?.maintenance?.requested || snapshot?.dispatcher.maintenance)
   const paused = snapshot?.dispatcher.state === 'paused'
+  const autoPresentation = snapshot ? autoSchedulerPresentation(snapshot) : null
+  let foregroundPosition = 0
+  const queuedRows = queued.map((job) => ({
+    job,
+    position: job.source === 'auto' ? undefined : ++foregroundPosition,
+  }))
 
   const renderSnapshot = () => snapshot ? (
     <div className="space-y-3 px-3 py-3 sm:px-4">
@@ -357,7 +516,9 @@ export function ExecutionQueuePanel({
           {queued.length > 0 ? (
             <>
               <ol className="grid min-w-0 gap-2">
-                {queued.map((job, index) => <JobRow key={job.public_id} job={job} position={index + 1} />)}
+                {queuedRows.map(({ job, position }) => (
+                  <JobRow key={job.public_id} job={job} position={position} />
+                ))}
               </ol>
               {hidden > 0 && (
                 <p className="mt-2 text-right text-xs text-muted-foreground">另有 {hidden} 项在后续队列</p>
@@ -402,8 +563,24 @@ export function ExecutionQueuePanel({
             {snapshot
               ? `全站当前对局槽上限 ${snapshot.capacity.match_slots.capacity} 场；`
               : '正在获取全站对局槽容量；'}
-            主机资源不足的任务继续排队。人工、人机、赛事与自动排位共用同一队列。
+            主机资源不足的任务继续排队。
+            {snapshot?.auto_scheduler
+              ? '用户挑战、人机和赛事始终优先；闲时排位不计入前台顺位或 ETA。'
+              : '闲时排位策略状态正在同步，以当前队列为准。'}
           </p>
+          {autoPresentation && (
+            <p
+              className="mt-0.5 flex min-w-0 items-start gap-1.5 text-xs leading-relaxed text-muted-foreground"
+              data-testid="auto-scheduler-status"
+              role="status"
+              aria-live="polite"
+            >
+              <Clock3 className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                闲时排位：{autoPresentation.label} · {autoPresentation.detail}
+              </span>
+            </p>
+          )}
           {(lastUpdatedAt || (loading && snapshot)) && (
             <p className="mt-0.5 text-xs text-muted-foreground">
               {loading && snapshot
@@ -506,7 +683,9 @@ export function ExecutionRequestCard({
 
       {request.status === 'queued' && (
         <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 text-xs">
-          <p>前方 {snapshot.ahead_jobs} 项任务；全站按同一队列依次运行。</p>
+          <p>{request.source === 'auto'
+            ? '等待平台闲时；不占用户挑战、人机或赛事的前台顺位。'
+            : `前方 ${snapshot.ahead_jobs} 项前台任务；闲时排位不计入此顺位。`}</p>
           {blockedReason ? (
             <p className="mt-1 flex min-w-0 items-start gap-1.5 text-warning-foreground" role="status">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
@@ -529,7 +708,7 @@ export function ExecutionRequestCard({
 
       {request.status === 'cancelled' && (
         <p className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 text-xs">
-          请求已取消，相关容量已安全释放。
+          {EXECUTION_REASON_LABEL[request.reason] || '请求已取消，相关容量已安全释放。'}
         </p>
       )}
 

@@ -104,15 +104,15 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 统一后台 | 仪表盘、用户/Bot/对局/赛事管理、日志、邮箱/广播与 Bug 处理使用一致信息架构；广播预览后持令牌二次批准，不展示运行时/赛制/事务邮件模板编辑器 |
-| 代码唯一配置 | 双资源容量/aging/用户上限/超时/自动公平策略/scheduler/循环赛护栏与内置赛制模板只随代码评审发布；旧数据库值和前端请求不能覆盖；唯一可变自动开关为 `execution_control.auto_enabled` |
+| 代码唯一配置 | 双资源容量、前台 aging、用户上限、超时、自动公平与闲时门禁、scheduler、循环赛护栏与内置赛制模板只随代码评审发布；旧数据库值和前端请求不能覆盖；唯一可变自动开关为 `execution_control.auto_enabled`，开启只表示允许闲时运行，不绕过空闲条件 |
 | 安全中止与删除 | 活跃对局只允许经 orchestrator 取消并收敛为 `aborted`，不得手工伪造 running/completed；用户/Bot/赛事存在活跃引用时拒绝硬删 |
 
 ### 3.9 站点与后台调度
 | 需求 | 验收标准 |
 |------|---------|
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
-| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类共享代码硬顶 `2 match slots + 4 sandbox units`；8 vCPU / 16 GiB 基准下最重两场赛事共需 8 CPU / 8 GiB，并保留约 8 GiB 系统内存，实际并发仍受 affinity/cgroup/物理资源共同收紧。节能/赛事 Docker 座位各占 1 sandbox unit，本地 Bot/真人座位占 0，因此双节能、双赛事为 `1 match slot + 2 units`，节能与本地 Bot、人机为 `1+1`，双本地 Bot 为 `1+0`；赛事份额 1 不是额外容量；`starting/running/settling` 均占容量；job 冻结环境、资源档位版本及 CPU/内存向量，赛事不得降档；优先级带无上限 aging，Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
-| 持续公平自动排位 | 默认开启且无每日上限，只作为全局队列的 `source=auto` producer；每个 owner/game 只消费当前唯一排行榜 Bot，按游戏/lane/所有者/pair 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；唯一开关只影响 auto 生成/claim，不影响人工、人机、赛事或在途局 |
+| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类共享代码硬顶 `2 match slots + 4 sandbox units`；8 vCPU / 16 GiB 基准下最重两场赛事共需 8 CPU / 8 GiB，并保留约 8 GiB 系统内存，实际并发仍受 affinity/cgroup/物理资源共同收紧。节能/赛事 Docker 座位各占 1 sandbox unit，本地 Bot/真人座位占 0，因此双节能、双赛事为 `1 match slot + 2 units`，节能与本地 Bot、人机为 `1+1`，双本地 Bot 为 `1+0`；赛事份额 1 不是额外容量；`starting/running/settling` 均占容量；job 冻结环境、资源档位版本及 CPU/内存向量，赛事不得降档；manual/human/contest 在前台类内带无上限 aging，auto 不参与跨来源 aging；Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
+| 闲时公平自动排位 | 默认允许，但启用不等于立即运行；只作为全局队列的 `source=auto` 后台 producer。manual/human/contest 的 queued/active、真实赛事 `running/rest` 全程 guard、已有待开 pairing 且 `starts_at` 进入未来 5 分钟的 `published` 保护窗，或未满 5 分钟的空闲/冷却均阻止 auto 生成与 claim；showcase 明确排除，远期或手动开赛的 published 不会无期占用 guard。两槽全空后每次至多生成 1 个候选并运行 1 场，结束后重新冷却；auto claim 还必须预留最高档一场赛事的 1 match slot + 2 sandbox units + 4000 毫核 + 4096 MiB。任一前台成功入队/重试或真实赛事 guard 取消 queued auto，在途 auto 以 `auto_yield_foreground` 安全收口且精确清理后才释放容量。每个 owner/game 只消费当前唯一排行榜 Bot，按游戏/lane/所有者/pair 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；管理员单纯关闭开关不取消在途局，关闭后在途局自然结束 |
 
 ## 4. 非功能需求
 
