@@ -23,7 +23,7 @@
 | 页面/路由 | 未登录 | 普通用户 | 组织者 | 管理员 | 主要验收点 |
 |---|---|---|---|---|---|
 | Shell、首页 `/` | 读 | 读 | 读 | 读 | 侧栏/移动菜单、主题、全局搜索、无重复指标、长公告折行 |
-| 挑战 `/challenge` | 门禁 | 操作 | 操作 | 操作 | Bot-v-Bot、自博弈、指定版本、人类后手；普通用户/组织者座位 1 仅本人 Bot，admin 可选全站 active+runnable Bot；POST 精确为 202 持久请求，claim 前不伪造 Match；排队位置/双容量/动态 ETA、刷新恢复、离线重连、取消与 interrupted 重试；重复提交只产生一条 request |
+| 挑战 `/challenge` | 门禁 | 操作 | 操作 | 操作 | Bot-v-Bot、自博弈、指定版本、人类固定第二方；普通用户/组织者可把本人 Bot 放在任一游戏位置，完整换位版本/环境/本地连接，admin 可选全站 active+runnable Bot；POST 精确为 202 持久请求，claim 前不伪造 Match；排队位置/双容量/动态 ETA、刷新恢复、离线重连、取消与 interrupted 重试；重复提交只产生一条 request |
 | 排行榜 `/leaderboard` | 读 | 读 | 读 | 读 | 单游戏 sticky tabs、无重复 SummaryStrip、公开排名/无名次计分样本分区、1-based 名次/百分位、Rating/RD/95% 区间、样本与分页；全来源双槽上限队列的 active/queued、安全暂停、长名/原因，桌面运行/等待左右紧凑布局；1440/1024/768/390 上下滚动，桌面普通表头不得覆盖前三名，移动首项可见且无根横溢出 |
 | 对局历史 `/history` | 读 | 读 | 读 | 读 | 状态/游戏/技术故障筛选、错误恢复、分页 |
 | 对局 `/match/:id` | 读 | 读 | 读 | 读 | live 从首事件推进、终态切回放、长动作列表、异常原因、SSE 收敛；三游戏终态公开 JSON v1 日志真实下载，live/未知游戏/路由切换零 `/log` 请求，Gomoku 同时保留独立棋谱入口；Pencil 在超宽/标准/横屏/移动比例下重排局面概览、完整方形棋盘与独立时序；德州 HUD 与 70 手定位在 2560/1920/1760/1600/1536/1366/1280/1024/390/320 无根横溢出，滚动 sticky 与时序折叠后无空右轨；复式赛显示 2×70 总进度、物理 Bot 换座与分局计分；私有 debug 仅按 owner/赛事角色/终态授权，长文本不溢出且无 HTML/链接执行，并且不进入公开日志 |
@@ -87,7 +87,7 @@
 | `contest-scoring-clarity.spec.ts` | 瑞士轮 3/1/0、真实 W/D/L 与轮空分列、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下两张宽表的具名横滚区域可聚焦且页面零根溢出 |
 | `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、自动 producer strict boolean、全来源队列与长文本滚动 |
 | `leaderboard-density.spec.ts` | 四角色共同读取排行榜且逐 context 核对匿名或 username/role；1440/1024/768/390、无 SummaryStrip、长文本、公开排名/计分样本分区、全来源双槽上限队列、上下滚动、滚动中可操作的 Radix tabs、慢响应切游戏清旧列表；普通表头无 page-sticky 属性，前三名与表头零交叠且中心命中自身，移动首项可见、无根横溢出与 Console/Network |
-| `execution-queue.spec.ts` | U-04 的 202 持久请求、同一 public_id 轮询/刷新恢复、queued 取消、interrupted 重试、Match 出现后跳转；普通用户座位 1 owner-only 与管理员全站 picker；排行榜全来源双槽上限队列、安全暂停/离线与公开字段白名单。测试文件存在不等于目标 HEAD 已执行通过 |
+| `execution-queue.spec.ts` | U-04 的 202 持久请求、同一 public_id 轮询/刷新恢复、queued 取消、interrupted 重试、Match 出现后跳转；普通用户任一位置 owner-only、完整座位状态交换、`my_seat=1` 精确 POST 与管理员全站 picker；排行榜全来源双槽上限队列、安全暂停/离线与公开字段白名单。测试文件存在不等于目标 HEAD 已执行通过 |
 
 全局执行队列重构还必须在目标 HEAD 上确认下列真浏览器证据，未执行前均为“待验证”：
 

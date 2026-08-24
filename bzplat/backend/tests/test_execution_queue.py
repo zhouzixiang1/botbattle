@@ -443,7 +443,7 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
     ).fetchone()[0] == before
 
 
-def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
+def test_admin_challenge_can_place_foreign_initiator_bot_in_second_seat(
     execution_api,
 ):
     app, client, store = (
@@ -466,6 +466,7 @@ def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
             "opponent_bot_id": second["bot_id"],
             "my_bot_version_id": first["version_id"],
             "opponent_bot_version_id": second["version_id"],
+            "my_seat": 1,
         },
     )
     assert normal_response.status_code == 403
@@ -479,6 +480,7 @@ def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
             "opponent_bot_id": second["bot_id"],
             "my_bot_version_id": first["version_id"],
             "opponent_bot_version_id": second["version_id"],
+            "my_seat": 1,
         },
     )
     assert accepted.status_code == 202
@@ -490,10 +492,10 @@ def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
     ).fetchone()
     assert tuple(row) == (
         administrator["id"],
-        first["bot_id"],
         second["bot_id"],
-        first["version_id"],
+        first["bot_id"],
         second["version_id"],
+        first["version_id"],
     )
 
     wrong_version = client.post(
@@ -504,6 +506,7 @@ def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
             "opponent_bot_id": second["bot_id"],
             "my_bot_version_id": second["version_id"],
             "opponent_bot_version_id": second["version_id"],
+            "my_seat": 1,
         },
     )
     assert wrong_version.status_code == 400
@@ -511,6 +514,97 @@ def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
     assert store._conn.execute(
         "SELECT COUNT(*) FROM execution_jobs"
     ).fetchone()[0] == 1
+
+
+def test_challenge_owner_can_choose_second_seat_with_full_version_mapping(
+    execution_api,
+    monkeypatch,
+):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    owner = _api_user(store, "seat_two_owner")
+    opponent_owner = _api_user(store, "seat_two_opponent")
+    own = _owned_bot(store, owner, "seat_two_owned")
+    opponent = _owned_bot(store, opponent_owner, "seat_two_foreign")
+    _verify_projection(store)
+    headers = _auth_headers(app, owner)
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
+
+    accepted = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={
+            "my_bot_id": own["bot_id"],
+            "opponent_bot_id": opponent["bot_id"],
+            "my_bot_version_id": own["version_id"],
+            "opponent_bot_version_id": opponent["version_id"],
+            "my_seat": 1,
+            "game_id": "holdem",
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    public_id = accepted.json()["public_id"]
+    row = store._conn.execute(
+        "SELECT owner_user_id,bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
+        "bot_a_environment,bot_b_environment,rated,rating_reason "
+        "FROM execution_jobs WHERE public_id=?",
+        (public_id,),
+    ).fetchone()
+    assert tuple(row) == (
+        owner["id"],
+        opponent["bot_id"],
+        own["bot_id"],
+        opponent["version_id"],
+        own["version_id"],
+        "platform_low",
+        "platform_low",
+        1,
+        "eligible",
+    )
+    assert audits == [{
+        "action": "match_challenge",
+        "result": "ok",
+        "user": owner["username"],
+        "target": public_id,
+        "detail": (
+            f"seat0_bot_id={opponent['bot_id']};"
+            f"seat1_bot_id={own['bot_id']};my_seat=1"
+        ),
+    }]
+
+    # my_seat 只改变物理位置，绝不能把“对手字段恰好属于本人”当作 owner 授权。
+    denied = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={
+            "my_bot_id": opponent["bot_id"],
+            "opponent_bot_id": own["bot_id"],
+            "my_seat": 1,
+        },
+    )
+    assert denied.status_code == 403
+    assert store._conn.execute("SELECT COUNT(*) FROM execution_jobs").fetchone()[0] == 1
+
+    invalid = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={
+            "my_bot_id": own["bot_id"],
+            "opponent_bot_id": opponent["bot_id"],
+            "my_seat": 2,
+        },
+    )
+    assert invalid.status_code == 422
+    assert store._conn.execute("SELECT COUNT(*) FROM execution_jobs").fetchone()[0] == 1
 
 
 def test_client_request_id_recovers_lost_202_without_duplicate_jobs(execution_api):
@@ -545,9 +639,23 @@ def test_client_request_id_recovers_lost_202_without_duplicate_jobs(execution_ap
     # Simulate a response being lost, followed by process admission closing:
     # the exact retry still resolves the original row before mutable checks.
     store.executions.set_control(dispatcher_state="starting", accepting=False)
-    repeated = client.post("/api/matches/challenge", headers=headers, json=body)
+    repeated = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={**body, "my_seat": 0},
+    )
     assert repeated.status_code == 202
     assert repeated.json()["public_id"] == request_id
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE public_id=?", (request_id,)
+    ).fetchone()[0] == 1
+
+    changed_seat = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={**body, "my_seat": 1},
+    )
+    assert changed_seat.status_code == 409
     assert store._conn.execute(
         "SELECT COUNT(*) FROM execution_jobs WHERE public_id=?", (request_id,)
     ).fetchone()[0] == 1

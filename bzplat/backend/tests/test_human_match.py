@@ -418,7 +418,8 @@ def test_human_match_api_and_websocket(store: Store, tmp_path, monkeypatch):
     # TestClient 必须作为 context 使用，让 FastAPI lifespan 在退出时调用
     # orchestrator.shutdown()，收敛本用例创建但尚未完成的人类对局任务。
     with TestClient(app) as c:
-        # 产品入口固定人类为座位 2（白方）；内部 seat 0 不对外开放。
+        # 产品入口固定人类为座位 2（交换决策方，棋色由交换结果决定）；
+        # 内部 seat 0 不对外开放。
         rejected = c.post(
             "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
             json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},

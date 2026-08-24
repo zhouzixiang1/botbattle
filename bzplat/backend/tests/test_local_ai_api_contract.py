@@ -1096,6 +1096,39 @@ def test_remote_challenge_checks_owner_and_live_state_and_is_unrated(
         assert mixed.json()["request"]["sandbox_units"] == 1
         assert mixed.json()["request"]["rated"] is False
 
+        reversed_mixed = client.post(
+            "/api/matches/challenge",
+            headers=owner_headers,
+            json={
+                "my_bot_id": local_bot["id"],
+                "opponent_bot_id": foreign_bot["id"],
+                "my_seat": 1,
+                "game_id": "gomoku",
+                "my_environment": "remote_local",
+                "opponent_environment": "platform_low",
+                "my_local_agent_id": first["public_id"],
+            },
+        )
+        assert reversed_mixed.status_code == 202, reversed_mixed.text
+        assert (
+            reversed_mixed.json()["request"]["bot_a_environment"],
+            reversed_mixed.json()["request"]["bot_b_environment"],
+            reversed_mixed.json()["request"]["sandbox_units"],
+            reversed_mixed.json()["request"]["rated"],
+            reversed_mixed.json()["request"]["rating_reason"],
+        ) == ("platform_low", "remote_local", 1, False, "remote_local")
+        reversed_row = app.state.store._conn.execute(
+            "SELECT bot_a_id,bot_b_id,bot_a_local_agent_id,bot_b_local_agent_id "
+            "FROM execution_jobs WHERE public_id=?",
+            (reversed_mixed.json()["public_id"],),
+        ).fetchone()
+        assert tuple(reversed_row) == (
+            foreign_bot["id"],
+            local_bot["id"],
+            None,
+            first["id"],
+        )
+
         offline_response = client.post(
             "/api/matches/challenge",
             headers=owner_headers,

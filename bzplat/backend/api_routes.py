@@ -1665,6 +1665,9 @@ class ChallengeBody(BaseModel):
     opponent_environment: Literal["platform_low", "remote_local"] = "platform_low"
     my_local_agent_id: str | None = Field(default=None, max_length=64)
     opponent_local_agent_id: str | None = Field(default=None, max_length=64)
+    # “我的 Bot”默认仍在内部座位 0，兼容旧客户端；传 1 时只改变
+    # my/opponent 四元组到物理座位的映射，不放宽 my_bot_id 的 owner 校验。
+    my_seat: Literal[0, 1] = 0
     game_id: str | None = None
     request_id: str | None = Field(
         default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
@@ -1672,9 +1675,14 @@ class ChallengeBody(BaseModel):
 
 
 def _execution_idempotency_fingerprint(kind: str, body: BaseModel) -> str:
+    body_payload = body.model_dump(mode="json", exclude={"request_id"})
+    if isinstance(body, ChallengeBody) and body_payload.get("my_seat") == 0:
+        # 升级前的 challenge fingerprint 没有 my_seat。默认座位继续省略该键，
+        # 让旧请求在 202 响应丢失后跨版本重试仍命中原 durable request。
+        body_payload.pop("my_seat", None)
     payload = {
         "kind": kind,
-        "body": body.model_dump(mode="json", exclude={"request_id"}),
+        "body": body_payload,
     }
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -1705,9 +1713,9 @@ def _existing_idempotent_request(
 
 @router.post("/api/matches/challenge", status_code=202)
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
-    # 普通用户只能用自己的 Bot 占座位 1，防止冒用他人身份污染评分/战绩；
+    # 普通用户的 my_bot_id 始终必须属于本人，防止冒用他人身份污染评分/战绩；
+    # my_seat 只决定该 Bot 落到物理座位 0/1，不改变这条 owner 边界。
     # 管理员的显式全站调度能力沿用同一版本归属、可运行性和游戏一致性校验。
-    # opponent_bot_id 仍允许任意可用 Bot（挑战他人 Bot 是正常功能）。
     my_bot = _store(request).get_bot(body.my_bot_id)
     if not my_bot:
         raise HTTPException(404, "Bot 不存在")
@@ -1755,29 +1763,46 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
                 raise ValueError(f"{side}本地 Bot 已离线或正在处理另一场对局")
             return int(agent["id"])
 
-        local_a = await resolve_local_agent(
+        my_local_agent = await resolve_local_agent(
             environment=body.my_environment,
             public_id=body.my_local_agent_id,
             bot_id=body.my_bot_id,
-            side="先手",
+            side="我的 Bot",
         )
-        local_b = await resolve_local_agent(
+        opponent_local_agent = await resolve_local_agent(
             environment=body.opponent_environment,
             public_id=body.opponent_local_agent_id,
             bot_id=body.opponent_bot_id,
-            side="后手",
+            side="对手 Bot",
+        )
+        my_runtime = (
+            body.my_bot_id,
+            body.my_bot_version_id,
+            body.my_environment,
+            my_local_agent,
+        )
+        opponent_runtime = (
+            body.opponent_bot_id,
+            body.opponent_bot_version_id,
+            body.opponent_environment,
+            opponent_local_agent,
+        )
+        seat_a, seat_b = (
+            (my_runtime, opponent_runtime)
+            if body.my_seat == 0
+            else (opponent_runtime, my_runtime)
         )
         request_id = await _orch(request).challenge(
-            body.my_bot_id,
-            body.opponent_bot_id,
+            seat_a[0],
+            seat_b[0],
             user["id"],
             game_id=body.game_id,
-            bot_a_version_id=body.my_bot_version_id,
-            bot_b_version_id=body.opponent_bot_version_id,
-            bot_a_environment=body.my_environment,
-            bot_b_environment=body.opponent_environment,
-            bot_a_local_agent_id=local_a,
-            bot_b_local_agent_id=local_b,
+            bot_a_version_id=seat_a[1],
+            bot_b_version_id=seat_b[1],
+            bot_a_environment=seat_a[2],
+            bot_b_environment=seat_b[2],
+            bot_a_local_agent_id=seat_a[3],
+            bot_b_local_agent_id=seat_b[3],
             request_id=body.request_id,
             idempotency_fingerprint=fingerprint,
         )
@@ -1791,7 +1816,17 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
-    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=request_id, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
+    audit_log(
+        request,
+        "match_challenge",
+        result="ok",
+        user=user.get("username"),
+        target=request_id,
+        detail=(
+            f"seat0_bot_id={seat_a[0]};seat1_bot_id={seat_b[0]};"
+            f"my_seat={body.my_seat}"
+        ),
+    )
     dispatcher.wake()
     return dispatcher.public_request(request_id)
 
