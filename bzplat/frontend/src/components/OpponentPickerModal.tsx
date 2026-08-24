@@ -34,23 +34,27 @@ interface User {
 }
 
 type Tab = 'all' | 'mine' | 'users'
+export type PickerPurpose = 'mine' | 'initiator' | 'opponent'
 
 /**
- * 对手选择大弹窗（参考 botzone）：搜索框 + 列表合一。
- * - "全部/我的"：按 bot 搜索（名称），点选即定为对手。
+ * Bot 选择大弹窗（参考 botzone）：搜索框 + 列表合一。
+ * - "全部/我的"：按 bot 搜索（名称），点选后用于调用方声明的位置。
  * - "按用户"：先搜用户，再展示该用户该游戏的 bot。
  */
 export default function OpponentPickerModal({
   gameId,
   myUserId,
   mineOnly = false,
+  purpose,
   onClose,
   onPick,
 }: {
   gameId: GameId
   myUserId?: number
-  /** 普通用户发起 Bot-vs-Bot 时座位 1 必须属于本人；管理员由调用方传 false。 */
+  /** 普通用户发起 Bot-vs-Bot 时“我的 Bot”位置只允许本人 Bot；管理员由调用方传 false。 */
   mineOnly?: boolean
+  /** 选择器的语义用途独立于过滤范围；管理员发起方可看全站 Bot。 */
+  purpose: PickerPurpose
   onClose: () => void
   onPick: (bot: PickBot) => void
 }) {
@@ -65,6 +69,16 @@ export default function OpponentPickerModal({
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const perPage = 50
+  const dialogTitle = purpose === 'mine'
+    ? '选择我的 Bot'
+    : purpose === 'initiator'
+      ? '选择发起方 Bot'
+      : '选择对手 Bot'
+  const searchPlaceholder = purpose === 'mine'
+    ? '搜索我的 Bot 名称…'
+    : purpose === 'initiator'
+      ? '搜索发起方 Bot 名称…'
+      : '搜索 Bot 名称…'
 
   // bot 列表（全部 / 我的 / 选定用户的）——服务端分页
   useEffect(() => {
@@ -113,7 +127,7 @@ export default function OpponentPickerModal({
         <DialogHeader className="border-b border-border px-5 py-3">
           <DialogTitle className="flex items-center gap-2 text-base">
             <BotIcon className="size-4 text-primary" />
-            选择对手
+            {dialogTitle}
             <Badge variant="secondary" className="text-[10px]">{gameLabel(gameId)}</Badge>
           </DialogTitle>
         </DialogHeader>
@@ -127,7 +141,7 @@ export default function OpponentPickerModal({
               setQ(e.target.value)
               if (tab === 'users') { setSelUser(null); setPage(1) }
             }}
-            placeholder={tab === 'users' ? '搜索用户名…' : mineOnly ? '搜索我的 Bot 名称…' : '搜索 Bot 名称…'}
+            placeholder={tab === 'users' ? '搜索用户名…' : searchPlaceholder}
           />
           {!mineOnly && (
             <div className="mt-2 flex gap-2">

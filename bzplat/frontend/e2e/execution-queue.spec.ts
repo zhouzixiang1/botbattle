@@ -187,7 +187,7 @@ async function mockBase(
   return { unexpectedBackendRequests, forbiddenMainRequests }
 }
 
-test('admin seat one picker exposes all public runnable Bots without an owner filter', async ({ page }) => {
+test('admin initiator picker follows the selected position without an owner filter', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const admin = {
     ...USER,
@@ -208,12 +208,18 @@ test('admin seat one picker exposes all public runnable Bots without an owner fi
     is_active: 1,
     runnable: true,
   }
+  const opponent = {
+    ...foreign,
+    id: 502,
+    name: 'foreign-opponent',
+    display_name: 'Foreign Opponent',
+  }
   await page.route('**/api/bots/public?**', async (route) => {
     requests.push(new URL(route.request().url()))
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ bots: [foreign], total: 1 }),
+      body: JSON.stringify({ bots: [foreign, opponent], total: 2 }),
     })
   })
   await page.route('**/api/bots/*/versions', async (route) => {
@@ -226,19 +232,64 @@ test('admin seat one picker exposes all public runnable Bots without an owner fi
       }),
     })
   })
+  let posted: Record<string, unknown> | null = null
+  await page.route('**/api/matches/challenge', async (route) => {
+    posted = route.request().postDataJSON() as Record<string, unknown>
+    const publicId = String(posted.request_id)
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify(requestSnapshot('cancelled', {}, publicId)),
+    })
+  })
+  await page.route('**/api/execution-requests/*', async (route) => {
+    const publicId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1) || '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(requestSnapshot('cancelled', {}, publicId)),
+    })
+  })
 
   await page.goto('/#/challenge')
-  const seatOneTrigger = page.getByRole('button', {
-    name: '选择全站可用 Bot（管理员）',
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await expect(page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: /^选择对手 Bot/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '选 Bot', exact: true }).click()
+  const initiatorTrigger = page.getByRole('button', {
+    name: '选择发起方 Bot（全站可用）',
     exact: true,
   })
-  await expect(seatOneTrigger).toBeVisible()
-  await seatOneTrigger.click()
-  const picker = page.getByRole('dialog', { name: /选择对手/ })
+  await expect(initiatorTrigger).toBeVisible()
+  await initiatorTrigger.click()
+  let picker = page.getByRole('dialog', { name: /^选择发起方 Bot/ })
   await expect(picker.getByRole('button', { name: /Foreign Seat One/ })).toBeVisible()
   expect(requests.some((url) => !url.searchParams.has('owner_id'))).toBe(true)
   await picker.getByRole('button', { name: /Foreign Seat One/ }).click()
-  await expect(page.locator('main')).toContainText('Foreign Seat One')
+  await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
+  picker = page.getByRole('dialog', { name: /^选择对手 Bot/ })
+  await picker.getByRole('button', { name: /Foreign Opponent/ }).click()
+
+  const position = page.getByTestId('challenge-my-seat')
+  await position.getByRole('button', { name: '发起方 Bot 设为玩家 2', exact: true }).click()
+  await expect(page.getByTestId('challenge-seat-0')).toContainText('Foreign Opponent')
+  await expect(page.getByTestId('challenge-seat-1')).toContainText('Foreign Seat One')
+
+  await page.getByTestId('challenge-seat-1').getByRole('button', { name: /Foreign Seat One/ }).click()
+  await expect(page.getByRole('dialog', { name: /^选择发起方 Bot/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByTestId('challenge-seat-0').getByRole('button', { name: /Foreign Opponent/ }).click()
+  await expect(page.getByRole('dialog', { name: /^选择对手 Bot/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('button', { name: '开始对局', exact: true }).click()
+  expect(posted).toMatchObject({
+    my_bot_id: foreign.id,
+    opponent_bot_id: opponent.id,
+    my_seat: 1,
+  })
   await expect(page.locator('main')).not.toContainText('玩家 1只能使用自己的 Bot')
 
   expect(network.unexpectedBackendRequests).toEqual([])
@@ -325,6 +376,9 @@ test('two online local Bots create one unrated practice request without horizont
     await page.getByLabel(`玩家 ${seat}本地 Bot 连接`).click()
     await page.getByRole('option', { name: agentName }).click()
   }
+  await page.getByTestId('challenge-my-seat')
+    .getByRole('button', { name: '我的 Bot 设为玩家 2', exact: true })
+    .click()
   await expectMobileTouchTargets(challengeForm, 'mobile Challenge form')
   await expect(page.getByText('本地 Bot 练习局，不计平台排行榜。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
@@ -336,6 +390,7 @@ test('two online local Bots create one unrated practice request without horizont
     opponent_environment: 'remote_local',
     my_local_agent_id: 'lai_alpha',
     opponent_local_agent_id: 'lai_beta',
+    my_seat: 1,
   })
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
@@ -528,6 +583,13 @@ test('challenge names both sides by the selected game instead of generic seats',
   await page.setViewportSize({ width: 1440, height: 900 })
   const monitor = monitorBrowser(page)
   const network = await mockBase(page, true)
+  await page.route('**/api/bots/public?**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '{"bots":[],"total":0}',
+    })
+  })
 
   await page.goto('/#/challenge')
   const formBox = await page.getByTestId('challenge-form').boundingBox()
@@ -539,6 +601,13 @@ test('challenge names both sides by the selected game instead of generic seats',
   await expect(page.getByText('玩家 1', { exact: true })).toBeVisible()
   await expect(page.getByText('玩家 2', { exact: true })).toBeVisible()
   await expect(page.getByText(/先手 \/ 黑/)).toHaveCount(0)
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
+  const humanOpponentPicker = page.getByRole('dialog', { name: /^选择对手 Bot/ })
+  await expect(humanOpponentPicker).toBeVisible()
+  await expect(humanOpponentPicker.getByPlaceholder('搜索 Bot 名称…')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '选 Bot', exact: true }).click()
 
   const gameSelect = page.getByRole('combobox').first()
   await gameSelect.click()
@@ -553,6 +622,187 @@ test('challenge names both sides by the selected game instead of generic seats',
   await expect(page.getByText('红方', { exact: true })).toBeVisible()
   await expect(page.getByText('蓝方', { exact: true })).toBeVisible()
 
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+  await monitor.expectClean()
+})
+
+test('ordinary user can move the owned Bot to either game position without losing seat settings', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page, true)
+  const ownBot = {
+    id: 1701,
+    name: 'owned-seat-bot',
+    display_name: '我的换位 Bot',
+    owner_id: USER.id,
+    owner_name: USER.username,
+    owner_display: USER.display_name,
+    game_id: 'holdem',
+    is_active: 1,
+    is_ranked: 1,
+    runnable: true,
+  }
+  const opponentBot = {
+    id: 2702,
+    name: 'opponent-seat-bot',
+    display_name: '对手换位 Bot',
+    owner_id: 77,
+    owner_name: 'seat_opponent',
+    owner_display: '换位对手',
+    game_id: 'holdem',
+    is_active: 1,
+    is_ranked: 1,
+    runnable: true,
+  }
+  const ownAgent = {
+    public_id: 'lai_owned_seat',
+    bot_id: ownBot.id,
+    label: '换位电脑',
+    game_id: 'holdem',
+    status: 'active',
+    is_online: true,
+    is_busy: false,
+    is_available: true,
+    bot_active: true,
+    last_seen_at: '2026-08-24T10:00:00Z',
+    bot_name: ownBot.name,
+    bot_display_name: ownBot.display_name,
+  }
+  await page.route('**/api/local-ai/agents', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [ownAgent] }),
+    })
+  })
+  const pickerRequests: URL[] = []
+  await page.route('**/api/bots/public?**', async (route) => {
+    const url = new URL(route.request().url())
+    pickerRequests.push(url)
+    const mineOnly = url.searchParams.get('owner_id') === String(USER.id)
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ bots: mineOnly ? [ownBot] : [opponentBot, ownBot], total: mineOnly ? 1 : 2 }),
+    })
+  })
+  await page.route('**/api/bots/*/versions', async (route) => {
+    const botId = Number(new URL(route.request().url()).pathname.split('/').at(-2))
+    const own = botId === ownBot.id
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        current_version: 1,
+        versions: [
+          { id: own ? 1711 : 2711, version: 1, runnable: true },
+          { id: own ? 1712 : 2712, version: 2, upload_note: own ? '我的 v2' : '对手 v2', runnable: true },
+        ],
+      }),
+    })
+  })
+  let posted: Record<string, unknown> | null = null
+  await page.route('**/api/matches/challenge', async (route) => {
+    posted = route.request().postDataJSON() as Record<string, unknown>
+    const publicId = String(posted.request_id)
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify(requestSnapshot('cancelled', {}, publicId)),
+    })
+  })
+  await page.route('**/api/execution-requests/*', async (route) => {
+    const publicId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1) || '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(requestSnapshot('cancelled', {}, publicId)),
+    })
+  })
+
+  await page.goto('/#/challenge')
+  const form = page.getByTestId('challenge-form')
+  const position = page.getByTestId('challenge-my-seat')
+  const playerOnePosition = position.getByRole('button', { name: '我的 Bot 设为玩家 1', exact: true })
+  const playerTwoPosition = position.getByRole('button', { name: '我的 Bot 设为玩家 2', exact: true })
+  await expect(playerOnePosition)
+    .toHaveAttribute('aria-pressed', 'true')
+  await expect(playerTwoPosition)
+    .toHaveAttribute('aria-pressed', 'false')
+
+  await page.getByRole('button', { name: '选择我的 Bot', exact: true }).click()
+  const minePicker = page.getByRole('dialog', { name: /^选择我的 Bot/ })
+  await minePicker.getByRole('button', { name: /我的换位 Bot/ }).click()
+  await page.getByLabel('玩家 1版本').click()
+  await page.getByRole('option', { name: /v2 我的 v2/ }).click()
+
+  await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
+  const opponentPicker = page.getByRole('dialog', { name: /^选择对手 Bot/ })
+  await opponentPicker.getByRole('button', { name: /对手换位 Bot/ }).click()
+  await page.getByLabel('玩家 2版本').click()
+  await page.getByRole('option', { name: /v2 对手 v2/ }).click()
+
+  await page.getByTestId('challenge-seat-0').getByRole('button', { name: /我的换位 Bot/ }).click()
+  await expect(page.getByRole('dialog', { name: /^选择我的 Bot/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByTestId('challenge-seat-1').getByRole('button', { name: /对手换位 Bot/ }).click()
+  await expect(page.getByRole('dialog', { name: /^选择对手 Bot/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  // Make the two sides asymmetric before moving them: the owned side is a
+  // remote-local connection, while the opponent keeps a pinned platform version.
+  await page.getByLabel('玩家 1运行位置').click()
+  await page.getByRole('option', { name: '本地 Bot（我的电脑）', exact: true }).click()
+  await page.getByLabel('玩家 1本地 Bot 连接').click()
+  await page.getByRole('option', { name: /我的换位 Bot.*换位电脑/ }).click()
+
+  // Exercise the native keyboard path, not only pointer activation.
+  await playerOnePosition.focus()
+  await page.keyboard.press('Tab')
+  await expect(playerTwoPosition).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(playerTwoPosition).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('challenge-seat-0')).toContainText('对手换位 Bot')
+  await expect(page.getByTestId('challenge-seat-0')).toContainText('v2 对手 v2')
+  await expect(page.getByTestId('challenge-seat-1')).toContainText('我的换位 Bot')
+  await expect(page.getByTestId('challenge-seat-1')).toContainText('换位电脑')
+
+  // Human play remains fixed to physical seat 2. The position switcher is
+  // hidden, the physical seat-0 opponent is retained, and Bot mode restores
+  // the owner-only picker on the selected semantic position.
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await expect(page.getByTestId('challenge-my-seat')).toHaveCount(0)
+  await expect(page.getByTestId('challenge-seat-0')).toContainText('对手换位 Bot')
+  await expect(page.getByText(/亲自上场，本局不计平台排行榜/)).toBeVisible()
+  await page.getByRole('button', { name: '选 Bot', exact: true }).click()
+  await expect(page.getByTestId('challenge-my-seat')).toBeVisible()
+  await expect(playerTwoPosition).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('challenge-seat-0')).toContainText('对手换位 Bot')
+  await expect(page.getByTestId('challenge-seat-1').getByRole('button', { name: '选择我的 Bot', exact: true })).toBeVisible()
+
+  await page.getByLabel('玩家 1版本').click()
+  await page.getByRole('option', { name: /v2 对手 v2/ }).click()
+  await page.getByLabel('玩家 2运行位置').click()
+  await page.getByRole('option', { name: '本地 Bot（我的电脑）', exact: true }).click()
+  await page.getByLabel('玩家 2本地 Bot 连接').click()
+  await page.getByRole('option', { name: /我的换位 Bot.*换位电脑/ }).click()
+
+  await expectMobileTouchTargets(form, 'mobile Challenge seat selection')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  await page.getByRole('button', { name: '开始对局', exact: true }).click()
+  expect(posted).toMatchObject({
+    my_bot_id: ownBot.id,
+    opponent_bot_id: opponentBot.id,
+    opponent_bot_version_id: 2712,
+    my_seat: 1,
+    my_environment: 'remote_local',
+    opponent_environment: 'platform_low',
+    my_local_agent_id: ownAgent.public_id,
+    opponent_local_agent_id: null,
+  })
+  expect(pickerRequests.some((url) => url.searchParams.get('owner_id') === String(USER.id))).toBe(true)
+  expect(pickerRequests.some((url) => !url.searchParams.has('owner_id'))).toBe(true)
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])
   await monitor.expectClean()

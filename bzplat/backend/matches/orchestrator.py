@@ -711,12 +711,12 @@ class MatchOrchestrator:
             environments[0] == EXECUTION_ENV_PLATFORM_LOW
             and not bot_a.get("binary_path")
         ):
-            raise ValueError("先手 Bot 当前不可用")
+            raise ValueError("座位 1 Bot 当前不可用")
         if not bot_b.get("is_active") or (
             environments[1] == EXECUTION_ENV_PLATFORM_LOW
             and not bot_b.get("binary_path")
         ):
-            raise ValueError("后手 Bot 当前不可用")
+            raise ValueError("座位 2 Bot 当前不可用")
         ga = normalize_game_id(bot_a.get("game_id"))
         gb = normalize_game_id(bot_b.get("game_id"))
         if ga != gb:
@@ -735,23 +735,23 @@ class MatchOrchestrator:
         # 仍严格校验归属；None 则在此刻解析当前激活版本，而非推迟到 runner 启动。
         if environments[0] == EXECUTION_ENV_REMOTE_LOCAL:
             if bot_a_version_id is not None or bot_a_local_agent_id is None:
-                raise ValueError("本地 Bot 先手须选择连接，且不能指定上传版本")
+                raise ValueError("座位 1 本地 Bot 须选择连接，且不能指定上传版本")
             version_a = None
         else:
             if bot_a_local_agent_id is not None:
-                raise ValueError("节能沙箱先手不能绑定本地连接")
+                raise ValueError("座位 1 节能沙箱不能绑定本地连接")
             version_a = self._snapshot_bot_version(
-                challenger_bot_id, bot_a_version_id, seat_label="先手"
+                challenger_bot_id, bot_a_version_id, seat_label="座位 1"
             )
         if environments[1] == EXECUTION_ENV_REMOTE_LOCAL:
             if bot_b_version_id is not None or bot_b_local_agent_id is None:
-                raise ValueError("本地 Bot 后手须选择连接，且不能指定上传版本")
+                raise ValueError("座位 2 本地 Bot 须选择连接，且不能指定上传版本")
             version_b = None
         else:
             if bot_b_local_agent_id is not None:
-                raise ValueError("节能沙箱后手不能绑定本地连接")
+                raise ValueError("座位 2 节能沙箱不能绑定本地连接")
             version_b = self._snapshot_bot_version(
-                opponent_bot_id, bot_b_version_id, seat_label="后手"
+                opponent_bot_id, bot_b_version_id, seat_label="座位 2"
             )
 
         # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，不再走 match_config。

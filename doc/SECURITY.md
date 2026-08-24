@@ -54,10 +54,12 @@ ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> 
 
 ## 挑战座位授权边界
 
-`POST /api/matches/challenge` 把座位 1 视为发起方身份。普通用户与组织者只能提交自己拥有的
-`my_bot_id`，冒用他人 Bot 固定返回 403 并写拒绝审计；管理员可为运维/验收目的从公开的
-active+runnable Bot 集合中选择任意座位 1。该管理员例外只放宽 Bot owner 检查，不放宽执行边界：
-显式 `my_bot_version_id` 仍必须属于座位 1 Bot，双方版本/当前版本仍须通过文件完整性、Linux
+`POST /api/matches/challenge` 以 `my_bot_id` 表示发起方身份，并由 `my_seat=0/1` 声明该 Bot
+落在物理座位 1 或 2。普通用户与组织者无论选择哪一侧，都只能提交自己拥有的 `my_bot_id`；
+把本人 Bot 偷放进 `opponent_bot_id`、再冒用他人 `my_bot_id` 仍固定返回 403 并写拒绝审计。
+管理员可为运维/验收目的从公开的 active+runnable Bot 集合中选择任意发起方 Bot。该管理员例外
+只放宽 Bot owner 检查，不放宽执行边界：显式 `my_bot_version_id` 仍必须属于语义 my Bot，双方版本
+会连同 environment/local-agent 依据 `my_seat` 整体映射，且当前版本仍须通过文件完整性、Linux
 x86_64 ELF、运行模式、激活状态和游戏一致性校验，失败不创建 execution job 或 Match。
 
 ## 公开单场对局日志边界

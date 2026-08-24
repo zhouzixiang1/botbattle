@@ -46,12 +46,12 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 ### 3.3 对局与观赛
 | 需求 | 验收标准 |
 |------|---------|
-| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值）；POST 返回 HTTP 202 持久 request，不在排队阶段创建 Match；支持查询、刷新恢复、取消及 interrupted 重试，取得容量后才沙箱运行。不同 owner 的双方都必须是各自该游戏当前排行榜 Bot 才计 Glicko；其他组合仍可练习但明确标记不计分 |
+| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值）+ 选择“我的 Bot 位置”；`my_bot_id` 始终表示本人 Bot，`my_seat=0/1` 决定其物理座位，Bot/版本/执行环境/本地连接整体映射。普通用户两个方向都必须通过本人 owner 校验。POST 返回 HTTP 202 持久 request，不在排队阶段创建 Match；支持查询、刷新恢复、取消及 interrupted 重试，取得容量后才沙箱运行。不同 owner 的双方都必须是各自该游戏当前排行榜 Bot 才计 Glicko；其他组合仍可练习但明确标记不计分 |
 | 实时观赛 | SSE 推送事件流，前端棋盘/牌桌逐步渲染 |
 | 对局回放 | 完整事件录制，播放/暂停/步进/倍速（0.5x-4x）/逐手跳转/进度拖动 |
 | 对局日志导出 | 德州、五子棋、点格棋的 `completed/aborted` 单场均可公开下载 canonical JSON v1；只有同一数据库快照中的终态 Match 与已持久化 `match_end/error` 尾项一致时才导出，活动局、未落稳回放、未知游戏或损坏契约返回 409，缺失对局返回 404。日志不包含私有 Bot `debug`、原始 stdout/stderr、二进制/版本路径、执行配置或令牌；五子棋专项棋谱是并列能力。功能严格限于单场，不恢复已下线的按月/批量对局数据集 |
 | Pencil 累计棋钟 | 每方固定 900 秒；Bot-vs-Bot 与人类对战均累计实际决策时间，成功/耗尽分别落 `time_used`/`time_out` 事件，并在点格棋观赛/回放显示剩余时间与超时状态 |
-| 人类 vs Bot | WebSocket 落子回传；与 manual/contest/auto 共用全局队列和 match slots，claim 后占 `1 slot + 1 sandbox unit`，人工/人机 per-user 活跃 ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
+| 人类 vs Bot | WebSocket 落子回传；公开挑战契约继续固定真人 `human_seat=1`（第二方），不继承 Bot-vs-Bot 的 `my_seat`；与 manual/contest/auto 共用全局队列和 match slots，claim 后占 `1 slot + 1 sandbox unit`，人工/人机 per-user 活跃 ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
 | 协议故障收敛 | 唯一响应对象必须包含 `response`，平台忽略其他顶层字段；顶层整数/裸坐标/缺少 `response` 的旧 `{a}` 仍拒绝，LongRunning 缺失精确握手不回退。首次协议故障即 `completed + protocol_error + technical_loss`；超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。新写回放和 SSE 只使用 `technical_incident`；结果只公开 `technical_incident_count` / `technical_incidents_by_seat` / `technical_incident_samples`，列表查询唯一使用 `has_technical_incidents`；历史旧事件仅在服务端读取边界归一化，不形成新写或第二套对外合约 |

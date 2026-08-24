@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { User, Bot as BotIcon, Laptop, Plus, Play, Trophy, X as XIcon } from 'lucide-react'
+import { ArrowLeftRight, User, Bot as BotIcon, Laptop, Plus, Play, Trophy, X as XIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
 import {
@@ -96,6 +96,8 @@ export default function Challenge() {
     { ...EMPTY_SEAT },
     { ...EMPTY_SEAT },
   ])
+  // Bot-vs-Bot 中“我的 Bot”可映射到任一物理座位；切换时完整交换双方配置。
+  const [mySeat, setMySeat] = useState<0 | 1>(0)
   // 第二方类型：'bot' 或 'human'（人类固定使用内部位置 1）。
   const [seat2Kind, setSeat2Kind] = useState<'bot' | 'human'>('bot')
   // 弹窗：pickingSeat 标记当前为哪个座位挑 bot（'s1'|'s2'）。
@@ -238,17 +240,17 @@ export default function Challenge() {
 
   // 选定某座位的 bot（来自弹窗）：写入 bot + 重置版本为「当前」+ 拉版本列表。
   const pickBotFor = (slot: 's1' | 's2', bot: PickBot) => {
+    const idx = slot === 's1' ? 0 : 1
     if (
-      slot === 's1'
+      idx === mySeat
       && seat2Kind === 'bot'
       && user?.role !== 'admin'
       && bot.owner_id !== user?.id
     ) {
-      setError(`Bot 对战时，${playerLabels[0]}只能使用自己的 Bot`)
+      setError(`Bot 对战时，${playerLabels[mySeat]}只能使用自己的 Bot`)
       setPickingSeat(null)
       return
     }
-    const idx = slot === 's1' ? 0 : 1
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
       next[idx] = {
@@ -316,20 +318,21 @@ export default function Challenge() {
   }
 
   const chooseSeat2Kind = (kind: 'bot' | 'human') => {
-    const seat1Bot = seats[0].bot
+    const seatOneBot = seats[0].bot
+    const myBot = seats[mySeat].bot
     setSeat2Kind(kind)
     if (
       kind === 'bot'
       && user?.role !== 'admin'
-      && seat1Bot
-      && seat1Bot.owner_id !== user?.id
+      && myBot
+      && myBot.owner_id !== user?.id
     ) {
-      setError(`已切换为 Bot 对战，请为${playerLabels[0]}选择自己的 Bot`)
+      setError(`已切换为 Bot 对战，请为${playerLabels[mySeat]}选择自己的 Bot`)
     } else {
       setError('')
       // 人类模式不展示版本，首次选 Bot 时不会拉历史；切回 Bot 模式且
       // 保留的是自己的 Bot 时补拉，避免版本下拉只剩“当前版本”。
-      if (kind === 'bot' && seat1Bot) void loadVersions(seat1Bot.id)
+      if (kind === 'bot' && seatOneBot) void loadVersions(seatOneBot.id)
     }
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
@@ -341,14 +344,23 @@ export default function Challenge() {
         next[1] = { ...EMPTY_SEAT }
       } else if (
         user?.role !== 'admin'
-        && next[0].bot
-        && next[0].bot.owner_id !== user?.id
+        && next[mySeat].bot
+        && next[mySeat].bot.owner_id !== user?.id
       ) {
-        // 人类模式允许挑战任意 Bot；切回 Bot-vs-Bot 后 my_bot_id 必须重新选自己的。
-        next[0] = { ...EMPTY_SEAT }
+        // 人类模式允许挑战任意 Bot；切回 Bot-vs-Bot 后“我的位置”必须重新选自己的。
+        next[mySeat] = { ...EMPTY_SEAT }
       }
       return next
     })
+  }
+
+  const chooseMySeat = (nextSeat: 0 | 1) => {
+    if (seat2Kind !== 'bot' || nextSeat === mySeat) return
+    // Bot、版本、运行环境和本地连接必须作为一个整体移动，避免切换位置后
+    // 版本或 agent 静默绑定到另一方。
+    setSeats((current) => [current[1], current[0]])
+    setMySeat(nextSeat)
+    setError('')
   }
 
   // 自博弈：第二方 = Bot 且双方使用同一 bot id。
@@ -409,19 +421,21 @@ export default function Challenge() {
         throw new Error('同一个本地连接不能同时控制双方，请分别启动两个连接')
       }
       const body: Record<string, unknown> = {
-        my_bot_id: selectedBotIds[0],
-        opponent_bot_id: selectedBotIds[1],
+        my_bot_id: selectedBotIds[mySeat],
+        opponent_bot_id: selectedBotIds[mySeat === 0 ? 1 : 0],
+        my_seat: mySeat,
         game_id: gameId,
-        my_environment: seats[0].environment,
-        opponent_environment: seats[1].environment,
-        my_local_agent_id: selectedLocalAgents[0]?.public_id ?? null,
-        opponent_local_agent_id: selectedLocalAgents[1]?.public_id ?? null,
+        my_environment: seats[mySeat].environment,
+        opponent_environment: seats[mySeat === 0 ? 1 : 0].environment,
+        my_local_agent_id: selectedLocalAgents[mySeat]?.public_id ?? null,
+        opponent_local_agent_id: selectedLocalAgents[mySeat === 0 ? 1 : 0]?.public_id ?? null,
       }
-      if (seats[0].environment === 'platform_low' && seats[0].versionId !== undefined) {
-        body.my_bot_version_id = seats[0].versionId
+      const opponentSeat = mySeat === 0 ? 1 : 0
+      if (seats[mySeat].environment === 'platform_low' && seats[mySeat].versionId !== undefined) {
+        body.my_bot_version_id = seats[mySeat].versionId
       }
-      if (seats[1].environment === 'platform_low' && seats[1].versionId !== undefined) {
-        body.opponent_bot_version_id = seats[1].versionId
+      if (seats[opponentSeat].environment === 'platform_low' && seats[opponentSeat].versionId !== undefined) {
+        body.opponent_bot_version_id = seats[opponentSeat].versionId
       }
       const requestId = createExecutionRequestId()
       body.request_id = requestId
@@ -585,13 +599,20 @@ export default function Challenge() {
     const vc = seat.bot ? versionCache[seat.bot.id] : undefined
     const localAgent = selectedLocalAgents[idx]
     const gameAgents = localAgents.filter((agent) => agent.game_id === gameId)
-    const mineOnly = slot === 's1' && seat2Kind === 'bot' && user?.role !== 'admin'
+    const mineOnly = idx === mySeat && seat2Kind === 'bot' && user?.role !== 'admin'
     const versionsEnabled = !(slot === 's1' && seat2Kind === 'human')
     return (
-      <div className="space-y-2">
+      <div className="space-y-2" data-testid={`challenge-seat-${idx}`}>
         {showLabel && (
           <div className="flex items-center justify-between">
-            <Label>{seatLabel}</Label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Label>{seatLabel}</Label>
+              {seat2Kind === 'bot' && idx === mySeat && (
+                <Badge variant="secondary" className="text-[10px]">
+                  {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
+                </Badge>
+              )}
+            </div>
             {(seat.bot || seat.localAgentId) && (
               <button
                 type="button"
@@ -607,7 +628,11 @@ export default function Challenge() {
           <Label className="text-xs text-muted-foreground">运行位置</Label>
           <Select
             value={seat.environment}
-            onValueChange={(value) => setSeatEnvironment(slot, value as SeatState['environment'])}
+            onValueChange={(value) => {
+              if (value === 'platform_low' || value === 'remote_local') {
+                setSeatEnvironment(slot, value)
+              }
+            }}
             disabled={seat2Kind === 'human'}
           >
             <SelectTrigger className="w-full" aria-label={`${seatLabel}运行位置`}>
@@ -654,8 +679,8 @@ export default function Challenge() {
               <Plus className="size-4" />
               {mineOnly
                 ? '选择我的 Bot'
-                : slot === 's1' && user?.role === 'admin'
-                  ? '选择全站可用 Bot（管理员）'
+                : seat2Kind === 'bot' && idx === mySeat && user?.role === 'admin'
+                  ? '选择发起方 Bot（全站可用）'
                   : '选择 Bot（搜索 / 我的 / 按用户）'}
             </>
           )}
@@ -668,7 +693,10 @@ export default function Challenge() {
         {seat.bot && versionsEnabled && (
           <Select
             value={seat.versionId === undefined ? 'current' : String(seat.versionId)}
-            onValueChange={(v) => setSeatVersion(slot, v === 'current' ? undefined : Number(v))}
+            onValueChange={(v) => {
+              if (!v) return
+              setSeatVersion(slot, v === 'current' ? undefined : Number(v))
+            }}
           >
             <SelectTrigger className="w-full" aria-label={`${seatLabel}版本`}>
               <SelectValue placeholder="选择版本" />
@@ -698,7 +726,7 @@ export default function Challenge() {
           <div className="space-y-1.5">
             <Select
               value={seat.localAgentId || 'none'}
-              onValueChange={(value) => { if (value !== 'none') setSeatLocalAgent(slot, value) }}
+              onValueChange={(value) => { if (value && value !== 'none') setSeatLocalAgent(slot, value) }}
               disabled={agentsLoading && gameAgents.length === 0}
             >
               <SelectTrigger className="w-full" aria-label={`${seatLabel}本地 Bot 连接`}>
@@ -846,14 +874,63 @@ export default function Challenge() {
                   自博弈
                 </Badge>
               )}
+              {seat2Kind === 'bot' && (
+                <div
+                  className="mb-3 flex flex-col gap-2 rounded-lg bg-muted/50 p-2.5 sm:flex-row sm:items-center sm:justify-between"
+                  data-testid="challenge-my-seat"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                      <ArrowLeftRight className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                      {user?.role === 'admin' ? '发起方 Bot 位置' : '我的 Bot 位置'}
+                    </div>
+                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                      切换时会连同双方 Bot、版本和运行位置一起交换。
+                    </p>
+                  </div>
+                  <div
+                    className="grid w-full grid-cols-2 gap-2 sm:w-auto"
+                    role="group"
+                    aria-label={user?.role === 'admin' ? '发起方 Bot 位置' : '我的 Bot 位置'}
+                  >
+                    {([0, 1] as const).map((index) => (
+                      <button
+                        key={index}
+                        type="button"
+                        onClick={() => chooseMySeat(index)}
+                        aria-pressed={mySeat === index}
+                        aria-label={`${user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'} 设为${playerLabels[index]}`}
+                        disabled={busy}
+                        className={cn(
+                          'inline-flex min-h-11 min-w-0 touch-manipulation items-center justify-center rounded-md border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50',
+                          mySeat === index
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-input bg-background text-foreground hover:bg-accent',
+                        )}
+                      >
+                        <span className="min-w-0 break-words text-center [overflow-wrap:anywhere]">
+                          作为{playerLabels[index]}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="grid gap-3 sm:grid-cols-2">
-                {/* 第一方固定为 Bot。 */}
+                {/* 物理座位 0 固定为 Bot；Bot-vs-Bot 时可成为“我的位置”或对手位置。 */}
                 {renderBotSeat('s1')}
 
-                {/* 第二方可选 Bot 或本人。 */}
+                {/* 物理座位 1 可选 Bot 或本人；真人对战仍由独立 API 固定在该座位。 */}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label>{playerLabels[1]}</Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Label>{playerLabels[1]}</Label>
+                      {seat2Kind === 'bot' && mySeat === 1 && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
+                        </Badge>
+                      )}
+                    </div>
                     <div className="inline-flex rounded-lg border border-input p-0.5 text-xs" role="group" aria-label={`${playerLabels[1]}玩家类型`}>
                       <button
                         type="button"
@@ -944,7 +1021,19 @@ export default function Challenge() {
         <OpponentPickerModal
           gameId={gameId}
           myUserId={user?.id}
-          mineOnly={pickingSeat === 's1' && seat2Kind === 'bot' && user?.role !== 'admin'}
+          purpose={
+            seat2Kind === 'human'
+              ? 'opponent'
+              : (pickingSeat === 's1' ? 0 : 1) === mySeat
+              ? user?.role === 'admin' ? 'initiator' : 'mine'
+              : 'opponent'
+          }
+          mineOnly={
+            pickingSeat !== null
+            && (pickingSeat === 's1' ? 0 : 1) === mySeat
+            && seat2Kind === 'bot'
+            && user?.role !== 'admin'
+          }
           onClose={() => setPickingSeat(null)}
           onPick={(b) => pickBotFor(pickingSeat, b)}
         />

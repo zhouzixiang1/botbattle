@@ -494,7 +494,7 @@ test('Challenge keeps ranked and practice Bots selectable and marks both kinds',
 
   await page.goto('/#/challenge')
   await page.getByRole('button', { name: '选择我的 Bot', exact: true }).click()
-  let picker = page.getByRole('dialog', { name: /选择对手/ })
+  let picker = page.getByRole('dialog', { name: /^选择我的 Bot/ })
   await expect(picker).toContainText('排行榜 Bot 与练习 Bot 均可挑战')
   const practiceChoice = picker.getByRole('button', { name: /练习甲.*练习 Bot/ })
   const rankedChoice = picker.getByRole('button', { name: /参榜甲.*排行榜 Bot/ })
@@ -505,7 +505,7 @@ test('Challenge keeps ranked and practice Bots selectable and marks both kinds',
   await expect(page.locator('main').getByRole('button', { name: /练习甲.*练习 Bot/ })).toBeVisible()
 
   await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
-  picker = page.getByRole('dialog', { name: /选择对手/ })
+  picker = page.getByRole('dialog', { name: /^选择对手 Bot/ })
   const opponentChoice = picker.getByRole('button', { name: /参榜对手.*排行榜 Bot/ })
   await expect(opponentChoice).toBeEnabled()
   await opponentChoice.click()
