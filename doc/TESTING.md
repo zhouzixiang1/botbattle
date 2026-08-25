@@ -118,12 +118,28 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --report
 
 ## 4. 历史执行证据与当前发布门禁
 
-### 4.1 当前 release 候选复合证据
+### 4.1 当前 Holdem all-in v2 候选与发布门禁
 
-下表记录 final 候选 `a29f942b3595db5c0ec4270ee80b9b5f3eb246ac` 的当前权威复合门禁，覆盖 **idle-only 自动排位**、
-Docker create-intent/launch 竞态收口及管理员按“用户 → Bot”精确指派赛事名册。所有运行证据均在该提交上生成；
-本节只回填运行真值，不把随后产生的文档 diff 冒充已执行候选。原始日志、报告、截图和清场审计保留在各行列出的
-`/tmp` 根，直至评审和生产发布完成。
+本轮 runtime 候选为 `e4e7352c2a516a48c6d5f0b2319721437347f1dd`，基于
+`c9e8c0c84a417a75476e9f08f2f58c2cab6f7c08`；候选相对 base 的冻结 patch SHA-256 为
+`a82b9a8fef1250e0309d78622aeb29af6b3a29786e219076289cdb5b8719ca67`。随后只修改本节以回填证据，
+不把 docs-only 提交冒充已执行 runtime。旧 `a29f942b3595db5c0ec4270ee80b9b5f3eb246ac` 的浏览器、构建、
+smoke 与生产副本结果仅支持本轮未改模块，不能替代当前 Holdem 规则候选的 pytest、smoke 或 cutover 门禁。
+
+| 检查 | 本轮状态 | 证据/说明 |
+|------|----------|-----------|
+| runtime 候选冻结 | **前后一致** | 完整门禁前后 HEAD、tracked 与样例 path/mode/content、git status/index、当前 patch 及 worktree 数据库 SHA 均一致；测试只刷新部分可执行样例的 ctime，最终 6 个正式 ELF mode 均为稳定 `0711`。 |
+| 后端完整 pytest | **1809 passed / 1 skipped / 2 warnings（1044.09s）** | 官方 venv 静态收集 1810 项，并在显式清除 QA/instance/Docker 等行为变量的 fresh `TMPDIR`、basetemp、cache 与临时 `BZ_DB_PATH` 下从第 1 项无过滤运行到 exit 0。skip 为测试环境未 build `frontend/dist` 的既有 SPA catch-all 条件；warnings 为既有 Starlette deprecation 与重复 OpenAPI operation id。产物根 `/tmp/botbattle-holdem-final-gate4-20260825-22vCH2/`；`full.log` SHA-256=`7b81b69e9445b824e361220363462066eeb6097eddb01ec69febc2286930edad`，`collect.log` SHA-256=`f322900a141319f31d958ba55f017c2e5b6b2b21f560b2e3a8237dd2dee92530`，`final-summary.txt` SHA-256=`fe49095e6d3a807303a08015060175e9c74c37b0ed5c31a63aec8aa3a84a3234`。此前两轮因文档/样例 mode 漂移无效；第三轮的两个 execution-queue 失败已证明是门禁误注入 `BZ_QA_INSTANCE/BZ_INSTANCE_KEY`，清除后精确节点与本轮全量均通过，不计作候选失败。 |
+| 隔离端到端 smoke | **ALL E2E CHECKS PASSED** | 原始 `scripts/e2e_smoke.sh` 在 fresh 0700 根、动态端口 `59549`、唯一 instance `qa-smoke-holdem-allin-59549` 上 source/tee 均 exit 0；health 为 `qa_instance=true,max_concurrent=2,ceiling=2`，完成 2 个 Bot 上传、HTTP 202 challenge、70 手 Holdem、排行榜与赛事。对局 `20260825195440-430bb258` 为 `holdem_hu_nlhe_allin_v2`，`deltas=[800,-800]`、`technical_loss=0`；35×200 + 1×202，5xx/error/traceback 均为 0。600 份 strace 对 50380 connect 为 0、主库 open/write 为 0，端口/进程/runtime/instance 容器清零。产物根 `/tmp/botbattle-holdem-e2e-gate-20260825-1Prb7g/`；console SHA-256=`b84d2e372034a88765d071743b8470f9793b06c925597dc72605a9491ea67503`，DB 验证 SHA-256=`c9d5c896df0caee149a8ec40c76fbcaec497d0255446d6cec6d8817a27583241`，evidence manifest SHA-256=`5ede98090f5626e3831104cb337c8ca35aba2d1365f2215b34877be2d0ee47fd`。 |
+| 生产副本 Holdem v2 cutover dry-run | **NO_GO_FAIL_CLOSED；未 apply** | 主库仅经 SQLite URI `mode=ro` + `query_only` 在线备份到独立 inode；真实候选 CLI 因非 showcase Holdem 赛事 `#5/#15` 仍为 `open` 而 exit 2，目标副本 SHA/mtime/inode 不变，integrity/quick=`ok`、FK=0。另发现 Bot `#34 organizer_holdem` 的 current binary path 仍是相对路径，不满足绝对 canonical 资产约束。报告对局 `20260825143811-19ebf690` 仍为 completed v1，57 个 current 资产 identity digest 前后一致。因首个硬门禁失败，未生成可审核 plan digest，也未验证实际空 manifest、评分归档/清零、旧任务收口、runtime contract 或二次幂等；审计报告 SHA-256=`d1d271c473506223af85a6463b1706035171f9cb69e7af6d26ff93a4e8878215`。 |
+| 当前发布结论 | **NO_GO** | PR 只能保持 Draft。须先按产品流程结束/处理两个旧规则赛事，并在获授权的维护事务中把 Bot #34 的旧相对路径规范化为已校验的绝对 canonical 路径；随后请求全站维护、等待完整排空并停止服务，重新制作生产冷副本完成 dry-run → 摘要审核 → apply → verify → no-op，才能启动新代码。不得先普通 rebuild/restart，也不得绕过 runtime contract。 |
+
+#### 已发布候选 a29f942 的继承证据（非本轮重跑）
+
+下表记录 `a29f942b3595db5c0ec4270ee80b9b5f3eb246ac` 当时的权威复合门禁，覆盖 **idle-only 自动排位**、
+Docker create-intent/launch 竞态收口及管理员按“用户 → Bot”精确指派赛事名册。它只支持本轮未改动模块，
+不能替代上方当前 Holdem runtime 候选的 pytest、smoke 或 cutover 门禁。原始日志、报告、截图和清场审计
+保留在各行列出的 `/tmp` 根，直至评审和生产发布完成。
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
@@ -159,7 +175,7 @@ Docker create-intent/launch 竞态收口及管理员按“用户 → Bot”精�
 |----------|------|-----------|
 | v3 评分重建生产同形副本演练 | **历史通过；不代表当前候选可上线** | 旧 `owner-neutral-v3` 代码曾在干净冷副本完成 dry-run → apply → verify：integrity=`ok`、FK=0、活动 job=0，识别 1425 场 rated、31 场 neutral，重建影响 34 个 Bot。该策略不含 `owner_id/is_ranked`，升级到当前 `owner-ranked-bot-v4` 后明确为 No-Go；当前候选只认 4.1 的 v4 演练和发布时重新计算的摘要 |
 
-以下各行只记录它们产生时的提交/分支证据，不能外推为当前 release 候选的一次完整运行；当前发布判断以 4.1 为准：
+以下各行只记录它们产生时的提交/分支证据，不能外推为当前 release 候选的一次完整运行；当前发布判断只以上方 4.1 的当前 Holdem 门禁表为准：
 
 | 检查 | 历史状态 | 证据/说明 |
 |------|----------|-----------|
