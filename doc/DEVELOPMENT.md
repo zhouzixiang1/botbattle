@@ -456,6 +456,9 @@ apply 为 zero-write no-op。
 `python -m bzplat.backend.cli game-contract-cutover` 是 wire 协议不兼容升级的长期离线入口，会用经审核
 的标准 ELF 为每个 Bot 建立新版本；`python -m bzplat.backend.cli game-rule-cutover` 专用于协议 ID 不变、
 但 ruleset 与 rating pool 同时换代的离线切换，保留现有 Bot/version，marker manifest 固定为空。
+同协议切换默认拒绝未终结赛事；产品方若决定让尚未开赛的 `open` 赛事直接使用新规则，必须逐个重复传入
+`--migrate-unstarted-contest-id`。Store 会要求授权集合与全部 live 赛事精确相等，并在同一 cutover 事务中
+只更新通过零 pairing/job/Match/result 门禁的赛事三元组，完整赛事/名册摘要绑定 `plan_digest`。
 两条命令的 dry-run 与 apply 都要求 API/dispatcher/scheduler/上传预检已经停服，并提供与目标逐字节一致、
 不同 inode、完整性与外键均通过的冷备；实现会在构造可迁移 Store 之前先取得目标数据库邻接的 dispatcher
 flock 并验证冷备。dry-run 只迁移并规划同目录临时 DB copy，不写目标 DB 或创建 `bot_uploads`。

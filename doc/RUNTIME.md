@@ -310,14 +310,17 @@ runtime 规则、冻结契约、Bot 协议和评分代际失配。
 1. 请求 maintenance 并等待 `maintenance.ready=true`，确认 `accepting=0`、`auto_enabled=0`；随后停止
    API、dispatcher、scheduler 与上传 worker。数据库中的 dispatcher 必须为 `stopped`，全站
    starting/running/settling job 与 attempt、pending/running Match、Local AI lease 均为 0，Docker launch
-   journal 为 `idle`。目标游戏还必须没有未结算旧规则 Match 或未结束的非 showcase 赛事。
+   journal 为 `idle`。目标游戏还必须没有未结算旧规则 Match。未结束的非 showcase 赛事默认阻断；唯一例外是
+   产品方逐个明确授权、状态严格为 `open` 且尚未生成任何 pairing/job/Match/阶段结果的赛事，见下方
+   `--migrate-unstarted-contest-id` 门禁。
 2. 停服后制作不同 inode 的逐字节冷备，核对 `cmp`、SHA-256、`PRAGMA integrity_check=ok` 与
    `PRAGMA foreign_key_check` 零行；保留数据库邻接 `.execution-dispatcher.lock`。dry-run/apply 都要求
    `--db`、`--backup` 为绝对路径并先取得该 flock，确认缺失时不会打开 Store。
 3. 执行 dry-run。CLI 只在目标库同目录创建临时 copy 并在结束时删除，目标 DB 零写；目标契约直接取
    当前代码 GameSpec，调用方只声明来源三元组。保存完整 JSON，审核 `from_contract/to_contract`、
    `bot_count/current_version_count/bot_snapshot_digest`、三项评分投影 digest、
-   `queued_job_ids/retryable_interrupted_job_ids/cancelled_job_count`、`plan_digest`、
+   `queued_job_ids/retryable_interrupted_job_ids/cancelled_job_count`、
+   `contest_contract_migrations`（精确 ID、报名数、赛事/名册快照摘要）、`plan_digest`、
    `target_preimage_sha256`。rule-only 计划的 `version_manifest` 必须为空，`manifest_digest` 必须是空数组
    `[]` 的 canonical SHA-256；任何 current Bot/version 协议、镜像字段、canonical 路径、SHA/size、权限、
    inode 漂移均为 No-Go。
@@ -363,7 +366,11 @@ python -m bzplat.backend.cli game-rule-cutover \
 
 apply 在一个事务中按上一 pool 归档 `ratings/rating_history/pair_stats`，把现行评分重置为
 1500/350/0.06、0 胜负平、0 场，清空该游戏自动排位服务历史，取消来源契约的 queued job 并关闭
-interrupted job 的通用重试，再以 compare-and-swap 推进 active ruleset/pool 和写入空 manifest marker。
+interrupted job 的通用重试，再以 compare-and-swap 迁移经显式授权的未开赛赛事三元组、推进 active
+ruleset/pool 和写入空 manifest marker。未传赛事 ID 时保持原有 fail-closed 行为；授权集合必须等于该游戏
+全部 live 非 showcase 赛事，且每场须为 `open`、未设置开始/结束/休赛时间、阶段索引为 0、报名未派发，
+pairing、execution job、任一游戏 Match、阶段结果与正式结果全为 0。完整赛事行与有序报名行的摘要进入
+`plan_digest`，apply 只修改赛事三元组，标题、赛制、状态、时间、名册与实名快照均不动。
 它不会新建、退役、改写或 pin 任何 Bot/version，也不会创建/删除 `bot_uploads` 文件；历史 Match、回放、
 赛事与上一评分池归档保持原契约。
 
@@ -402,6 +409,8 @@ python -m bzplat.backend.cli game-rule-cutover \
   --from-ruleset holdem_hu_nlhe_v1 \
   --from-protocol holdem_action_v1 \
   --from-rating-pool holdem_rating_v1 \
+  --migrate-unstarted-contest-id 5 \
+  --migrate-unstarted-contest-id 15 \
   --backup /absolute/path/botzone.pre-holdem-allin-v2.db \
   --confirm-service-stopped --confirm-cold-backup
 
@@ -413,6 +422,8 @@ python -m bzplat.backend.cli game-rule-cutover \
   --from-ruleset holdem_hu_nlhe_v1 \
   --from-protocol holdem_action_v1 \
   --from-rating-pool holdem_rating_v1 \
+  --migrate-unstarted-contest-id 5 \
+  --migrate-unstarted-contest-id 15 \
   --apply \
   --expect-plan-digest <reviewed-plan-digest> \
   --expect-manifest-digest <reviewed-empty-manifest-digest> \
