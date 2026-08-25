@@ -19,6 +19,7 @@ import {
   TableRow,
 } from './ui'
 import Pagination from '@/components/Pagination'
+import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
 import {
   Dialog,
   DialogContent,
@@ -32,7 +33,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { useConfirm } from '@/hooks/use-confirm'
 import { fmtTime } from '@/lib/format'
-import { findGame, gameLabel } from '@/lib/games'
+import { gameLabel } from '@/lib/games'
 
 interface Contest {
   id: number
@@ -408,7 +409,13 @@ export default function ContestsTab() {
                           <Link to={`/contests/${contest.id}`} className="text-xs text-primary hover:underline">查看赛事详情</Link>
                         </div>
                         {mutableRoster && (
-                          <AssignPanel contestId={contest.id} gameId={contest.game_id} onDone={() => void loadEntries(contest.id)} />
+                          <AdminContestRosterAssign
+                            contestId={contest.id}
+                            gameId={contest.game_id}
+                            existingUserIds={entries.map((entry) => entry.user_id)}
+                            onDone={() => loadEntries(contest.id)}
+                            className="mb-3"
+                          />
                         )}
                         {entriesLoading ? (
                           <Loading text="加载名册…" />
@@ -619,51 +626,5 @@ function ScheduleDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?: string; onDone: () => void }) {
-  const [query, setQuery] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
-  const gameSpec = findGame(gameId)
-
-  const assignAll = async () => {
-    if (!gameSpec) {
-      setMessage('该赛事的游戏类型不受支持，无法批量指派。')
-      return
-    }
-    setBusy(true)
-    setMessage('')
-    try {
-      const response = await apiJson<{ added: number; skipped: string[]; total_entries: number }>(
-        `/api/admin/contests/${contestId}/entries/bulk`,
-        'POST',
-        { assign_all: true, game_id: gameSpec.id, name_prefix: query || undefined },
-      )
-      setMessage(`已指派 ${response.added} 人（共 ${response.total_entries} 人${response.skipped.length ? `，跳过 ${response.skipped.length}` : ''}）`)
-      onDone()
-    } catch (cause) {
-      setMessage(errMsg(cause))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-3 text-xs">
-      <span className="font-medium text-foreground">批量指派</span>
-      <Input
-        type="text"
-        placeholder="按 Bot 名关键字过滤（可选）"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        className="h-9 w-64"
-      />
-      <Button type="button" size="sm" onClick={() => void assignAll()} disabled={busy || !gameSpec}>
-        {busy ? '指派中…' : `指派全部 ${gameLabel(gameId)} Bot`}
-      </Button>
-      {message && <span className="text-muted-foreground">{message}</span>}
-    </div>
   )
 }

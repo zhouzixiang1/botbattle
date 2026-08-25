@@ -25,6 +25,8 @@ export const PLATFORM_TERMINAL_REASONS: ReasonMap = {
   bot_crashed: danger('Bot 启动失败'),
   platform_error: danger('平台运行异常'),
   admin_aborted: danger('管理员中止'),
+  auto_yield_foreground: neutral('自动排位为前台任务让路'),
+  auto_idle_policy_cutover: neutral('自动排位策略升级后收口'),
   contest_bot_unavailable: danger('赛事 Bot 不可用'),
   contest_both_bots_unavailable: danger('赛事双方 Bot 均不可用'),
   contest_ended_pending_orphan: danger('赛事结束时仍有孤立对局'),

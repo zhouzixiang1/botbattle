@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchParticipants } from '@/components/MatchParticipants'
+import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
 import { PairingResult } from '@/components/contest/pairing-result'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -964,7 +965,7 @@ export default function ContestDetail() {
             description={rosterDescription}
             actions={
               <>
-                {canAssignEntries && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
+                {canAssignEntries && user?.role !== 'admin' && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -985,6 +986,15 @@ export default function ContestDetail() {
             }
             contentClassName="min-w-0"
           >
+                {canAssignEntries && user?.role === 'admin' && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
+                  <AdminContestRosterAssign
+                    contestId={contest.id}
+                    gameId={contest.game_id}
+                    existingUserIds={entries.map((entry) => entry.user_id)}
+                    onDone={load}
+                    className="m-3"
+                  />
+                )}
                 {entries.length === 0 ? (
                   <EmptyState text="暂无报名" className="py-8" />
                 ) : (

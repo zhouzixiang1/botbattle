@@ -50,6 +50,15 @@ _IMAGE_READY_LOCK = threading.Lock()
 _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
 
 
+class ExecutionAttemptCancelled(asyncio.CancelledError):
+    """The durable execution attempt yielded before physical work began."""
+
+
+def _raise_if_attempt_cancelled(exc: Exception) -> None:
+    if getattr(exc, "code", "") == "execution_attempt_not_current":
+        raise ExecutionAttemptCancelled(str(exc)) from exc
+
+
 @dataclass
 class ExecutionScope:
     """One durable job attempt shared by all of its Bot sessions."""
@@ -77,7 +86,11 @@ class ExecutionScope:
             return slot
 
     def assert_current(self) -> None:
-        self.attempt_check()
+        try:
+            self.attempt_check()
+        except Exception as exc:
+            _raise_if_attempt_cancelled(exc)
+            raise
 
     def mark_recovery_pending(self, reason: str) -> None:
         if self.recovery_mark is not None:
@@ -727,6 +740,9 @@ class BinaryRunner:
             else:
                 self._mark_unscoped_docker_uncertain(reason)
             raise SandboxControlUncertain(reason) from exc
+        except Exception as exc:
+            _raise_if_attempt_cancelled(exc)
+            raise
 
     async def send(self, session_id: str, line: str, *,
                    timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:

@@ -447,6 +447,8 @@ class ContestManager:
         target_user = self.store.get_user(user_id)
         if not target_user:
             return f"user {user_id} 不存在"
+        if not int(target_user.get("is_active") or 0):
+            return f"user {user_id} 已停用"
         if int(contest.get("require_real_name") or 0) and not all(
             (target_user.get(field) or "").strip()
             for field in ("real_name", "phone", "school", "student_id")

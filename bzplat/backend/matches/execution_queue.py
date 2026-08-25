@@ -28,6 +28,10 @@ from bzplat.backend.store.execution import (
     ExecutionInvariantError,
     ExecutionMaintenanceConflict,
 )
+from bzplat.backend.store.schema import (
+    AUTO_IDLE_POLICY_CUTOVER_REASON,
+    AUTO_YIELD_FOREGROUND_REASON,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -175,6 +179,11 @@ class ExecutionDispatcher:
             await self.orch.runner.runner.cleanup_instance()
             self.repo.assert_docker_launch_idle()
             await self.orch.runner.runner.ensure_runtime_ready()
+            auto_reconciled = self.repo.reconcile_auto_scheduler_policy()
+            # The policy transition must linearize before generic restart
+            # recovery.  Otherwise a legacy automatic match that already
+            # emitted events would be rewritten as ``orphan_after_restart``
+            # before the idle-only cutover can attach its dedicated reason.
             recovered = self.repo.recover_after_namespace_cleanup()
             # Accepting is restored only after physical cleanup and durable
             # attempt compensation.  The remaining application recovery then
@@ -223,6 +232,7 @@ class ExecutionDispatcher:
         return {
             "outcome": "running",
             "recovered": recovered,
+            "auto_reconciled": auto_reconciled,
             "application_recovered": application_recovered,
         }
 
@@ -405,6 +415,7 @@ class ExecutionDispatcher:
                 await self.orch.runner.runner.cleanup_instance()
                 self.repo.assert_docker_launch_idle()
                 await self.orch.runner.runner.ensure_runtime_ready()
+                self.repo.reconcile_auto_scheduler_policy()
                 recovered = self.repo.recover_after_namespace_cleanup()
                 logger.warning("execution namespace recovered: %s", recovered)
                 # Keep the durable state paused until every awaited business
@@ -476,7 +487,16 @@ class ExecutionDispatcher:
             if not match_id:
                 continue
             try:
-                await self.orch.abort_match(match_id)
+                yield_reason = str(job.get("terminal_reason") or "")
+                if yield_reason in {
+                    AUTO_IDLE_POLICY_CUTOVER_REASON,
+                    AUTO_YIELD_FOREGROUND_REASON,
+                }:
+                    await self.orch.abort_execution_match(
+                        match_id, reason=yield_reason
+                    )
+                else:
+                    await self.orch.abort_match(match_id)
             except ValueError:
                 logger.info("cancel converged elsewhere match=%s", match_id)
 
@@ -514,6 +534,7 @@ class ExecutionDispatcher:
             self._pause_control_uncertainty(str(exc))
             return {"outcome": "paused"}
 
+        auto_reconciled = self.repo.reconcile_auto_scheduler_policy()
         await self._process_cancellations()
         # ``run_once`` may have awaited the Docker launch guard or an active
         # cancellation after its initial recovery check.  Recheck immediately
@@ -523,13 +544,6 @@ class ExecutionDispatcher:
         if self._recovering_application_state:
             return {"outcome": "recovering"}
         finalized = self.repo.finalize_ready()
-        refill: dict = {"outcome": "capability_disabled", "inserted": 0}
-        if self.auto_capability_enabled:
-            refill = self.repo.refill_auto(
-                target_queued=EXECUTION_AUTO_LOOKAHEAD,
-                bootstrap_target_matches=AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
-            )
-
         claimed = 0
         while True:
             job = self.repo.claim_next(
@@ -538,6 +552,7 @@ class ExecutionDispatcher:
                 aging_seconds=EXECUTION_AGING_SECONDS,
                 user_active_limit=EXECUTION_USER_ACTIVE_LIMIT,
                 contest_share_slots=EXECUTION_CONTEST_SHARE_SLOTS,
+                claim_class="foreground",
                 max_host_cpu_millis=self.max_host_cpu_millis,
                 max_host_memory_mb=self.max_host_memory_mb,
             )
@@ -562,11 +577,50 @@ class ExecutionDispatcher:
                 )
                 break
             claimed += 1
+        refill: dict = {"outcome": "capability_disabled", "inserted": 0}
+        if self.auto_capability_enabled:
+            refill = self.repo.refill_auto(
+                target_queued=EXECUTION_AUTO_LOOKAHEAD,
+                bootstrap_target_matches=AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
+            )
+            auto_job = self.repo.claim_next(
+                max_match_slots=self.max_match_slots,
+                max_sandbox_units=self.max_sandbox_units,
+                aging_seconds=EXECUTION_AGING_SECONDS,
+                user_active_limit=EXECUTION_USER_ACTIVE_LIMIT,
+                contest_share_slots=EXECUTION_CONTEST_SHARE_SLOTS,
+                claim_class="auto",
+                max_host_cpu_millis=self.max_host_cpu_millis,
+                max_host_memory_mb=self.max_host_memory_mb,
+            )
+            if auto_job is not None:
+                try:
+                    self.orch.start_execution_job(auto_job)
+                except Exception as exc:
+                    if not self.repo.rollback_unstarted_claim(
+                        str(auto_job["public_id"]),
+                        reason=f"task_start:{type(exc).__name__}",
+                    ):
+                        self.repo.pause(
+                            "claim 后 runner task 启动结果不确定",
+                            bounded_retry=True,
+                        )
+                        raise ExecutionInvariantError(
+                            "claimed execution could not be compensated"
+                        ) from exc
+                    logger.exception(
+                        "automatic execution task start failed and compensated "
+                        "request=%s",
+                        auto_job["public_id"],
+                    )
+                else:
+                    claimed += 1
         return {
             "outcome": "ok",
             "claimed": claimed,
             "finalized": finalized,
             "auto_refill": refill,
+            "auto_reconciled": auto_reconciled,
         }
 
     def _capacity_snapshot(self, *, public_id: str | None = None) -> dict:
@@ -778,6 +832,27 @@ class ExecutionDispatcher:
         maintenance = self._maintenance_snapshot(
             include_internal=include_internal
         )
+        raw_auto = snap["auto_scheduler"]
+        auto_scheduler = {
+            "mode": "idle_only",
+            "state": (
+                str(raw_auto.get("state") or "disabled")
+                if self.auto_capability_enabled
+                else "disabled"
+            ),
+            "reason": (
+                str(raw_auto.get("reason") or "auto_disabled")
+                if self.auto_capability_enabled
+                else "capability_disabled"
+            ),
+            "idle_required_seconds": int(
+                raw_auto.get("idle_required_seconds") or 0
+            ),
+            "cooldown_seconds": int(raw_auto.get("cooldown_seconds") or 0),
+            "max_active": int(raw_auto.get("max_active") or 0),
+            "queued_target": int(raw_auto.get("queued_target") or 0),
+            "next_eligible_at": raw_auto.get("next_eligible_at"),
+        }
         return {
             "dispatcher": {
                 "state": str(control.get("dispatcher_state") or "stopped"),
@@ -800,6 +875,7 @@ class ExecutionDispatcher:
                 for row in queued
             ],
             "queued_count": len(queued),
+            "auto_scheduler": auto_scheduler,
             "maintenance": maintenance,
         }
 

@@ -321,7 +321,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
   })
 }
 
-test('admin queue switch is a single boolean control and survives polling', async ({ page }) => {
+test('admin queue switch enables idle-only scheduling without promising immediate execution', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
@@ -357,6 +357,16 @@ test('admin queue switch is a single boolean control and survives polling', asyn
       reason: '',
     }],
     queued_count: 1,
+    auto_scheduler: {
+      mode: 'idle_only',
+      state: enabled ? 'cooldown' : 'disabled',
+      reason: enabled ? 'idle_grace' : 'auto_disabled',
+      idle_required_seconds: 300,
+      cooldown_seconds: 300,
+      max_active: 1,
+      queued_target: 1,
+      next_eligible_at: enabled ? '2026-08-25T00:10:00+08:00' : null,
+    },
   })
   await page.route('**/api/admin/settings/runtime', async (route) => {
     await route.fulfill({
@@ -413,8 +423,13 @@ test('admin queue switch is a single boolean control and survives polling', asyn
 
   await page.goto('/#/admin')
   const panel = page.getByTestId('execution-queue-panel')
-  const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
+  const toggle = page.getByRole('switch', { name: '闲时自动排位开关' })
   await expect(panel).toContainText('等待执行')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('闲时排位：等待闲时')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('正在等待连续空闲 5 分钟')
+  await expect(panel.getByTestId('auto-scheduler-status')).toContainText('最多 1 场、1 个候选')
+  await expect(panel).toContainText('用户挑战、人机和赛事始终优先')
+  await expect(panel).toContainText('闲时排位不计入前台顺位或 ETA')
   await expect(toggle).toBeChecked()
   await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
   await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
@@ -422,10 +437,10 @@ test('admin queue switch is a single boolean control and survives polling', asyn
 
   await toggle.click()
   await expect(toggle).not.toBeChecked()
-  await expect(page.getByText('自动排位生产已关闭，人工与赛事任务不受影响', { exact: true })).toBeVisible()
+  await expect(page.getByText('闲时排位已关闭；当前自动局会自然结束，前台任务不受影响', { exact: true })).toBeVisible()
   await toggle.click()
   await expect(toggle).toBeChecked()
-  await expect(page.getByText('自动排位生产已开启', { exact: true })).toBeVisible()
+  await expect(page.getByText('闲时排位已启用；满足空闲与冷却条件后自动运行', { exact: true })).toBeVisible()
   expect(payloads).toEqual([false, true])
   expect(publicQueueRequests).toBe(0)
   await expectNoRootOverflow(page, 'admin auto queue re-enabled')
@@ -505,6 +520,16 @@ for (const viewport of MAINTENANCE_VIEWPORTS) {
           reason: '',
         }],
         queued_count: 7,
+        auto_scheduler: {
+          mode: 'idle_only',
+          state: autoEnabled ? 'foreground_busy' : 'disabled',
+          reason: autoEnabled ? 'foreground_queued_or_active' : 'auto_disabled',
+          idle_required_seconds: 300,
+          cooldown_seconds: 300,
+          max_active: 1,
+          queued_target: 1,
+          next_eligible_at: null,
+        },
         maintenance: {
           requested: maintenance,
           ready: maintenance && phase === 'ready',
@@ -614,7 +639,7 @@ for (const viewport of MAINTENANCE_VIEWPORTS) {
 
     await page.goto('/#/admin')
     const control = page.getByTestId('deployment-maintenance-control')
-    const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
+    const toggle = page.getByRole('switch', { name: '闲时自动排位开关' })
     const prepare = page.getByRole('button', { name: '准备维护', exact: true })
     await expect(control).toContainText('正常调度')
     await expect(control).toContainText('运行 1 · 等待 7')

@@ -559,7 +559,18 @@ def test_legacy_contest_entries_gain_unique_registration_index(tmp_path):
     initial = Store(db)
     owner = initial.create_user("owner", "owner@example.com", "hash")
     entrant = initial.create_user("entrant", "entrant@example.com", "hash")
-    bot = initial.create_bot(entrant["id"], "entrant_bot", game_id="holdem")
+    # The modern registration write path validates the current executable
+    # mirror before checking the duplicate key.  Keep this migration fixture a
+    # genuinely runnable legacy Bot so the assertion below continues to test
+    # the unique-registration migration rather than failing an unrelated Bot
+    # admission guard first.
+    bot = initial.create_bot(
+        entrant["id"],
+        "entrant_bot",
+        binary_path="/tmp/entrant_bot",
+        format="elf",
+        game_id="holdem",
+    )
     contest = initial.create_contest(
         "legacy registration",
         owner["id"],

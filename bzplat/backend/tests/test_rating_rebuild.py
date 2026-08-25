@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from bzplat.backend.rating.rebuild import (
     apply_rebuild_plan,
     build_rebuild_plan,
 )
+from bzplat.backend.runtime.config import AUTO_MATCH_SCHEDULER_POLICY_VERSION
 from bzplat.backend.store import (
     Store,
     rating_projection_digest,
@@ -956,12 +958,24 @@ def test_rebuild_is_no_go_while_execution_attempt_is_active(tmp_path):
         bot_a_version_id=first_version["id"],
         bot_b_version_id=second_version["id"],
     )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET dispatch_policy_version=?,"
+            "next_eligible_at=?,gate_reason='idle_grace' WHERE singleton=1",
+            (
+                AUTO_MATCH_SCHEDULER_POLICY_VERSION,
+                (datetime.now() - timedelta(minutes=1)).isoformat(
+                    timespec="seconds"
+                ),
+            ),
+        )
     claimed = store.executions.claim_next(
-        max_match_slots=1,
-        max_sandbox_units=2,
+        max_match_slots=2,
+        max_sandbox_units=4,
         aging_seconds=60,
         user_active_limit=1,
         contest_share_slots=1,
+        claim_class="auto",
     )
     assert claimed is not None and claimed["public_id"] == queued["public_id"]
     store.close()

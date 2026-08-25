@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { apiFetch, apiJson, errMsg } from '@/api'
 import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn, Button } from './ui'
 import {
+  autoSchedulerPresentation,
   ExecutionQueuePanel,
   type ExecutionQueueSnapshot,
 } from '@/components/execution-queue'
@@ -125,7 +126,9 @@ export default function Dashboard() {
       if (revision !== requestRevision.current) return
       setQueue(updated)
       setLastUpdatedAt(Date.now())
-      toast.success(enabled ? '自动排位生产已开启' : '自动排位生产已关闭，人工与赛事任务不受影响')
+      toast.success(enabled
+        ? '闲时排位已启用；满足空闲与冷却条件后自动运行'
+        : '闲时排位已关闭；当前自动局会自然结束，前台任务不受影响')
     } catch (e) {
       if (revision === requestRevision.current) {
         toast.error(errMsg(e, '更新自动排位总开关失败'))
@@ -347,6 +350,7 @@ function MaintenanceControls({
   const faultPaused = queue.dispatcher.state === 'paused'
   const busy = action !== null
   const normal = queue.dispatcher.state === 'running' && queue.dispatcher.accepting
+  const autoStatus = autoSchedulerPresentation(queue)
   const status = faultPaused
     ? {
         label: requested ? '排空受阻' : '队列异常暂停',
@@ -378,7 +382,7 @@ function MaintenanceControls({
 
   return (
     <div
-      className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[minmax(10rem,auto)_auto_auto] sm:items-stretch"
+      className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[minmax(10rem,auto)_minmax(13rem,20rem)_auto] sm:items-stretch"
       data-testid="deployment-maintenance-control"
     >
       <div
@@ -397,16 +401,16 @@ function MaintenanceControls({
 
       <div className="flex min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 sm:justify-start">
         <div className="min-w-0">
-          <div className="text-xs font-medium">自动排位</div>
-          <div className="truncate text-[0.6875rem] text-muted-foreground">
-            {queue.dispatcher.auto_enabled ? '继续生成练习局' : '已停止生成新局'}
+          <div className="text-xs font-medium">闲时排位</div>
+          <div className="break-words text-[0.6875rem] leading-tight text-muted-foreground [overflow-wrap:anywhere]">
+            {autoStatus.label} · {autoStatus.detail}
           </div>
         </div>
         <Switch
           checked={queue.dispatcher.auto_enabled}
           disabled={busy || requested}
           onCheckedChange={onToggleAuto}
-          aria-label="自动排位生产开关"
+          aria-label="闲时自动排位开关"
           className="relative before:absolute before:-inset-x-3 before:-inset-y-3.5 before:content-['']"
         />
       </div>

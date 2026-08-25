@@ -124,10 +124,10 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
 - 人工/人机按用户未终态请求（queued/starting/running/settling）合计最多 4 条，其中同时活跃最多 1 条；
   因而没有活跃局时最多 4 条排队，有 1 条活跃时最多另排 3 条，人机来源另限同一时刻仅 1 条未终态请求。
   四类来源合计共享 2 个全局 slot。
-  `contest_share_slots=1` 只在存在可运行的非赛事请求时限制赛事优先占用；它不新增第三个 slot，若非赛事请求
-  因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额以免物理容量空转。
-  基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过
-  后续到达的高优先级请求，不会永久饥饿。
+  `contest_share_slots=1` 只在存在可运行的 manual/human 前台请求时限制赛事优先占用；auto 不属于该份额，
+  不会让第二场赛事给自动排位让槽。若 manual/human 因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额
+  以免物理容量空转。manual/human 与 contest 在前台类内保持基础优先级并每 60 秒增加一次无上限 aging；
+  auto 是严格后台类，不参与跨来源 aging，也不会出现在前台请求的 `ahead_jobs`、`ahead_sandbox_units` 或 ETA 中。
 - rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。真正新建且没有任何旧业务表的库
   会在初始化事务内认证其规范空投影；任何已存在的 schema 仍必须走离线 rebuild，即使当时没有对局也不会被启动自动信任。
   容量可在容器清零后释放，
@@ -431,13 +431,53 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
   若仍为 pending/running 则抛出 invariant error、保留 `settling` 与容量，绝不把非终态 Match 当作已收尾。
   对 runtime interrupted 的 retryable 也按 source 决定：manual/human 为 1，auto/contest 为 0。
 
-### 自动公平生产者
+### 闲时公平生产者
 
-自动排位只是全局队列的一个 `source=auto` 生产者，不再拥有独立 admission、dispatcher 或物理 fence。
-它持续补足最多 6 条预告请求；没有每日上限、空闲等待、Bot 冷却、陈旧阈值或“每轮最多几场”。
-唯一可变项 `execution_control.auto_enabled` 由 `PUT /api/admin/auto-match` 严格 boolean 修改：关闭只停止
-自动生成和自动 claim，已有自动局自然结束；人工、人机、赛事完全不受影响，已排自动请求留在队列可见。
-再次开启立即续跑。`BZ_QA_INSTANCE=1` 的代码能力门仍禁止开启自动生产。
+自动排位只是全局队列的一个 `source=auto` 后台生产者，不再拥有独立 dispatcher 或物理容量池。
+唯一可变项 `execution_control.auto_enabled` 由 `PUT /api/admin/auto-match` 严格 boolean 修改，但开启只表示
+**允许在闲时运行**，不表示立即生成或 claim。管理员单纯关闭开关只停止新的 auto 生成/claim，
+已有自动局自然结束；manual/human/contest 完全不受开关影响。`BZ_QA_INSTANCE=1`
+的代码能力门仍禁止开启自动生产。
+
+闲时门禁与公平选择是两层不同职责。dispatcher 只有同时满足以下条件时才允许生成或 claim auto：
+
+1. manual/human/contest 没有 queued/starting/running/settling 请求；非 showcase 真实赛事不处于 `running/rest`，
+   且不处于已有待开 pairing、`starts_at` 进入未来 5 分钟保护窗的 `published`；远期或
+   `starts_at=NULL` 的 published 不会无期阻塞 auto；
+2. 全站两个 match slot 均为空，且上述前台空闲已经连续保持 **300 秒**；`next_eligible_at`
+   持久到数据库。进入真实前台/赛事 guard 时仅把 `gate_reason=busy` 写入一次，持续繁忙不产生每秒写放大；
+   guard 首次解除才开始完整 300 秒空闲窗，该边界跨 Store reopen/进程重启保持。有 auto 的恢复则推进 cooldown，
+   不把每次重启一概当作重置；
+3. 没有 active auto，距上一场 auto 收口也已经冷却 **300 秒**；
+4. 评分投影、Docker launch journal、冻结版本及其他既有安全门禁全部正常；auto claim 后仍能按追加式
+   资源 registry 的逐维最高值预留一整场前台资源。当前为 1 match slot + 2 sandbox units + 4000 毫核
+   + 4096 MiB；未来追加更高档位会自动提高预留。主机 ceiling 收紧后无法同时容纳 auto 与该预留时，
+   auto 保持等待。
+
+满足门禁后，producer 至多保留 **1 条** auto 候选，dispatcher 至多运行 **1 场** auto，始终给随后到达的
+前台请求保留至少 1 个 match slot。任一 manual/human/contest 前台请求成功入队/重试时（尤其人类对局入队），在同一 `BEGIN IMMEDIATE` 中取消 queued auto；
+真实赛事 guard 出现后由 dispatcher 下一次 reconcile 事务取消/yield，而 auto claim 自身在事务内重查 guard，因此不会穿透开局。在途 auto 通过专用非评分终态
+`auto_yield_foreground` 安全让路；只有对应 sandbox 完成精确清理后容量才释放，页面统一显示
+“自动排位为前台任务让路”。auto 收口后重新进入 300 秒冷却，不能在持续空闲时无间隔连跑。
+
+yield 与物理启动以 Docker create intent 事务确定唯一顺序。execution 所有者把 launch journal 从 `idle`
+写为 `creating` 时，必须在同一个 `BEGIN IMMEDIATE` 内先证明 host-wide journal 已收敛，再复核 job 仍处于当前
+`starting/running` attempt、attempt 序号一致且 `cancel_requested=0`。`settling` 仍占收尾容量，但不得再创建物理容器：
+
+1. 前台入队/yield 先提交时，create intent 看到取消标记并以 `execution_attempt_not_current` 拒绝；事务回滚后
+   journal 仍为 `idle`，物理 `docker create` 不得发生。Docker supervisor 必须保留这个确定性错误，BinaryRunner
+   将其转换为 `asyncio.CancelledError` 语义的 benign task cancellation，随后按普通 attempt 取消路径清理；不得误报
+   Docker 控制不确定，也不得把 dispatcher/队列置为 paused。
+2. launch intent 先提交时，token、确定性名称、instance/job/attempt/slot 与 host boot 已先持久化；后到的 yield
+   继续设置取消标记，但不能撤销或跳过 launch journal。runner 必须沿既有 token/name/label/journal exact cleanup
+   收敛，确认物理容器与 intent 均清零后才释放资源并让前台 claim。
+
+producer 与 claim 都必须在各自 `BEGIN IMMEDIATE` 内重新检查持久前台真相；外层 dispatcher 的空闲快照
+只用于节流和展示，不能成为并发 enqueue 穿透门禁。`auto_match_fair_state` 追加可幂等迁移列
+`dispatch_policy_version` / `next_eligible_at` / `gate_reason`，以持久化策略代际、最早可运行时间和门禁原因。首次
+`idle-only-v1` 对账会取消遗留 queued auto、让在途 auto 以专用 `auto_idle_policy_cutover`
+（“自动排位策略升级后收口”）收口，并从当时起重新计 300 秒空闲窗；
+审计 decision/job 行保留终态真值，不会无边界消化旧预告。
 
 公平选择由 SQLite 持久状态推进，不借用可被人工挑战影响的 `ratings.last_played_at` 或 `pair_stats`：
 
@@ -451,8 +491,12 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
 4. 决策永久记录策略版本、游标/lane、服务计数、pair 次数、Rating 差、座位债务、冻结版本、
    `job_public_id` 和每次 attempt 终态；通用 job 是生命周期真值，`auto_match_decisions` 是选择审计。
 
-公开 `GET /api/execution-queue` 返回 dispatcher、双容量向量和脱敏 active/queued；POST 挑战/人机返回
-HTTP 202 与 request public_id、真实 `ahead_jobs`、`ahead_sandbox_units`、容量及动态 ETA 区间。
+公开 `GET /api/execution-queue` 返回 dispatcher、双容量向量、脱敏 active/queued 与顶层 `auto_scheduler`：
+其 `mode=idle_only`，并公开 `state/reason/idle_required_seconds/cooldown_seconds/max_active/queued_target`
+及可选 `next_eligible_at`。`state` 为 `disabled/foreground_busy/contest_guard/cooldown/ready/yielding/running`，
+`reason` 是稳定机器码，前端必须本地化而不得直出；这使“已启用但等待前台/赛事/冷却”、“正在安全收口”与“正在闲时运行”可以区分。POST 挑战/人机返回
+HTTP 202 与 request public_id、真实前台 `ahead_jobs`、`ahead_sandbox_units`、容量及动态 ETA 区间；auto
+永不计入前台顺位或 ETA。
 `GET/DELETE /api/execution-requests/{public_id}` 用于查询/取消，interrupted 的人工/人机可 POST `retry`。
 所有投影都由白名单构造，不返回内部 DB id、version id、二进制路径、checksum、token、match_config 或
 Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间，而非承诺时间。
@@ -587,7 +631,8 @@ Glicko 传播，但不会写回带 FK 的投影表。直接命中的污染 Bot �
 ## 代码配置与只读诊断
 
 `bzplat/backend/runtime/config.py` 是运行参数的唯一真相源，集中声明决策超时、默认并发、
-全局执行容量/aging/用户上限、自动 bootstrap 目标、独立公开排名资格与赛事 scheduler 参数。
+全局执行容量/前台 aging/用户上限、自动排位 300 秒空闲与冷却门禁、单场单候选上限、bootstrap 目标、
+独立公开排名资格与赛事 scheduler 参数。
 阶段休息时间直接属于各代码模板。修改须走代码评审、测试、
 部署；旧 `platform_settings` 同名记录只作为历史数据保留，启动不 seed、不读取、不回写。
 

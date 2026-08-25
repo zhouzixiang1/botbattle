@@ -700,9 +700,20 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     const adminRosterRegion = page.getByRole('heading', { name: /报名选手/ })
       .locator('xpath=ancestor::*[@data-slot="data-region"][1]')
     await expect(adminRosterRegion).toContainText('管理员代报名会写入审计')
-    await expect(
-      adminRosterRegion.getByRole('button', { name: '批量指派', exact: true }),
-    ).toBeVisible()
+    const preciseRosterAssign = adminRosterRegion.getByRole('button', {
+      name: '选择参赛用户与 Bot',
+      exact: true,
+    })
+    const assignAllRoster = adminRosterRegion.getByRole('button', {
+      name: '指派全部可用用户',
+      exact: true,
+    })
+    await expect(preciseRosterAssign).toBeVisible()
+    await expect(preciseRosterAssign).toHaveAttribute('data-variant', 'default')
+    await expect(assignAllRoster).toBeVisible()
+    await expect(assignAllRoster).toHaveAttribute('data-variant', 'outline')
+    await expectTouchSafeWithoutRootOverflow(page, preciseRosterAssign)
+    await expectTouchSafeWithoutRootOverflow(page, assignAllRoster)
 
     await player.page.goto(`/#/contests/${identityContestId}`)
     await expect(player.page.getByRole('link', { name: /导出.*实名/ })).toHaveCount(0)

@@ -692,6 +692,8 @@ CREATE INDEX IF NOT EXISTS idx_execution_jobs_owner
     ON execution_jobs(owner_user_id,status,created_at);
 CREATE INDEX IF NOT EXISTS idx_execution_jobs_source
     ON execution_jobs(source,status,created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_source_terminal
+    ON execution_jobs(source,status,terminal_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_current_match
     ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_active_contest_pairing
@@ -755,6 +757,11 @@ CREATE TABLE IF NOT EXISTS auto_match_fair_state (
     next_lane           INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),
     revision            INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),
     bootstrap_version   INTEGER NOT NULL DEFAULT 0 CHECK (bootstrap_version>=0),
+    dispatch_policy_version TEXT NOT NULL DEFAULT '',
+    next_eligible_at    TEXT,
+    gate_reason         TEXT NOT NULL DEFAULT 'idle_grace' CHECK (
+        gate_reason IN ('idle_grace','cooldown','busy')
+    ),
     updated_at          TEXT    NOT NULL
 );
 INSERT OR IGNORE INTO auto_match_fair_state(
@@ -1438,9 +1445,13 @@ PUBLIC_MATCH_COMPLETED_REASONS = frozenset(
 
 # 公开 match ``error`` 终局唯一允许的稳定原因码。任意内部异常文本、旧自定义
 # 管理员 reason 或未知值在公共边界一律归一为 platform_error；诊断详情只进日志。
+AUTO_IDLE_POLICY_CUTOVER_REASON = "auto_idle_policy_cutover"
+AUTO_YIELD_FOREGROUND_REASON = "auto_yield_foreground"
 PUBLIC_MATCH_ERROR_REASONS = frozenset(
     {
         "admin_aborted",
+        AUTO_IDLE_POLICY_CUTOVER_REASON,
+        AUTO_YIELD_FOREGROUND_REASON,
         "bot_crashed",
         "contest_bot_unavailable",
         "contest_both_bots_unavailable",
@@ -1461,7 +1472,7 @@ PUBLIC_MATCH_ERROR_FALLBACK = "platform_error"
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
-TYPE_LADDER = "ladder"  # 持续自动排位维护天梯榜（系统发起，无 owner）
+TYPE_LADDER = "ladder"  # 闲时自动排位维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
 
 # 社交目标类型。comments / likes 是多态引用，SQLite 无法为 target_id 声明

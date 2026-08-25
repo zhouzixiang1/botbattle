@@ -303,18 +303,6 @@ def test_owner_delete_atomically_converges_durable_state_and_is_idempotent(
     )
     enable_execution_queue(store)
 
-    decision_id = _decision(store, target, opponent, "delete convergence")
-    queued = store.executions.enqueue(
-        source=EXECUTION_SOURCE_AUTO,
-        owner_user_id=None,
-        game_id="holdem",
-        match_type=TYPE_LADDER,
-        bot_a_id=target["bot_id"],
-        bot_b_id=opponent["bot_id"],
-        bot_a_version_id=target["version_id"],
-        bot_b_version_id=opponent["version_id"],
-        auto_decision_id=decision_id,
-    )
     retry = _enqueue(store, EXECUTION_SOURCE_MANUAL, target, opponent)
     with store._tx() as conn:
         conn.execute(
@@ -327,6 +315,21 @@ def test_owner_delete_atomically_converges_durable_state_and_is_idempotent(
                 retry["public_id"],
             ),
         )
+    # Keep the auto row as the deletion fixture by inserting it after the
+    # foreground request has already become terminal. Foreground enqueue now
+    # intentionally cancels any older queued auto in the same transaction.
+    decision_id = _decision(store, target, opponent, "delete convergence")
+    queued = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=target["bot_id"],
+        bot_b_id=opponent["bot_id"],
+        bot_a_version_id=target["version_id"],
+        bot_b_version_id=opponent["version_id"],
+        auto_decision_id=decision_id,
+    )
 
     agent = store.create_local_ai_agent(
         owner_id=target["owner_id"],
@@ -529,6 +532,15 @@ def test_owner_delete_busy_keeps_every_convergence_table_unchanged(tmp_path):
 
     active = _enqueue(store, EXECUTION_SOURCE_HUMAN, target, opponent)
     _force_active_job_state(store, str(active["public_id"]), "starting")
+    retry = _enqueue(store, EXECUTION_SOURCE_MANUAL, target, opponent)
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "terminal_reason='transient',last_error='transient',"
+            "terminal_at='2026-08-22T00:00:00',"
+            "next_attempt_at='2099-01-01T00:00:00' WHERE public_id=?",
+            (str(retry["public_id"]),),
+        )
     decision_id = _decision(store, target, opponent, "busy zero write")
     queued = store.executions.enqueue(
         source=EXECUTION_SOURCE_AUTO,
@@ -541,15 +553,6 @@ def test_owner_delete_busy_keeps_every_convergence_table_unchanged(tmp_path):
         bot_b_version_id=opponent["version_id"],
         auto_decision_id=decision_id,
     )
-    retry = _enqueue(store, EXECUTION_SOURCE_MANUAL, target, opponent)
-    with store._tx() as conn:
-        conn.execute(
-            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
-            "terminal_reason='transient',last_error='transient',"
-            "terminal_at='2026-08-22T00:00:00',"
-            "next_attempt_at='2099-01-01T00:00:00' WHERE public_id=?",
-            (str(retry["public_id"]),),
-        )
     agent = store.create_local_ai_agent(
         owner_id=target["owner_id"],
         bot_id=target["bot_id"],

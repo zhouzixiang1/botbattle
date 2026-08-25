@@ -40,6 +40,8 @@ export interface ConfirmOptions {
   danger?: boolean
   /** 两个操作按钮的附加样式；页面可按触控场景扩大命中区。 */
   buttonClassName?: string
+  /** 是否允许点击遮罩取消（默认 true）；Escape 与取消按钮始终保留。 */
+  dismissOnOutside?: boolean
 }
 
 type Resolver = (ok: boolean) => void
@@ -67,7 +69,7 @@ export function useConfirm(): [
     resolver.current = null
   }, [])
 
-  // 遮罩点击 / Esc / 关闭按钮 → 视为取消
+  // 默认由遮罩点击 / Esc / 关闭按钮取消；个别敏感确认可只禁止遮罩关闭。
   const onOpenChange = useCallback(
     (next: boolean) => {
       if (!next) settle(false)
@@ -84,11 +86,18 @@ export function useConfirm(): [
     cancelText = '取消',
     danger = false,
     buttonClassName,
+    dismissOnOutside = true,
   } = opts
 
   const dialog = (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent
+        showCloseButton={false}
+        className="max-w-md"
+        onPointerDownOutside={(event) => {
+          if (!dismissOnOutside) event.preventDefault()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {desc != null && <DialogDescription>{desc}</DialogDescription>}
