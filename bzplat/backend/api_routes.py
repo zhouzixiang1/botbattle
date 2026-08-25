@@ -3574,6 +3574,17 @@ async def organizer_assign_entries(
             ),
         )
         raise HTTPException(403, ContestRealNameRosterForbidden.MESSAGE)
+    if body.model_extra:
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail="mode=bulk; reason=invalid_fields",
+            )
+        raise HTTPException(400, "请求包含不支持的字段")
     from bzplat.backend.games import normalize_game_id
     try:
         cgid = normalize_game_id(c.get("game_id"))
@@ -4300,12 +4311,17 @@ def _set_admin_private_headers(response: Response) -> None:
 def admin_users(
     request: Request, response: Response,
     q: str | None = None, real_name: bool | None = None,
+    active: bool | None = None,
     page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
     _set_admin_private_headers(response)
     result = _store(request).list_users(
-        q=q, real_name=real_name, page=page, per_page=per_page,
+        q=q,
+        real_name=real_name,
+        active_only=bool(active) if active is not None else False,
+        page=page,
+        per_page=per_page,
     )
     if isinstance(result, dict):
         return {"users": [_admin_user_for_api(u) for u in result["items"]],
@@ -4467,21 +4483,59 @@ async def admin_patch_match(
 
 # ── admin: bots ───────────────────────────────────────────────
 
+def _current_runnable_bot_ids(
+    store,
+    *,
+    owner_id: int | None = None,
+    active_only: bool = False,
+    game_id: str | None = None,
+) -> set[int]:
+    """Return the canonical current executable Bot set for an API selector."""
+    rows = store.list_bots(
+        owner_id=owner_id,
+        active_only=active_only,
+        include_owner_deleted=False,
+        runnable_only=True,
+        game_id=game_id,
+    )
+    return {int(row["id"]) for row in rows}
+
+
 @router.get("/api/admin/bots")
 def admin_bots(
     request: Request,
+    response: Response,
     active: bool | None = None,
     q: str | None = None,
     game_id: str | None = None,
+    owner_id: int | None = None,
+    runnable: bool | None = None,
     page: int | None = None,
     per_page: int = 50,
     _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     store = _store(request)
+    active_only = bool(active) if active is not None else False
     rows = store.list_bots(
-        active_only=bool(active) if active is not None else False,
+        owner_id=owner_id,
+        active_only=active_only,
         game_id=game_id,
     )
+    runnable_ids: set[int] | None = None
+    if runnable is not None:
+        # Reuse Store's executable-target predicate (including current
+        # protocol/version) and apply the filter before search/pagination.
+        runnable_ids = _current_runnable_bot_ids(
+            store,
+            owner_id=owner_id,
+            active_only=active_only,
+            game_id=game_id,
+        )
+        rows = [
+            bot for bot in rows
+            if (int(bot["id"]) in runnable_ids) is runnable
+        ]
     if q:
         ql = q.lower()
         rows = [b for b in rows if ql in (b.get("name") or "").lower()
@@ -4496,8 +4550,15 @@ def admin_bots(
     enriched = []
     for row in rows:
         owner = store.get_user(row.get("owner_id")) if row.get("owner_id") else None
+        projected = _with_bot_runnable(row, include_owner_deleted_at=True)
+        if runnable_ids is not None:
+            # The legacy projection only checks binary metadata.  A filtered
+            # response must reflect the stricter Store selector as well.
+            projected["runnable"] = int(row["id"]) in runnable_ids
+            if not projected["runnable"] and projected["unsupported_reason"] is None:
+                projected["unsupported_reason"] = "当前 Bot 版本不可运行"
         enriched.append({
-            **_with_bot_runnable(row, include_owner_deleted_at=True),
+            **projected,
             "owner_name": owner.get("username") if owner else None,
             "owner_display": owner.get("display_name") if owner else None,
         })
@@ -4778,13 +4839,18 @@ def admin_contest_entries(
     contest_id: int,
     request: Request,
     response: Response,
+    identity: bool | None = None,
     _admin=Depends(require_admin),
 ):
     store = _store(request)
     contest = store.get_contest(contest_id)
     if not contest:
         raise HTTPException(404, "赛事不存在")
-    include_identity = bool(int(contest.get("require_real_name") or 0))
+    _set_admin_private_headers(response)
+    include_identity = (
+        bool(int(contest.get("require_real_name") or 0))
+        and identity is not False
+    )
     if include_identity:
         response.headers.update(_CONTEST_IDENTITY_PRIVATE_HEADERS)
     return {
@@ -4802,7 +4868,12 @@ class AdminAssignEntries(BaseModel):
     - 便捷全选：assign_all=true + game_id（自动找该游戏所有 active+public 的 Bot，
       每用户取其一个 Bot 指派），可选 name_prefix 过滤 Bot/用户名前缀（如 "load_"）。
     """
-    entries: list[dict] | None = None  # [{user_id, bot_id}, ...]
+    # Unknown top-level fields are captured so authenticated handlers can write
+    # the same failure audit as other malformed admin roster requests.  Every
+    # route below still rejects them; no extra value reaches business logic.
+    model_config = {"extra": "allow"}
+
+    entries: list[dict[str, Any]] | None = None  # [{user_id, bot_id}, ...]
     assign_all: bool = False
     game_id: str | None = None
     name_prefix: str | None = None
@@ -4830,6 +4901,38 @@ async def admin_assign_entries(
         )
         raise HTTPException(404, "赛事不存在")
     requires_identity = bool(int(c.get("require_real_name") or 0))
+    extra_fields = sorted((body.model_extra or {}).keys())
+    if extra_fields:
+        audit_log(
+            request,
+            "admin_assign_entries",
+            result="fail",
+            user=admin.get("username"),
+            target=contest_id,
+            detail=(
+                f"real_name_override={int(requires_identity)}; "
+                f"reason=invalid_fields; count={len(extra_fields)}"
+            ),
+        )
+        raise HTTPException(400, "请求包含不支持的字段")
+    invalid_mode = (
+        body.assign_all and body.entries is not None
+    ) or (
+        not body.assign_all and not body.entries
+    )
+    if invalid_mode:
+        audit_log(
+            request,
+            "admin_assign_entries",
+            result="fail",
+            user=admin.get("username"),
+            target=contest_id,
+            detail=(
+                f"real_name_override={int(requires_identity)}; "
+                "reason=invalid_mode"
+            ),
+        )
+        raise HTTPException(400, "entries 精确指派与 assign_all 必须且只能选择一种")
     from bzplat.backend.games import normalize_game_id
     try:
         cgid = normalize_game_id(c.get("game_id"))
@@ -4898,8 +5001,12 @@ async def admin_assign_entries(
         target = []
         try:
             for e in body.entries or []:
-                uid = int(e.get("user_id"))
-                bid = int(e.get("bot_id"))
+                if set(e) != {"user_id", "bot_id"}:
+                    raise TypeError("entry fields must be exact")
+                uid = e["user_id"]
+                bid = e["bot_id"]
+                if type(uid) is not int or type(bid) is not int or uid <= 0 or bid <= 0:
+                    raise TypeError("entry ids must be positive integers")
                 target.append((uid, bid))
         except (TypeError, ValueError):
             audit_log(
@@ -4914,6 +5021,54 @@ async def admin_assign_entries(
                 ),
             )
             raise HTTPException(400, "user_id / bot_id 必须是整数")
+
+    requested_count = len(target)
+
+    # Disabled accounts cannot be delegated into a new live roster.  Keep a
+    # missing user for the Manager's established validation message, but drop
+    # an explicitly disabled one in both precise and assign-all modes.
+    pre_skipped: list[str] = []
+    active_user_targets: list[tuple[int, int]] = []
+    for uid, bid in target:
+        target_user = store.get_user(uid)
+        if target_user is not None and not int(target_user.get("is_active") or 0):
+            pre_skipped.append(f"user {uid} 已停用，跳过")
+            continue
+        active_user_targets.append((uid, bid))
+    target = active_user_targets
+
+    # The Manager validates existence, identity, owner and game.  Complete the
+    # API contract with Store's canonical current executable predicate so an
+    # active but stale/retired protocol version cannot enter a roster through
+    # the explicit admin path.
+    if not body.assign_all and target:
+        runnable_ids = _current_runnable_bot_ids(
+            store,
+            active_only=True,
+            game_id=cgid,
+        )
+        runnable_targets: list[tuple[int, int]] = []
+        for uid, bid in target:
+            bot = store.get_bot(bid)
+            target_user = store.get_user(uid)
+            identity_incomplete = requires_identity and (
+                not target_user
+                or not all(
+                    (target_user.get(field) or "").strip()
+                    for field in ("real_name", "phone", "school", "student_id")
+                )
+            )
+            if (
+                bot
+                and int(bot.get("owner_id") or 0) == uid
+                and bot.get("game_id") == cgid
+                and not identity_incomplete
+                and bid not in runnable_ids
+            ):
+                pre_skipped.append(f"bot {bid} 当前不可运行，跳过")
+                continue
+            runnable_targets.append((uid, bid))
+        target = runnable_targets
 
     try:
         result = await _contests(request).assign_roster_entries(
@@ -4935,13 +5090,15 @@ async def admin_assign_entries(
             target=contest_id,
             detail=(
                 f"real_name_override={int(failure_requires_identity)}; "
-                f"requested={len(target)}; reason=validation_failed"
+                f"requested={requested_count}; reason=validation_failed"
             ),
         )
         raise _contest_write_http_error(exc) from exc
     actual_identity_override = bool(
         result.pop("_identity_required_at_commit", False)
     )
+    if pre_skipped:
+        result["skipped"] = [*pre_skipped, *result["skipped"]]
     audit_log(
         request,
         "admin_assign_entries",
@@ -4949,7 +5106,7 @@ async def admin_assign_entries(
         user=admin.get("username"),
         target=contest_id,
         detail=(
-            f"real_name_override={int(actual_identity_override)}; requested={len(target)}; "
+            f"real_name_override={int(actual_identity_override)}; requested={requested_count}; "
             f"added={result['added']}; skipped={len(result['skipped'])}"
         ),
     )

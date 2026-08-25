@@ -122,6 +122,12 @@ class ExecutionInvariantError(RuntimeError):
     """Persisted execution state violates a fail-closed invariant."""
 
 
+class ExecutionAttemptNotCurrent(ExecutionInvariantError):
+    """A claimed attempt lost ownership before a physical launch boundary."""
+
+    code = "execution_attempt_not_current"
+
+
 class DockerLaunchInvariantError(ExecutionInvariantError):
     """The singleton Docker launch journal has not physically converged."""
 
@@ -628,10 +634,31 @@ class ExecutionRepository:
                 raise DockerLaunchInvariantError(
                     "dispatcher 未运行，禁止创建 Docker 容器"
                 )
+            # The singleton journal is the host-wide physical fence.  Preserve
+            # that uncertainty even when this particular execution has since
+            # yielded; a benign stale-attempt result must never mask an
+            # unclosed create intent owned by another launch.
             if launch["state"] != "idle":
                 raise DockerLaunchInvariantError(
                     "前一 Docker launch 尚未收敛"
                 )
+            if owner_kind == "execution":
+                job = conn.execute(
+                    "SELECT status,attempt_count,cancel_requested "
+                    "FROM execution_jobs WHERE public_id=?",
+                    (str(job_public_id),),
+                ).fetchone()
+                if (
+                    job is None
+                    # Settling is durable-active for capacity/finalization but
+                    # no longer owns a physical launch boundary.
+                    or job["status"] not in {EXECUTION_STARTING, EXECUTION_RUNNING}
+                    or int(job["attempt_count"] or 0) != int(attempt_no)
+                    or int(job["cancel_requested"] or 0) != 0
+                ):
+                    raise ExecutionAttemptNotCurrent(
+                        "execution attempt is no longer current"
+                    )
             conn.execute(
                 "UPDATE docker_launch_journal SET state='creating',"
                 "launch_token=?,instance_key=?,owner_kind=?,job_public_id=?,"
@@ -2644,15 +2671,19 @@ class ExecutionRepository:
     def assert_active_attempt(self, public_id: str, attempt_no: int) -> None:
         with self.store._tx() as conn:
             row = conn.execute(
-                "SELECT status,attempt_count FROM execution_jobs WHERE public_id=?",
+                "SELECT status,attempt_count,cancel_requested "
+                "FROM execution_jobs WHERE public_id=?",
                 (public_id,),
             ).fetchone()
             if (
                 row is None
                 or row["status"] not in EXECUTION_ACTIVE_STATES
                 or int(row["attempt_count"] or 0) != int(attempt_no)
+                or int(row["cancel_requested"] or 0) != 0
             ):
-                raise ExecutionInvariantError("execution attempt is no longer current")
+                raise ExecutionAttemptNotCurrent(
+                    "execution attempt is no longer current"
+                )
 
     def mark_cleanup_pending(self, public_id: str, reason: str) -> None:
         manual_pause = False

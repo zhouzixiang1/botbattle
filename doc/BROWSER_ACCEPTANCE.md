@@ -84,6 +84,7 @@
 | `qa-regression.spec.ts` | 三视口公开页与受保护页访客门禁、U-02～U-04 的核心链路、私有 debug 折叠/纯文本/长文本移动端/无权限零请求、实时通信、协议/二进制/版本/异常终态与权限回归 |
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
 | `contest-export-identity.spec.ts` | O-03 与 A-02 的赛事导出/名册权限子集：实名参赛者经真实 UI `/register` 本人报名，组织者详情/v2 的 `registration_profile`、`identity_captured_at` 及改资料后快照稳定；普通组织者 UI 与伪造单条/批量 POST 门禁，admin 在独立赛事的受审计例外；公开成绩与组织者 v2 真实下载、29 列及稳定 ID/展示名/实名快照、公式注入与文本数字保护、非实名/公开导出零 PII；320px 零根溢出、44px 触控、键盘下载，同一断言由 Chromium/Firefox/WebKit 执行并监控 Console/Network |
+| `admin-contest-roster-assign.spec.ts` | A-02 的精确名册控制：Admin 赛事页与赛事详情均以“选择参赛用户与 Bot”为主操作，服务端 active 用户搜索与 owner/game/active/runnable Bot 过滤、暂存/换 Bot/移除、显式 entries payload、partial skipped 原位修正，以及需确认的次要全员操作；实名 organizer 仍无代报名入口。390px 零根溢出、44px 操作、键盘开关 Dialog 与 Console/Network/50380 隔离由三浏览器执行 |
 | `contest-scoring-clarity.spec.ts` | 瑞士轮 3/1/0、真实 W/D/L 与轮空分列、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下两张宽表的具名横滚区域可聚焦且页面零根溢出 |
 | `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、闲时排位 strict boolean 开关及顶层 `auto_scheduler` 状态、前台优先/单场单候选文案、全来源队列与长文本滚动 |
 | `leaderboard-density.spec.ts` | 四角色共同读取排行榜且逐 context 核对匿名或 username/role；1440/1024/768/390、无 SummaryStrip、长文本、公开排名/计分样本分区、全来源双槽上限队列、上下滚动、滚动中可操作的 Radix tabs、慢响应切游戏清旧列表；普通表头无 page-sticky 属性，前三名与表头零交叠且中心命中自身，移动首项可见、无根横溢出与 Console/Network |

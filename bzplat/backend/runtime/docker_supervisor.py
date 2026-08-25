@@ -381,6 +381,12 @@ class DockerSupervisor:
                 host_boot_id=boot_id,
             )
         except Exception as exc:
+            # A foreground enqueue may have synchronously marked an automatic
+            # attempt for yield after claim but before Docker create.  The
+            # journal performs the authoritative check under BEGIN IMMEDIATE;
+            # this is a definite rejection, not uncertain Docker control.
+            if getattr(exc, "code", "") == "execution_attempt_not_current":
+                raise
             logger.exception(
                 "Docker launch intent persistence failed owner=%s job=%s attempt=%s slot=%s",
                 owner_kind,

@@ -42,6 +42,7 @@ from bzplat.backend.runtime.docker_supervisor import (
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotSession,
+    ExecutionScope,
     SandboxControlUncertain,
 )
 from bzplat.backend.runtime.limits import HostResourceBudget, PLATFORM_LOW_PROFILE
@@ -57,6 +58,8 @@ from bzplat.backend.runtime.config import (
 )
 from bzplat.backend.store import Store, rating_projection_digests
 from bzplat.backend.store.execution import (
+    DockerLaunchInvariantError,
+    ExecutionAttemptNotCurrent,
     ExecutionInvariantError,
     ExecutionMaintenanceConflict,
     ExecutionQueueClosed,
@@ -69,6 +72,7 @@ from bzplat.backend.store.schema import (
     EXECUTION_SOURCE_CONTEST,
     EXECUTION_SOURCE_HUMAN,
     EXECUTION_SOURCE_MANUAL,
+    EXECUTION_SETTLING,
     TYPE_CHALLENGE,
     TYPE_CONTEST,
     TYPE_HUMAN,
@@ -6107,6 +6111,192 @@ def test_docker_create_persists_intent_before_rpc_and_marks_created(
     launch = queue_store.executions.docker_launch()
     assert launch["state"] == "created"
     assert launch["launch_token"] == token
+
+
+def test_foreground_yield_committed_before_launch_blocks_docker_rpc(
+    queue_store, tmp_path, monkeypatch
+):
+    import bzplat.backend.runtime.docker_supervisor as supervisor_mod
+
+    store = queue_store
+    bots = [_bot(store, f"launch-yield-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    foreground = _enqueue_pair(store, (bots[2], bots[3]))
+    assert store.executions.get(foreground["public_id"])["status"] == "queued"
+    with pytest.raises(ExecutionAttemptNotCurrent):
+        store.executions.assert_active_attempt(
+            automatic["public_id"], int(claimed["attempt_count"])
+        )
+
+    supervisor = _journal_supervisor(store, tmp_path)
+    identity = DockerExecutionIdentity(
+        "journal-test-instance",
+        automatic["public_id"],
+        int(claimed["attempt_count"]),
+    )
+    binary = tmp_path / "yield-before-create.elf"
+    binary.write_bytes(b"test")
+    monkeypatch.setattr(supervisor_mod, "host_boot_id", lambda: "boot-yield")
+    docker_rpc_called = False
+
+    def forbidden_rpc(*_args, **_kwargs):
+        nonlocal docker_rpc_called
+        docker_rpc_called = True
+        raise AssertionError("cancelled auto attempt must not reach Docker RPC")
+
+    monkeypatch.setattr(supervisor, "_run", forbidden_rpc)
+    with pytest.raises(ExecutionAttemptNotCurrent):
+        supervisor.create(
+            identity=identity,
+            slot=0,
+            launch_token="yield-before-create-token",
+            owner_kind="execution",
+            binary_path=binary,
+            image="test-image",
+            profile=PLATFORM_LOW_PROFILE,
+        )
+
+    assert docker_rpc_called is False
+    assert store.executions.docker_launch()["state"] == "idle"
+
+
+def test_binary_runner_treats_launch_rejection_as_benign_task_cancellation(tmp_path):
+    class RejectingSupervisor:
+        instance = "qa-launch-rejected"
+
+        @asynccontextmanager
+        async def launch_guard(self):
+            yield
+
+        def create(self, **_kwargs):
+            raise ExecutionAttemptNotCurrent(
+                "execution attempt is no longer current"
+            )
+
+    binary = tmp_path / "launch-rejected.elf"
+    binary.write_bytes(b"test")
+    runner = object.__new__(BinaryRunner)
+    runner.supervisor = RejectingSupervisor()
+    runner._linux_image = "test-image"
+    scope = ExecutionScope(
+        instance="qa-launch-rejected",
+        job_public_id="req-launch-rejected",
+        attempt_no=1,
+        supervisor=runner.supervisor,
+        attempt_check=lambda: None,
+    )
+    session = BotSession(
+        session_id="launch-rejected",
+        info=SimpleNamespace(),
+        binary_path=binary,
+        execution_scope=scope,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(runner._start_docker(session))
+
+
+def test_launch_intent_committed_before_foreground_is_then_yielded(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"launch-first-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    store.executions.begin_docker_launch(
+        launch_token="launch-first-token",
+        instance_key="qa-launch-first",
+        owner_kind="execution",
+        job_public_id=automatic["public_id"],
+        attempt_no=int(claimed["attempt_count"]),
+        slot=0,
+        container_name="bz-launch-first",
+        host_boot_id="boot-launch-first",
+    )
+
+    foreground = _enqueue_pair(store, (bots[2], bots[3]))
+
+    assert store.executions.get(foreground["public_id"])["status"] == "queued"
+    yielded = store.executions.get(automatic["public_id"])
+    assert yielded["cancel_requested"] == 1
+    assert yielded["terminal_reason"] == AUTO_YIELD_FOREGROUND_REASON
+    assert store.executions.docker_launch()["state"] == "creating"
+
+
+def test_docker_launch_rejects_settling_attempt_and_preserves_nonidle_fence(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"launch-fence-{index}") for index in range(4)]
+    automatic = _enqueue_pair(
+        store,
+        (bots[0], bots[1]),
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    attempt_no = int(claimed["attempt_count"])
+
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET status=?,settling_at=datetime('now'),"
+            "cleanup_state='pending' WHERE public_id=?",
+            (EXECUTION_SETTLING, automatic["public_id"]),
+        )
+    with pytest.raises(ExecutionAttemptNotCurrent):
+        store.executions.begin_docker_launch(
+            launch_token="settling-rejected-token",
+            instance_key="qa-launch-fence",
+            owner_kind="execution",
+            job_public_id=automatic["public_id"],
+            attempt_no=attempt_no,
+            slot=0,
+            container_name="bz-settling-rejected",
+            host_boot_id="boot-launch-fence",
+        )
+    assert store.executions.docker_launch()["state"] == "idle"
+
+    # Establish an unrelated physical create intent, then cancel this job.
+    store.executions.begin_docker_launch(
+        launch_token="preflight-fence-token",
+        instance_key="qa-launch-fence",
+        owner_kind="preflight",
+        job_public_id="preflight-fence",
+        attempt_no=1,
+        slot=0,
+        container_name="bz-preflight-fence",
+        host_boot_id="boot-launch-fence",
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET cancel_requested=1 WHERE public_id=?",
+            (automatic["public_id"],),
+        )
+    with pytest.raises(DockerLaunchInvariantError):
+        store.executions.begin_docker_launch(
+            launch_token="cancelled-behind-fence-token",
+            instance_key="qa-launch-fence",
+            owner_kind="execution",
+            job_public_id=automatic["public_id"],
+            attempt_no=attempt_no,
+            slot=0,
+            container_name="bz-cancelled-behind-fence",
+            host_boot_id="boot-launch-fence",
+        )
+    launch = store.executions.docker_launch()
+    assert launch["state"] == "creating"
+    assert launch["launch_token"] == "preflight-fence-token"
 
 
 @pytest.mark.parametrize("outcome", ["nonzero", "exception"])

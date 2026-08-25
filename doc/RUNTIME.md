@@ -455,10 +455,22 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
    auto 保持等待。
 
 满足门禁后，producer 至多保留 **1 条** auto 候选，dispatcher 至多运行 **1 场** auto，始终给随后到达的
-前台请求保留至少 1 个 match slot。任一前台请求成功入队/重试时，在同一 `BEGIN IMMEDIATE` 中取消 queued auto；
+前台请求保留至少 1 个 match slot。任一 manual/human/contest 前台请求成功入队/重试时（尤其人类对局入队），在同一 `BEGIN IMMEDIATE` 中取消 queued auto；
 真实赛事 guard 出现后由 dispatcher 下一次 reconcile 事务取消/yield，而 auto claim 自身在事务内重查 guard，因此不会穿透开局。在途 auto 通过专用非评分终态
 `auto_yield_foreground` 安全让路；只有对应 sandbox 完成精确清理后容量才释放，页面统一显示
 “自动排位为前台任务让路”。auto 收口后重新进入 300 秒冷却，不能在持续空闲时无间隔连跑。
+
+yield 与物理启动以 Docker create intent 事务确定唯一顺序。execution 所有者把 launch journal 从 `idle`
+写为 `creating` 时，必须在同一个 `BEGIN IMMEDIATE` 内先证明 host-wide journal 已收敛，再复核 job 仍处于当前
+`starting/running` attempt、attempt 序号一致且 `cancel_requested=0`。`settling` 仍占收尾容量，但不得再创建物理容器：
+
+1. 前台入队/yield 先提交时，create intent 看到取消标记并以 `execution_attempt_not_current` 拒绝；事务回滚后
+   journal 仍为 `idle`，物理 `docker create` 不得发生。Docker supervisor 必须保留这个确定性错误，BinaryRunner
+   将其转换为 `asyncio.CancelledError` 语义的 benign task cancellation，随后按普通 attempt 取消路径清理；不得误报
+   Docker 控制不确定，也不得把 dispatcher/队列置为 paused。
+2. launch intent 先提交时，token、确定性名称、instance/job/attempt/slot 与 host boot 已先持久化；后到的 yield
+   继续设置取消标记，但不能撤销或跳过 launch journal。runner 必须沿既有 token/name/label/journal exact cleanup
+   收敛，确认物理容器与 intent 均清零后才释放资源并让前台 claim。
 
 producer 与 claim 都必须在各自 `BEGIN IMMEDIATE` 内重新检查持久前台真相；外层 dispatcher 的空闲快照
 只用于节流和展示，不能成为并发 enqueue 穿透门禁。`auto_match_fair_state` 追加可幂等迁移列

@@ -457,6 +457,18 @@ def _delete_social_target(
     )
 
 
+def _require_active_contest_user_tx(
+    conn: sqlite3.Connection, user_id: int
+) -> None:
+    user = conn.execute(
+        "SELECT is_active FROM users WHERE id=?", (int(user_id),)
+    ).fetchone()
+    if user is None:
+        raise ValueError(f"user {int(user_id)} 不存在")
+    if not int(user["is_active"] or 0):
+        raise ValueError(f"user {int(user_id)} 已停用")
+
+
 def _require_live_contest_bot_tx(
     conn: sqlite3.Connection, bot_id: int
 ) -> None:
@@ -467,6 +479,50 @@ def _require_live_contest_bot_tx(
     ).fetchone()
     if live is None:
         raise ValueError("Bot 当前已停用或删除，不能加入赛事")
+
+
+def _require_current_runnable_contest_bot_tx(
+    conn: sqlite3.Connection, bot_id: int
+) -> None:
+    """Validate the current executable Bot mirror at the roster write point."""
+    _require_live_contest_bot_tx(conn, bot_id)
+    bot = conn.execute(
+        "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+    ).fetchone()
+    if bot is None:  # pragma: no cover - guarded by the same transaction above
+        raise RuntimeError("Bot live guard lost its row")
+    contract = _active_game_contract_tx(conn, str(bot["game_id"]))
+    if (
+        str(bot["binary_path"] or "").strip() == ""
+        or str(bot["format"] or "") != SUPPORTED_BINARY_FORMAT
+        or str(bot["os"] or "") != SUPPORTED_BINARY_OS
+        or str(bot["arch"] or "") != SUPPORTED_BINARY_ARCH
+        or str(bot["protocol_version"] or "") != contract["protocol_version"]
+    ):
+        raise ValueError("Bot 当前不可运行，不能加入赛事")
+    current_version = int(bot["current_version"] or 0)
+    if current_version == 0:
+        if conn.execute(
+            "SELECT 1 FROM bot_versions WHERE bot_id=? LIMIT 1",
+            (int(bot_id),),
+        ).fetchone() is not None:
+            raise ValueError("Bot 当前不可运行，不能加入赛事")
+        return
+    version = conn.execute(
+        "SELECT * FROM bot_versions WHERE bot_id=? AND version=?",
+        (int(bot_id), current_version),
+    ).fetchone()
+    if (
+        version is None
+        or version["retired_at"] is not None
+        or str(version["binary_path"] or "") != str(bot["binary_path"] or "")
+        or str(version["runtime_mode"] or "") != str(bot["runtime_mode"] or "")
+        or str(version["protocol_version"] or "") != contract["protocol_version"]
+        or str(version["format"] or "") != SUPPORTED_BINARY_FORMAT
+        or str(version["os"] or "") != SUPPORTED_BINARY_OS
+        or str(version["arch"] or "") != SUPPORTED_BINARY_ARCH
+    ):
+        raise ValueError("Bot 当前不可运行，不能加入赛事")
 
 
 def _require_contest_without_owner_deleted_bot_tx(
@@ -4476,9 +4532,12 @@ class Store:
             if active_only:
                 sql += " AND is_active=1"
             if q:
-                sql += " AND (LOWER(username) LIKE ? OR LOWER(email) LIKE ?)"
+                sql += (
+                    " AND (LOWER(username) LIKE ? OR LOWER(email) LIKE ? "
+                    "OR LOWER(display_name) LIKE ?)"
+                )
                 like = f"%{q.strip().lower()}%"
-                params.extend((like, like))
+                params.extend((like, like, like))
             if real_name is not None:
                 complete = (
                     "TRIM(COALESCE(real_name,''))<>'' AND "
@@ -6746,7 +6805,11 @@ class Store:
             if not include_owner_deleted:
                 sql += " AND owner_deleted_at IS NULL"
             if runnable_only:
-                sql += " AND format=? AND os=? AND arch=?"
+                sql += (
+                    " AND is_active=1 AND owner_deleted_at IS NULL "
+                    "AND TRIM(binary_path)<>'' "
+                    "AND format=? AND os=? AND arch=?"
+                )
                 params.extend((
                     SUPPORTED_BINARY_FORMAT,
                     SUPPORTED_BINARY_OS,
@@ -6755,11 +6818,21 @@ class Store:
                 sql += (
                     " AND protocol_version=(SELECT state.protocol_version "
                     "FROM rating_pool_state state WHERE state.game_id=bots.game_id) "
-                    "AND (current_version=0 OR EXISTS(SELECT 1 FROM bot_versions v "
+                    "AND ((current_version=0 AND NOT EXISTS(SELECT 1 "
+                    "FROM bot_versions any_version WHERE any_version.bot_id=bots.id)) "
+                    "OR EXISTS(SELECT 1 FROM bot_versions v "
                     "WHERE v.bot_id=bots.id AND v.version=bots.current_version "
-                    "AND v.retired_at IS NULL "
-                    "AND v.protocol_version=bots.protocol_version))"
+                    "AND v.retired_at IS NULL AND TRIM(v.binary_path)<>'' "
+                    "AND v.binary_path=bots.binary_path "
+                    "AND v.runtime_mode=bots.runtime_mode "
+                    "AND v.protocol_version=bots.protocol_version "
+                    "AND v.format=? AND v.os=? AND v.arch=?))"
                 )
+                params.extend((
+                    SUPPORTED_BINARY_FORMAT,
+                    SUPPORTED_BINARY_OS,
+                    SUPPORTED_BINARY_ARCH,
+                ))
             if not include_builtin:
                 sql += " AND is_builtin=0"
             if game_id:
@@ -12069,7 +12142,8 @@ class Store:
             ).fetchone()
             if not contest or contest["status"] != CONTEST_OPEN:
                 raise ValueError("比赛未开放报名")
-            _require_live_contest_bot_tx(c, bot_id)
+            _require_active_contest_user_tx(c, user_id)
+            _require_current_runnable_contest_bot_tx(c, bot_id)
             if c.execute(
                 "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
                 (contest_id, user_id),
@@ -12131,7 +12205,16 @@ class Store:
             added: list[dict] = []
             skipped: list[int] = []
             for user_id, bot_id in entries:
-                _require_live_contest_bot_tx(c, bot_id)
+                try:
+                    _require_active_contest_user_tx(c, user_id)
+                    _require_current_runnable_contest_bot_tx(c, bot_id)
+                except ValueError as exc:
+                    raise ContestRosterWriteValidationError(
+                        str(exc),
+                        identity_required_at_commit=bool(
+                            int(contest["require_real_name"] or 0)
+                        ),
+                    ) from exc
                 if c.execute(
                     "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
                     (contest_id, user_id),
