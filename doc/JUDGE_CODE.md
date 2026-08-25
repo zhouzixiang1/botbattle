@@ -51,7 +51,7 @@ games.registry.get(game_id).run_session(decide, **params)
 ### 德州扑克（规则 `holdem_judge.py`，适配 `engine.py`）
 
 - HU NLHE；盲注 SB/BB 交替；Bot 协议 raise response 的正整数 = **额外下注筹码**（raise delta，引擎内部转 raise-to-total 校验，min re-raise-to ≥ 2× 上一 raise-to）。
-- 格式正确但下注不合法 → fold；Bot 信封/response 格式错误或超时由平台层在进入裁判前立即技术判负。all-in 后直接发出剩余公共牌结算。
+- 格式正确但下注不合法 → fold；Bot 信封/response 格式错误或超时由平台层在进入裁判前立即技术判负。现行 `holdem_hu_nlhe_allin_v2` 把 all-in 水位记为本街此前投入与剩余筹码之和；精确耗尽筹码的 call 进入 all-in 状态。覆盖短码全压的一方合法集仅为 fold/call，可只 call 匹配额并保留余额；为兼容同一 `holdem_action_v1` 的既有 Bot，此时 `response=-2` 规范化为精确 call，不产生虚假超额 all-in。下注关闭后只剩一名可行动玩家时直接发出剩余公共牌，不再逐街请求单人 check。
 - **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
 - **启动失败**由编排层处理：所有 Bot-vs-Bot 类型统一记为 `completed` + `technical_loss`，崩溃方判负；人类对战则记为 `aborted`（`bot_crashed`）。
 - `MatchSession` 一手 = 一轮，按手数循环，最终按累计净筹码判胜。

@@ -15,6 +15,11 @@ DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
 # 游戏规则 / Bot 协议 / 评分池是三个独立的持久化契约。通用层
 # 只查表，不按 game_id 写分支；一次大版规则切换由 Store 的离线
 # cutover API 原子推进 active contract。
+HOLDEM_PREVIOUS_RULESET = "holdem_hu_nlhe_v1"
+HOLDEM_CURRENT_RULESET = "holdem_hu_nlhe_allin_v2"
+HOLDEM_PROTOCOL = "holdem_action_v1"
+HOLDEM_PREVIOUS_RATING_POOL = "holdem_rating_v1"
+HOLDEM_CURRENT_RATING_POOL = "holdem_allin_rating_v2"
 GOMOKU_LEGACY_RULESET = "gomoku_freestyle_v1"
 GOMOKU_PREVIOUS_RULESET = "gomoku_ccgc_2013_v1"
 GOMOKU_CURRENT_RULESET = "gomoku_ccgc_2013_five_move_two_v2"
@@ -26,9 +31,9 @@ GOMOKU_CURRENT_RATING_POOL = "gomoku_ccgc_2013_five_move_two_rating_v2"
 
 GAME_RULE_CONTRACTS = {
     "holdem": {
-        "ruleset_version": "holdem_hu_nlhe_v1",
-        "protocol_version": "holdem_action_v1",
-        "rating_pool_id": "holdem_rating_v1",
+        "ruleset_version": HOLDEM_CURRENT_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_CURRENT_RATING_POOL,
     },
     "gomoku": {
         "ruleset_version": GOMOKU_CURRENT_RULESET,
@@ -44,6 +49,11 @@ GAME_RULE_CONTRACTS = {
 
 GAME_LEGACY_RULE_CONTRACTS = {
     **GAME_RULE_CONTRACTS,
+    "holdem": {
+        "ruleset_version": HOLDEM_PREVIOUS_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_PREVIOUS_RATING_POOL,
+    },
     "gomoku": {
         "ruleset_version": GOMOKU_LEGACY_RULESET,
         "protocol_version": GOMOKU_LEGACY_PROTOCOL,

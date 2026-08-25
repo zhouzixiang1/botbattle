@@ -654,6 +654,11 @@ def game_rule_cutover(
     from_ruleset: str = typer.Option(..., "--from-ruleset"),
     from_protocol: str = typer.Option(..., "--from-protocol"),
     from_rating_pool: str = typer.Option(..., "--from-rating-pool"),
+    migrate_unstarted_contest_id: list[int] | None = typer.Option(
+        None,
+        "--migrate-unstarted-contest-id",
+        help="显式授权随切换迁移的未开赛 open 赛事 ID；可重复",
+    ),
     apply: bool = typer.Option(False, "--apply", help="提交切换；默认只生成计划"),
     expect_plan_digest: str | None = typer.Option(
         None,
@@ -729,6 +734,7 @@ def game_rule_cutover(
         "rating_pool_id": from_rating_pool,
     }
     target = game_rule_contract(game_id)
+    contest_ids = tuple(migrate_unstarted_contest_id or ())
     expected_empty_manifest = hashlib.sha256(b"[]").hexdigest()
     try:
         with offline_cutover_path_guard(database) as path_guard:
@@ -785,6 +791,7 @@ def game_rule_cutover(
                             game_id=game_id,
                             from_contract=source,
                             to_contract=target,
+                            migrate_unstarted_contest_ids=contest_ids,
                         )
                     finally:
                         reviewed_store.close()
@@ -817,6 +824,7 @@ def game_rule_cutover(
                             game_id=game_id,
                             from_contract=source,
                             to_contract=target,
+                            migrate_unstarted_contest_ids=contest_ids,
                         )
                         report: dict[str, object] = {
                             "mode": "dry-run",
@@ -833,6 +841,7 @@ def game_rule_cutover(
                                 game_id=game_id,
                                 from_contract=source,
                                 to_contract=target,
+                                migrate_unstarted_contest_ids=contest_ids,
                             )
                             if plan.get("plan_digest") != str(
                                 expect_plan_digest or ""
@@ -854,6 +863,7 @@ def game_rule_cutover(
                             to_contract=target,
                             expected_plan_digest=str(expect_plan_digest or ""),
                             offline_guard=offline_guard,
+                            migrate_unstarted_contest_ids=contest_ids,
                         )
                         report = {
                             "mode": "applied",

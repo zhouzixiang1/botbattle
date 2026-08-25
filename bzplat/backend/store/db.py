@@ -5430,6 +5430,26 @@ class Store:
             issues.append("同协议 rule-only marker bot_count 必须为 0")
         if enforce_live_generation and _active_game_contract_tx(c, gid) != target:
             issues.append("active contract 不是 marker target")
+        if enforce_live_generation:
+            wrong_live_contests = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM contests WHERE game_id=? "
+                    "AND showcase_key IS NULL AND status NOT IN (?,?) AND ("
+                    "ruleset_version<>? OR protocol_version<>? OR rating_pool_id<>?)",
+                    (
+                        gid,
+                        CONTEST_FINISHED,
+                        CONTEST_CANCELLED,
+                        target["ruleset_version"],
+                        target["protocol_version"],
+                        target["rating_pool_id"],
+                    ),
+                ).fetchone()[0]
+            )
+            if wrong_live_contests:
+                issues.append(
+                    f"{wrong_live_contests} 个未终结赛事 contract 不是 marker target"
+                )
 
         root: Path | None = None
         if verify_assets and normalized_manifest:
@@ -7248,6 +7268,116 @@ class Store:
             "snapshot_digest": _canonical_digest(snapshot),
         }
 
+    def _rule_cutover_unstarted_contests_tx(
+        self,
+        c: sqlite3.Connection,
+        *,
+        game_id: str,
+        source: dict[str, str],
+        authorized_ids: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        """Bind explicitly authorized, open and entirely unstarted contests.
+
+        A rule-only cutover may preserve an open roster because pairings freeze
+        Bot versions only when the contest is later published/started.  This
+        exception is intentionally narrower than a generic "not running"
+        check: every persisted execution/result surface must still be empty,
+        and the complete contest/roster snapshot is part of the reviewed plan.
+        """
+
+        if any(contest_id <= 0 for contest_id in authorized_ids):
+            raise ValueError("迁移赛事 ID 必须为正整数")
+        if len(set(authorized_ids)) != len(authorized_ids):
+            raise ValueError("迁移赛事 ID 不得重复")
+        requested_ids = tuple(sorted(authorized_ids))
+        rows = c.execute(
+            "SELECT * FROM contests WHERE game_id=? AND showcase_key IS NULL "
+            "AND status NOT IN (?,?) ORDER BY id",
+            (game_id, CONTEST_FINISHED, CONTEST_CANCELLED),
+        ).fetchall()
+        live_ids = tuple(int(row["id"]) for row in rows)
+        if live_ids != requested_ids:
+            raise ValueError(
+                "仍有未终结的旧规则赛事，且与显式授权迁移 ID 不一致: "
+                f"live={list(live_ids)} authorized={list(requested_ids)}"
+            )
+
+        migrations: list[dict[str, Any]] = []
+        for row in rows:
+            contest_id = int(row["id"])
+            contract = {
+                "ruleset_version": str(row["ruleset_version"] or ""),
+                "protocol_version": str(row["protocol_version"] or ""),
+                "rating_pool_id": str(row["rating_pool_id"] or ""),
+            }
+            if contract != source:
+                raise ValueError(f"赛事 {contest_id} contract 不是 source")
+            if str(row["status"] or "") != CONTEST_OPEN:
+                raise ValueError(f"赛事 {contest_id} 不是 open，禁止随规则切换迁移")
+            if (
+                row["starts_at"] is not None
+                or row["ends_at"] is not None
+                or row["rest_ends_at"] is not None
+                or int(row["current_stage_idx"] or 0) != 0
+                or int(row["official_results_ready"] or 0) != 0
+            ):
+                raise ValueError(f"赛事 {contest_id} 已进入赛程，禁止迁移")
+            stages = _loads_json(row["stages_json"], default=None)
+            if not isinstance(stages, list) or not stages:
+                raise ValueError(f"赛事 {contest_id} 阶段配置无效，禁止迁移")
+            current_stage_idx = int(row["current_stage_idx"] or 0)
+            if current_stage_idx < 0 or current_stage_idx >= len(stages):
+                raise ValueError(f"赛事 {contest_id} 当前阶段越界，禁止迁移")
+
+            entry_rows = c.execute(
+                "SELECT * FROM contest_entries WHERE contest_id=? ORDER BY id",
+                (contest_id,),
+            ).fetchall()
+            if any(entry["dispatched_at"] is not None for entry in entry_rows):
+                raise ValueError(f"赛事 {contest_id} 已派发报名，禁止迁移")
+            graph_counts = {
+                "pairings": int(c.execute(
+                    "SELECT COUNT(*) FROM contest_pairings WHERE contest_id=?",
+                    (contest_id,),
+                ).fetchone()[0]),
+                "stage_results": int(c.execute(
+                    "SELECT COUNT(*) FROM contest_stage_results WHERE contest_id=?",
+                    (contest_id,),
+                ).fetchone()[0]),
+                "official_results": int(c.execute(
+                    "SELECT COUNT(*) FROM contest_official_results WHERE contest_id=?",
+                    (contest_id,),
+                ).fetchone()[0]),
+                "execution_jobs": int(c.execute(
+                    "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+                    (contest_id,),
+                ).fetchone()[0]),
+                "matches": sum(
+                    int(c.execute(
+                        f"SELECT COUNT(*) FROM {_matches_table(other_game)} "
+                        "WHERE contest_id=?",
+                        (contest_id,),
+                    ).fetchone()[0])
+                    for other_game in _all_game_ids()
+                ),
+            }
+            if any(graph_counts.values()):
+                raise ValueError(
+                    f"赛事 {contest_id} 已生成赛程/对局，禁止迁移: {graph_counts}"
+                )
+            migrations.append(
+                {
+                    "contest_id": contest_id,
+                    "status": CONTEST_OPEN,
+                    "entry_count": len(entry_rows),
+                    "contest_snapshot_digest": _canonical_digest(dict(row)),
+                    "entry_snapshot_digest": _canonical_digest(
+                        [dict(entry) for entry in entry_rows]
+                    ),
+                }
+            )
+        return migrations
+
     def _game_rule_cutover_plan_tx(
         self,
         c: sqlite3.Connection,
@@ -7256,6 +7386,7 @@ class Store:
         game_id: str,
         source: dict[str, str],
         target: dict[str, str],
+        migrate_unstarted_contest_ids: tuple[int, ...] = (),
     ) -> dict[str, Any]:
         if target != game_rule_contract(game_id):
             raise ValueError("目标 contract 与代码声明的 current contract 不一致")
@@ -7279,15 +7410,12 @@ class Store:
         )
         if unsettled:
             raise ValueError("仍有未结算的旧规则 Match，禁止切换")
-        live_contests = int(
-            c.execute(
-                "SELECT COUNT(*) FROM contests WHERE game_id=? "
-                "AND showcase_key IS NULL AND status NOT IN (?,?)",
-                (game_id, CONTEST_FINISHED, CONTEST_CANCELLED),
-            ).fetchone()[0]
+        contest_migrations = self._rule_cutover_unstarted_contests_tx(
+            c,
+            game_id=game_id,
+            source=source,
+            authorized_ids=migrate_unstarted_contest_ids,
         )
-        if live_contests:
-            raise ValueError("仍有未终结的旧规则赛事，禁止切换")
         chain = self._protocol_cutover_chain_tx(c, game_id)
         if chain:
             for index, marker in enumerate(chain):
@@ -7382,6 +7510,7 @@ class Store:
             "rating_plan_digest": projection["plan_digest"],
             "queued_job_ids": queued_ids,
             "retryable_interrupted_job_ids": retryable_ids,
+            "contest_contract_migrations": contest_migrations,
         }
         return {
             **plan_basis,
@@ -7398,6 +7527,7 @@ class Store:
         game_id: str,
         from_contract: dict[str, str],
         to_contract: dict[str, str],
+        migrate_unstarted_contest_ids: tuple[int, ...] | list[int] = (),
     ) -> dict[str, Any]:
         """Plan a same-wire ruleset/rating-pool cutover without DB writes."""
 
@@ -7470,6 +7600,9 @@ class Store:
                     game_id=gid,
                     source=source,
                     target=target,
+                    migrate_unstarted_contest_ids=tuple(
+                        migrate_unstarted_contest_ids
+                    ),
                 ),
             }
 
@@ -7482,6 +7615,7 @@ class Store:
         to_contract: dict[str, str],
         expected_plan_digest: str,
         offline_guard: _OfflineCutoverGuard,
+        migrate_unstarted_contest_ids: tuple[int, ...] | list[int] = (),
     ) -> dict[str, Any]:
         """Atomically advance ruleset/pool while retaining same-wire Bot assets."""
 
@@ -7619,6 +7753,9 @@ class Store:
                 game_id=gid,
                 source=source,
                 target=target,
+                migrate_unstarted_contest_ids=tuple(
+                    migrate_unstarted_contest_ids
+                ),
             )
             if plan["plan_digest"] != reviewed_plan_digest:
                 raise ValueError(
@@ -7753,6 +7890,26 @@ class Store:
                 "auto_match_owner_pair_service",
             ):
                 c.execute(f"DELETE FROM {service_table} WHERE game_id=?", (gid,))
+            for migration in plan["contest_contract_migrations"]:
+                changed_contest = c.execute(
+                    "UPDATE contests SET ruleset_version=?,protocol_version=?,"
+                    "rating_pool_id=? WHERE id=? AND game_id=? AND showcase_key IS NULL "
+                    "AND status=? AND ruleset_version=? AND protocol_version=? "
+                    "AND rating_pool_id=?",
+                    (
+                        target["ruleset_version"],
+                        target["protocol_version"],
+                        target["rating_pool_id"],
+                        int(migration["contest_id"]),
+                        gid,
+                        CONTEST_OPEN,
+                        source["ruleset_version"],
+                        source["protocol_version"],
+                        source["rating_pool_id"],
+                    ),
+                )
+                if changed_contest.rowcount != 1:
+                    raise RuntimeError("未开赛赛事 contract compare-and-swap 失败")
             changed = c.execute(
                 "UPDATE rating_pool_state SET active_pool_id=?,ruleset_version=?,"
                 "protocol_version=?,activated_at=? WHERE game_id=? AND "

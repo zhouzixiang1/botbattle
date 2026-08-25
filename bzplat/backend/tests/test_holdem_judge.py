@@ -136,6 +136,76 @@ def test_call_allowed_after_allin():
         pytest.fail(f"B should be able to CALL after A allin, got ValueError: {e}")
 
 
+def test_allin_keeps_prior_street_contribution_and_exact_call_runs_out():
+    """全压水位必须包含本街既有投入；精确耗尽筹码的跟注应直接发完公共牌。
+
+    生产事故回归（第 27 手的最小动作链）：SB 先补齐盲注，BB 加注到 508，
+    SB 随后全压。SB 的全压总额应为 20000，不能只把剩余 19900 当作水位；
+    BB 的最后 19492 必须全部投入，并进入 all-in 状态，不再独自逐街 check。
+    """
+    judge = Holdem(
+        player_chips=[20000, 20000],
+        dealer_idx=0,
+        small_blind=50,
+        big_blind=100,
+    )
+    judge.set_deck_from_str(
+        ["2c", "3d", "4h", "5s", "6c", "7d", "8h", "9s", "Tc"]
+    )
+    judge.deal_cards_and_blind()
+
+    assert judge.player_action(Holdem.CALL) == []  # SB: 50 -> 100
+    assert judge.player_action(408) == []  # BB: 100 + 408 = raise-to 508
+    assert judge.player_action(Holdem.ALLIN) == []  # SB: 100 + 19900 = 20000
+
+    assert judge.round_bet == 20000
+    assert judge._street_bet_of(0) == 20000
+    assert judge.hand_contrib == [20000, 508]
+    assert judge.player_chips == [0, 19492]
+
+    winners = judge.player_action(Holdem.CALL)
+
+    assert winners in ([0], [1], [0, 1])
+    assert judge.round_player_bet == [Holdem.ALLIN, Holdem.ALLIN]
+    assert judge.hand_contrib == [20000, 20000]
+    assert judge.player_chips == [0, 0]
+    assert judge.pot == 40000
+    assert len(judge.public_cards) == 5
+
+
+def test_covering_stack_call_after_short_allin_runs_out_without_forced_checks():
+    """覆盖短码全压的一方只需精确跟注，可保留筹码，但下注已关闭并立即 runout。"""
+    judge = Holdem(
+        player_chips=[5000, 20000],
+        dealer_idx=0,
+        small_blind=50,
+        big_blind=100,
+    )
+    judge.set_deck_from_str(
+        ["2c", "3d", "4h", "5s", "6c", "7d", "8h", "9s", "Tc"]
+    )
+    judge.deal_cards_and_blind()
+
+    assert judge.player_action(Holdem.ALLIN) == []
+    assert judge.round_bet == 5000
+    assert judge._street_bet_of(0) == 5000
+
+    with pytest.raises(ValueError, match="INVALID_BET"):
+        judge.player_action(9900)
+    with pytest.raises(ValueError, match="INVALID_BET"):
+        judge.player_action(Holdem.ALLIN)
+    assert judge.hand_contrib == [5000, 100]
+    assert judge.player_chips == [0, 19900]
+
+    winners = judge.player_action(Holdem.CALL)
+
+    assert winners in ([0], [1], [0, 1])
+    assert judge.hand_contrib == [5000, 5000]
+    assert judge.player_chips == [0, 15000]
+    assert judge.pot == 10000
+    assert len(judge.public_cards) == 5
+
+
 # ── 修复点 5：split pot 整数 + 奇筹码给 SB ──────────────────────────────
 
 def test_split_pot_integer_even():

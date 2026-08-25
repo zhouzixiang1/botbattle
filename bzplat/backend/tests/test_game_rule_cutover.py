@@ -1,6 +1,7 @@
 """Same-wire game-rule cutover keeps Bot assets while isolating ratings."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,12 +16,19 @@ from typer.testing import CliRunner
 from bzplat.backend.cli import app as cli_app
 from bzplat.backend.store import Store, rating_projection_digests
 from bzplat.backend.store.schema import (
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
     EXECUTION_SOURCE_MANUAL,
     GOMOKU_CURRENT_PROTOCOL,
     GOMOKU_CURRENT_RATING_POOL,
     GOMOKU_CURRENT_RULESET,
     GOMOKU_PREVIOUS_RATING_POOL,
     GOMOKU_PREVIOUS_RULESET,
+    HOLDEM_CURRENT_RATING_POOL,
+    HOLDEM_CURRENT_RULESET,
+    HOLDEM_PREVIOUS_RATING_POOL,
+    HOLDEM_PREVIOUS_RULESET,
+    HOLDEM_PROTOCOL,
     STATUS_COMPLETED,
     TYPE_CHALLENGE,
     game_rule_contract,
@@ -32,6 +40,60 @@ PREVIOUS_CONTRACT = {
     "protocol_version": GOMOKU_CURRENT_PROTOCOL,
     "rating_pool_id": GOMOKU_PREVIOUS_RATING_POOL,
 }
+
+
+def test_holdem_allin_v2_uses_same_wire_and_requires_new_rating_pool(tmp_path):
+    """下注修复改变裁判与结算，必须同协议换 ruleset/rating pool，旧库拒绝在线启动。"""
+    source = game_rule_contract("holdem", legacy=True)
+    target = game_rule_contract("holdem")
+    assert source == {
+        "ruleset_version": HOLDEM_PREVIOUS_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_PREVIOUS_RATING_POOL,
+    }
+    assert target == {
+        "ruleset_version": HOLDEM_CURRENT_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_CURRENT_RATING_POOL,
+    }
+
+    store = Store(str(tmp_path / "holdem-v1-needs-cutover.db"))
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE rating_pool_state SET active_pool_id=?,ruleset_version=?,"
+            "protocol_version=?,activated_at='holdem-v1-test' WHERE game_id='holdem'",
+            (
+                HOLDEM_PREVIOUS_RATING_POOL,
+                HOLDEM_PREVIOUS_RULESET,
+                HOLDEM_PROTOCOL,
+            ),
+        )
+    with pytest.raises(RuntimeError, match="game-rule-cutover"):
+        store.assert_runtime_contracts_current()
+
+    _certify_projection(store)
+    plan = store.plan_game_rule_cutover(
+        cutover_id="holdem-allin-v2-test",
+        game_id="holdem",
+        from_contract=source,
+        to_contract=target,
+    )
+    assert plan["version_manifest"] == []
+    assert plan["manifest_digest"] == hashlib.sha256(b"[]").hexdigest()
+    _prepare_cold_cutover(store)
+    with store.offline_cutover_guard() as guard:
+        applied = store.apply_game_rule_cutover(
+            cutover_id=plan["cutover_id"],
+            game_id="holdem",
+            from_contract=source,
+            to_contract=target,
+            expected_plan_digest=plan["plan_digest"],
+            offline_guard=guard,
+        )
+    assert applied["already_applied"] is False
+    assert store.get_active_game_contract("holdem") == target
+    store.assert_runtime_contracts_current()
+    store.close()
 
 
 def _set_previous_contract(store: Store) -> None:
@@ -183,16 +245,27 @@ def _prepare_cold_cutover(store: Store) -> None:
     store.executions.set_control(dispatcher_state="stopped", accepting=False)
 
 
-def _plan(store: Store, cutover_id: str) -> dict:
+def _plan(
+    store: Store,
+    cutover_id: str,
+    *,
+    migrate_unstarted_contest_ids: tuple[int, ...] = (),
+) -> dict:
     return store.plan_game_rule_cutover(
         cutover_id=cutover_id,
         game_id="gomoku",
         from_contract=PREVIOUS_CONTRACT,
         to_contract=game_rule_contract("gomoku"),
+        migrate_unstarted_contest_ids=migrate_unstarted_contest_ids,
     )
 
 
-def _apply(store: Store, plan: dict) -> dict:
+def _apply(
+    store: Store,
+    plan: dict,
+    *,
+    migrate_unstarted_contest_ids: tuple[int, ...] = (),
+) -> dict:
     with store.offline_cutover_guard() as guard:
         return store.apply_game_rule_cutover(
             cutover_id=plan["cutover_id"],
@@ -201,7 +274,27 @@ def _apply(store: Store, plan: dict) -> dict:
             to_contract=game_rule_contract("gomoku"),
             expected_plan_digest=plan["plan_digest"],
             offline_guard=guard,
+            migrate_unstarted_contest_ids=migrate_unstarted_contest_ids,
         )
+
+
+def _open_unstarted_contest(
+    store: Store,
+    *,
+    organizer_id: int,
+    title: str,
+) -> dict:
+    return store.create_contest(
+        title,
+        organizer_id,
+        status=CONTEST_OPEN,
+        game_id="gomoku",
+        template_id="gomoku_test",
+        stages_json=json.dumps(
+            [{"key": "swiss", "type": "swiss", "rounds": 1}],
+            ensure_ascii=False,
+        ),
+    )
 
 
 def test_rule_cutover_is_atomic_idempotent_and_keeps_current_bot_assets(tmp_path):
@@ -473,6 +566,311 @@ def test_rule_cutover_is_atomic_idempotent_and_keeps_current_bot_assets(tmp_path
     reopened.close()
 
 
+def test_rule_cutover_atomically_migrates_only_explicit_open_unstarted_contests(
+    tmp_path,
+):
+    store = Store(str(tmp_path / "rule-cutover-open-contests.db"))
+    _set_previous_contract(store)
+    owner, version = _canonical_bot(store, tmp_path, "contest_migration")
+    first = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title="migrate first"
+    )
+    second = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title="migrate second"
+    )
+    entry = store.add_contest_entry_once(
+        second["id"], owner["id"], version["bot_id"]
+    )
+    historical = store.create_contest(
+        "historical finished",
+        owner["id"],
+        status="finished",
+        game_id="gomoku",
+        stages_json='[{"key":"done","type":"swiss","rounds":1}]',
+    )
+    before_contests = {
+        contest_id: store.get_contest(contest_id)
+        for contest_id in (first["id"], second["id"], historical["id"])
+    }
+    before_entry = store.get_contest_entry(second["id"], owner["id"])
+    _certify_projection(store)
+
+    ids = (first["id"], second["id"])
+    plan = _plan(
+        store,
+        "open-contests-rule-cutover",
+        migrate_unstarted_contest_ids=ids,
+    )
+    assert [
+        item["contest_id"] for item in plan["contest_contract_migrations"]
+    ] == list(ids)
+    assert [
+        item["entry_count"] for item in plan["contest_contract_migrations"]
+    ] == [0, 1]
+    _prepare_cold_cutover(store)
+    applied = _apply(
+        store,
+        plan,
+        migrate_unstarted_contest_ids=ids,
+    )
+    assert applied["already_applied"] is False
+
+    target = game_rule_contract("gomoku")
+    contract_keys = ("ruleset_version", "protocol_version", "rating_pool_id")
+    for contest_id in ids:
+        after = store.get_contest(contest_id)
+        assert {key: after[key] for key in contract_keys} == target
+        before = before_contests[contest_id]
+        assert {
+            key: value for key, value in after.items() if key not in contract_keys
+        } == {
+            key: value for key, value in before.items() if key not in contract_keys
+        }
+    assert store.get_contest_entry(second["id"], owner["id"]) == before_entry == entry
+    assert store.get_contest(historical["id"]) == before_contests[historical["id"]]
+    store.assert_protocol_cutover_postconditions(plan["cutover_id"])
+    repeated = _apply(
+        store,
+        plan,
+        migrate_unstarted_contest_ids=ids,
+    )
+    assert repeated["already_applied"] is True
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET ruleset_version=? WHERE id=?",
+            (GOMOKU_PREVIOUS_RULESET, first["id"]),
+        )
+    with pytest.raises(RuntimeError, match="未终结赛事 contract"):
+        store.assert_protocol_cutover_postconditions(plan["cutover_id"])
+    store.close()
+
+
+def test_migrated_contest_publish_and_start_freeze_target_contract(tmp_path):
+    from bzplat.backend.contests.manager import ContestManager
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+
+    store = Store(str(tmp_path / "migrated-contest-publish-start.db"))
+    _set_previous_contract(store)
+    owner_a, version_a = _canonical_bot(store, tmp_path, "migrated_publish_a")
+    owner_b, version_b = _canonical_bot(store, tmp_path, "migrated_publish_b")
+    contest = _open_unstarted_contest(
+        store, organizer_id=owner_a["id"], title="publish after migration"
+    )
+    store.add_contest_entry_once(
+        contest["id"], owner_a["id"], version_a["bot_id"]
+    )
+    store.add_contest_entry_once(
+        contest["id"], owner_b["id"], version_b["bot_id"]
+    )
+    _certify_projection(store)
+    ids = (contest["id"],)
+    plan = _plan(
+        store,
+        "migrated-contest-publish-start-cutover",
+        migrate_unstarted_contest_ids=ids,
+    )
+    _prepare_cold_cutover(store)
+    _apply(store, plan, migrate_unstarted_contest_ids=ids)
+    store.executions.resume()
+    store.executions.end_maintenance()
+
+    manager = ContestManager(store, MatchOrchestrator(store))
+    asyncio.run(manager.publish(contest["id"]))
+    pairing = store.list_contest_pairings(contest["id"])[0]
+    frozen_by_bot = {
+        int(pairing["bot_a_id"]): int(pairing["bot_a_version_id"]),
+        int(pairing["bot_b_id"]): int(pairing["bot_b_version_id"]),
+    }
+    assert frozen_by_bot == {
+        int(version_a["bot_id"]): int(version_a["id"]),
+        int(version_b["bot_id"]): int(version_b["id"]),
+    }
+
+    asyncio.run(manager.start(contest["id"]))
+    jobs = store._conn.execute(
+        "SELECT ruleset_version,protocol_version,rating_pool_id FROM execution_jobs "
+        "WHERE contest_id=? ORDER BY id",
+        (contest["id"],),
+    ).fetchall()
+    assert len(jobs) == 1
+    assert dict(jobs[0]) == game_rule_contract("gomoku")
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("blocker", "message"),
+    [
+        ("missing_authorization", "显式授权迁移 ID 不一致"),
+        ("published", "不是 open"),
+        ("starts_at", "已进入赛程"),
+        ("dispatched_entry", "已派发报名"),
+        ("pairing", "已生成赛程/对局"),
+        ("match", "已生成赛程/对局"),
+    ],
+)
+def test_rule_cutover_rejects_any_started_or_unreviewed_contest_state(
+    tmp_path, blocker, message
+):
+    store = Store(str(tmp_path / f"contest-blocker-{blocker}.db"))
+    _set_previous_contract(store)
+    owner, version = _canonical_bot(store, tmp_path, f"contest_{blocker}")
+    contest = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title=f"blocked {blocker}"
+    )
+    entry = store.add_contest_entry_once(
+        contest["id"], owner["id"], version["bot_id"]
+    )
+    if blocker == "published":
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE contests SET status=? WHERE id=?",
+                (CONTEST_PUBLISHED, contest["id"]),
+            )
+    elif blocker == "starts_at":
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE contests SET starts_at='2026-01-01T00:00:00' WHERE id=?",
+                (contest["id"],),
+            )
+    elif blocker == "dispatched_entry":
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE contest_entries SET dispatched_at='test' WHERE id=?",
+                (entry["id"],),
+            )
+    elif blocker == "pairing":
+        store.add_pairing(
+            contest["id"],
+            version["bot_id"],
+            version["bot_id"],
+        )
+    elif blocker == "match":
+        store.create_match(
+            f"contest-blocker-{blocker}",
+            version["bot_id"],
+            version["bot_id"],
+            game_id="gomoku",
+            contest_id=contest["id"],
+        )
+    _certify_projection(store)
+
+    authorized = () if blocker == "missing_authorization" else (contest["id"],)
+    with pytest.raises(ValueError, match=message):
+        _plan(
+            store,
+            f"contest-blocker-{blocker}-cutover",
+            migrate_unstarted_contest_ids=authorized,
+        )
+    assert store.get_active_game_contract("gomoku") == PREVIOUS_CONTRACT
+    assert store.get_protocol_cutover(f"contest-blocker-{blocker}-cutover") is None
+    store.close()
+
+
+def test_rule_cutover_rejects_roster_drift_after_review_without_partial_writes(
+    tmp_path,
+):
+    store = Store(str(tmp_path / "contest-roster-plan-drift.db"))
+    _set_previous_contract(store)
+    owner, version = _canonical_bot(store, tmp_path, "contest_roster_drift")
+    contest = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title="roster drift"
+    )
+    entry = store.add_contest_entry_once(
+        contest["id"], owner["id"], version["bot_id"]
+    )
+    _certify_projection(store)
+    ids = (contest["id"],)
+    plan = _plan(
+        store,
+        "contest-roster-drift-cutover",
+        migrate_unstarted_contest_ids=ids,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_entries SET seed=seed+1 WHERE id=?",
+            (entry["id"],),
+        )
+    _prepare_cold_cutover(store)
+
+    with pytest.raises(ValueError, match="expected_plan_digest"):
+        _apply(
+            store,
+            plan,
+            migrate_unstarted_contest_ids=ids,
+        )
+    assert store.get_contest(contest["id"])["ruleset_version"] == (
+        GOMOKU_PREVIOUS_RULESET
+    )
+    assert store.get_protocol_cutover(plan["cutover_id"]) is None
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM rating_pool_archives WHERE game_id='gomoku'"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+def test_rule_cutover_rolls_back_contest_migration_with_later_pool_failure(
+    tmp_path,
+):
+    store = Store(str(tmp_path / "contest-migration-atomic-rollback.db"))
+    _set_previous_contract(store)
+    owner, version = _canonical_bot(store, tmp_path, "contest_atomic_rollback")
+    contest = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title="atomic rollback"
+    )
+    entry = store.add_contest_entry_once(
+        contest["id"], owner["id"], version["bot_id"]
+    )
+    before_contest = store.get_contest(contest["id"])
+    before_entry = store.get_contest_entry(contest["id"], owner["id"])
+    _certify_projection(store)
+    ids = (contest["id"],)
+    plan = _plan(
+        store,
+        "contest-migration-atomic-rollback-cutover",
+        migrate_unstarted_contest_ids=ids,
+    )
+    _prepare_cold_cutover(store)
+    with store._tx() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_pool_switch BEFORE UPDATE ON rating_pool_state "
+            "WHEN OLD.game_id='gomoku' BEGIN "
+            "SELECT RAISE(ABORT, 'forced pool switch failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced pool switch failure"):
+        _apply(
+            store,
+            plan,
+            migrate_unstarted_contest_ids=ids,
+        )
+
+    assert store.get_contest(contest["id"]) == before_contest
+    assert store.get_contest_entry(contest["id"], owner["id"]) == before_entry == entry
+    assert store.get_active_game_contract("gomoku") == PREVIOUS_CONTRACT
+    assert store.get_protocol_cutover(plan["cutover_id"]) is None
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM rating_pool_archives WHERE game_id='gomoku'"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+@pytest.mark.parametrize("authorized_ids", [(-1,), (1, 1)])
+def test_rule_cutover_rejects_invalid_explicit_contest_ids(tmp_path, authorized_ids):
+    store = Store(str(tmp_path / f"invalid-contest-ids-{authorized_ids!r}.db"))
+    _set_previous_contract(store)
+    _canonical_bot(store, tmp_path, f"invalid_contest_ids_{len(authorized_ids)}")
+    _certify_projection(store)
+    with pytest.raises(ValueError, match="赛事 ID"):
+        _plan(
+            store,
+            "invalid-explicit-contest-ids-cutover",
+            migrate_unstarted_contest_ids=authorized_ids,
+        )
+    assert store.get_active_game_contract("gomoku") == PREVIOUS_CONTRACT
+    assert store.get_protocol_cutover("invalid-explicit-contest-ids-cutover") is None
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("source", "target", "message"),
     [
@@ -701,6 +1099,134 @@ def test_game_rule_cutover_cli_dry_run_apply_and_lost_output_retry(tmp_path):
     assert rejected.exit_code != 0
     assert "原审核计划" in rejected.output
     assert (database.read_bytes(), database.stat().st_mtime_ns) == before
+
+
+def test_game_rule_cutover_cli_requires_and_applies_explicit_contest_ids(tmp_path):
+    database, _ = _cli_source_database(tmp_path, "rule-cli-contest")
+    store = Store(str(database))
+    organizer = store.create_user(
+        "rule_cli_organizer", "rule-cli-organizer@example.test", "hash"
+    )
+    first = _open_unstarted_contest(
+        store, organizer_id=organizer["id"], title="CLI first"
+    )
+    second = _open_unstarted_contest(
+        store, organizer_id=organizer["id"], title="CLI second"
+    )
+    bot = store._conn.execute(
+        "SELECT id,owner_id FROM bots WHERE game_id='gomoku' ORDER BY id LIMIT 1"
+    ).fetchone()
+    entry = store.add_contest_entry_once(
+        second["id"], int(bot["owner_id"]), int(bot["id"])
+    )
+    pii_sentinels = {
+        "real_name_snapshot": "CUTOVER-PRIVATE-NAME",
+        "phone_snapshot": "CUTOVER-PRIVATE-PHONE",
+        "school_snapshot": "CUTOVER-PRIVATE-SCHOOL",
+        "student_id_snapshot": "CUTOVER-PRIVATE-STUDENT",
+        "identity_captured_at": "2026-08-25T00:00:00",
+        "identity_source": "verified_profile",
+    }
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_entries SET real_name_snapshot=?,phone_snapshot=?,"
+            "school_snapshot=?,student_id_snapshot=?,identity_captured_at=?,"
+            "identity_source=? WHERE id=?",
+            (*pii_sentinels.values(), entry["id"]),
+        )
+    before_entry = dict(
+        store._conn.execute(
+            "SELECT * FROM contest_entries WHERE id=?", (entry["id"],)
+        ).fetchone()
+    )
+    store.close()
+    backup = (tmp_path / "rule-cli-contest.preimage.db").resolve()
+    shutil.copyfile(database, backup)
+    common = [
+        "game-rule-cutover",
+        "--db", str(database),
+        "--cutover-id", "rule-cli-contest-cutover",
+        "--game-id", "gomoku",
+        "--from-ruleset", GOMOKU_PREVIOUS_RULESET,
+        "--from-protocol", GOMOKU_CURRENT_PROTOCOL,
+        "--from-rating-pool", GOMOKU_PREVIOUS_RATING_POOL,
+        "--migrate-unstarted-contest-id", str(first["id"]),
+        "--migrate-unstarted-contest-id", str(second["id"]),
+        "--backup", str(backup),
+        "--confirm-service-stopped",
+        "--confirm-cold-backup",
+    ]
+    runner = CliRunner()
+    without_ids = runner.invoke(
+        cli_app,
+        common[:13] + common[17:],
+    )
+    assert without_ids.exit_code != 0
+    assert "显式授权迁移 ID 不一致" in without_ids.output
+
+    dry = runner.invoke(cli_app, common)
+    assert dry.exit_code == 0, dry.output
+    assert all(value not in dry.output for value in pii_sentinels.values())
+    report = json.loads(dry.output)
+    assert [
+        item["contest_id"] for item in report["contest_contract_migrations"]
+    ] == [first["id"], second["id"]]
+    applied = runner.invoke(
+        cli_app,
+        common
+        + [
+            "--apply",
+            "--confirm-db", str(database),
+            "--expect-plan-digest", report["plan_digest"],
+            "--expect-manifest-digest", report["manifest_digest"],
+            "--expect-target-preimage-sha256", report["target_preimage_sha256"],
+        ],
+    )
+    assert applied.exit_code == 0, applied.output
+    assert all(value not in applied.output for value in pii_sentinels.values())
+    repeated = runner.invoke(
+        cli_app,
+        common
+        + [
+            "--apply",
+            "--confirm-db", str(database),
+            "--expect-plan-digest", report["plan_digest"],
+            "--expect-manifest-digest", report["manifest_digest"],
+            "--expect-target-preimage-sha256", report["target_preimage_sha256"],
+        ],
+    )
+    assert repeated.exit_code == 0, repeated.output
+    assert json.loads(repeated.output)["already_applied"] is True
+    assert all(value not in repeated.output for value in pii_sentinels.values())
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id,status,ruleset_version,protocol_version,rating_pool_id "
+            "FROM contests WHERE id IN (?,?) ORDER BY id",
+            (first["id"], second["id"]),
+        ).fetchall()
+        after_entry = dict(
+            conn.execute(
+                "SELECT * FROM contest_entries WHERE id=?", (entry["id"],)
+            ).fetchone()
+        )
+    assert [tuple(row) for row in rows] == [
+        (
+            first["id"],
+            CONTEST_OPEN,
+            GOMOKU_CURRENT_RULESET,
+            GOMOKU_CURRENT_PROTOCOL,
+            GOMOKU_CURRENT_RATING_POOL,
+        ),
+        (
+            second["id"],
+            CONTEST_OPEN,
+            GOMOKU_CURRENT_RULESET,
+            GOMOKU_CURRENT_PROTOCOL,
+            GOMOKU_CURRENT_RATING_POOL,
+        ),
+    ]
+    assert after_entry == before_entry
 
 
 def test_game_rule_cutover_cli_rejects_raw_marker_impersonation(tmp_path):
