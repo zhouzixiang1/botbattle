@@ -279,6 +279,9 @@ class Holdem:
         self.round_player_bet = [0 for _ in range(self.num_players)]
         # 每玩家本手总投入（跨街道，边池结算用）
         self.hand_contrib = [0 for _ in range(self.num_players)]
+        # all-in 玩家用负数哨兵退出行动轮转；真实本街累计投入必须另存，
+        # 供对手计算精确跟注额与下注关闭条件。
+        self._allin_street_bets: dict[int, int] = {}
         self.history = []
         self.deck = [Card(suit, number) for number in range(2, 15) for suit in Suit]
         random.shuffle(self.deck)
@@ -329,10 +332,12 @@ class Holdem:
         self.round_raise = self.big_blind // 2
         self.round_action_left = sum(1 for b in self.round_player_bet if b >= 0)
         self.round_player_bet = [b if b < 0 else 0 for b in self.round_player_bet]
-        if self.round_action_left > 0:
+        if self.round_action_left > 1:
             self._next_player()
         else:
-            return self._next_round()  # all-in runout：无人可动，递归到下一街
+            # 只剩 0/1 名玩家能行动时已经不存在可响应的对手，下注关闭；
+            # 覆盖短码全压的一方即使仍有筹码，也不能独自逐街下注，直接 runout。
+            return self._next_round()
 
     def player_action(self, bet):
         """处理一个玩家动作。
@@ -346,6 +351,20 @@ class Holdem:
         非法动作（筹码不足/加注不达 min/无效码）→ 抛 ValueError，适配层 catch 后
         改发 FOLD（裁判不自动 fold）。
         """
+        actor = self.round_idx
+        has_actionable_opponent = any(
+            idx != actor and self.round_player_bet[idx] >= 0
+            for idx in range(self.num_players)
+        )
+        to_call = max(0, self.round_bet - self._street_bet_of(actor))
+        if not has_actionable_opponent:
+            # HU 中唯一对手已经 all-in 后，覆盖方只能 fold/call。短码或刚好
+            # 耗尽筹码的 ALLIN 仍是合法跟注；超过 to_call 的投入没有响应者。
+            if bet > 0 or (
+                bet == Holdem.ALLIN and self.player_chips[actor] > to_call
+            ):
+                raise ValueError("INVALID_BET")
+
         if bet == Holdem.FOLD:
             self.round_player_bet[self.round_idx] = Holdem.FOLD
             players_left = [i for i, b in enumerate(self.round_player_bet) if b != Holdem.FOLD]
@@ -360,14 +379,14 @@ class Holdem:
                 })
                 return players_left
         elif bet == Holdem.ALLIN:
-            # 修复点 4：不毒化 round_bet。allin 方把剩余筹码全投入，水位取 max。
+            # all-in 方把剩余筹码全投入。必须先按「本街既有投入 + shove」冻结
+            # 真实累计额，再写 -2 哨兵；反过来会丢掉盲注/此前下注，使对手欠注。
             shove = self.player_chips[self.round_idx]
+            effective_bet = self._effective_street_bet(self.round_idx, shove)
             self.pot += shove
             self.player_chips[self.round_idx] = 0
             self.round_player_bet[self.round_idx] = Holdem.ALLIN
             self.hand_contrib[self.round_idx] += shove
-            # allin 方的「等效下注额」= 加注前 street_bet + shove（用于判定是否构成 raise）
-            effective_bet = self._effective_street_bet(self.round_idx, shove)
             if effective_bet > self.round_bet:
                 # 这是一次 all-in raise：更新水位 + min-raise 基准（round_raise 取总额）
                 self.round_raise = effective_bet
@@ -381,9 +400,14 @@ class Holdem:
                 raise ValueError("INSUFFICIENT_CHIPS")
             self.pot += inc
             self.player_chips[self.round_idx] -= inc
-            self.round_player_bet[self.round_idx] = self.round_bet \
-                if self.round_player_bet[self.round_idx] != Holdem.ALLIN else Holdem.ALLIN
             self.hand_contrib[self.round_idx] += inc
+            if self.player_chips[self.round_idx] == 0:
+                # 精确耗尽筹码的 call 同样进入 all-in 状态；否则下一街会错误地
+                # 再向零筹码玩家索要 check/call。
+                self.round_player_bet[self.round_idx] = Holdem.ALLIN
+                self._allin_street_bets[self.round_idx] = self.round_bet
+            else:
+                self.round_player_bet[self.round_idx] = self.round_bet
             action_type = "check" if inc == 0 else "call"
         elif self.round_bet >= 0 and bet + self._street_bet_of(self.round_idx) >= self.round_raise * 2:
             # raise（bet 是 delta）。min raise-to = 2 × round_raise（round_raise = 上次
@@ -448,8 +472,6 @@ class Holdem:
         base = self._allin_street_bets.get(idx, 0) if prev == Holdem.ALLIN else (prev if prev >= 0 else 0)
         total = base + shove
         # 记录 allin 方本街等效投入（供后续 _street_bet_of 读取）
-        if not hasattr(self, "_allin_street_bets"):
-            self._allin_street_bets = {}
         self._allin_street_bets[idx] = total
         return total
 
@@ -460,8 +482,6 @@ class Holdem:
         - dealer = SB（翻前先动，翻后后动）
         - 非 dealer = BB
         """
-        if not hasattr(self, "_allin_street_bets"):
-            self._allin_street_bets = {}
         # 发底牌：每人 2 张（LIFO pop）
         for pc in self.player_cards:
             pc.append(self.deck.pop())

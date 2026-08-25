@@ -334,15 +334,31 @@ class MatchSession:
             else:
                 actions.append(Action.CALL.value)
 
+        # 只有仍有可行动对手时才存在 raise。HU 中对手已经 all-in 后，覆盖方
+        # 只能 fold/call；多投入的筹码无人匹配，不能伪装成一次新的 all-in raise。
+        has_actionable_opponent = any(
+            idx != actor and judge.round_player_bet[idx] >= 0
+            for idx in range(judge.num_players)
+        )
+
         # raise 边界
         min_raise_to = 2 * judge.round_raise if judge.round_raise > 0 else self.bb
         max_raise_to = street_bet + chips  # all-in raise-to
-        can_raise = chips > to_call and max_raise_to > judge.round_bet and min_raise_to <= max_raise_to
+        can_raise = (
+            has_actionable_opponent
+            and chips > to_call
+            and max_raise_to > judge.round_bet
+            and min_raise_to <= max_raise_to
+        )
         if can_raise:
             actions.append(Action.RAISE.value)
             if Action.ALLIN.value not in actions:
                 actions.append(Action.ALLIN.value)
-        elif chips > to_call and max_raise_to > judge.round_bet:
+        elif (
+            has_actionable_opponent
+            and chips > to_call
+            and max_raise_to > judge.round_bet
+        ):
             # short all-in raise（不足 min 但超过 current_bet）
             actions.append(Action.ALLIN.value)
 
@@ -424,6 +440,10 @@ class MatchSession:
 
         if action == "allin":
             if "allin" not in allowed and "raise" not in allowed:
+                # 对手已经 all-in 时，覆盖方多报的 all-in 没有可匹配的加注对象；
+                # 兼容地按完整 call 执行并退回未匹配筹码，事件也保持真实 call。
+                if "call" in allowed:
+                    return Holdem.CALL, "call", to_call
                 if to_call > 0 and chips > 0:
                     return Holdem.ALLIN, "allin", street_bet + chips
                 return Holdem.FOLD, "fold", 0
@@ -434,6 +454,8 @@ class MatchSession:
                 return Holdem.FOLD, "fold", 0
             delta = int(x)
             if delta <= 0:
+                return Holdem.FOLD, "fold", 0
+            if "raise" not in allowed and "allin" not in allowed:
                 return Holdem.FOLD, "fold", 0
             raise_to = street_bet + delta
             max_to = legal["max_raise_to"]

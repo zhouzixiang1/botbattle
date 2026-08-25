@@ -143,9 +143,9 @@ async def _preflight_check(
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="德州扑克",
-    ruleset_id="holdem_hu_nlhe_v1",
+    ruleset_id="holdem_hu_nlhe_allin_v2",
     protocol_version="holdem_action_v1",
-    rating_pool_id="holdem_rating_v1",
+    rating_pool_id="holdem_allin_rating_v2",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
     default_match_params={},  # 手数钉死 DEFAULT_HANDS，无对局级可配参数

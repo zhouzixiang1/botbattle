@@ -556,7 +556,9 @@ def test_existing_database_backfill_is_deterministic_and_never_repeats(tmp_path)
     conn = sqlite3.connect(db)
     conn.executescript(legacy_schema)
     now = "2026-08-18T00:00:00"
-    contract = game_rule_contract("holdem", legacy=True)
+    # 本测试只模拟缺列的旧 schema，不模拟已退役的游戏规则代际；规则切换必须
+    # 由 game-rule-cutover 单独完成，不能让无关迁移用例绕过 runtime contract。
+    contract = game_rule_contract("holdem")
     conn.execute(
         "INSERT INTO rating_pool_state(game_id,active_pool_id,ruleset_version,"
         "protocol_version,activated_at) VALUES(?,?,?,?,?)",

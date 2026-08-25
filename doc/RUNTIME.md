@@ -379,6 +379,54 @@ apply 后继续停服，至少复核：数据库完整性/FK；marker 链唯一�
 旧代码 release。rule-only 切换没有新增 vN 或资产目录，回滚时**不得删除或改写任何 Bot 文件**。只回滚
 代码、只改 `rating_pool_state`、反向运行 cutover 或把归档评分手工灌回当前表均禁止。
 
+#### 现行切换：Holdem v1 → 全压累计水位 v2（同协议）
+
+现行目标契约为
+`holdem_hu_nlhe_allin_v2 / holdem_action_v1 / holdem_allin_rating_v2`，来源为
+`holdem_hu_nlhe_v1 / holdem_action_v1 / holdem_rating_v1`。wire 没有变化：Bot 仍只返回
+`-2=all-in`、`0=call/check` 或正整数 raise delta；变化在裁判按本街累计投入计算 all-in 水位、
+精确耗尽筹码的 call 状态，以及只剩一名可行动玩家时直接 runout。该修复会改变底池、净筹码与评分，
+因此不得只重启新代码继续使用 `holdem_rating_v1`。
+
+部署复用上一项同协议 rule-only 切换的全部维护、排空、冷备、dispatcher flock、dry-run 摘要审核、
+apply CAS、完整性/FK、marker 链、评分归档和回滚门禁；`version_manifest` 必须为空，不更换、不退役、
+不重新预检任何 Holdem Bot 二进制。历史 v1 Match/Replay/评分归档保持逐字节可读，新池从默认评分与
+0 场开始。旧 v1 queued/retryable job 必须由 cutover 以 `ruleset_retired` 收口，不能在 v2 裁判下续跑。
+
+```bash
+# dry-run；保存并人工审核 plan_digest、空 manifest_digest、target_preimage_sha256
+python -m bzplat.backend.cli game-rule-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id holdem-allin-v2-<deployment-id> \
+  --game-id holdem \
+  --from-ruleset holdem_hu_nlhe_v1 \
+  --from-protocol holdem_action_v1 \
+  --from-rating-pool holdem_rating_v1 \
+  --backup /absolute/path/botzone.pre-holdem-allin-v2.db \
+  --confirm-service-stopped --confirm-cold-backup
+
+# apply；三个摘要必须来自同一停服 preimage 的上述 dry-run
+python -m bzplat.backend.cli game-rule-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id holdem-allin-v2-<deployment-id> \
+  --game-id holdem \
+  --from-ruleset holdem_hu_nlhe_v1 \
+  --from-protocol holdem_action_v1 \
+  --from-rating-pool holdem_rating_v1 \
+  --apply \
+  --expect-plan-digest <reviewed-plan-digest> \
+  --expect-manifest-digest <reviewed-empty-manifest-digest> \
+  --expect-target-preimage-sha256 <reviewed-target-preimage-sha256> \
+  --confirm-db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.pre-holdem-allin-v2.db \
+  --confirm-service-stopped --confirm-cold-backup
+```
+
+启动前除通用后置条件外，还须在隔离副本/维护态用固定动作链复核
+`call 50 → raise-to 508 → all-in 20000 → call/all-in 20000`：只允许四个动作，底池 40000，
+随后直接发 flop/turn/river；不得再次出现 `call 19392`、余额 100 或三次单人 check。验收新评分池后再恢复
+接单，自动排位仍最后单独开启。
+
 ## 运行模式边界
 
 | 模式 | 进程 | 请求 |

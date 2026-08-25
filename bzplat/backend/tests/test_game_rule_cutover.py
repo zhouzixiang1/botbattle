@@ -21,6 +21,11 @@ from bzplat.backend.store.schema import (
     GOMOKU_CURRENT_RULESET,
     GOMOKU_PREVIOUS_RATING_POOL,
     GOMOKU_PREVIOUS_RULESET,
+    HOLDEM_CURRENT_RATING_POOL,
+    HOLDEM_CURRENT_RULESET,
+    HOLDEM_PREVIOUS_RATING_POOL,
+    HOLDEM_PREVIOUS_RULESET,
+    HOLDEM_PROTOCOL,
     STATUS_COMPLETED,
     TYPE_CHALLENGE,
     game_rule_contract,
@@ -32,6 +37,60 @@ PREVIOUS_CONTRACT = {
     "protocol_version": GOMOKU_CURRENT_PROTOCOL,
     "rating_pool_id": GOMOKU_PREVIOUS_RATING_POOL,
 }
+
+
+def test_holdem_allin_v2_uses_same_wire_and_requires_new_rating_pool(tmp_path):
+    """下注修复改变裁判与结算，必须同协议换 ruleset/rating pool，旧库拒绝在线启动。"""
+    source = game_rule_contract("holdem", legacy=True)
+    target = game_rule_contract("holdem")
+    assert source == {
+        "ruleset_version": HOLDEM_PREVIOUS_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_PREVIOUS_RATING_POOL,
+    }
+    assert target == {
+        "ruleset_version": HOLDEM_CURRENT_RULESET,
+        "protocol_version": HOLDEM_PROTOCOL,
+        "rating_pool_id": HOLDEM_CURRENT_RATING_POOL,
+    }
+
+    store = Store(str(tmp_path / "holdem-v1-needs-cutover.db"))
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE rating_pool_state SET active_pool_id=?,ruleset_version=?,"
+            "protocol_version=?,activated_at='holdem-v1-test' WHERE game_id='holdem'",
+            (
+                HOLDEM_PREVIOUS_RATING_POOL,
+                HOLDEM_PREVIOUS_RULESET,
+                HOLDEM_PROTOCOL,
+            ),
+        )
+    with pytest.raises(RuntimeError, match="game-rule-cutover"):
+        store.assert_runtime_contracts_current()
+
+    _certify_projection(store)
+    plan = store.plan_game_rule_cutover(
+        cutover_id="holdem-allin-v2-test",
+        game_id="holdem",
+        from_contract=source,
+        to_contract=target,
+    )
+    assert plan["version_manifest"] == []
+    assert plan["manifest_digest"] == hashlib.sha256(b"[]").hexdigest()
+    _prepare_cold_cutover(store)
+    with store.offline_cutover_guard() as guard:
+        applied = store.apply_game_rule_cutover(
+            cutover_id=plan["cutover_id"],
+            game_id="holdem",
+            from_contract=source,
+            to_contract=target,
+            expected_plan_digest=plan["plan_digest"],
+            offline_guard=guard,
+        )
+    assert applied["already_applied"] is False
+    assert store.get_active_game_contract("holdem") == target
+    store.assert_runtime_contracts_current()
+    store.close()
 
 
 def _set_previous_contract(store: Store) -> None:

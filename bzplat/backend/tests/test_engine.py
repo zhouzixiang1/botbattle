@@ -9,6 +9,7 @@ import pytest
 from bzplat.backend.games.holdem.holdem_judge import (
     Card,
     HandType,
+    Holdem,
     Suit,
     compare_full_cards,
     hand_type_of_cards,
@@ -330,6 +331,90 @@ def test_allin_runout_emits_deal_board_for_all_streets():
     # 最终 board 5 张
     settle = next(e for e in result.events if e["type"] == "settle")
     assert len(settle["board"]) == 5
+
+
+def test_prior_bet_then_allin_requires_full_call_and_emits_no_solo_checks():
+    """生产第 27 手回归：raise-to 508 后全压，跟注必须补到 20000 并直接 runout。"""
+    scripted = {
+        0: [resp("call"), resp("allin")],
+        1: [resp("raise", raise_to=508, street_bet=100), resp("call")],
+    }
+    decide_calls = [0, 0]
+
+    def decide(pid: int, req: dict) -> dict:
+        idx = decide_calls[pid]
+        decide_calls[pid] += 1
+        return scripted[pid][idx]
+
+    session = MatchSession(num_hands=1, rng=__import__("random").Random(27))
+    result = asyncio.run(session.run_async(decide))
+
+    actions = [event for event in result.events if event["type"] == "action"]
+    assert [
+        (event["player"], event["action"], event["amount"])
+        for event in actions
+    ] == [
+        (0, "call", 50),
+        (1, "raise", 508),
+        (0, "allin", STARTING_STACK),
+        (1, "allin", STARTING_STACK),
+    ]
+    assert decide_calls == [2, 2]
+
+    boards = [event for event in result.events if event["type"] == "deal_board"]
+    assert [event["street"] for event in boards] == ["flop", "turn", "river"]
+    settle = next(event for event in result.events if event["type"] == "settle")
+    assert settle["pot"] == 2 * STARTING_STACK
+    assert settle["chips"] in (
+        [2 * STARTING_STACK, 0],
+        [0, 2 * STARTING_STACK],
+        [STARTING_STACK, STARTING_STACK],
+    )
+    assert settle["deltas"] in (
+        [STARTING_STACK, -STARTING_STACK],
+        [-STARTING_STACK, STARTING_STACK],
+        [0, 0],
+    )
+
+
+def test_covering_stack_facing_short_allin_can_only_fold_or_call():
+    """HU 对手已全压后，覆盖方不能再制造无人响应的 raise/all-in。"""
+    judge = Holdem(
+        player_chips=[5000, STARTING_STACK],
+        dealer_idx=0,
+        small_blind=50,
+        big_blind=100,
+    )
+    judge.deal_cards_and_blind()
+    assert judge.player_action(Holdem.ALLIN) == []
+    assert judge.round_idx == 1
+
+    session = MatchSession(num_hands=1)
+    legal = session._legal_from_judge(judge, actor=1)
+
+    assert legal["actions"] == ["fold", "call"]
+    assert legal["to_call"] == 4900
+    assert legal["chips"] == 19900
+    # 旧 Bot 即使仍回 all-in，也只能按已匹配的 call 结算，不能产生虚假超额全压事件。
+    translated = session._translate_response(judge, 1, resp("allin"), legal)
+    assert translated == (
+        Holdem.CALL,
+        "call",
+        4900,
+    )
+    assert session._translate_response(
+        judge,
+        1,
+        resp("raise", raise_to=10000, street_bet=100),
+        legal,
+    ) == (Holdem.FOLD, "fold", 0)
+
+    winners = judge.player_action(translated[0])
+    assert winners in ([0], [1], [0, 1])
+    assert judge.hand_contrib == [5000, 5000]
+    assert judge.player_chips == [0, 15000]
+    assert judge.pot == 10000
+    assert len(judge.public_cards) == 5
 
 
 def test_holdem_event_contract_keys():
