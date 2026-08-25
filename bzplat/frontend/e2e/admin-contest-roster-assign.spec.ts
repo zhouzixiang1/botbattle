@@ -348,6 +348,69 @@ test('Bot picker paginates beyond the first 50 runnable Bots', async ({ page }) 
   expect(network.forbiddenMainRequests).toEqual([])
 })
 
+test('Bot picker ignores a delayed response after the selected user changes', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  await mockAdminContestList(page)
+  let releaseAlpha: (() => void) | undefined
+  let markAlphaRequested: () => void = () => undefined
+  const alphaRequested = new Promise<void>((resolve) => {
+    markAlphaRequested = resolve
+  })
+  await page.route('**/api/admin/bots?*', async (route) => {
+    const url = new URL(route.request().url())
+    const ownerId = Number(url.searchParams.get('owner_id'))
+    if (ownerId === ALPHA_USER.id) {
+      markAlphaRequested()
+      await new Promise<void>((release) => { releaseAlpha = release })
+    }
+    const bots = ownerId === ALPHA_USER.id ? ALPHA_BOTS : BETA_BOTS
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ bots, page: 1, per_page: 50, total: bots.length }),
+    })
+  })
+  await page.route('**/api/admin/users?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ users: [ALPHA_USER, BETA_USER], page: 1, per_page: 20, total: 2 }),
+  }))
+
+  await openAdminRoster(page)
+  await page.getByRole('button', { name: '选择参赛用户与 Bot', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '选择参赛用户与 Bot' })
+  await dialog.getByRole('button', { name: `选择用户 ${ALPHA_USER.username}` }).click()
+  await alphaRequested
+  try {
+    await dialog.getByRole('button', { name: `选择用户 ${BETA_USER.username}` }).click()
+    // Release Alpha immediately after the click, before waiting for Beta's
+    // passive effect/request. chooseUser must invalidate the old generation
+    // synchronously in this render-to-effect window.
+    releaseAlpha?.()
+    await expect(dialog.getByText(
+      `已选用户：${BETA_USER.display_name}（@${BETA_USER.username}）`,
+      { exact: true },
+    )).toBeVisible()
+    const botSelect = dialog.getByLabel('选择该用户的 Bot')
+    await expect(botSelect).toBeEnabled()
+    await botSelect.click()
+    await expect(page.getByRole('option', { name: /Beta 一号/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Alpha 一号/ })).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await dialog.getByRole('button', { name: `选择用户 ${BETA_USER.username}` }).click()
+    await botSelect.click()
+    await expect(page.getByRole('option', { name: /Beta 一号/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Alpha 一号/ })).toHaveCount(0)
+    await page.keyboard.press('Escape')
+  } finally {
+    releaseAlpha?.()
+  }
+  await monitor.expectClean()
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
 test('partial explicit assignment stays open with exact reasons and can be corrected', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const network = await mockBase(page)
@@ -419,15 +482,64 @@ test('assign-all remains a secondary confirmed action with its own payload', asy
   const assignAll = page.getByRole('button', { name: '指派全部可用用户', exact: true })
   await expect(precise).toHaveAttribute('data-variant', 'default')
   await expect(assignAll).toHaveAttribute('data-variant', 'outline')
-  await assignAll.dblclick()
-  await expect(page.getByRole('button', { name: '准备确认…', exact: true })).toBeDisabled()
+  const triggerBox = await assignAll.boundingBox()
+  expect(triggerBox).not.toBeNull()
+  const triggerPoint = {
+    x: triggerBox!.x + triggerBox!.width / 2,
+    y: triggerBox!.y + triggerBox!.height / 2,
+  }
+  await page.mouse.click(triggerPoint.x, triggerPoint.y)
+  await expect(
+    page.getByTestId('admin-contest-roster-assign').locator('button').filter({ hasText: '等待确认…' }),
+  ).toBeDisabled()
   const confirm = page.getByRole('dialog', { name: '指派全部可用用户？' })
   await expect(confirm).toContainText('请只在确实需要全员参赛时使用')
+  await page.waitForTimeout(400)
+  expect(await page.evaluate(({ x, y }) => (
+    document.elementFromPoint(x, y)?.closest('[data-slot="dialog-overlay"]') != null
+  ), triggerPoint)).toBe(true)
+  await page.mouse.click(triggerPoint.x, triggerPoint.y)
+  await expect(confirm).toBeVisible()
   expect(posted).toBeNull()
+  expect(postCount).toBe(0)
+  await page.keyboard.press('Escape')
+  await expect(confirm).toBeHidden()
+  const rawAssignAll = page.getByTestId('admin-contest-roster-assign')
+    .locator('button').filter({ hasText: '指派全部可用用户' })
+  await expect(rawAssignAll).toBeEnabled()
+
+  await rawAssignAll.click()
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(confirm).toBeHidden()
+  await expect(rawAssignAll).toBeEnabled()
+
+  await rawAssignAll.click()
+  await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '确认全员指派', exact: true }).click()
   await expect(page.getByText('已指派 7 人', { exact: true })).toBeVisible()
   expect(posted).toEqual({ assign_all: true, game_id: 'gomoku' })
   expect(postCount).toBe(1)
+  await monitor.expectClean()
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('shared confirmations keep default outside-click dismissal', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  await mockAdminContestList(page)
+  await page.goto('/#/admin?tab=contests')
+
+  await page.getByRole('button', { name: '删除草稿', exact: true }).click()
+  const confirm = page.getByRole('dialog', { name: '删除锦标赛草稿' })
+  await expect(confirm).toBeVisible()
+  expect(await page.evaluate(() => (
+    document.elementFromPoint(5, 5)?.closest('[data-slot="dialog-overlay"]') != null
+  ))).toBe(true)
+  await page.mouse.click(5, 5)
+  await expect(confirm).toBeHidden()
+
   await monitor.expectClean()
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])

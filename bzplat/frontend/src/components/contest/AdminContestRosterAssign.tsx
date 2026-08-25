@@ -55,8 +55,6 @@ interface AdminContestRosterAssignProps {
   className?: string
 }
 
-const ASSIGN_ALL_CONFIRM_DELAY_MS = 250
-
 function userLabel(user: AdminUser): string {
   const display = (user.display_name || '').trim()
   return display && display !== user.username
@@ -106,13 +104,13 @@ export function AdminContestRosterAssign({
   const [staged, setStaged] = useState<StagedAssignment[]>([])
   const [submitIssues, setSubmitIssues] = useState<string[]>([])
   const [submitting, setSubmitting] = useState(false)
-  const [preparingAll, setPreparingAll] = useState(false)
+  const [confirmingAll, setConfirmingAll] = useState(false)
   const [assigningAll, setAssigningAll] = useState(false)
   const rosterRequestSeq = useRef(0)
   const userRequestSeq = useRef(0)
   const botRequestSeq = useRef(0)
   const actionLockRef = useRef(false)
-  const busy = submitting || preparingAll || assigningAll
+  const busy = submitting || confirmingAll || assigningAll
   const userTotalPages = Math.max(1, Math.ceil(userTotal / 20))
   const botTotalPages = Math.max(1, Math.ceil(botTotal / 50))
 
@@ -215,18 +213,24 @@ export function AdminContestRosterAssign({
   }, [open, query, userPage, userReloadKey])
 
   useEffect(() => {
-    if (!open || !selectedUser || !game) return
     const seq = ++botRequestSeq.current
-    setBotsLoading(true)
     setBotsError('')
     setAvailableBots([])
     setSelectedBotId('')
+    setBotTotal(0)
+    if (!open || !selectedUser || !game) {
+      setBotsLoading(false)
+      return
+    }
+    setBotsLoading(true)
+    const ownerId = selectedUser.id
+    const gameId = game.id
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams({
-        owner_id: String(selectedUser.id),
+        owner_id: String(ownerId),
         active: 'true',
         runnable: 'true',
-        game_id: game.id,
+        game_id: gameId,
         page: String(botPage),
         per_page: '50',
       })
@@ -236,7 +240,7 @@ export function AdminContestRosterAssign({
         .then((response) => {
           if (botRequestSeq.current !== seq) return
           const next = (response.bots || []).filter(
-            (bot) => bot.owner_id === selectedUser.id && bot.runnable === true,
+            (bot) => bot.owner_id === ownerId && bot.runnable === true,
           )
           const total = response.total ?? next.length
           const totalPages = Math.max(1, Math.ceil(total / 50))
@@ -261,10 +265,19 @@ export function AdminContestRosterAssign({
   }, [botPage, botQuery, botReloadKey, game, open, selectedUser])
 
   const chooseUser = (candidate: AdminUser) => {
+    if (selectedUser?.id === candidate.id) return
+    // Invalidate the previous owner's request synchronously. Waiting for the
+    // passive effect would leave a render-to-effect window where stale Bot
+    // options could flash or be staged against the new user.
+    ++botRequestSeq.current
+    setAvailableBots([])
+    setSelectedBotId('')
+    setBotTotal(0)
+    setBotsLoading(false)
+    setBotsError('')
     setSelectedUser(candidate)
     setBotQuery('')
     setBotPage(1)
-    setBotTotal(0)
   }
 
   const addSelected = () => {
@@ -362,21 +375,17 @@ export function AdminContestRosterAssign({
   const assignAll = async () => {
     if (!game || busy || actionLockRef.current) return
     actionLockRef.current = true
-    setPreparingAll(true)
+    setConfirmingAll(true)
     try {
-      // Keep the trigger in place until a pointer double-click sequence has
-      // finished, so its second click cannot land on and dismiss the overlay.
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, ASSIGN_ALL_CONFIRM_DELAY_MS)
-      })
-      setPreparingAll(false)
       const ok = await confirm({
         title: '指派全部可用用户？',
         desc: `将为所有尚未报名、且拥有可运行 ${gameLabel(game.id)} Bot 的用户各指派一个 Bot。请只在确实需要全员参赛时使用。`,
         confirmText: '确认全员指派',
         buttonClassName: 'max-sm:min-h-11',
+        dismissOnOutside: false,
       })
       if (!ok) return
+      setConfirmingAll(false)
       setAssigningAll(true)
       const response = await apiJson<AssignResponse>(
         `/api/admin/contests/${contestId}/entries/bulk`,
@@ -397,7 +406,7 @@ export function AdminContestRosterAssign({
       toast.error(errMsg(cause, '全员指派失败'))
     } finally {
       actionLockRef.current = false
-      setPreparingAll(false)
+      setConfirmingAll(false)
       setAssigningAll(false)
     }
   }
@@ -432,11 +441,11 @@ export function AdminContestRosterAssign({
             variant="outline"
             className="min-h-11 max-sm:w-full"
             disabled={!game || busy}
-            aria-busy={preparingAll || assigningAll}
+            aria-busy={confirmingAll || assigningAll}
             onClick={() => void assignAll()}
           >
             <Users aria-hidden="true" className="size-4" />
-            {preparingAll ? '准备确认…' : assigningAll ? '指派中…' : '指派全部可用用户'}
+            {confirmingAll ? '等待确认…' : assigningAll ? '指派中…' : '指派全部可用用户'}
           </Button>
         </div>
       </div>

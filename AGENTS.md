@@ -158,7 +158,7 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 4. **label 包裹**：SelectTrigger 是 `<button>` 不支持 `htmlFor`——表单内用 `<div className="space-y-1.5"><Label>…</Label><Select>…</Select></div>`；inline 行内用 `<div className="flex items-center gap-2"><span>…</span><Select>…</Select></div>`。
 
 **表单控件统一规范**（硬约束——禁止裸用以下浏览器原生控件，跨设备/浏览器渲染不一致）：
-- **确认对话框**：禁止原生 `confirm()`（阻塞主线程 + OS 样式）。用 `@/hooks/use-confirm` 的 `useConfirm()`：`const [confirm, dialog] = useConfirm()` → `if (!await confirm({ title, desc, danger: true })) return` → 组件 JSX 末尾渲染 `{dialog}`。删除/中止/移除等危险操作设 `danger: true`（红色按钮）。
+- **确认对话框**：禁止原生 `confirm()`（阻塞主线程 + OS 样式）。用 `@/hooks/use-confirm` 的 `useConfirm()`：`const [confirm, dialog] = useConfirm()` → `if (!await confirm({ title, desc, danger: true })) return` → 组件 JSX 末尾渲染 `{dialog}`。删除/中止/移除等危险操作设 `danger: true`（红色按钮）。对“全员指派”等不可由触发器重复点击误取消的二次确认，可显式传 `dismissOnOutside: false`，但必须保留 Escape 与取消按钮；禁止用固定 sleep 猜测双击时序。
 - **操作成功提示**：禁止原生 `alert()`。用 `import { toast } from 'sonner'` → `toast.success('...')`（Toaster 已挂在 App.tsx，非阻塞、自动消失、跨设备一致）。
 - **滑块**：禁止原生 `<input type="range">`。用 `@/components/ui/slider`（Radix Slider）：`<Slider value={[n]} onValueChange={(v)=>setN(v[0])} min max step disabled />`（单值用数组包裹）。
 - **开关**：禁止原生 `<input type="checkbox">`（布尔开关语义）。用 `@/components/ui/switch`（Radix Switch）：`<Switch checked onCheckedChange={setBool} />`。

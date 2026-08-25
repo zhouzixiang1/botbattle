@@ -4544,7 +4544,8 @@ def admin_bots(
     total = len(rows)
     if page is not None:
         pp = max(1, min(200, per_page))
-        offset = (max(1, page) - 1) * pp
+        normalized_page = max(1, page)
+        offset = (normalized_page - 1) * pp
         rows = rows[offset:offset + pp]
     # 管理端所有者链接走 /user/:username，不能把数值 owner_id 填进用户名路由。
     enriched = []
@@ -4563,7 +4564,12 @@ def admin_bots(
             "owner_display": owner.get("display_name") if owner else None,
         })
     if page is not None:
-        return {"bots": enriched, "page": page, "per_page": pp, "total": total}
+        return {
+            "bots": enriched,
+            "page": normalized_page,
+            "per_page": pp,
+            "total": total,
+        }
     return {"bots": enriched}
 
 

@@ -525,6 +525,27 @@ def _require_current_runnable_contest_bot_tx(
         raise ValueError("Bot 当前不可运行，不能加入赛事")
 
 
+def _require_contest_bot_binding_tx(
+    conn: sqlite3.Connection,
+    *,
+    contest_game_id: str,
+    user_id: int,
+    bot_id: int,
+) -> None:
+    """Recheck roster ownership and game identity under the writer lock."""
+    bot = conn.execute(
+        "SELECT owner_id,game_id FROM bots WHERE id=?", (int(bot_id),)
+    ).fetchone()
+    if bot is None:  # pragma: no cover - runnable guard owns missing-row wording
+        raise RuntimeError("Bot runnable guard lost its row")
+    if int(bot["owner_id"]) != int(user_id):
+        raise ValueError(f"bot {int(bot_id)} 不属于 user {int(user_id)}")
+    if str(bot["game_id"]) != str(contest_game_id):
+        raise ValueError(
+            f"bot {int(bot_id)} 游戏 {bot['game_id']} ≠ 赛事 {contest_game_id}"
+        )
+
+
 def _require_contest_without_owner_deleted_bot_tx(
     conn: sqlite3.Connection, contest_id: int
 ) -> None:
@@ -12138,12 +12159,19 @@ class Store:
             # called from another Store transaction, so this is not nested.
             c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status,require_real_name FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,require_real_name,game_id FROM contests WHERE id=?",
+                (contest_id,),
             ).fetchone()
             if not contest or contest["status"] != CONTEST_OPEN:
                 raise ValueError("比赛未开放报名")
             _require_active_contest_user_tx(c, user_id)
             _require_current_runnable_contest_bot_tx(c, bot_id)
+            _require_contest_bot_binding_tx(
+                c,
+                contest_game_id=str(contest["game_id"]),
+                user_id=user_id,
+                bot_id=bot_id,
+            )
             if c.execute(
                 "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
                 (contest_id, user_id),
@@ -12190,7 +12218,7 @@ class Store:
             # See add_contest_entry_once: _tx() has not opened a transaction here.
             c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status,require_real_name FROM contests WHERE id=?",
+                "SELECT status,require_real_name,game_id FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
             if not contest:
@@ -12208,6 +12236,12 @@ class Store:
                 try:
                     _require_active_contest_user_tx(c, user_id)
                     _require_current_runnable_contest_bot_tx(c, bot_id)
+                    _require_contest_bot_binding_tx(
+                        c,
+                        contest_game_id=str(contest["game_id"]),
+                        user_id=user_id,
+                        bot_id=bot_id,
+                    )
                 except ValueError as exc:
                     raise ContestRosterWriteValidationError(
                         str(exc),

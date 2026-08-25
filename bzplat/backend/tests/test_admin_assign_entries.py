@@ -120,9 +120,17 @@ def test_admin_bot_picker_filters_owner_runnable_before_pagination(tmp_path):
         },
         headers=headers,
     )
+    normalized_zero_page = client.get(
+        "/api/admin/bots",
+        params={
+            "active": "true", "runnable": "true", "game_id": "holdem",
+            "owner_id": owner["id"], "page": 0, "per_page": 1,
+        },
+        headers=headers,
+    )
 
     assert first.status_code == second.status_code == rejected.status_code == 200
-    assert implicit_active.status_code == 200
+    assert implicit_active.status_code == normalized_zero_page.status_code == 200
     assert first.headers["cache-control"].startswith("private, no-store")
     assert first.headers["pragma"] == "no-cache"
     assert first.json()["total"] == second.json()["total"] == 2
@@ -139,10 +147,48 @@ def test_admin_bot_picker_filters_owner_runnable_before_pagination(tmp_path):
     assert {bot["id"] for bot in implicit_active.json()["bots"]} == {
         users[0][1]["id"], good["id"],
     }
+    assert normalized_zero_page.json()["page"] == 1
+    assert normalized_zero_page.json()["bots"] == first.json()["bots"]
     assert inactive["id"] not in {
         bot["id"]
         for bot in st.list_bots(active_only=False, runnable_only=True)
     }
+    s.close()
+
+
+@pytest.mark.parametrize("writer", ["single", "bulk"])
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    [("owner", "不属于"), ("bot_game", "游戏")],
+)
+def test_store_roster_writes_recheck_bot_binding_under_writer_lock(
+    tmp_path, writer, drift, error
+):
+    """Both product roster writes fail closed on owner/game drift."""
+    s, st, _admin, users, cid, _tok, _client = _setup(tmp_path)
+    user, bot = users[0]
+    st.update_contest(cid, status="open")
+    if drift == "owner":
+        st._conn.execute(
+            "UPDATE bots SET owner_id=? WHERE id=?",
+            (users[1][0]["id"], bot["id"]),
+        )
+        st._conn.commit()
+    else:
+        gomoku_contract = st.get_active_game_contract("gomoku")
+        st._conn.execute(
+            "UPDATE bots SET game_id='gomoku',protocol_version=? WHERE id=?",
+            (gomoku_contract["protocol_version"], bot["id"]),
+        )
+        st._conn.commit()
+
+    with pytest.raises(ValueError, match=error):
+        if writer == "single":
+            st.add_contest_entry_once(cid, user["id"], bot["id"])
+        else:
+            st.add_contest_roster_entries(cid, [(user["id"], bot["id"])])
+
+    assert st.get_entry(cid, user["id"]) is None
     s.close()
 
 
@@ -837,6 +883,68 @@ def test_admin_bulk_store_rechecks_runnable_bot_and_commit_identity_gate(
                 "reason=validation_failed"
             ),
         }]
+    finally:
+        release_store.set()
+        second.close()
+        s.close()
+
+
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    [("owner", "不属于"), ("bot_game", "游戏")],
+)
+def test_admin_bulk_store_rechecks_binding_after_manager_precheck(
+    tmp_path, monkeypatch, drift, error
+):
+    """A second connection cannot invalidate Manager owner/game validation."""
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    user, bot = users[0]
+    second = Store(st.path)
+    gomoku_protocol = st.get_active_game_contract("gomoku")["protocol_version"]
+    original_add = st.add_contest_roster_entries
+    store_boundary = threading.Barrier(2)
+    release_store = threading.Event()
+
+    def paused_add(*args, **kwargs):
+        store_boundary.wait(timeout=5)
+        if not release_store.wait(timeout=5):
+            raise TimeoutError("Bot binding Store release timed out")
+        return original_add(*args, **kwargs)
+
+    monkeypatch.setattr(st, "add_contest_roster_entries", paused_add)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                client.post,
+                f"/api/admin/contests/{cid}/entries/bulk",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"entries": [{
+                    "user_id": user["id"], "bot_id": bot["id"],
+                }]},
+            )
+            store_boundary.wait(timeout=5)
+            try:
+                if drift == "owner":
+                    second._conn.execute(
+                        "UPDATE bots SET owner_id=? WHERE id=?",
+                        (users[1][0]["id"], bot["id"]),
+                    )
+                    second._conn.commit()
+                else:
+                    second._conn.execute(
+                        "UPDATE bots SET game_id='gomoku',protocol_version=? "
+                        "WHERE id=?",
+                        (gomoku_protocol, bot["id"]),
+                    )
+                    second._conn.commit()
+            finally:
+                release_store.set()
+            response = future.result(timeout=10)
+
+        assert response.status_code == 400, response.text
+        assert error in response.text
+        assert st.get_entry(cid, user["id"]) is None
     finally:
         release_store.set()
         second.close()
