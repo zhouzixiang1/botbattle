@@ -120,19 +120,19 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --report
 
 ### 4.1 当前 Holdem all-in v2 候选与发布门禁
 
-本节下表当前记录的是未开赛赛事迁移增量之前的父候选 `e4e7352c2a516a48c6d5f0b2319721437347f1dd`
-及其门禁，不得冒充本次增量的最终执行证据。本次增量在 `game-rule-cutover` 中加入显式 ID 的 open/零赛程
-赛事迁移、完整赛事/名册摘要和同事务三元组 CAS；须在最终 runtime 提交冻结后重新执行完整 pytest、隔离
-smoke 与生产冷副本 `dry-run → apply → verify → no-op`，再以 docs-only 提交回填本节。旧
-`a29f942b3595db5c0ec4270ee80b9b5f3eb246ac` 的浏览器、构建、smoke 与生产副本结果也只支持未改模块。
+本节当前 runtime 候选为 `c611c8f62b44d6c9f4e17233f20137750d98bd88`。该提交在
+`game-rule-cutover` 中加入显式 ID 的 open/零赛程赛事迁移、完整赛事/名册摘要和同事务三元组 CAS；完整
+pytest 与隔离 smoke 已在同一冻结提交上从头通过。生产冷副本 `dry-run → apply → verify → no-op` 仍须在
+维护排空、停服和 Bot #34 canonical 路径修复后执行；完成前继续保持发布 No-Go。旧
+`a29f942b3595db5c0ec4270ee80b9b5f3eb246ac` 的浏览器、构建、smoke 与生产副本结果只支持未改模块。
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| runtime 候选冻结 | **前后一致** | 完整门禁前后 HEAD、tracked 与样例 path/mode/content、git status/index、当前 patch 及 worktree 数据库 SHA 均一致；测试只刷新部分可执行样例的 ctime，最终 6 个正式 ELF mode 均为稳定 `0711`。 |
-| 后端完整 pytest | **1809 passed / 1 skipped / 2 warnings（1044.09s）** | 官方 venv 静态收集 1810 项，并在显式清除 QA/instance/Docker 等行为变量的 fresh `TMPDIR`、basetemp、cache 与临时 `BZ_DB_PATH` 下从第 1 项无过滤运行到 exit 0。skip 为测试环境未 build `frontend/dist` 的既有 SPA catch-all 条件；warnings 为既有 Starlette deprecation 与重复 OpenAPI operation id。产物根 `/tmp/botbattle-holdem-final-gate4-20260825-22vCH2/`；`full.log` SHA-256=`7b81b69e9445b824e361220363462066eeb6097eddb01ec69febc2286930edad`，`collect.log` SHA-256=`f322900a141319f31d958ba55f017c2e5b6b2b21f560b2e3a8237dd2dee92530`，`final-summary.txt` SHA-256=`fe49095e6d3a807303a08015060175e9c74c37b0ed5c31a63aec8aa3a84a3234`。此前两轮因文档/样例 mode 漂移无效；第三轮的两个 execution-queue 失败已证明是门禁误注入 `BZ_QA_INSTANCE/BZ_INSTANCE_KEY`，清除后精确节点与本轮全量均通过，不计作候选失败。 |
-| 隔离端到端 smoke | **ALL E2E CHECKS PASSED** | 原始 `scripts/e2e_smoke.sh` 在 fresh 0700 根、动态端口 `59549`、唯一 instance `qa-smoke-holdem-allin-59549` 上 source/tee 均 exit 0；health 为 `qa_instance=true,max_concurrent=2,ceiling=2`，完成 2 个 Bot 上传、HTTP 202 challenge、70 手 Holdem、排行榜与赛事。对局 `20260825195440-430bb258` 为 `holdem_hu_nlhe_allin_v2`，`deltas=[800,-800]`、`technical_loss=0`；35×200 + 1×202，5xx/error/traceback 均为 0。600 份 strace 对 50380 connect 为 0、主库 open/write 为 0，端口/进程/runtime/instance 容器清零。产物根 `/tmp/botbattle-holdem-e2e-gate-20260825-1Prb7g/`；console SHA-256=`b84d2e372034a88765d071743b8470f9793b06c925597dc72605a9491ea67503`，DB 验证 SHA-256=`c9d5c896df0caee149a8ec40c76fbcaec497d0255446d6cec6d8817a27583241`，evidence manifest SHA-256=`5ede98090f5626e3831104cb337c8ca35aba2d1365f2215b34877be2d0ee47fd`。 |
+| runtime 候选冻结 | **前后一致** | 完整门禁前后 HEAD、455 个 tracked 文件与 35 个样例的 path/mode/content、git status/语义 index、当前 patch 及 worktree 数据库 SHA 均一致；测试只刷新 7 个已执行样例 ELF 的 ctime，权限与内容均不变。 |
+| 后端完整 pytest | **1822 passed / 1 skipped / 2 warnings（927.09s）** | 冻结 `c611c8f`，官方 venv 静态收集 1823 项，并在显式清除 QA/instance/Docker 等行为变量的 fresh `TMPDIR`、basetemp、cache 与临时 `BZ_DB_PATH` 下从第 1 项无过滤运行到 exit 0。skip 为测试环境未 build `frontend/dist` 的既有 SPA catch-all 条件；warnings 为既有 Starlette deprecation 与重复 OpenAPI operation id。47 轮 watchdog 守护 HEAD/status/语义 index、455 个 tracked 文件、35 个 samples 与 worktree DB，path/mode/content/SHA 均无漂移；仅 7 个已执行 sample ELF 刷新 ctime，权限与内容不变。产物根 `/tmp/botbattle-holdem-full-gate-c611c8f-qvPJIY/`；pytest/collect/evidence manifest SHA-256 依次为 `c6a7a4f5ffe5e045e56c807adbfe64f008c14b3644dad8a8fe45f6bb7871505f` / `81965d2fd30cb5a8a4e247d236765d3e90fc1c8bbe5567c31b9c40c83eedd229` / `eadd8f8566bb3447de119962ddf9a718f933ff4da36718b9ec84068f285f11fc`。 |
+| 隔离端到端 smoke | **ALL E2E CHECKS PASSED** | 同一冻结 `c611c8f` 的原始 `scripts/e2e_smoke.sh` 在 fresh 0700 根、动态端口 `55173`、唯一 instance `qa-smoke-holdem-c611c8f-55173-defa85` 上真实 source exit 0；health 为 `qa_instance=true,max_concurrent=2,ceiling=2`，完成 2 个 Bot 上传、HTTP 202 challenge、70 手 Holdem、排行榜与赛事。对局 `20260825220000-974bcc9f` completed，契约为 `holdem_hu_nlhe_allin_v2 / holdem_action_v1 / holdem_allin_rating_v2`，`deltas=[600,-600]`、`normalized_delta=6.0`；赛事为 published、2 entries/1 pairing，5xx/error/traceback 均为 0。strace 对 50380 connect 为 0、worktree DB 访问为 0；主库仅有 QA samefile 守卫的 4 次 `newfstatat`，open/write 为 0。端口、进程、runtime 与 instance 容器均清零，候选仍 clean。产物根 `/tmp/botbattle-holdem-contest-smoke-c611c8f.KCLC1x/`；console/DB/evidence manifest SHA-256 依次为 `489151622c2e84f4df1b4caa084dbd561361894faef631fff097e8843c27c05a` / `3bd6d927cdb46c85e2ee8ea964dc155b34c26938380804e42593b87688c3afde` / `2488f70d07ea97c582ac6a12adf923485d31f1889c621636592894145a6ff2cb`。 |
 | 生产副本 Holdem v2 cutover dry-run | **NO_GO_FAIL_CLOSED；未 apply** | 主库仅经 SQLite URI `mode=ro` + `query_only` 在线备份到独立 inode；真实候选 CLI 因非 showcase Holdem 赛事 `#5/#15` 仍为 `open` 而 exit 2，目标副本 SHA/mtime/inode 不变，integrity/quick=`ok`、FK=0。另发现 Bot `#34 organizer_holdem` 的 current binary path 仍是相对路径，不满足绝对 canonical 资产约束。报告对局 `20260825143811-19ebf690` 仍为 completed v1，57 个 current 资产 identity digest 前后一致。因首个硬门禁失败，未生成可审核 plan digest，也未验证实际空 manifest、评分归档/清零、旧任务收口、runtime contract 或二次幂等；审计报告 SHA-256=`d1d271c473506223af85a6463b1706035171f9cb69e7af6d26ff93a4e8878215`。 |
-| 当前发布结论 | **NO_GO（等待本增量最终门禁）** | 产品方已明确授权 #5/#15 保留赛事与名册并直接采用新规则；代码增量仍须冻结提交并重跑完整 pytest、隔离 smoke 与生产冷副本演练。正式切换还必须在维护排空、停服与冷备后精确规范化 Bot #34 两处镜像路径，再以显式赛事 ID 执行 dry-run → 摘要审核 → apply → verify → no-op。完成这些证据前不得先普通 rebuild/restart。 |
+| 当前发布结论 | **NO_GO（等待停服冷副本演练与正式切换）** | 产品方已明确授权 #5/#15 保留赛事与名册并直接采用新规则；`c611c8f` 完整 pytest 与隔离 smoke 已通过。正式切换仍须先维护排空、停服、冷备并精确规范化 Bot #34 两处镜像路径，再在生产冷副本完成显式赛事 ID 的 dry-run → apply → verify → no-op；审核同一计划摘要后方可合并并对主库 apply。完成前不得先普通 rebuild/restart。 |
 
 #### 已发布候选 a29f942 的继承证据（非本轮重跑）
 
