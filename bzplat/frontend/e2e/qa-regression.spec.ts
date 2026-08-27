@@ -3936,7 +3936,10 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
   })
   await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto(`/#/match/${matchId}`)
-  await page.getByRole('button', { name: /直接查看最终结果/ }).click()
+  // 这份三事件 fixture 会在 700ms 播放节拍内自行到达终局。WebKit 的
+  // pointer actionability 稳定等待可能跨过整个窗口，令按钮随游标推进而卸载；
+  // 立即派发同一个 click 事件，稳定验证 jumpToTerminal 与终局 reducer。
+  await page.getByRole('button', { name: /直接查看最终结果/ }).dispatchEvent('click')
   const overview = page.getByTestId('pencil-position-overview')
   await expect(overview).toContainText('0/25')
   await expect(overview).toContainText('25')
