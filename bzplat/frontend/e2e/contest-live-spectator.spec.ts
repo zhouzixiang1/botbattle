@@ -316,6 +316,27 @@ test('immutable running snapshot is dark/mobile readable, keyboard reachable, an
   await monitor.expectClean()
 })
 
+test.describe('coarse pointer touch targets', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
+
+  test('keeps the live page primary actions at least 44px tall', async ({ page }) => {
+    const monitor = monitorBrowser(page)
+    await installLiveApi(page, liveSnapshot())
+    await page.goto('/#/contests/42/live')
+
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+    for (const action of [
+      page.getByRole('link', { name: '返回赛事详情' }),
+      page.getByRole('button', { name: '刷新赛况' }),
+      page.getByRole('link', { name: '进入第 1 桌观赛' }),
+    ]) {
+      await expect(action).toBeVisible()
+      expect((await action.boundingBox())?.height).toBeGreaterThanOrEqual(44)
+    }
+    await monitor.expectClean()
+  })
+})
+
 test('route generation rejects stale contest data and terminal transition stops polling', async ({ page }) => {
   let releaseContest42 = () => undefined
   const contest42Gate = new Promise<void>((resolve) => { releaseContest42 = resolve })

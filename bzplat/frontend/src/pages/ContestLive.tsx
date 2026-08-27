@@ -235,7 +235,7 @@ export default function ContestLive() {
           title="正在进入直播间"
           description={offline ? '当前离线，联网后会自动加载。' : '正在读取当前桌台、赛程与排名。'}
           actions={(
-            <Button asChild variant="outline" className="min-h-11">
+            <Button asChild variant="outline" className="h-11">
               <Link to={`/contests/${contestId}`}><ArrowLeft aria-hidden="true" className="size-4" />返回赛事详情</Link>
             </Button>
           )}
@@ -249,14 +249,14 @@ export default function ContestLive() {
         ) : unavailable ? (
           <div className="flex min-h-36 flex-col items-center justify-center gap-3 rounded-xl border border-dashed px-4">
             <ErrorMsg msg={error} />
-            <Button asChild variant="outline" className="min-h-11">
+            <Button asChild variant="outline" className="h-11">
               <Link to="/contests"><ArrowLeft aria-hidden="true" className="size-4" />返回赛事列表</Link>
             </Button>
           </div>
         ) : (
           <div className="flex min-h-36 flex-col items-center justify-center gap-3 rounded-xl border border-dashed px-4">
             <ErrorMsg msg={error || '暂时无法读取赛况。'} />
-            <Button type="button" variant="outline" className="min-h-11" onClick={refresh} disabled={offline || polling}>
+            <Button type="button" variant="outline" className="h-11" onClick={refresh} disabled={offline || polling}>
               重试
             </Button>
           </div>
@@ -302,7 +302,7 @@ export default function ContestLive() {
           </span>
         )}
         actions={(
-          <Button asChild variant="outline" className="min-h-11 w-full sm:w-auto">
+          <Button asChild variant="outline" className="h-11 w-full sm:w-auto">
             <Link to={`/contests/${contestId}`}><ArrowLeft aria-hidden="true" className="size-4" />返回赛事详情</Link>
           </Button>
         )}

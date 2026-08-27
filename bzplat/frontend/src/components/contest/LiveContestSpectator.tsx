@@ -254,7 +254,7 @@ function ActiveTable({
         <MatchParticipantIdentity source={pairing} side={1} variant="panel" textLines={2} />
       </div>
       {pairing.match_id ? (
-        <Button asChild size="sm" className="mt-3 min-h-11 w-full sm:w-auto">
+        <Button asChild size="sm" className="mt-3 h-11 w-full sm:w-auto">
           <Link to={`/match/${pairing.match_id}`} aria-label={`${snapshot ? '查看演示' : '进入'}第 ${tableNumber} 桌观赛`}>
             <Eye aria-hidden="true" className="size-4" />{snapshot ? '查看演示对局' : '进入实时观赛'}
           </Link>
@@ -376,7 +376,7 @@ export function LiveContestSpectator({
           type="button"
           variant="outline"
           size="sm"
-          className="min-h-11 w-full sm:w-auto"
+          className="h-11 w-full sm:w-auto"
           onClick={onRefresh}
           disabled={!refreshEnabled || polling || offline}
           aria-busy={polling || undefined}
