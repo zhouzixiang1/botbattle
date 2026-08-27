@@ -16,6 +16,13 @@ import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
+import {
+  StageSeriesSettingsEditor,
+  defaultStageSeriesSettings,
+  stageSeriesSettingsValid,
+  type StageSeriesConfig,
+  type StageSeriesSettings,
+} from '@/components/contest/stage-series-settings'
 
 interface Contest {
   id: number
@@ -57,11 +64,19 @@ interface Template {
   game_id: string
   summary?: string
   recommended?: boolean
+  stages?: Array<{ duplicate?: boolean }>
+  games_per_pair_config?: {
+    default: number
+    min: number
+    max: number
+  }
+  stage_series_configs?: StageSeriesConfig[]
 }
 
 // Radix Select 必须全生命周期保持受控且不能用空字符串；该值不可能通过后端
 // template id 校验（id 必须以字母开头），仅用于 loading/empty 占位。
 const TEMPLATE_PENDING_VALUE = '__template_pending__'
+const EMPTY_STAGE_SERIES_CONFIGS: StageSeriesConfig[] = []
 
 export default function Contests() {
   const { user, isLoggedIn } = useAuth()
@@ -76,6 +91,8 @@ export default function Contests() {
   const [filterGame, setFilterGame] = useState('')
   const [formGameId, setFormGameId] = useState('holdem')
   const [requireRealName, setRequireRealName] = useState(false)
+  const [gamesPerPair, setGamesPerPair] = useState(1)
+  const [stageSeriesSettings, setStageSeriesSettings] = useState<StageSeriesSettings>({})
   // 时间编排（datetime-local 字符串；空=不设，手动触发对应阶段）
   const [regOpensAt, setRegOpensAt] = useState('')
   const [regClosesAt, setRegClosesAt] = useState('')
@@ -175,16 +192,33 @@ export default function Contests() {
     setTemplatesForGame('')
     setTemplateError('')
     setTemplatesLoading(true)
+    setGamesPerPair(1)
+    setStageSeriesSettings({})
     setFormGameId(nextGame)
   }
 
   const selectedTemplate = templates.find((t) => t.id === templateId)
+  const stageSeriesConfigs = selectedTemplate?.stage_series_configs || EMPTY_STAGE_SERIES_CONFIGS
+  const gamesPerPairConfig = stageSeriesConfigs.length > 0 ? undefined : selectedTemplate?.games_per_pair_config
+  const selectedTemplateIsDuplicate = selectedTemplate?.stages?.some((stage) => stage.duplicate) === true
   const templatePlaceholder = templatesLoading ? '模板加载中…'
     : templateError ? '模板加载失败'
     : '选择模板'
   const templateReady = !templatesLoading &&
     templatesForGame === formGameId &&
     selectedTemplate?.game_id === formGameId
+  const gamesPerPairReady = !gamesPerPairConfig || (
+    Number.isInteger(gamesPerPair) &&
+    gamesPerPair >= gamesPerPairConfig.min &&
+    gamesPerPair <= gamesPerPairConfig.max
+  )
+  const stageSeriesReady = stageSeriesConfigs.length === 0 ||
+    stageSeriesSettingsValid(stageSeriesConfigs, stageSeriesSettings)
+
+  useEffect(() => {
+    setGamesPerPair(gamesPerPairConfig?.default ?? 1)
+    setStageSeriesSettings(defaultStageSeriesSettings(stageSeriesConfigs))
+  }, [templateId, gamesPerPairConfig?.default, stageSeriesConfigs])
 
   /** datetime-local 值（如 2026-01-01T14:00）→ ISO 秒级字符串（后端 naive 本地时间约定） */
   const toIso = (v: string): string | undefined => {
@@ -200,6 +234,14 @@ export default function Contests() {
       setFormError(templateError || '请等待当前游戏的模板加载完成后再创建赛事')
       return
     }
+    if (!gamesPerPairReady) {
+      setFormError('请选择模板允许的每对选手交手场数')
+      return
+    }
+    if (!stageSeriesReady) {
+      setFormError('请选择模板允许的逐阶段公平性设置')
+      return
+    }
     creatingRef.current = true
     setCreating(true)
     setFormError('')
@@ -213,12 +255,19 @@ export default function Contests() {
         registration_opens_at: toIso(regOpensAt),
         registration_closes_at: toIso(regClosesAt),
         starts_at: toIso(startsAt),
+        ...(stageSeriesConfigs.length > 0
+          ? { stage_series_settings: stageSeriesSettings }
+          : gamesPerPairConfig
+            ? { games_per_pair: gamesPerPair }
+            : {}),
       })
       setTitle('')
       setDescription('')
       setRegOpensAt('')
       setRegClosesAt('')
       setStartsAt('')
+      setGamesPerPair(gamesPerPairConfig?.default ?? 1)
+      setStageSeriesSettings(defaultStageSeriesSettings(stageSeriesConfigs))
       setPage(1)
       await load(1)
       setShowCreate(false)
@@ -312,6 +361,45 @@ export default function Contests() {
               <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>
               <div className="space-y-1.5"><Label htmlFor="contest-desc">说明</Label><Input id="contest-desc" value={description} onChange={(event) => setDescription(event.target.value)} /></div>
             </div>
+            {gamesPerPairConfig && (
+              <fieldset className="grid min-w-0 gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-[minmax(12rem,15rem)_minmax(0,1fr)] sm:items-end">
+                <legend className="sr-only">每对选手交手场数</legend>
+                <div className="min-w-0 space-y-1.5">
+                  <span id="contest-games-per-pair-label" className="block text-sm font-medium leading-none">每对选手交手场数</span>
+                  <Select value={String(gamesPerPair)} onValueChange={(value) => setGamesPerPair(Number(value))}>
+                    <SelectTrigger
+                      className="min-h-11 w-full"
+                      aria-labelledby="contest-games-per-pair-label"
+                      aria-describedby="contest-games-per-pair-help"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from(
+                        { length: gamesPerPairConfig.max - gamesPerPairConfig.min + 1 },
+                        (_, index) => gamesPerPairConfig.min + index,
+                      ).map((count) => (
+                        <SelectItem key={count} value={String(count)}>{count} 场</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p id="contest-games-per-pair-help" className="text-sm leading-relaxed text-muted-foreground">
+                  {selectedTemplateIsDuplicate
+                    ? `${gamesPerPair} 场复式对局 · 正常完成时 ${gamesPerPair * 2} 局计分。每场实际对局内部仍使用同副牌换座 2 leg，对局数不是 leg 数。`
+                    : `每对选手进行 ${gamesPerPair} 场独立实际对局；场数越多，发牌与座位波动越小，总赛程也越长。`}
+                </p>
+              </fieldset>
+            )}
+            {stageSeriesConfigs.length > 0 && (
+              <div className="overflow-hidden rounded-lg border border-border bg-muted/20">
+                <StageSeriesSettingsEditor
+                  configs={stageSeriesConfigs}
+                  value={stageSeriesSettings}
+                  onChange={setStageSeriesSettings}
+                />
+              </div>
+            )}
             <div className="grid min-w-0 items-end gap-3 lg:grid-cols-[minmax(15rem,0.8fr)_minmax(0,2fr)_auto]">
               <div className="flex min-w-0 min-h-[var(--control-height)] items-start gap-2 rounded-lg border px-3 py-2">
                 <Switch id="contest-realname" checked={requireRealName} onCheckedChange={setRequireRealName} />
@@ -325,7 +413,7 @@ export default function Contests() {
                   <div className="space-y-1"><Label htmlFor="contest-starts" className="text-xs">比赛开始</Label><Input id="contest-starts" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></div>
                 </div>
               </fieldset>
-              <Button type="submit" disabled={creating || !templateReady} aria-busy={creating} className="w-full lg:w-auto">
+              <Button type="submit" disabled={creating || !templateReady || !gamesPerPairReady || !stageSeriesReady} aria-busy={creating} className="min-h-11 w-full lg:w-auto">
                 <Plus className="size-4" />{creating ? '创建中…' : '创建赛事'}
               </Button>
             </div>
@@ -348,6 +436,7 @@ export default function Contests() {
                 {list.map((contest, index) => {
                   const hint = scheduleHint(contest)
                   const templateName = contest.template_name || templates.find((template) => template.id === contest.template_id)?.name
+                  const liveAvailable = ['published', 'running', 'rest'].includes(contest.status)
                   return (
                     <li key={contest.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
                       <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
@@ -367,7 +456,11 @@ export default function Contests() {
                           {hint && <span className="inline-flex min-w-0 items-center gap-1 font-medium text-primary">{hint.label}{hint.time && <Countdown endsAt={hint.time} />}</span>}
                         </div>
                       </div>
-                      <Button asChild variant="ghost" size="sm"><Link to={`/contests/${contest.id}`}>查看赛事</Link></Button>
+                      <Button asChild variant={liveAvailable ? 'outline' : 'ghost'} size="sm" className="min-h-11 sm:min-h-[var(--control-height)]">
+                        <Link to={liveAvailable ? `/contests/${contest.id}/live` : `/contests/${contest.id}`}>
+                          {liveAvailable ? '进入直播' : '查看赛事'}
+                        </Link>
+                      </Button>
                     </li>
                   )
                 })}

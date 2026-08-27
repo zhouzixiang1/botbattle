@@ -169,6 +169,12 @@ class GameSpec:
     # P4 duplicate：构造多 leg 对局计划（默认单 leg；holdem 覆写返回 2 leg 同 deal_sequence）。
     # 返回 list[LegSpec]，每 leg 含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
     build_match_plan: Callable[[int, dict[str, Any]], list[dict[str, Any]]] | None = None
+
+    # 模板显式开放的单阶段 round_robin 每对选手独立对局场数上限。
+    # None 表示该游戏不具备此能力；通用赛事层还必须同时看到模板的
+    # games_per_pair_config 才能启用，绝不从 stage type 或 game_id 推断。
+    # 未声明该字段的旧模板与旧赛事继续保持历史赛制语义。
+    contest_games_per_pair_max: int | None = None
     # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
     # Gomoku/Pencil 设 900.0（每座位累计 15 分钟，超时判负）。
     time_budget_per_side: float | None = None
@@ -189,6 +195,15 @@ class GameSpec:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} 必须是非空字符串")
+        if (
+            self.contest_games_per_pair_max is not None
+            and (
+                isinstance(self.contest_games_per_pair_max, bool)
+                or not isinstance(self.contest_games_per_pair_max, int)
+                or self.contest_games_per_pair_max < 2
+            )
+        ):
+            raise ValueError("contest_games_per_pair_max 必须为 >=2 的整数或 None")
         judge_file = f"{self.game_id}_judge.py"
         files = tuple(self.source_files) or (
             judge_file,

@@ -186,8 +186,9 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
     bracket_pairing = bracket_rows[normal_pairing["id"]]
     public_pairing_fields = {
         "id", "round_num", "bot_a_id", "bot_b_id", "scheduled_at",
-        "match_id", "status", "stage_idx", "stage_key", "group_id",
-        "bracket_slot", "bot_a_name", "bot_a_display", "bot_b_name",
+        "started_at", "ended_at", "match_id", "status", "display_status",
+        "stage_idx", "stage_key", "group_id", "bracket_slot",
+        "series_index", "series_size", "bot_a_name", "bot_a_display", "bot_b_name",
         "bot_b_display", "owner_a_name", "owner_a_display",
         "owner_b_name", "owner_b_display", "match_winner", "is_bye",
     }
@@ -197,6 +198,7 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
     for internal in (
         "contest_id", "entry_a_id", "entry_b_id", "bot_a_version_id",
         "bot_b_version_id", "pairing_seed", "published_at", "color_first",
+        "match_status", "_match_created_at", "_match_result_json",
     ):
         assert internal not in bracket_pairing
     # Round-robin never creates no-opponent placeholders.  Even the otherwise

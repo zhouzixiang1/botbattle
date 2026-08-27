@@ -26,6 +26,7 @@ const Challenge = lazy(() => import('@/pages/Challenge'))
 const Leaderboard = lazy(() => import('@/pages/Leaderboard'))
 const Contests = lazy(() => import('@/pages/Contests'))
 const ContestDetail = lazy(() => import('@/pages/ContestDetail'))
+const ContestLive = lazy(() => import('@/pages/ContestLive'))
 const MyBots = lazy(() => import('@/pages/MyBots'))
 const Wiki = lazy(() => import('@/pages/Wiki'))
 const Judges = lazy(() => import('@/pages/Judges'))
@@ -442,6 +443,7 @@ export function AppShell() {
               <Route path="/wiki" element={<Wiki />} />
               <Route path="/judges" element={<Judges />} />
               <Route path="/contests" element={<Contests />} />
+              <Route path="/contests/:id/live" element={<ContestLive />} />
               <Route path="/contests/:id" element={<ContestDetail />} />
               <Route path="/user/:name" element={<UserProfile />} />
               <Route path="/search" element={<SearchPage />} />

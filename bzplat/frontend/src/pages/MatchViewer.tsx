@@ -9,7 +9,7 @@
  * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
@@ -44,6 +44,7 @@ type MatchRow = MatchSeatRow & {
   status?: string
   reason?: string
   can_view_debug?: boolean
+  contest_id?: number | null
 }
 
 type ReplayPayload = {
@@ -974,9 +975,17 @@ export default function MatchViewer() {
         </div>
       )}
 
-      <Button variant="ghost" size="sm" className="mt-6 gap-1.5" onClick={() => navigate(-1)}>
-        <ArrowLeft className="size-4" />返回
-      </Button>
+      {match?.contest_id != null ? (
+        <Button asChild variant="ghost" size="sm" className="mt-6 min-h-11 gap-1.5">
+          <Link to={`/contests/${match.contest_id}/live`}>
+            <ArrowLeft aria-hidden="true" className="size-4" />返回赛事直播
+          </Link>
+        </Button>
+      ) : (
+        <Button variant="ghost" size="sm" className="mt-6 min-h-11 gap-1.5" onClick={() => navigate(-1)}>
+          <ArrowLeft aria-hidden="true" className="size-4" />返回
+        </Button>
+      )}
       {id && <Comments targetType="match" targetId={id} />}
     </PageStub>
   )

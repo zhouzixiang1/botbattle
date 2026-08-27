@@ -6,7 +6,11 @@ interface SingleFlightPollingOptions {
   onSuccess?: () => void
   enabled?: boolean
   intervalMs: number
+  /** Delay before the first request in this polling scope. Defaults to immediate. */
+  initialDelayMs?: number
   maxIntervalMs?: number
+  /** Changing the scope aborts the old request even when the interval is unchanged. */
+  scopeKey?: string | number | null
 }
 
 function isAbortError(error: unknown): boolean {
@@ -26,7 +30,9 @@ export function useSingleFlightPolling({
   onSuccess,
   enabled = true,
   intervalMs,
+  initialDelayMs = 0,
   maxIntervalMs = intervalMs * 8,
+  scopeKey = null,
 }: SingleFlightPollingOptions) {
   const taskRef = useRef(task)
   const onErrorRef = useRef(onError)
@@ -140,7 +146,7 @@ export function useSingleFlightPolling({
     window.addEventListener('offline', handleOffline)
     document.addEventListener('visibilitychange', handleVisibility)
     setOffline(!navigator.onLine)
-    schedule(0)
+    schedule(initialDelayMs)
 
     return () => {
       disposed = true
@@ -151,7 +157,7 @@ export function useSingleFlightPolling({
       window.removeEventListener('offline', handleOffline)
       document.removeEventListener('visibilitychange', handleVisibility)
     }
-  }, [enabled, intervalMs, maxIntervalMs])
+  }, [enabled, initialDelayMs, intervalMs, maxIntervalMs, scopeKey])
 
   return { refresh, polling, offline }
 }

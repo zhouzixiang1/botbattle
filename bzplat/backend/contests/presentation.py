@@ -9,6 +9,10 @@ import json
 from collections import defaultdict
 from typing import Any
 
+from bzplat.backend.contests.series import (
+    aggregate_series_rows_settled,
+    is_aggregate_series_stage,
+)
 from bzplat.backend.store.schema import STATUS_COMPLETED
 from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
 
@@ -58,8 +62,27 @@ def _swiss_byes(
     return dict(counts)
 
 
-def _rank_rows(rows: list[dict[str, Any]], *, grouped: bool) -> list[dict[str, Any]]:
+def _rank_rows(
+    rows: list[dict[str, Any]], *, grouped: bool, use_persisted_rank: bool = False
+) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
+    if use_persisted_rank and rows and all(
+        isinstance(row.get("_persisted_rank"), int)
+        and not isinstance(row.get("_persisted_rank"), bool)
+        and int(row["_persisted_rank"]) >= 1
+        for row in rows
+    ):
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("group_id") or "") if grouped else "",
+                int(row["_persisted_rank"]),
+                int(row.get("entry_id") or 0),
+            ),
+        )
+        for row in ordered:
+            row["rank"] = int(row.pop("_persisted_rank"))
+        return ordered
     if grouped:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
@@ -197,11 +220,20 @@ def build_stage_summaries(
                     "byes": bye_counts.get(int(entry_id), 0),
                     "delta_total": int(source_row.get("delta_total") or 0),
                     "group_id": source_row.get("group_id") or entry.get("group_id") or "",
+                    "_persisted_rank": (
+                        int(source_row.get("rank_in_group") or 0)
+                        if source == "persisted"
+                        else None
+                    ),
                 }
             )
 
         grouped = str(stage.get("type") or "").startswith("group_")
-        rows = _rank_rows(rows, grouped=grouped)
+        rows = _rank_rows(
+            rows, grouped=grouped, use_persisted_rank=(source == "persisted")
+        )
+        for row in rows:
+            row.pop("_persisted_rank", None)
         stage_type = stage.get("type")
         completed_count = sum(
             1
@@ -212,7 +244,31 @@ def build_stage_summaries(
                 and pairing.get("match_status") == STATUS_COMPLETED
             )
         )
-        all_completed = bool(stage_pairings) and completed_count == len(stage_pairings)
+        aggregate_complete = True
+        if is_aggregate_series_stage(stage):
+            real_pairings = [
+                pairing
+                for pairing in stage_pairings
+                if not is_authoritative_no_opponent_pairing(stage_type, pairing)
+            ]
+            # ``contest_bracket`` 已在同一批查询里附带公开 Match 摘要。阶段详情
+            # 这里只需要 series 坐标与 completed 状态，禁止再按 pairing 逐条
+            # ``get_match``，否则大规模 K 系列会退化成 N+1 查询。
+            match_projection = {
+                str(pairing["match_id"]): {
+                    "status": pairing.get("match_status"),
+                    "winner": pairing.get("match_winner"),
+                    "result": {},
+                }
+                for pairing in real_pairings
+                if pairing.get("match_id") is not None
+            }
+            aggregate_complete = aggregate_series_rows_settled(
+                stage, real_pairings, match_projection.get
+            )
+        all_completed = bool(stage_pairings) and (
+            completed_count == len(stage_pairings) and aggregate_complete
+        )
 
         next_ids = _participants(pairing_by_stage.get(stage_idx + 1, []))
         advancement_final = bool(next_ids) or all_completed

@@ -11,6 +11,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -25,7 +26,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.datastructures import FormData, UploadFile
 
 from bzplat.backend.auth.auth_manager import COOKIE_NAME
@@ -90,6 +91,11 @@ _CONTEST_IDENTITY_PRIVATE_HEADERS = {
 }
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.ranking import with_official_result_provenance
+from bzplat.backend.contests.series import (
+    group_conceptual_series,
+    is_aggregate_series_stage,
+    summarize_conceptual_series,
+)
 from bzplat.backend.contests.presentation import build_stage_summaries
 from bzplat.backend.contests.showcase import (
     ShowcaseReadOnlyError,
@@ -97,7 +103,7 @@ from bzplat.backend.contests.showcase import (
     require_mutable as require_mutable_contest,
     template_name as contest_template_name,
 )
-from bzplat.backend.contests.templates import list_templates
+from bzplat.backend.contests.templates import list_templates, points_for_result
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games.base import MatchRecordExportError
 from bzplat.backend.matches import MatchOrchestrator
@@ -147,6 +153,8 @@ from bzplat.backend.store.schema import (
     SUPPORTED_BINARY_ERROR,
     STATUS_ABORTED,
     STATUS_COMPLETED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
     is_supported_binary_metadata,
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
@@ -3020,6 +3028,13 @@ def update_notif_prefs(
 
 # ── contests ──────────────────────────────────────────────────
 
+class ContestStageSeriesSetting(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    games_per_pair: StrictInt
+    swiss_extra_rounds: StrictInt | None = None
+
+
 class ContestCreate(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -3028,6 +3043,8 @@ class ContestCreate(BaseModel):
     template_id: str | None = None
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
+    games_per_pair: StrictInt | None = None
+    stage_series_settings: dict[str, ContestStageSeriesSetting] | None = None
     phase: str = "standalone"  # P5: preliminary/final/standalone
     source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
     require_real_name: bool = False  # 报名是否要求实名
@@ -3043,6 +3060,30 @@ class ContestRegister(BaseModel):
 
 class ContestDispatch(BaseModel):
     bot_id: int
+
+
+class ContestStageSeriesPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    stage_series_settings: dict[str, ContestStageSeriesSetting]
+
+
+def _stage_series_settings_payload(
+    settings: dict[str, ContestStageSeriesSetting] | None,
+) -> dict[str, dict[str, int]] | None:
+    if settings is None:
+        return None
+    payload: dict[str, dict[str, int]] = {}
+    for stage_key, setting in settings.items():
+        if (
+            "swiss_extra_rounds" in setting.model_fields_set
+            and setting.swiss_extra_rounds is None
+        ):
+            raise ValueError(
+                f"阶段 {stage_key} swiss_extra_rounds 不能为 null"
+            )
+        payload[stage_key] = setting.model_dump(exclude_none=True)
+    return payload
 
 
 _CONTEST_ENTRY_PUBLIC_FIELDS = (
@@ -3123,6 +3164,42 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
     public = dict(contest)
     public.pop("hands_per_match", None)
     public.pop("match_config_json", None)
+    public["games_per_pair"] = None
+    public["stage_series_settings"] = {}
+    raw_stages = contest.get("stages_json") or "[]"
+    try:
+        stages = json.loads(raw_stages) if isinstance(raw_stages, str) else raw_stages
+    except (TypeError, ValueError):
+        stages = []
+    if (
+        isinstance(stages, list)
+        and len(stages) == 1
+        and isinstance(stages[0], dict)
+        and stages[0].get("type", "round_robin") == "round_robin"
+    ):
+        value = stages[0].get("games_per_pair")
+        if value is None:
+            # Absent means the immutable legacy one-match RR semantic.  Never
+            # re-read today's template default for an old contest snapshot.
+            value = 1
+        if isinstance(value, int) and not isinstance(value, bool):
+            public["games_per_pair"] = value
+    if isinstance(stages, list):
+        for index, stage in enumerate(stages):
+            if (
+                not isinstance(stage, dict)
+                or stage.get("series_scoring") != "aggregate_match_points_v1"
+            ):
+                continue
+            games = stage.get("games_per_pair")
+            if not isinstance(games, int) or isinstance(games, bool):
+                continue
+            stage_key = str(stage.get("key") or f"stage{index + 1}")
+            setting: dict[str, int] = {"games_per_pair": games}
+            extra = stage.get("swiss_extra_rounds")
+            if isinstance(extra, int) and not isinstance(extra, bool):
+                setting["swiss_extra_rounds"] = extra
+            public["stage_series_settings"][stage_key] = setting
     public["template_name"] = contest_template_name(public)
     if public.get("showcase_key"):
         public["description"] = contest_public_description(public)
@@ -3170,6 +3247,8 @@ _PUBLIC_PAIRING_INTERNAL_FIELDS = (
     "published_at",
     "color_first",
     "match_status",
+    "_match_created_at",
+    "_match_result_json",
 )
 
 _PUBLIC_PAIRING_FIELDS = frozenset(
@@ -3179,12 +3258,17 @@ _PUBLIC_PAIRING_FIELDS = frozenset(
         "bot_a_id",
         "bot_b_id",
         "scheduled_at",
+        "started_at",
+        "ended_at",
         "match_id",
         "status",
         "stage_idx",
         "stage_key",
         "group_id",
         "bracket_slot",
+        "series_index",
+        "series_size",
+        "series_summary",
         "bot_a_name",
         "bot_a_display",
         "bot_b_name",
@@ -3195,6 +3279,7 @@ _PUBLIC_PAIRING_FIELDS = frozenset(
         "owner_b_display",
         "match_winner",
         "is_bye",
+        "display_status",
     }
 )
 
@@ -3217,6 +3302,45 @@ def _contest_stage_types(contest: dict[str, Any]) -> dict[int, object]:
     }
 
 
+def _contest_stage_configs(contest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the frozen stage list, treating malformed legacy JSON as empty."""
+    raw = contest.get("stages_json") or "[]"
+    if isinstance(raw, list):
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = []
+    if not isinstance(parsed, list):
+        return []
+    return [stage if isinstance(stage, dict) else {} for stage in parsed]
+
+
+def _live_pairing_sort_key(row: dict[str, Any]) -> tuple[bool, str, int, int]:
+    scheduled_at = row.get("scheduled_at")
+    return (
+        scheduled_at is not None,
+        str(scheduled_at or ""),
+        int(row.get("round_num") or 1),
+        int(row.get("id") or 0),
+    )
+
+
+def _latest_actual_timestamp(values: list[object]) -> str:
+    """Compare actual ISO event times chronologically, ignoring malformed values."""
+    parsed: list[tuple[float, str]] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            instant = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        parsed.append((instant, value))
+    return max(parsed, default=(0.0, ""))[1]
+
+
 def _public_contest_pairings(
     rows: list[dict], *, stage_types: dict[int, object] | None = None
 ) -> list[dict]:
@@ -3234,6 +3358,14 @@ def _public_contest_pairings(
         public["is_bye"] = is_authoritative_no_opponent_pairing(
             known_stage_types.get(stage_idx), row
         )
+        if row.get("match_status") == STATUS_COMPLETED or public["is_bye"]:
+            public["display_status"] = STATUS_COMPLETED
+        elif row.get("match_status") == STATUS_RUNNING:
+            public["display_status"] = STATUS_RUNNING
+        elif row.get("match_status") == STATUS_PENDING:
+            public["display_status"] = "queued"
+        else:
+            public["display_status"] = STATUS_PENDING
         for field in _PUBLIC_PAIRING_INTERNAL_FIELDS:
             public.pop(field, None)
         projected.append(
@@ -3290,6 +3422,9 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
 def create_contest(body: ContestCreate, request: Request, user=Depends(require_organizer)):
     _reject_fixed_rule_overrides(body.stages)
     try:
+        stage_series_settings = _stage_series_settings_payload(
+            body.stage_series_settings
+        )
         c = _contests(request).create(
             user["id"],
             body.title,
@@ -3297,6 +3432,8 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             template_id=body.template_id,
             game_id=body.game_id,
             stages=body.stages,
+            games_per_pair=body.games_per_pair,
+            stage_series_settings=stage_series_settings,
             phase=body.phase,
             source_contest_id=body.source_contest_id,
             require_real_name=int(body.require_real_name),
@@ -3315,10 +3452,47 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
         user=user.get("username"), target=c["id"],
         detail=(
             f"title={body.title}; opens={c.get('registration_opens_at')}; "
-            f"closes={c.get('registration_closes_at')}; starts={c.get('starts_at')}"
+            f"closes={c.get('registration_closes_at')}; starts={c.get('starts_at')}; "
+            f"games_per_pair={_contest_for_api(c).get('games_per_pair')}"
         ),
     )
     return {"contest": _contest_for_api(c)}
+
+
+@router.patch("/api/contests/{contest_id}")
+async def patch_contest_stage_series(
+    contest_id: int,
+    body: ContestStageSeriesPatch,
+    request: Request,
+    user=Depends(require_organizer),
+):
+    contest = _store(request).get_contest(contest_id)
+    if not contest:
+        raise HTTPException(404, "比赛不存在")
+    if (
+        user.get("role") != ROLE_ADMIN
+        and int(contest.get("organizer_id") or 0) != int(user["id"])
+    ):
+        raise HTTPException(403, "无权修改该赛事")
+    try:
+        settings = _stage_series_settings_payload(body.stage_series_settings)
+        assert settings is not None
+        updated = await _contests(request).revise_stage_series_settings(
+            contest_id, settings
+        )
+    except ValueError as exc:
+        raise _contest_write_http_error(exc) from exc
+    if not updated:
+        raise HTTPException(404, "比赛不存在")
+    audit_log(
+        request,
+        "contest_patch_stage_series",
+        result="ok",
+        user=user.get("username"),
+        target=contest_id,
+        detail="stage_series_settings=changed",
+    )
+    return {"contest": _contest_for_api(updated)}
 
 
 @router.get("/api/contests/{contest_id}")
@@ -3416,6 +3590,280 @@ def contest_detail(
     }
     resp.update(entries_meta)
     return resp
+
+
+@router.get("/api/contests/{contest_id}/live")
+def contest_live(
+    contest_id: int,
+    request: Request,
+    response: Response,
+    user=Depends(optional_user),
+):
+    """Lightweight, allow-listed projection for a polling spectator page."""
+    response.headers.update(_DEBUG_NO_STORE_HEADERS)
+    store = _store(request)
+    snapshot = store.contest_live_snapshot(contest_id)
+    if snapshot is None:
+        raise HTTPException(404, "比赛不存在", headers=_DEBUG_NO_STORE_HEADERS)
+    contest = snapshot["contest"]
+    if (
+        contest.get("status") in _CONTEST_HIDDEN_STATUSES
+        and not _can_view_hidden_contest(contest, user)
+    ):
+        raise HTTPException(404, "比赛不存在", headers=_DEBUG_NO_STORE_HEADERS)
+
+    stages = _contest_stage_configs(contest)
+    stage_idx = int(contest.get("current_stage_idx") or 0)
+    stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
+    stage_type = stage.get("type") if stage else None
+    raw_pairings = snapshot["pairings"]
+    public_rows = _public_contest_pairings(
+        raw_pairings,
+        stage_types={stage_idx: stage_type},
+    )
+    public_by_id = {int(row["id"]): row for row in public_rows}
+    conceptual_series_total = 0
+    conceptual_series_completed = 0
+    if stage is not None and is_aggregate_series_stage(stage):
+        match_by_id: dict[str, dict[str, Any]] = {}
+        for row in raw_pairings:
+            match_id = row.get("match_id")
+            if not match_id:
+                continue
+            raw_result = row.get("_match_result_json")
+            if isinstance(raw_result, str):
+                try:
+                    result = json.loads(raw_result)
+                except (TypeError, ValueError):
+                    result = {}
+            else:
+                result = raw_result if isinstance(raw_result, dict) else {}
+            match_by_id[str(match_id)] = {
+                "status": row.get("match_status"),
+                "winner": row.get("match_winner"),
+                "result": result,
+            }
+        normalize_delta = game_registry.get(
+            str(contest.get("game_id") or "")
+        ).normalize_delta
+        for rows in group_conceptual_series(stage, raw_pairings).values():
+            summary = summarize_conceptual_series(stage, rows, match_by_id.get)
+            conceptual_series_total += 1
+            conceptual_series_completed += int(bool(summary["settled"]))
+            for row in rows:
+                entry_a = int(row["entry_a_id"])
+                entry_b = int(row["entry_b_id"])
+                public_by_id[int(row["id"])]["series_summary"] = {
+                    "series_size": summary["series_size"],
+                    "completed_matches": summary["completed_matches"],
+                    "game_points_a": summary["game_points"][entry_a],
+                    "game_points_b": summary["game_points"][entry_b],
+                    "normalized_delta_a": normalize_delta(
+                        int(summary["deltas"][entry_a])
+                    ),
+                    "settled": bool(summary["settled"]),
+                    "standings_points_a": summary["standings_points"][entry_a],
+                    "standings_points_b": summary["standings_points"][entry_b],
+                }
+        for row in raw_pairings:
+            if not is_authoritative_no_opponent_pairing(stage_type, row):
+                continue
+            conceptual_series_total += 1
+            conceptual_series_completed += 1
+            public_by_id[int(row["id"])]["series_summary"] = {
+                "bye": True,
+                "series_size": 1,
+                "completed_matches": 0,
+                "game_points_a": None,
+                "game_points_b": None,
+                "normalized_delta_a": 0.0,
+                "settled": True,
+                "standings_points_a": points_for_result(
+                    str(stage.get("scoring")), 0, 0
+                ),
+                "standings_points_b": None,
+            }
+
+    completed_raw: list[dict[str, Any]] = []
+    active_raw: list[dict[str, Any]] = []
+    pending_raw: list[dict[str, Any]] = []
+    for row in raw_pairings:
+        completed = row.get("match_status") == STATUS_COMPLETED or (
+            is_authoritative_no_opponent_pairing(stage_type, row)
+        )
+        active = not completed and row.get("match_status") == STATUS_RUNNING
+        if completed:
+            completed_raw.append(row)
+        elif active:
+            active_raw.append(row)
+        else:
+            pending_raw.append(row)
+
+    active_raw.sort(key=_live_pairing_sort_key)
+    pending_raw.sort(key=_live_pairing_sort_key)
+    completed_raw.sort(
+        key=lambda row: (
+            str(
+                row.get("ended_at")
+                or row.get("started_at")
+                or row.get("scheduled_at")
+                or row.get("published_at")
+                or ""
+            ),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )
+
+    def public_subset(rows: list[dict[str, Any]], limit: int | None = None) -> list[dict]:
+        selected = rows if limit is None else rows[:limit]
+        return [public_by_id[int(row["id"])] for row in selected]
+
+    stage_entry_ids = {
+        int(entry_id)
+        for row in raw_pairings
+        for entry_id in (row.get("entry_a_id"), row.get("entry_b_id"))
+        if entry_id is not None
+    }
+    stage_entries = [
+        entry
+        for entry in snapshot["entries"]
+        if int(entry["id"]) in stage_entry_ids
+    ]
+    entry_names = {
+        int(entry["id"]): entry.get("bot_display") or entry.get("bot_name")
+        for entry in stage_entries
+    }
+    ranked_rows = _contests(request).standings(
+        contest_id,
+        pairings=raw_pairings,
+        entries=stage_entries,
+        contest=contest,
+    )
+    if str(stage_type or "").startswith("group_"):
+        group_positions: dict[str, int] = {}
+        group_ranked: list[tuple[int, str, dict[str, Any]]] = []
+        for row in ranked_rows:
+            group_id = str(row.get("group_id") or "")
+            group_positions[group_id] = group_positions.get(group_id, 0) + 1
+            group_ranked.append((group_positions[group_id], group_id, row))
+        selected_standings = sorted(
+            group_ranked,
+            key=lambda item: (item[0], item[1]),
+        )[:8]
+    else:
+        selected_standings = [
+            (rank, str(row.get("group_id") or ""), row)
+            for rank, row in enumerate(ranked_rows[:8], start=1)
+        ]
+
+    standings: list[dict[str, Any]] = []
+    for rank, _group_id, row in selected_standings:
+        standings.append(
+            {
+                "rank": rank,
+                "bot_id": row.get("bot_id"),
+                "bot_name": entry_names.get(int(row["entry_id"])),
+                "points": row.get("points") or 0,
+                "wins": int(row.get("wins") or 0),
+                "draws": int(row.get("draws") or 0),
+                "losses": int(row.get("losses") or 0),
+                "byes": int(row.get("byes") or 0),
+                "delta_total": int(row.get("delta_total") or 0),
+                "group_id": row.get("group_id") or "",
+            }
+        )
+
+    public_contest = _contest_for_api(contest)
+    aggregate_series = bool(stage and is_aggregate_series_stage(stage))
+    games_per_pair = (
+        stage.get("games_per_pair")
+        if aggregate_series and stage is not None
+        else public_contest.get("games_per_pair")
+    )
+    duplicate = bool(stage and stage.get("duplicate"))
+    legs_per_match = 2 if duplicate else 1
+    updated_candidates = [
+        contest.get("created_at"),
+    ]
+    for row in raw_pairings:
+        updated_candidates.extend(
+            (
+                row.get("published_at"),
+                row.get("_match_created_at"),
+                row.get("started_at"),
+                row.get("ended_at"),
+            )
+        )
+    updated_at = _latest_actual_timestamp(updated_candidates)
+
+    return {
+        "contest": {
+            "id": int(contest["id"]),
+            "title": contest.get("title") or "",
+            "game_id": contest.get("game_id"),
+            "status": contest.get("status"),
+            "starts_at": contest.get("starts_at"),
+            "ends_at": contest.get("ends_at"),
+            "rest_ends_at": contest.get("rest_ends_at"),
+            "showcase": bool(contest.get("showcase_key")),
+            "immutable": bool(contest.get("showcase_key")),
+            "official_results_ready": bool(
+                int(contest.get("official_results_ready") or 0)
+            ),
+        },
+        "stage": (
+            {
+                "index": stage_idx,
+                "key": stage.get("key") or f"stage{stage_idx}",
+                "label": (
+                    stage.get("label")
+                    or stage.get("name")
+                    or stage.get("key")
+                    or f"阶段 {stage_idx + 1}"
+                ),
+                "type": stage.get("type") or "",
+                "games_per_pair": stage.get("games_per_pair"),
+                "swiss_extra_rounds": stage.get("swiss_extra_rounds"),
+                "effective_rounds": stage.get("effective_rounds"),
+                "scoring_mode": stage.get("series_scoring"),
+            }
+            if stage is not None
+            else None
+        ),
+        "series": (
+            {
+                "games_per_pair": games_per_pair,
+                "duplicate": False,
+                "scoring_mode": "aggregate_match_points_v1",
+                "conceptual_completed": conceptual_series_completed,
+                "conceptual_total": conceptual_series_total,
+            }
+            if aggregate_series
+            else {
+                "games_per_pair": games_per_pair,
+                "duplicate": duplicate,
+                "scoring_legs_per_match": legs_per_match,
+                "scoring_legs_per_pair": (
+                    int(games_per_pair) * legs_per_match
+                    if games_per_pair is not None
+                    else None
+                ),
+            }
+        ),
+        "progress": {
+            "completed": len(completed_raw),
+            "total": len(raw_pairings),
+            "running": len(active_raw),
+            "pending": len(pending_raw),
+        },
+        "active": public_subset(active_raw),
+        "upcoming": public_subset(pending_raw, 6),
+        "recent": public_subset(completed_raw, 8),
+        "standings": standings,
+        "updated_at": updated_at,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
 
 
 @router.get("/api/contests/{contest_id}/bracket")
@@ -4684,6 +5132,7 @@ class AdminContestPatch(BaseModel):
     registration_opens_at: str | None = None
     registration_closes_at: str | None = None
     starts_at: str | None = None
+    stage_series_settings: dict[str, ContestStageSeriesSetting] | None = None
 
 
 @router.get("/api/admin/contests")
@@ -4712,6 +5161,34 @@ async def admin_patch_contest(
         # ``null`` 显式清空可选时间；未提交的字段由 Store 合并旧值后校验。
         if tk in body.model_fields_set:
             fields[tk] = getattr(body, tk)
+
+    if "stage_series_settings" in body.model_fields_set:
+        if body.status is not None or fields:
+            raise HTTPException(
+                400, "系列设置不能与状态、标题或时间修改同时提交"
+            )
+        try:
+            settings = _stage_series_settings_payload(
+                body.stage_series_settings
+            )
+            if settings is None:
+                raise ValueError("stage_series_settings 不能为 null")
+            contest = await _contests(request).revise_stage_series_settings(
+                contest_id, settings
+            )
+        except ValueError as exc:
+            raise _contest_write_http_error(exc) from exc
+        if not contest:
+            raise HTTPException(404, "比赛不存在")
+        audit_log(
+            request,
+            "admin_patch_contest_stage_series",
+            result="ok",
+            user=admin.get("username"),
+            target=contest_id,
+            detail="stage_series_settings=changed",
+        )
+        return {"contest": _contest_for_api(contest)}
 
     if body.status is not None:
         if body.status not in {

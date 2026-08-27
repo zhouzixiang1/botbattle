@@ -229,6 +229,9 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
     (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/contests/${contestId}/publish`,
   )
   await page.getByRole('button', { name: '截止报名·出排期', exact: true }).click()
+  const publishDialog = page.getByRole('dialog', { name: '截止报名并发布排期？' })
+  await expect(publishDialog).toBeVisible()
+  await publishDialog.getByRole('button', { name: '确认发布', exact: true }).click()
   expect((await publishResponse).status()).toBe(200)
   await expect(page.getByRole('main').getByText('排期已发布', { exact: true })).toBeVisible()
 

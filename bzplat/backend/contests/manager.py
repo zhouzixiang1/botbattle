@@ -10,15 +10,21 @@ from typing import Any, Callable, Literal
 
 from bzplat.backend.contests.stages import (
     PairingSpec,
+    effective_swiss_rounds,
     effective_group_count,
     estimate_match_count,
     generate_stage_pairings,
-    swiss_rounds_needed,
 )
 from bzplat.backend.contests.templates import (
     get_template,
     points_for_result,
     resolve_template,
+)
+from bzplat.backend.contests.series import (
+    aggregate_series_rows_settled,
+    group_conceptual_series,
+    is_aggregate_series_stage,
+    summarize_conceptual_series,
 )
 from bzplat.backend.contests.showcase import is_showcase, require_mutable
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -177,7 +183,11 @@ class ContestManager:
         registration_opens_at: str | None = None,
         registration_closes_at: str | None = None,
         starts_at: str | None = None,
+        games_per_pair: int | None = None,
+        stage_series_settings: dict[str, dict[str, Any]] | None = None,
     ) -> dict:
+        series_capability: dict[str, Any] | None = None
+        stage_series_capabilities: list[dict[str, Any]] | None = None
         # 自定义 stages 直接用；否则只从游戏注册表中的代码模板解析 stages。
         if stages is not None:
             if not stages:
@@ -204,14 +214,32 @@ class ContestManager:
             tid, gid, stage_list, _tpl_mc = resolve_template(
                 template_id, game_id=game_id
             )
+            template = get_template(tid)
+            if template is not None:
+                raw_capability = template.get("games_per_pair_config")
+                series_capability = (
+                    dict(raw_capability)
+                    if isinstance(raw_capability, dict)
+                    else None
+                )
+                raw_stage_capabilities = template.get("stage_series_configs")
+                stage_series_capabilities = (
+                    list(raw_stage_capabilities)
+                    if isinstance(raw_stage_capabilities, list)
+                    else None
+                )
         # 无论来自 API 自定义内容还是代码模板，都通过同一严格 schema。未知键、
         # 错拼字段和不属于该阶段类型的配置必须在落赛事快照前失败。
-        from bzplat.backend.contests.validation import validate_stage
+        from bzplat.backend.contests.validation import configure_games_per_pair
 
-        stage_list = [
-            validate_stage(stage, idx, gid)
-            for idx, stage in enumerate(stage_list)
-        ]
+        stage_list = configure_games_per_pair(
+            stage_list,
+            gid,
+            games_per_pair,
+            capability=series_capability,
+            stage_series_settings=stage_series_settings,
+            stage_capabilities=stage_series_capabilities,
+        )
         # P5：phase 优先级：显式传入 > 模板自带 phase > standalone
         if phase == "standalone":
             tpl = get_template(tid)
@@ -235,6 +263,111 @@ class ContestManager:
             registration_closes_at=registration_closes_at,
             starts_at=starts_at,
         )
+
+    @staticmethod
+    def _stage_series_capabilities(template_id: object) -> list[dict[str, Any]] | None:
+        template = get_template(str(template_id or ""))
+        raw = template.get("stage_series_configs") if template else None
+        return list(raw) if isinstance(raw, list) else None
+
+    @staticmethod
+    def _matches_template_stage_topology(
+        template_id: object, stages: list[dict[str, Any]]
+    ) -> bool:
+        """Whether a persisted snapshot still has its code template's graph.
+
+        Older callers may combine a built-in ``template_id`` with explicit custom
+        stages.  The identifier alone therefore cannot authorize injecting new
+        code-template defaults at publish time.
+        """
+        template = get_template(str(template_id or ""))
+        template_stages = template.get("stages") if template else None
+        if not isinstance(template_stages, list) or len(template_stages) != len(stages):
+            return False
+
+        def topology(rows: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | None:
+            out: list[tuple[str, str]] = []
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    return None
+                out.append(
+                    (
+                        str(row.get("key") or f"stage{index + 1}"),
+                        str(row.get("type") or "round_robin"),
+                    )
+                )
+            return tuple(out)
+
+        return topology(template_stages) == topology(stages)
+
+    def _configured_unstarted_series_stages(
+        self,
+        contest: dict[str, Any],
+        stages: list[dict[str, Any]],
+        settings: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Apply current code-template defaults only at the unstarted boundary."""
+        capabilities = self._stage_series_capabilities(contest.get("template_id"))
+        if capabilities is None:
+            if settings is not None:
+                raise ValueError("当前赛事模板不支持 stage_series_settings")
+            return stages
+        if not self._matches_template_stage_topology(
+            contest.get("template_id"), stages
+        ):
+            if settings is not None:
+                raise ValueError("自定义阶段拓扑不支持 stage_series_settings")
+            return stages
+        from bzplat.backend.contests.validation import configure_games_per_pair
+
+        return configure_games_per_pair(
+            stages,
+            _stored_game_id(contest, entity=f"赛事 #{contest.get('id')}"),
+            None,
+            capability=None,
+            stage_series_settings=settings,
+            stage_capabilities=capabilities,
+        )
+
+    @staticmethod
+    def _freeze_effective_stage_values(
+        stages: list[dict[str, Any]], participant_count: int
+    ) -> list[dict[str, Any]]:
+        """Freeze participant-dependent effective Swiss rounds at publication."""
+        frozen = [dict(stage) for stage in stages]
+        for stage in frozen:
+            if stage.get("type") == "swiss" and "swiss_extra_rounds" in stage:
+                stage["effective_rounds"] = effective_swiss_rounds(
+                    {key: value for key, value in stage.items() if key != "effective_rounds"},
+                    participant_count,
+                )
+        return frozen
+
+    async def revise_stage_series_settings(
+        self,
+        contest_id: int,
+        settings: dict[str, dict[str, Any]],
+    ) -> dict | None:
+        """CAS-update an unstarted template snapshot before any schedule exists."""
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                return None
+            require_mutable(contest)
+            if contest.get("status") not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("仅 draft/open 且尚未生成赛程的赛事可修改系列设置")
+            stages = _parse_stages(contest)
+            if not stages:
+                raise ValueError("赛事缺少有效阶段快照")
+            configured = self._configured_unstarted_series_stages(
+                contest, stages, settings
+            )
+            return self.store.compare_and_swap_unstarted_contest_stages(
+                contest_id,
+                expected_status=str(contest["status"]),
+                expected_stages_json=str(contest.get("stages_json") or "[]"),
+                stages_json=json.dumps(configured, ensure_ascii=False),
+            )
 
     async def revise_schedule(
         self, contest_id: int, fields: dict[str, Any]
@@ -864,6 +997,8 @@ class ContestManager:
         stages = _parse_stages(c)
         if not stages:
             raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
+        stages = self._configured_unstarted_series_stages(c, stages)
+        stages = self._freeze_effective_stage_values(stages, len(entries))
 
         self._guard_full_rr(stages, len(entries))
 
@@ -931,6 +1066,8 @@ class ContestManager:
         stages = _parse_stages(c)
         if not stages:
             raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
+        stages = self._configured_unstarted_series_stages(c, stages)
+        stages = self._freeze_effective_stage_values(stages, len(entries))
 
         self._guard_full_rr(stages, len(entries))
 
@@ -1082,6 +1219,36 @@ class ContestManager:
             return bot_b_id, bot_a_id
         return bot_a_id, bot_b_id
 
+    @staticmethod
+    def _frozen_pairing_seed(
+        contest_id: int, stage_idx: int, ordinal: int
+    ) -> int:
+        """Allocate a deterministic, non-overlapping seed block per contest.
+
+        Decimal coordinate blocks reserve room for 100 stages and 9,999,999
+        rows per stage.  The ordinal comes from the frozen entry/seed
+        cohort pairing plan; no DB pairing id, Bot id or process-random hash
+        participates.
+        """
+        if (
+            contest_id < 1
+            or not 0 <= stage_idx < 100
+            or not 1 <= ordinal < 10_000_000
+        ):
+            raise ValueError("赛事对阵 seed 坐标超出范围")
+        seed = contest_id * 1_000_000_000 + stage_idx * 10_000_000 + ordinal
+        if seed > 9_223_372_036_854_775_807:
+            raise ValueError("赛事对阵 seed 超出 SQLite INTEGER 范围")
+        return seed
+
+    @staticmethod
+    def _duplicate_seed(pairing: dict[str, Any]) -> int:
+        """Use the publication-frozen seed, with a legacy-row compatibility fallback."""
+        frozen = pairing.get("pairing_seed")
+        if frozen is not None:
+            return int(frozen)
+        return int(pairing["id"]) * 7919 + 1
+
     def _stage_pairing_plan(
         self, contest: dict, stage_idx: int
     ) -> tuple[dict, list, dict[int, int]]:
@@ -1111,6 +1278,7 @@ class ContestManager:
             key=lambda entry: (
                 -prior_scores.get(entry["id"], 0),
                 entry.get("seed") or 0,
+                entry["id"],
             )
         )
         bot_ids = [
@@ -1124,7 +1292,7 @@ class ContestManager:
         if len(bot_ids) < 2 and stage.get("type") != "single_elimination":
             return stage, [], bot_to_entry
         if stage.get("type") == "swiss":
-            rounds = int(stage.get("rounds") or 0) or swiss_rounds_needed(len(bot_ids))
+            rounds = effective_swiss_rounds(stage, len(bot_ids))
             stage = {**stage, "rounds": rounds}
             specs = generate_stage_pairings(stage, bot_ids, swiss_round=1)
         else:
@@ -1181,7 +1349,8 @@ class ContestManager:
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
         pairing_rows: list[dict[str, Any]] = []
-        for sp in specs:
+        series_stage = "games_per_pair" in stage
+        for ordinal, sp in enumerate(specs, start=1):
             bot_a_id, bot_b_id = self._materialize_pairing_seats(sp)
             sched = self._stage_scheduled_at(stage, sp.round_num, base)
             if not sp.requires_match:
@@ -1196,6 +1365,8 @@ class ContestManager:
                         "group_id": sp.group_id,
                         "bracket_slot": sp.bracket_slot,
                         "color_first": 0,
+                        "series_index": sp.series_index,
+                        "series_size": sp.series_size,
                         "entry_a_id": bot_to_entry.get(bot_a_id),
                         "entry_b_id": None,
                         "published_at": published_at,
@@ -1213,6 +1384,13 @@ class ContestManager:
                     "group_id": sp.group_id,
                     "bracket_slot": sp.bracket_slot,
                     "color_first": 0,
+                    "series_index": sp.series_index,
+                    "series_size": sp.series_size,
+                    "pairing_seed": (
+                        self._frozen_pairing_seed(contest_id, stage_idx, ordinal)
+                        if series_stage
+                        else None
+                    ),
                     "entry_a_id": bot_to_entry.get(bot_a_id),
                     "entry_b_id": bot_to_entry.get(bot_b_id),
                     "published_at": published_at,
@@ -1261,6 +1439,9 @@ class ContestManager:
                 row.get("group_id") or "",
                 row.get("bracket_slot"),
                 int(row.get("color_first") or 0),
+                row.get("pairing_seed"),
+                int(row.get("series_index") or 1),
+                int(row.get("series_size") or 1),
                 row.get("status") or "pending",
             )
             for row in rows
@@ -1286,7 +1467,8 @@ class ContestManager:
         existing = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         key = stage.get("key") or f"stage{stage_idx}"
         expected_shape: list[dict] = []
-        for spec in specs:
+        series_stage = "games_per_pair" in stage
+        for ordinal, spec in enumerate(specs, start=1):
             bot_a_id, bot_b_id = self._materialize_pairing_seats(spec)
             expected_shape.append(
                 {
@@ -1299,6 +1481,13 @@ class ContestManager:
                     "group_id": spec.group_id,
                     "bracket_slot": spec.bracket_slot,
                     "color_first": 0,
+                    "series_index": spec.series_index,
+                    "series_size": spec.series_size,
+                    "pairing_seed": (
+                        self._frozen_pairing_seed(contest_id, stage_idx, ordinal)
+                        if series_stage
+                        else None
+                    ),
                     "status": spec.status,
                 }
             )
@@ -1582,8 +1771,8 @@ class ContestManager:
             if slot_budget is not None and slot_budget <= 0:
                 break
             # 冻结快照已在 pairing 行；直接开打
-            # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
-            # 保证两 leg 同副牌可复现。
+            # duplicate=True 时使用发布批次冻结的 pairing_seed；恢复重建仍得到
+            # 同一 seed，保证两 leg 同副牌可复现且不依赖数据库行 id。
             try:
                 await self._prepare_bind_start_pairing(
                     c,
@@ -1640,7 +1829,7 @@ class ContestManager:
                 return await self.orch.challenge_duplicate(
                     pairing["bot_a_id"],
                     pairing["bot_b_id"],
-                    duplicate_seed=int(pairing["id"]) * 7919 + 1,
+                    duplicate_seed=self._duplicate_seed(pairing),
                     **common,
                 )
             return await self.orch.challenge(
@@ -1663,7 +1852,7 @@ class ContestManager:
                 mid = await self.orch.challenge_duplicate(
                     pairing["bot_a_id"],
                     pairing["bot_b_id"],
-                    duplicate_seed=int(pairing["id"]) * 7919 + 1,
+                    duplicate_seed=self._duplicate_seed(pairing),
                     **common,
                 )
             else:
@@ -1744,9 +1933,24 @@ class ContestManager:
             return self.store.delete_contest(contest_id)
 
     def standings(
-        self, contest_id: int, *, stage_idx: int | None = None
+        self,
+        contest_id: int,
+        *,
+        stage_idx: int | None = None,
+        pairings: list[dict[str, Any]] | None = None,
+        entries: list[dict[str, Any]] | None = None,
+        contest: dict[str, Any] | None = None,
     ) -> list[dict]:
-        c = self.store.get_contest(contest_id)
+        if contest is not None:
+            try:
+                snapshot_id = int(contest.get("id"))
+            except (TypeError, ValueError):
+                raise ValueError("赛事快照缺少有效 id") from None
+            if snapshot_id != int(contest_id):
+                raise ValueError("赛事快照 id 与 standings 请求不一致")
+            c = contest
+        else:
+            c = self.store.get_contest(contest_id)
         stages = _parse_stages(c or {})
         if stage_idx is None:
             stage_idx = int((c or {}).get("current_stage_idx") or 0)
@@ -1758,7 +1962,31 @@ class ContestManager:
         default_scoring = game_registry.get(gid).default_scoring
         scoring = stage["scoring"] if "scoring" in stage else default_scoring
 
-        entries = self.store.list_contest_entries(contest_id)
+        entry_rows = (
+            entries
+            if entries is not None
+            else self.store.list_contest_entries(contest_id)
+        )
+        pairing_rows = (
+            pairings
+            if pairings is not None
+            else self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+        )
+        if stage_idx > 0 and pairing_rows:
+            participant_entry_ids = {
+                int(entry_id)
+                for pairing in pairing_rows
+                for entry_id in (
+                    pairing.get("entry_a_id"),
+                    pairing.get("entry_b_id"),
+                )
+                if isinstance(entry_id, int) and not isinstance(entry_id, bool)
+            }
+            entry_rows = [
+                entry
+                for entry in entry_rows
+                if int(entry["id"]) in participant_entry_ids
+            ]
         # P0：排名/积分键改为 entry.id（换 Bot 不丢历史分）。
         # pairing 存 entry_a_id/entry_b_id（生成时快照），用它定位 stats；
         # match 的 winner(座位0/1) 对应 pairing 的 a/b 侧。
@@ -1777,9 +2005,77 @@ class ContestManager:
                 "group_id": e.get("group_id") or "",
                 "eliminated": int(e.get("eliminated") or 0),
             }
-            for e in entries
+            for e in entry_rows
         }
-        for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx):
+        if is_aggregate_series_stage(stage):
+            matches_by_id: dict[str, dict[str, Any]] = {}
+            for pairing in pairing_rows:
+                match_id = pairing.get("match_id")
+                if not match_id:
+                    if (
+                        stage.get("type") == "swiss"
+                        and is_authoritative_no_opponent_pairing(
+                            stage.get("type"), pairing
+                        )
+                    ):
+                        entry_id = pairing.get("entry_a_id")
+                        if entry_id in stats:
+                            stats[entry_id]["points"] += points_for_result(
+                                scoring, 0, 0
+                            )
+                            stats[entry_id]["byes"] += 1
+                    continue
+                if "_match_result_json" in pairing:
+                    raw_result = pairing.get("_match_result_json")
+                    if isinstance(raw_result, str):
+                        try:
+                            result = json.loads(raw_result)
+                        except (TypeError, ValueError):
+                            result = {}
+                    else:
+                        result = raw_result if isinstance(raw_result, dict) else {}
+                    matches_by_id[str(match_id)] = {
+                        "status": pairing.get("match_status"),
+                        "winner": pairing.get("match_winner"),
+                        "result": result,
+                    }
+                else:
+                    match = self.store.get_match(str(match_id))
+                    if match:
+                        matches_by_id[str(match_id)] = match
+
+            for rows in group_conceptual_series(stage, pairing_rows).values():
+                summary = summarize_conceptual_series(
+                    stage, rows, matches_by_id.get
+                )
+                first, second = summary["entries"]
+                if first not in stats or second not in stats:
+                    continue
+                if summary["settled"]:
+                    for entry_id in (first, second):
+                        stats[entry_id]["delta_total"] += int(
+                            summary["deltas"][entry_id]
+                        )
+                        stats[entry_id]["points"] += float(
+                            summary["standings_points"][entry_id]
+                        )
+                    winner_entry = summary["winner_entry"]
+                    if winner_entry is None:
+                        stats[first]["draws"] += 1
+                        stats[second]["draws"] += 1
+                    else:
+                        loser_entry = second if winner_entry == first else first
+                        stats[winner_entry]["wins"] += 1
+                        stats[loser_entry]["losses"] += 1
+                group_id = str(rows[0].get("group_id") or "")
+                if group_id:
+                    stats[first]["group_id"] = group_id
+                    stats[second]["group_id"] = group_id
+            rows = list(stats.values())
+            rows.sort(key=lambda row: (-row["points"], -row["delta_total"]))
+            return rows
+
+        for p in pairing_rows:
             mid = p.get("match_id")
             if not mid:
                 # Swiss 奇数轮的 bye 是显式 completed/no-match pairing。
@@ -1796,7 +2092,22 @@ class ContestManager:
                         )
                         stats[entry_id]["byes"] += 1
                 continue
-            m = self.store.get_match(mid)
+            if "_match_result_json" in p:
+                raw_result = p.get("_match_result_json")
+                if isinstance(raw_result, str):
+                    try:
+                        result = json.loads(raw_result)
+                    except (TypeError, ValueError):
+                        result = {}
+                else:
+                    result = raw_result if isinstance(raw_result, dict) else {}
+                m = {
+                    "status": p.get("match_status"),
+                    "winner": p.get("match_winner"),
+                    "result": result,
+                }
+            else:
+                m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
                 continue
             ea_id = p.get("entry_a_id")
@@ -1862,6 +2173,21 @@ class ContestManager:
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
             return False
+        stage = (
+            stages[stage_idx]
+            if 0 <= stage_idx < len(stages) and isinstance(stages[stage_idx], dict)
+            else {}
+        )
+        if is_aggregate_series_stage(stage):
+            real_pairings = [
+                pairing
+                for pairing in pairings
+                if not is_authoritative_no_opponent_pairing(stage_type, pairing)
+            ]
+            if not aggregate_series_rows_settled(
+                stage, real_pairings, self.store.get_match
+            ):
+                return False
         for p in pairings:
             # 只有赛制允许且身份/对局/状态四项完整的 no-opponent 行才是
             # 已完成轮空。真实对手 Bot 被 FK SET NULL 后仍保留 entry_b_id，
@@ -1888,7 +2214,7 @@ class ContestManager:
             key = stages[stage_idx].get("key") or f"stage{stage_idx}"
             grouped = str(stages[stage_idx].get("type") or "").startswith("group_")
         group_ranks: Counter = Counter()
-        for i, s in enumerate(self.standings(contest_id, stage_idx=stage_idx)):
+        for i, s in enumerate(self._rank_stage_rows(contest_id, stage_idx)):
             group_key = s.get("group_id") or "_"
             group_ranks[group_key] += 1
             self.store.upsert_stage_result(
@@ -1962,7 +2288,7 @@ class ContestManager:
         if stage_idx < 0 or stage_idx >= len(stages):
             return
         stage = stages[stage_idx]
-        standings = self.standings(contest_id, stage_idx=stage_idx)
+        standings = self._rank_stage_rows(contest_id, stage_idx)
         # P0：advance 以 entry_id 为键（与 standings 一致，换 Bot 不影响晋级判定）
         advance: set[int] = set()
         if stage.get("advance_per_group"):
@@ -1984,6 +2310,34 @@ class ContestManager:
         for e in self.store.list_contest_entries(contest_id):
             if e["id"] not in advance:
                 self.store.update_entry(contest_id, e["user_id"], eliminated=1)
+
+    def _rank_stage_rows(self, contest_id: int, stage_idx: int) -> list[dict]:
+        """Rank one frozen stage with the same tie-break chain used at finish."""
+        from bzplat.backend.contests import ranking as _ranking
+
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return []
+        stages = _parse_stages(contest)
+        stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
+        standings = self.standings(contest_id, stage_idx=stage_idx)
+        pairings = self.store.list_contest_pairings(
+            contest_id, stage_idx=stage_idx
+        )
+        match_ids = [pairing["match_id"] for pairing in pairings if pairing.get("match_id")]
+        matches = {
+            match_id: self.store.get_match(match_id)
+            for match_id in match_ids
+            if match_id
+        }
+        return _ranking.compute_official_ranking(
+            standings,
+            pairings,
+            {key: value for key, value in matches.items() if value},
+            normalize_delta=game_registry.get(game_id).normalize_delta,
+            stage=stage,
+        )
 
     async def handle_match_done(
         self,
@@ -2357,25 +2711,13 @@ class ContestManager:
         scope+1..N 取前一阶段未晋级者相对序）。
         """
         from bzplat.backend.contests import ranking as _ranking
-        from bzplat.backend.games import registry as _reg
-
         c = self.store.get_contest(contest_id)
         if not c:
             return
         stages = _parse_stages(c)
         cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
-        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
-        normalize_delta = _reg.get(gid).normalize_delta
-
         def _rank_stage(sidx: int) -> list[dict]:
-            standings = self.standings(contest_id, stage_idx=sidx)
-            pairings = self.store.list_contest_pairings(contest_id, stage_idx=sidx)
-            match_ids = [p["match_id"] for p in pairings if p.get("match_id")]
-            matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
-            matches = {k: v for k, v in matches.items() if v}
-            return _ranking.compute_official_ranking(
-                standings, pairings, matches, normalize_delta=normalize_delta
-            )
+            return self._rank_stage_rows(contest_id, sidx)
 
         ranking_rows = _rank_stage(stage_idx)
         # replace_top 合成榜（决赛：末阶段 Top8 + 前一阶段未晋级者）
@@ -2408,14 +2750,27 @@ class ContestManager:
             match = self.store.get_match(match_id)
             return bool(match and match["status"] == STATUS_COMPLETED)
 
+        if is_aggregate_series_stage(stage):
+            real_pairings = [
+                pairing
+                for pairing in pairings
+                if not is_authoritative_no_opponent_pairing(
+                    stage.get("type"), pairing
+                )
+            ]
+            if not aggregate_series_rows_settled(
+                stage, real_pairings, self.store.get_match
+            ):
+                return False
+
         # Every earlier round is part of the Swiss score/opponent/seat history.
         # A later round must never be generated while any row is unadjudicated;
         # otherwise drift in R1 could be skipped merely because R2 completed.
         if not all(_is_adjudicated(pairing) for pairing in pairings):
             return False
-        total_rounds = int(stage.get("rounds") or swiss_rounds_needed(
-            len(self.store.list_contest_entries(contest_id))
-        ))
+        total_rounds = effective_swiss_rounds(
+            stage, len(self.store.list_contest_entries(contest_id))
+        )
         if max_round >= total_rounds:
             return False
         # 生成下一轮（P0：standings 键 entry_id；P1：bot_id 取 entry 当前值——
@@ -2478,7 +2833,9 @@ class ContestManager:
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
         pairing_rows: list[dict[str, Any]] = []
-        for sp in specs:
+        series_stage = "games_per_pair" in stage
+        prior_row_count = len(pairings)
+        for ordinal, sp in enumerate(specs, start=1):
             bot_a_id, bot_b_id = self._materialize_pairing_seats(sp)
             if not sp.requires_match:
                 pairing_rows.append(
@@ -2491,6 +2848,8 @@ class ContestManager:
                         "group_id": sp.group_id,
                         "bracket_slot": sp.bracket_slot,
                         "color_first": 0,
+                        "series_index": sp.series_index,
+                        "series_size": sp.series_size,
                         "entry_a_id": bot_to_entry.get(bot_a_id),
                         "entry_b_id": None,
                         "published_at": published_at,
@@ -2507,6 +2866,15 @@ class ContestManager:
                     "group_id": sp.group_id,
                     "bracket_slot": sp.bracket_slot,
                     "color_first": 0,
+                    "series_index": sp.series_index,
+                    "series_size": sp.series_size,
+                    "pairing_seed": (
+                        self._frozen_pairing_seed(
+                            contest_id, stage_idx, prior_row_count + ordinal
+                        )
+                        if series_stage
+                        else None
+                    ),
                     "entry_a_id": bot_to_entry.get(bot_a_id),
                     "entry_b_id": bot_to_entry.get(bot_b_id),
                     "published_at": published_at,
@@ -2829,6 +3197,19 @@ class ContestManager:
         )
         for stage_idx, stage_pairings in pairings_by_stage.items():
             if stage_pairings:
+                stage = stages[stage_idx]
+                if is_aggregate_series_stage(stage):
+                    real_pairings = [
+                        pairing
+                        for pairing in stage_pairings
+                        if not is_authoritative_no_opponent_pairing(
+                            stage.get("type"), pairing
+                        )
+                    ]
+                    if not aggregate_series_rows_settled(
+                        stage, real_pairings, self.store.get_match
+                    ):
+                        return True
                 continue
             initial_zero_or_one = (
                 stage_idx == current_stage_idx == 0 and len(entries) <= 1
@@ -2849,6 +3230,14 @@ class ContestManager:
             raise ValueError("比赛不存在")
         n = len(self.store.list_contest_entries(contest_id))
         stages = _parse_stages(c)
+        # 旧 draft/open 内建模板可以尚未持久化当前系列默认值。发布/启动会在
+        # 冻结边界注入这些值，因此预估也必须基于同一份内存投影，避免 API
+        # 先低报 K/轮数、实际发布后突然膨胀。这里只读计算，不静默改写快照。
+        if (
+            c.get("status") in (CONTEST_DRAFT, CONTEST_OPEN)
+            and not self.store.list_contest_pairings(contest_id)
+        ):
+            stages = self._configured_unstarted_series_stages(c, stages)
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         spec = game_registry.get(gid)
         # estimate 按晋级契约传播各 stage 人数。与 _advance_participants 一致，
@@ -2856,6 +3245,12 @@ class ContestManager:
         total = 0
         execution_legs = 0
         cur_n = n
+        conc = max(
+            1,
+            int(getattr(self.orch, "max_concurrent", MAX_CONCURRENT_MATCHES)),
+        )
+        sec_per = _estimate_sec_per_match(gid, {})
+        stage_estimates: list[dict[str, Any]] = []
         for st in stages:
             stage_matches = estimate_match_count(st, cur_n)
             total += stage_matches
@@ -2867,7 +3262,32 @@ class ContestManager:
                 if not match_plan:
                     raise ValueError(f"游戏 {gid} 的 duplicate 对局计划为空")
                 leg_count = len(match_plan)
-            execution_legs += stage_matches * leg_count
+            stage_execution_legs = stage_matches * leg_count
+            execution_legs += stage_execution_legs
+            stage_type = str(st.get("type") or "round_robin")
+            games_per_pair = int(
+                st.get("games_per_pair")
+                or (2 if "double_round_robin" in stage_type else 1)
+            )
+            conceptual_pairings = (
+                stage_matches // max(1, games_per_pair)
+            )
+            stage_estimates.append(
+                {
+                    "stage_key": st.get("key") or f"stage{len(stage_estimates) + 1}",
+                    "participant_count": cur_n,
+                    "conceptual_pairings": conceptual_pairings,
+                    "effective_rounds": (
+                        effective_swiss_rounds(st, cur_n)
+                        if stage_type == "swiss"
+                        else None
+                    ),
+                    "games_per_pair": games_per_pair,
+                    "estimated_matches": stage_matches,
+                    "estimated_execution_legs": stage_execution_legs,
+                    "eta_seconds": int((stage_execution_legs / conc) * sec_per),
+                }
+            )
             advance_per_group = st.get("advance_per_group")
             if advance_per_group and int(advance_per_group) > 0:
                 group_count = effective_group_count(
@@ -2885,16 +3305,11 @@ class ContestManager:
         # Production uses MatchOrchestrator.max_concurrent.  Lightweight
         # read-only estimators/test doubles need no execution interface, so
         # fall back to the same immutable code policy instead of a DB setting.
-        conc = max(
-            1,
-            int(getattr(self.orch, "max_concurrent", MAX_CONCURRENT_MATCHES)),
-        )
-        # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
-        sec_per = _estimate_sec_per_match(gid, {})
         eta_sec = (execution_legs / conc) * sec_per if conc else 0
         return {
             "entries": n,
             "estimated_matches": total,
             "max_concurrent": conc,
             "eta_seconds": int(eta_sec),
+            "stages": stage_estimates,
         }

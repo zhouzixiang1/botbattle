@@ -37,20 +37,55 @@ export interface SchedulePairing extends MatchParticipantSource {
   match_winner?: number | null
   scheduled_at?: string | null
   group_id?: string | null
+  series_index?: number | null
+  series_size?: number | null
+}
+
+function pairingSeriesKey(pairing: SchedulePairing, stageType?: string): string {
+  if (pairing.is_bye || !pairing.series_size || pairing.series_size <= 1) return `match:${pairing.id}`
+  const players = [
+    pairing.bot_a_id ?? pairing.owner_a_name ?? pairing.bot_a_name ?? `unknown-a-${pairing.id}`,
+    pairing.bot_b_id ?? pairing.owner_b_name ?? pairing.bot_b_name ?? `unknown-b-${pairing.id}`,
+  ].sort().join(':')
+  const round = stageType === 'swiss' ? pairing.round_num ?? 1 : 0
+  return `${round}:${pairing.group_id || ''}:${players}`
 }
 
 interface Props {
   pairings: SchedulePairing[]
+  stageType?: string
 }
 
 const PER_PAGE = 30
 
-export default function ScheduleTable({ pairings }: Props) {
+export default function ScheduleTable({ pairings, stageType }: Props) {
   const [page, setPage] = useState(1)
 
   // 扁平化为有序行：先按 round_num 分组排序，组内按 bracket_slot（淘汰）或 id（其他）排序。
   // 预计算每行是否为「本轮首行」isRoundStart，使分页切片后轮次徽章显示仍正确。
   const rows = useMemo(() => {
+    const hasSeries = pairings.some((pairing) => (pairing.series_size ?? 1) > 1)
+    if (hasSeries) {
+      const groups = new Map<string, SchedulePairing[]>()
+      for (const pairing of pairings) {
+        const key = pairingSeriesKey(pairing, stageType)
+        const group = groups.get(key) || []
+        group.push(pairing)
+        groups.set(key, group)
+      }
+      const ordered = Array.from(groups.values()).sort((a, b) => {
+        const round = (a[0]?.round_num ?? 1) - (b[0]?.round_num ?? 1)
+        return round !== 0 ? round : (a[0]?.id ?? 0) - (b[0]?.id ?? 0)
+      })
+      return ordered.flatMap((group) => group
+        .sort((a, b) => (a.series_index ?? 1) - (b.series_index ?? 1))
+        .map((pairing, index) => ({
+          pairing,
+          round: pairing.round_num ?? 1,
+          isRoundStart: index === 0,
+          isSeriesStart: index === 0,
+        })))
+    }
     const byRound = new Map<number, SchedulePairing[]>()
     for (const p of pairings) {
       const r = p.round_num ?? 1
@@ -68,12 +103,12 @@ export default function ScheduleTable({ pairings }: Props) {
           return a.id - b.id
         }),
       }))
-    const out: Array<{ pairing: SchedulePairing; round: number; isRoundStart: boolean }> = []
+    const out: Array<{ pairing: SchedulePairing; round: number; isRoundStart: boolean; isSeriesStart: boolean }> = []
     for (const r of sortedRounds) {
-      r.pairings.forEach((p, idx) => out.push({ pairing: p, round: r.round, isRoundStart: idx === 0 }))
+      r.pairings.forEach((p, idx) => out.push({ pairing: p, round: r.round, isRoundStart: idx === 0, isSeriesStart: true }))
     }
     return out
-  }, [pairings])
+  }, [pairings, stageType])
 
   // 客户端分页（越界回退：对阵总数缩短到当前页之外时夹紧到末页）
   const totalPages = Math.max(1, Math.ceil(rows.length / PER_PAGE))
@@ -87,15 +122,23 @@ export default function ScheduleTable({ pairings }: Props) {
   return (
     <div className="min-w-0 space-y-2">
       <div className="divide-y overflow-hidden rounded-lg border md:hidden" aria-label="赛事对阵一览表移动视图">
-        {pageRows.map(({ pairing: p, round }) => {
+        {pageRows.map(({ pairing: p, round, isSeriesStart }) => {
           const isBye = p.is_bye === true
           const aWin = (isBye && p.status === 'completed') || p.match_winner === 0
           const bWin = !isBye && p.match_winner === 1
           return (
-            <article key={p.id} data-testid="contest-schedule-mobile-card" className="space-y-2.5 p-3">
+            <article
+              key={p.id}
+              data-testid="contest-schedule-mobile-card"
+              data-series-start={isSeriesStart || undefined}
+              className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'space-y-2.5 border-t-2 border-primary/20 p-3 first:border-t-0' : 'space-y-2.5 p-3'}
+            >
               <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
                 <span className="font-mono font-semibold text-foreground">
                   {p.group_id ? `${p.group_id} · ` : ''}R{round}
+                  {p.series_size && p.series_size > 1
+                    ? ` · 本对 ${p.series_size} 场 · 第 ${p.series_index ?? 1}/${p.series_size}`
+                    : ''}
                 </span>
                 <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
               </header>
@@ -132,17 +175,22 @@ export default function ScheduleTable({ pairings }: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {pageRows.map(({ pairing: p, round, isRoundStart }) => {
+          {pageRows.map(({ pairing: p, round, isRoundStart, isSeriesStart }) => {
             const w = p.match_winner
             const isBye = p.is_bye === true
             // 胜者着色：a 胜 → 座位1 高亮；b 胜 → 座位2 高亮（bye 时 a 自动晋级）
             const aWin = (isBye && p.status === 'completed') || w === 0
             const bWin = !isBye && w === 1
             return (
-              <TableRow key={p.id}>
+              <TableRow key={p.id} data-series-start={isSeriesStart || undefined} className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'border-t-2 border-primary/20' : undefined}>
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {isRoundStart ? `R${round}` : ''}
+                  {p.series_size && p.series_size > 1 && (
+                    <span className="block whitespace-nowrap text-xs">
+                      {isSeriesStart ? `本对 ${p.series_size} 场 · ` : ''}第 {p.series_index ?? 1}/{p.series_size}
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
                   <MatchParticipantIdentity

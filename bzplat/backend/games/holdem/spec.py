@@ -159,4 +159,5 @@ SPEC = GameSpec(
     summary="HU NLHE；单局多手；按筹码差判胜。",
     preflight_check=_preflight_check,
     build_match_plan=_build_match_plan,
+    contest_games_per_pair_max=10,
 )
