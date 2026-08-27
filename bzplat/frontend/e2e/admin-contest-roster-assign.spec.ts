@@ -546,6 +546,18 @@ test('shared confirmations keep default outside-click dismissal', async ({ page 
 })
 
 async function mockContestDetail(page: Page, requireRealName: number, isOrganizer = true) {
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
   await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
