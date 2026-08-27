@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from bzplat.backend.games import registry as _reg
+from bzplat.backend.contests.stages import PAIR_SERIES_STAGE_TYPES
 from bzplat.backend.store.schema import VALID_GAME_IDS
 
 # 阶段类型（与 stages.generate_stage_pairings 对齐）
@@ -33,7 +34,11 @@ _COMMON_STAGE_KEYS = frozenset({
     "round_stagger_minutes",
 })
 _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
-    "round_robin": frozenset({"duplicate", "allow_large_round_robin"}),
+    "round_robin": frozenset({
+        "duplicate",
+        "allow_large_round_robin",
+        "games_per_pair",
+    }),
     "double_round_robin": frozenset({
         "duplicate",
         "allow_large_round_robin",
@@ -201,6 +206,22 @@ def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
     if allow_large is not None:
         out["allow_large_round_robin"] = allow_large
 
+    games_per_pair = _int_field(
+        stage,
+        "games_per_pair",
+        minimum=1,
+        label=f"阶段 {idx + 1} games_per_pair",
+    )
+    if games_per_pair is not None:
+        maximum = spec.contest_games_per_pair_max
+        if maximum is None:
+            raise ValueError(f"游戏 {spec.game_id} 不支持 games_per_pair")
+        if games_per_pair > maximum:
+            raise ValueError(
+                f"阶段 {idx + 1} games_per_pair 须为 1..{maximum} 的整数"
+            )
+        out["games_per_pair"] = games_per_pair
+
     if "ranking_mode" in stage:
         if stage["ranking_mode"] != "replace_top":
             raise ValueError(
@@ -220,6 +241,82 @@ def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
             )
         out["ranking_scope"] = scope
     return out
+
+
+def configure_games_per_pair(
+    stages: list[dict[str, Any]],
+    game_id: str,
+    games_per_pair: int | None,
+    *,
+    capability: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Freeze the creation-only contest series option into one stage snapshot.
+
+    V1 deliberately supports one code-template RR stage only.  Swiss, elimination,
+    legacy double-round-robin and multi-stage graphs require different series
+    completion semantics, so accepting the field there would be misleading.
+    The game capability and its upper bound come from ``GameSpec``.
+    """
+    import copy
+
+    copied = copy.deepcopy(stages)
+    if capability is not None:
+        if not isinstance(capability, dict):
+            raise ValueError("赛事模板 games_per_pair_config 非法")
+        spec = _game_spec(game_id)
+        spec_max = spec.contest_games_per_pair_max
+        minimum = capability.get("min")
+        maximum = capability.get("max")
+        default = capability.get("default")
+        if (
+            spec_max is None
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in (minimum, maximum, default)
+            )
+            or minimum != 1
+            or not minimum <= default <= maximum <= spec_max
+        ):
+            raise ValueError("赛事模板 games_per_pair_config 与游戏能力不一致")
+
+    explicit = [stage for stage in copied if "games_per_pair" in stage]
+    if explicit and capability is None:
+        raise ValueError("当前赛事模板不支持 games_per_pair")
+    selected = games_per_pair
+    if selected is None and capability is not None and not explicit:
+        selected = int(capability["default"])
+    if selected is not None:
+        if explicit:
+            raise ValueError(
+                "games_per_pair 不能同时在赛事字段与 stages 中重复设置"
+            )
+        if isinstance(selected, bool) or not isinstance(selected, int):
+            raise ValueError("games_per_pair 须为整数")
+        if capability is None:
+            raise ValueError("当前赛事模板不支持 games_per_pair")
+        if (
+            len(copied) != 1
+            or copied[0].get("type", "round_robin") not in PAIR_SERIES_STAGE_TYPES
+        ):
+            raise ValueError(
+                "games_per_pair 仅支持标记为可配置的单阶段 round_robin 模板"
+            )
+        copied[0]["games_per_pair"] = selected
+
+    configured = [stage for stage in copied if "games_per_pair" in stage]
+    if configured and (
+        len(copied) != 1
+        or len(configured) != 1
+        or copied[0].get("type", "round_robin") not in PAIR_SERIES_STAGE_TYPES
+    ):
+        raise ValueError(
+            "games_per_pair 仅支持标记为可配置的单阶段 round_robin 模板"
+        )
+
+    # Run the same strict stage validator here so direct Manager callers and the
+    # HTTP model share one capability/range boundary.
+    gid = _game_spec(game_id).game_id
+    return [validate_stage(stage, idx, gid) for idx, stage in enumerate(copied)]
 
 
 def validate_template(
@@ -250,4 +347,5 @@ __all__ = [
     "validate_match_config",
     "validate_stage",
     "validate_template",
+    "configure_games_per_pair",
 ]

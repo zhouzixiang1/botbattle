@@ -23,6 +23,7 @@ TEMPLATES: list[dict[str, Any]] = [
         ),
         "recommended": True,
         "game_id": "holdem",
+        "games_per_pair_config": {"default": 1, "min": 1, "max": 10},
         "stages": [
             {
                 "key": "dup_rr",
@@ -69,6 +70,7 @@ TEMPLATES: list[dict[str, Any]] = [
             "公平性与耗时介于复式单循环和瑞士制之间。"
         ),
         "game_id": "holdem",
+        "games_per_pair_config": {"default": 1, "min": 1, "max": 10},
         "stages": [
             {
                 "key": "rr",

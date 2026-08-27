@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock, Radio } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchParticipants } from '@/components/MatchParticipants'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
@@ -68,6 +68,7 @@ interface Contest {
   ends_at?: string | null
   official_results_ready?: number
   showcase_key?: string | null
+  games_per_pair?: number
 }
 interface Stage {
   key?: string
@@ -124,6 +125,8 @@ interface Pairing extends MatchParticipantSource {
   group_id?: string
   match_winner?: number | null
   scheduled_at?: string | null
+  series_index?: number | null
+  series_size?: number | null
 }
 interface Standing {
   bot_id: number | null
@@ -605,6 +608,7 @@ export default function ContestDetail() {
   const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
   const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
   const showOfficial = contest.status === 'finished'
+  const showLiveCta = ['published', 'running', 'rest'].includes(contest.status)
   const currentScoringLabel = SCORING_LABEL[
     stages[contest.current_stage_idx ?? 0]?.scoring || ''
   ] || '按本阶段规则计分'
@@ -640,6 +644,13 @@ export default function ContestDetail() {
         description="查看赛程、选手和比赛结果。"
         actions={
           <>
+            {showLiveCta && (
+              <Button asChild size="sm" className="min-h-11 sm:min-h-[var(--control-height)]">
+                <Link to={`/contests/${contest.id}/live`}>
+                  <Radio aria-hidden="true" className="size-4" />进入赛事直播
+                </Link>
+              </Button>
+            )}
             <Button asChild variant="outline" size="sm">
               <Link to="/contests"><ArrowLeft aria-hidden="true" className="size-4" />返回赛事</Link>
             </Button>
@@ -708,6 +719,16 @@ export default function ContestDetail() {
                 {estimate?.estimated_matches != null ? `预计 ${estimate.estimated_matches}` : pairings.length}
               </dd>
             </div>
+            {contest.games_per_pair != null && (
+              <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                <dt className="text-muted-foreground">每对交手场数</dt>
+                <dd className="font-mono font-medium tabular-nums text-foreground">
+                  {isDuplicate
+                    ? `${contest.games_per_pair} 场复式对局 · 正常完成时 ${contest.games_per_pair * 2} 局计分`
+                    : `${contest.games_per_pair} 场对局`}
+                </dd>
+              </div>
+            )}
           </dl>
           {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="flex min-w-0 items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">

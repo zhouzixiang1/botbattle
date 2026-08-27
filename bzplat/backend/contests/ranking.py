@@ -4,9 +4,9 @@
 破同分链：points → buchholz_cut1 → sonneborn_berger → head_to_head → normalized_delta
 → technical_losses → entry.seed。
 
-各破同分项（基于该阶段所有已完成对局）：
-- Buchholz：该 entry 所有对手的 points 总和（衡量对手强度）
-- Buchholz Cut1：去掉最高对手分后的 Buchholz（减少一场极端对手的影响）
+各破同分项（基于该阶段所有已完成计分记录；复式每条 leg 各是一条记录）：
+- Buchholz：该 entry 所有计分记录对应对手的 points 总和（重复交手会重复加权）
+- Buchholz Cut1：从上述记录中删去一条最高对手分记录后的 Buchholz
 - Sonneborn-Berger：该 entry 击败的对手 points 之和（胜场对手强度加权）
 - Head-to-head：同分者之间直接对战胜率
 - normalized_delta：本游戏的座位 0 归一化分差（Holdem 为大盲注）

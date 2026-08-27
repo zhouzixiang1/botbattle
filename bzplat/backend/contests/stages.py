@@ -16,6 +16,96 @@ class PairingSpec:
     color_first: int = 0  # 0 = a 先手/座位0；1 = b 先手
     status: str = "pending"
     requires_match: bool = True
+    series_index: int = 1
+    series_size: int = 1
+
+
+PAIR_SERIES_STAGE_TYPES = frozenset({"round_robin"})
+
+
+def _series_extra_seat(
+    bot_a_id: int,
+    bot_b_id: int,
+    cohort: list[int],
+) -> int:
+    """Choose the odd-series extra seat with a deterministic balanced orientation.
+
+    A complete round-robin graph on an odd number of vertices has a regular
+    tournament orientation.  For an even number of players, orient the graph as
+    if one deterministic bye vertex existed, then remove it; every real player
+    is left with seat imbalance exactly one.  The result is independent of DB
+    ids, process order and retry timing.
+
+    Return ``0`` when conceptual A receives the extra seat-0 game, otherwise 1.
+    """
+    # Preserve the caller's frozen entry/seed order.  Bot ids are used only to
+    # locate the two cohort positions; their numeric values never affect seats.
+    ordered = list(dict.fromkeys(int(bot_id) for bot_id in cohort))
+    if bot_a_id not in ordered or bot_b_id not in ordered:
+        raise ValueError("系列对阵选手不在冻结的参赛序列中")
+    cycle_size = len(ordered) if len(ordered) % 2 == 1 else len(ordered) + 1
+    pos_a = ordered.index(bot_a_id)
+    pos_b = ordered.index(bot_b_id)
+    distance = (pos_b - pos_a) % cycle_size
+    return 0 if 0 < distance <= cycle_size // 2 else 1
+
+
+def expand_pairing_series(
+    pairings: list[PairingSpec], games_per_pair: int, *, cohort: list[int]
+) -> list[PairingSpec]:
+    """Expand one RR fixture into independent physical Matches.
+
+    Even series split seat 0 exactly evenly.  Odd series differ by one within
+    every opponent pair, while ``_series_extra_seat`` also balances that extra
+    seat across the complete round-robin graph.
+    ``round_num`` advances by one full base schedule for each series cycle so
+    existing round staggering remains meaningful and deterministic.
+    """
+    if isinstance(games_per_pair, bool) or not isinstance(games_per_pair, int):
+        raise ValueError("games_per_pair 须为整数")
+    if games_per_pair < 1:
+        raise ValueError("games_per_pair 须为 >=1 的整数")
+    if not pairings:
+        return []
+
+    rounds_per_cycle = max(int(pairing.round_num or 1) for pairing in pairings)
+    expanded: list[PairingSpec] = []
+    for pairing in pairings:
+        if pairing.bot_b_id is None or not pairing.requires_match:
+            expanded.append(
+                PairingSpec(
+                    **{
+                        **pairing.__dict__,
+                        "series_index": 1,
+                        "series_size": 1,
+                    }
+                )
+            )
+            continue
+        first = _series_extra_seat(
+            pairing.bot_a_id,
+            pairing.bot_b_id,
+            cohort,
+        )
+        for series_index in range(1, games_per_pair + 1):
+            expanded.append(
+                PairingSpec(
+                    bot_a_id=pairing.bot_a_id,
+                    bot_b_id=pairing.bot_b_id,
+                    round_num=(
+                        int(pairing.round_num or 1)
+                        + (series_index - 1) * rounds_per_cycle
+                    ),
+                    group_id=pairing.group_id,
+                    bracket_slot=pairing.bracket_slot,
+                    color_first=first if series_index % 2 == 1 else 1 - first,
+                    status=pairing.status,
+                    requires_match=pairing.requires_match,
+                    series_index=series_index,
+                    series_size=games_per_pair,
+                )
+            )
+    return expanded
 
 
 def round_robin(bot_ids: list[int], *, double: bool = False) -> list[PairingSpec]:
@@ -279,7 +369,14 @@ def generate_stage_pairings(
 ) -> list[PairingSpec]:
     stype = stage.get("type") or "round_robin"
     if stype == "round_robin":
-        return round_robin(bot_ids, double=False)
+        pairings = round_robin(bot_ids, double=False)
+        if "games_per_pair" in stage:
+            return expand_pairing_series(
+                pairings,
+                stage["games_per_pair"],
+                cohort=bot_ids,
+            )
+        return pairings
     if stype == "double_round_robin":
         return round_robin(bot_ids, double=True)
     if stype == "group_round_robin":
@@ -311,7 +408,7 @@ def generate_stage_pairings(
 def estimate_match_count(stage: dict[str, Any], n: int) -> int:
     stype = stage.get("type") or "round_robin"
     if stype in ("round_robin",):
-        return n * (n - 1) // 2
+        return n * (n - 1) // 2 * int(stage.get("games_per_pair") or 1)
     if stype == "double_round_robin":
         return n * (n - 1)
     if stype.startswith("group_"):

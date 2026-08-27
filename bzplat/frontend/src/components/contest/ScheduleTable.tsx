@@ -37,6 +37,8 @@ export interface SchedulePairing extends MatchParticipantSource {
   match_winner?: number | null
   scheduled_at?: string | null
   group_id?: string | null
+  series_index?: number | null
+  series_size?: number | null
 }
 
 interface Props {
@@ -96,6 +98,7 @@ export default function ScheduleTable({ pairings }: Props) {
               <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
                 <span className="font-mono font-semibold text-foreground">
                   {p.group_id ? `${p.group_id} · ` : ''}R{round}
+                  {p.series_size && p.series_size > 1 ? ` · 第 ${p.series_index ?? 1}/${p.series_size} 场` : ''}
                 </span>
                 <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
               </header>
@@ -143,6 +146,9 @@ export default function ScheduleTable({ pairings }: Props) {
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {isRoundStart ? `R${round}` : ''}
+                  {p.series_size && p.series_size > 1 && (
+                    <span className="block whitespace-nowrap text-xs">第 {p.series_index ?? 1}/{p.series_size} 场</span>
+                  )}
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
                   <MatchParticipantIdentity

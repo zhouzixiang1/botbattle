@@ -1026,6 +1026,91 @@ def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
+def _pairing_series_fields(source: dict[str, Any]) -> tuple[int, int]:
+    """Return strict durable series coordinates for one pairing write."""
+    index = source.get("series_index", 1)
+    size = source.get("series_size", 1)
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or index < 1
+        or size < 1
+        or index > size
+    ):
+        raise ValueError("赛事对阵 series_index/series_size 必须满足 1<=index<=size")
+    return index, size
+
+
+def _pairing_seed_field(source: dict[str, Any], *, required: bool) -> int | None:
+    """Return a strict SQLite-safe frozen seed for one pairing write."""
+    seed = source.get("pairing_seed")
+    if seed is None:
+        if required:
+            raise ValueError("多场赛事对阵必须冻结 pairing_seed")
+        return None
+    if (
+        isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or seed < 1
+        or seed > 9_223_372_036_854_775_807
+    ):
+        raise ValueError("赛事对阵 pairing_seed 必须为 SQLite 范围内的正整数")
+    return seed
+
+
+def _pairing_series_participants(source: dict[str, Any]) -> tuple[int, int]:
+    """Return a seat-independent participant identity for batch validation."""
+    first = source.get("entry_a_id")
+    second = source.get("entry_b_id")
+    if first is None or second is None:
+        first = source.get("bot_a_id")
+        second = source.get("bot_b_id")
+    if (
+        isinstance(first, bool)
+        or not isinstance(first, int)
+        or isinstance(second, bool)
+        or not isinstance(second, int)
+        or first == second
+    ):
+        raise ValueError("多场赛事对阵必须包含两个不同的冻结参赛者")
+    return tuple(sorted((first, second)))
+
+
+def _pairing_series_batch(
+    rows: list[dict[str, Any]],
+) -> list[tuple[int, int]]:
+    """Validate complete series coordinates and frozen seeds before a batch write."""
+    normalized = [_pairing_series_fields(source) for source in rows]
+    frozen_seeds: list[int] = []
+    series: dict[tuple[str, str, int, int], list[tuple[int, int]]] = {}
+    for source, (index, size) in zip(rows, normalized):
+        seed = _pairing_seed_field(source, required=size > 1)
+        if seed is not None:
+            frozen_seeds.append(seed)
+        if size > 1:
+            first, second = _pairing_series_participants(source)
+            key = (
+                str(source.get("stage_key") or ""),
+                str(source.get("group_id") or ""),
+                first,
+                second,
+            )
+            series.setdefault(key, []).append((index, size))
+
+    if len(frozen_seeds) != len(set(frozen_seeds)):
+        raise ValueError("多场赛事对阵必须冻结互不重复的 pairing_seed")
+    for coordinates in series.values():
+        sizes = {size for _index, size in coordinates}
+        if len(sizes) != 1:
+            raise ValueError("同一组选手的 series_size 必须一致")
+        size = next(iter(sizes))
+        if sorted(index for index, _size in coordinates) != list(range(1, size + 1)):
+            raise ValueError("同一组选手的 series_index 必须完整覆盖 1..series_size")
+    return normalized
+
+
 # 每游戏对局表的建表模板（全面解耦 PR3：matches 拆三表，结构一致）。
 # {suffix} = 注册 game_id；game_id 本身必须由 Store 创建入口显式写入。
 _CREATE_MATCHES_TABLE_SQL = """
@@ -3734,6 +3819,18 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
         _add_col(conn, "contest_pairings", "published_at", "TEXT")
+        _add_col(
+            conn,
+            "contest_pairings",
+            "series_index",
+            "INTEGER NOT NULL DEFAULT 1 CHECK(series_index>=1)",
+        )
+        _add_col(
+            conn,
+            "contest_pairings",
+            "series_size",
+            "INTEGER NOT NULL DEFAULT 1 CHECK(series_size>=1)",
+        )
         duplicate_binding = conn.execute(
             "SELECT match_id, COUNT(*) AS n FROM contest_pairings "
             "WHERE match_id IS NOT NULL GROUP BY match_id HAVING COUNT(*)>1 "
@@ -12530,18 +12627,34 @@ class Store:
         pairing_seed: int | None = None,
         published_at: str | None = None,
         scheduled_at: str | None = None,
+        series_index: int = 1,
+        series_size: int = 1,
     ) -> dict:
+        series_index, series_size = _pairing_series_fields(
+            {"series_index": series_index, "series_size": series_size}
+        )
+        pairing_seed = _pairing_seed_field(
+            {"pairing_seed": pairing_seed}, required=series_size > 1
+        )
+        if series_size > 1:
+            raise ValueError("多场赛事对阵必须通过原子批次接口写入")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             _require_live_contest_pairing_bots_tx(
                 c, contest_id, bot_a_id, bot_b_id
             )
+            if pairing_seed is not None and c.execute(
+                "SELECT 1 FROM contest_pairings WHERE contest_id=? AND stage_idx=? "
+                "AND pairing_seed=? LIMIT 1",
+                (contest_id, stage_idx, pairing_seed),
+            ).fetchone():
+                raise ValueError("多场赛事对阵 pairing_seed 不得重复")
             cur = c.execute(
                 "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
                 "entry_b_id, bot_a_id, bot_b_id, bot_a_version_id, bot_b_version_id, "
                 "pairing_seed, published_at, scheduled_at, match_id, status, stage_idx, "
-                "stage_key, group_id, bracket_slot, color_first) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "stage_key, group_id, bracket_slot, color_first,series_index,series_size) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     contest_id,
                     round_num,
@@ -12561,6 +12674,8 @@ class Store:
                     group_id,
                     bracket_slot,
                     color_first,
+                    series_index,
+                    series_size,
                 ),
             )
             pid = cur.lastrowid
@@ -12615,7 +12730,10 @@ class Store:
             "group_id",
             "bracket_slot",
             "color_first",
+            "series_index",
+            "series_size",
         )
+        normalized_series = _pairing_series_batch(pairing_rows)
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
@@ -12664,7 +12782,9 @@ class Store:
 
             inserted: list[dict] = []
             placeholders = ",".join("?" for _ in columns)
-            for source in pairing_rows:
+            for source, (series_index, series_size) in zip(
+                pairing_rows, normalized_series
+            ):
                 row = {
                     "contest_id": contest_id,
                     "round_num": int(source.get("round_num") or 1),
@@ -12684,6 +12804,8 @@ class Store:
                     "group_id": source.get("group_id") or "",
                     "bracket_slot": source.get("bracket_slot"),
                     "color_first": int(source.get("color_first") or 0),
+                    "series_index": series_index,
+                    "series_size": series_size,
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -12731,6 +12853,7 @@ class Store:
         """
         if not pairing_rows:
             raise ValueError("赛事轮次对阵批次不能为空")
+        normalized_series = _pairing_series_batch(pairing_rows)
         previous_round = int(expected_previous_max_round)
         target_round = previous_round + 1
         if any(
@@ -12758,6 +12881,8 @@ class Store:
             "group_id",
             "bracket_slot",
             "color_first",
+            "series_index",
+            "series_size",
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -12799,7 +12924,9 @@ class Store:
 
             inserted: list[dict] = []
             placeholders = ",".join("?" for _ in columns)
-            for source in pairing_rows:
+            for source, (series_index, series_size) in zip(
+                pairing_rows, normalized_series
+            ):
                 row = {
                     "contest_id": contest_id,
                     "round_num": target_round,
@@ -12820,6 +12947,8 @@ class Store:
                     "bracket_slot": source.get("bracket_slot"),
                     # A/B have already been materialized as actual seat 0/1.
                     "color_first": 0,
+                    "series_index": series_index,
+                    "series_size": series_size,
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -12909,6 +13038,7 @@ class Store:
         check→replace 窗口中被覆盖。
         """
         expected_ids = sorted({int(pairing_id) for pairing_id in expected_existing_ids})
+        normalized_series = _pairing_series_batch(pairing_rows)
         columns = (
             "contest_id",
             "round_num",
@@ -12928,6 +13058,8 @@ class Store:
             "group_id",
             "bracket_slot",
             "color_first",
+            "series_index",
+            "series_size",
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -12982,7 +13114,9 @@ class Store:
             )
             inserted: list[dict] = []
             placeholders = ",".join("?" for _ in columns)
-            for source in pairing_rows:
+            for source, (series_index, series_size) in zip(
+                pairing_rows, normalized_series
+            ):
                 row = {
                     "contest_id": contest_id,
                     "round_num": int(source.get("round_num") or 1),
@@ -13002,6 +13136,8 @@ class Store:
                     "group_id": source.get("group_id") or "",
                     "bracket_slot": source.get("bracket_slot"),
                     "color_first": int(source.get("color_first") or 0),
+                    "series_index": series_index,
+                    "series_size": series_size,
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -13018,61 +13154,113 @@ class Store:
                 )
             return inserted
 
-    def contest_bracket(self, contest_id: int) -> list[dict]:
-        """返回对阵（带 bot 名/owner 名 + 对局 winner），便于前端画对阵图。
+    def _contest_bracket_tx(
+        self,
+        c: sqlite3.Connection,
+        contest_id: int,
+        game_id: str,
+        *,
+        stage_idx: int | None = None,
+        include_result: bool = False,
+    ) -> list[dict]:
+        """Read public schedule inputs inside the caller's SQLite snapshot."""
+        tbl = _matches_table(_registered_game_id(game_id))
+        stage_filter = "" if stage_idx is None else "AND p.stage_idx=? "
+        params: tuple[int, ...] = (
+            (contest_id,) if stage_idx is None else (contest_id, stage_idx)
+        )
+        result_projection = "m.created_at AS _match_created_at"
+        if include_result:
+            result_projection += ", m.result AS _match_result_json"
+        rows = c.execute(
+            "SELECT p.*, "
+            "COALESCE(p.entry_a_id, legacy_a.entry_id) AS _effective_entry_a_id, "
+            "COALESCE(p.entry_b_id, legacy_b.entry_id) AS _effective_entry_b_id, "
+            "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+            "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+            "COALESCE(ua.username,eua.username) AS owner_a_name, "
+            "COALESCE(ua.display_name,eua.display_name) AS owner_a_display, "
+            "COALESCE(ub.username,eub.username) AS owner_b_name, "
+            "COALESCE(ub.display_name,eub.display_name) AS owner_b_display, "
+            "m.winner AS match_winner, m.status AS match_status, "
+            "m.started_at AS started_at, m.ended_at AS ended_at, "
+            + result_projection
+            + " FROM contest_pairings p "
+            "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
+            "LEFT JOIN bots bb ON p.bot_b_id=bb.id "
+            "LEFT JOIN users ua ON ba.owner_id=ua.id "
+            "LEFT JOIN users ub ON bb.owner_id=ub.id "
+            "LEFT JOIN contest_entries ea ON p.entry_a_id=ea.id "
+            "AND ea.contest_id=p.contest_id "
+            "LEFT JOIN contest_entries eb ON p.entry_b_id=eb.id "
+            "AND eb.contest_id=p.contest_id "
+            "LEFT JOIN users eua ON ea.user_id=eua.id "
+            "LEFT JOIN users eub ON eb.user_id=eub.id "
+            f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
+            "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
+            "AND p.contest_id=legacy_a.contest_id "
+            f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
+            "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
+            "AND p.contest_id=legacy_b.contest_id "
+            f"LEFT JOIN {tbl} m ON p.match_id=m.id "
+            "WHERE p.contest_id=? "
+            + stage_filter
+            + "ORDER BY p.stage_idx, p.round_num, p.id",
+            params,
+        ).fetchall()
+        return [
+            _apply_effective_entry_ids(
+                _row(raw),
+                ("entry_a_id", "_effective_entry_a_id"),
+                ("entry_b_id", "_effective_entry_b_id"),
+            )
+            for raw in rows
+        ]
 
-        每行含 pairing 全字段 + bot_a_name/bot_a_display/bot_b_name/bot_b_display
-        + owner_a_name/owner_b_name + winner（从 matches 取）。
-        """
+    def contest_bracket(self, contest_id: int) -> list[dict]:
+        """返回对阵（带公开 Bot/owner 名、对局状态与结果摘要）。"""
         with self._tx() as c:
-            # 赛事绑定单一游戏——取其 game_id 定位 per-game 对局表 join winner
-            ct = c.execute(
+            contest = c.execute(
                 "SELECT game_id FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
-            gid = _registered_game_id(ct["game_id"] if ct else None)
-            tbl = _matches_table(gid)
-            rows = c.execute(
-                "SELECT p.*, "
-                "COALESCE(p.entry_a_id, legacy_a.entry_id) AS _effective_entry_a_id, "
-                "COALESCE(p.entry_b_id, legacy_b.entry_id) AS _effective_entry_b_id, "
-                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
-                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
-                "COALESCE(ua.username,eua.username) AS owner_a_name, "
-                "COALESCE(ua.display_name,eua.display_name) AS owner_a_display, "
-                "COALESCE(ub.username,eub.username) AS owner_b_name, "
-                "COALESCE(ub.display_name,eub.display_name) AS owner_b_display, "
-                "m.winner AS match_winner, m.status AS match_status "
-                "FROM contest_pairings p "
-                "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
-                "LEFT JOIN bots bb ON p.bot_b_id=bb.id "
-                "LEFT JOIN users ua ON ba.owner_id=ua.id "
-                "LEFT JOIN users ub ON bb.owner_id=ub.id "
-                "LEFT JOIN contest_entries ea ON p.entry_a_id=ea.id "
-                "AND ea.contest_id=p.contest_id "
-                "LEFT JOIN contest_entries eb ON p.entry_b_id=eb.id "
-                "AND eb.contest_id=p.contest_id "
-                "LEFT JOIN users eua ON ea.user_id=eua.id "
-                "LEFT JOIN users eub ON eb.user_id=eub.id "
-                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
-                "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
-                "AND p.contest_id=legacy_a.contest_id "
-                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
-                "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
-                "AND p.contest_id=legacy_b.contest_id "
-                f"LEFT JOIN {tbl} m ON p.match_id=m.id "
-                "WHERE p.contest_id=? "
-                "ORDER BY p.stage_idx, p.round_num, p.id",
-                (contest_id,),
-            ).fetchall()
-            result: list[dict] = []
-            for raw in rows:
-                row = _apply_effective_entry_ids(
-                    _row(raw),
-                    ("entry_a_id", "_effective_entry_a_id"),
-                    ("entry_b_id", "_effective_entry_b_id"),
-                )
-                result.append(row)
-            return result
+            gid = _registered_game_id(contest["game_id"] if contest else None)
+            return self._contest_bracket_tx(c, contest_id, gid)
+
+    def contest_live_snapshot(self, contest_id: int) -> dict[str, Any] | None:
+        """Return one transactionally consistent, replay-free live projection input.
+
+        The fixed three SELECTs are independent of pairing count: contest state,
+        current-stage pairings joined with compact Match results, then the frozen
+        roster needed for standings.  Explicit ``BEGIN`` makes those reads one
+        SQLite snapshot even when another process advances a stage concurrently.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN")
+            contest = _row(
+                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
+            )
+            if contest is None:
+                return None
+            stage_idx = int(contest.get("current_stage_idx") or 0)
+            pairings = self._contest_bracket_tx(
+                c,
+                contest_id,
+                _registered_game_id(contest.get("game_id")),
+                stage_idx=stage_idx,
+                include_result=True,
+            )
+            entries = [
+                _row(row)
+                for row in c.execute(
+                    "SELECT e.id,e.bot_id,e.user_id,e.seed,e.group_id,e.eliminated,"
+                    "b.name AS bot_name,b.display_name AS bot_display "
+                    "FROM contest_entries e "
+                    "LEFT JOIN bots b ON b.id=e.bot_id "
+                    "WHERE e.contest_id=? ORDER BY e.registered_at,e.id",
+                    (contest_id,),
+                ).fetchall()
+            ]
+            return {"contest": contest, "pairings": pairings, "entries": entries}
 
     def contest_entries_named(
         self,
@@ -13189,6 +13377,11 @@ class Store:
             return [_row(r) for r in rows]
 
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
+        immutable = {"pairing_seed", "series_index", "series_size"}.intersection(
+            fields
+        )
+        if immutable:
+            raise ValueError("赛事对阵发布身份字段不可修改")
         allowed = {
             "match_id",
             "status",
@@ -13199,7 +13392,6 @@ class Store:
             "bot_b_id",
             "bot_a_version_id",
             "bot_b_version_id",
-            "pairing_seed",
             "published_at",
             "scheduled_at",
             "stage_idx",
@@ -13210,21 +13402,24 @@ class Store:
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
+        guarded = {"bot_a_id", "bot_b_id"}.intersection(fields)
         with self._tx() as c:
-            if {"bot_a_id", "bot_b_id"}.intersection(fields):
+            if guarded:
                 c.execute("BEGIN IMMEDIATE")
                 current = c.execute(
-                    "SELECT contest_id,bot_a_id,bot_b_id FROM contest_pairings "
+                    "SELECT contest_id,bot_a_id,bot_b_id "
+                    "FROM contest_pairings "
                     "WHERE id=?",
                     (int(pairing_id),),
                 ).fetchone()
                 if current is not None:
-                    _require_live_contest_pairing_bots_tx(
-                        c,
-                        int(current["contest_id"]),
-                        fields.get("bot_a_id", current["bot_a_id"]),
-                        fields.get("bot_b_id", current["bot_b_id"]),
-                    )
+                    if {"bot_a_id", "bot_b_id"}.intersection(fields):
+                        _require_live_contest_pairing_bots_tx(
+                            c,
+                            int(current["contest_id"]),
+                            fields.get("bot_a_id", current["bot_a_id"]),
+                            fields.get("bot_b_id", current["bot_b_id"]),
+                        )
             if sets:
                 vals.append(pairing_id)
                 c.execute(

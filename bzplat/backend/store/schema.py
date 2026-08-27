@@ -1314,7 +1314,10 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     stage_key       TEXT    NOT NULL DEFAULT '',
     group_id        TEXT    NOT NULL DEFAULT '',
     bracket_slot    INTEGER,
-    color_first     INTEGER NOT NULL DEFAULT 0
+    color_first     INTEGER NOT NULL DEFAULT 0,
+    series_index    INTEGER NOT NULL DEFAULT 1 CHECK(series_index>=1),
+    series_size     INTEGER NOT NULL DEFAULT 1 CHECK(series_size>=1),
+    CONSTRAINT chk_contest_pairing_series CHECK(series_index<=series_size)
 );
 
 CREATE TABLE IF NOT EXISTS contest_stage_results (
