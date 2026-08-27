@@ -9,6 +9,11 @@ function pairing({
   matchId,
   seriesIndex,
   winner = null,
+  botAId,
+  botBId,
+  seriesSize = 4,
+  isBye = false,
+  seriesSummary,
 }: {
   id: number
   status: 'pending' | 'running' | 'completed'
@@ -16,12 +21,26 @@ function pairing({
   matchId: string | null
   seriesIndex: number
   winner?: number | null
+  botAId?: number
+  botBId?: number | null
+  seriesSize?: number
+  isBye?: boolean
+  seriesSummary?: {
+    series_size: number
+    completed_matches: number
+    game_points_a: number
+    game_points_b: number
+    normalized_delta_a: number
+    settled: boolean
+    standings_points_a: number | null
+    standings_points_b: number | null
+  }
 }) {
   return {
     id,
     round_num: 2,
-    bot_a_id: 101 + id,
-    bot_b_id: 201 + id,
+    bot_a_id: botAId ?? 101 + id,
+    bot_b_id: botBId === undefined ? 201 + id : botBId,
     scheduled_at: '2026-08-28T12:00:00+08:00',
     started_at: displayStatus === 'running' || displayStatus === 'completed'
       ? '2026-08-27T12:01:00+08:00'
@@ -35,7 +54,7 @@ function pairing({
     group_id: null,
     bracket_slot: id,
     series_index: seriesIndex,
-    series_size: 4,
+    series_size: seriesSize,
     bot_a_name: `alpha-${id}`,
     bot_a_display: `Alpha ${id}`,
     bot_b_name: `beta-${id}`,
@@ -45,7 +64,9 @@ function pairing({
     owner_b_name: `owner-beta-${id}`,
     owner_b_display: `Beta Owner ${id}`,
     match_winner: winner,
-    is_bye: false,
+    is_bye: isBye,
+    bye: isBye,
+    series_summary: seriesSummary,
   }
 }
 
@@ -184,6 +205,77 @@ test('running spectator prioritizes live tables and polls only the live projecti
     .toEqual(Array(api.liveReads()).fill('/api/contests/42/live'))
   expect(api.apiPaths.filter((path) => path !== '/api/auth/me'))
     .toEqual(Array(api.liveReads()).fill('/api/contests/42/live'))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('series scorecards aggregate physical games and keep a Swiss bye distinct', async ({ page }) => {
+  const pendingSummary = {
+    series_size: 2,
+    completed_matches: 1,
+    game_points_a: 1,
+    game_points_b: 0,
+    normalized_delta_a: 8.4,
+    settled: false,
+    standings_points_a: null,
+    standings_points_b: null,
+  }
+  const settledSummary = {
+    series_size: 2,
+    completed_matches: 2,
+    game_points_a: 2,
+    game_points_b: 0,
+    normalized_delta_a: 15.25,
+    settled: true,
+    standings_points_a: 3,
+    standings_points_b: 0,
+  }
+  const snapshot = liveSnapshot()
+  snapshot.stage = { ...snapshot.stage, key: 'prelim', label: 'prelim', type: 'swiss' }
+  snapshot.series = {
+    games_per_pair: 2,
+    duplicate: false,
+    scoring_mode: 'aggregate_match_points_v1',
+    conceptual_completed: 1,
+    conceptual_total: 3,
+  }
+  snapshot.active = []
+  snapshot.upcoming = [
+    pairing({ id: 21, status: 'running', displayStatus: 'queued', matchId: 'series-pending-1', seriesIndex: 1, seriesSize: 2, botAId: 501, botBId: 502, seriesSummary: pendingSummary }),
+    pairing({ id: 22, status: 'pending', displayStatus: 'pending', matchId: null, seriesIndex: 2, seriesSize: 2, botAId: 502, botBId: 501, seriesSummary: pendingSummary }),
+  ]
+  snapshot.recent = [
+    pairing({ id: 31, status: 'completed', displayStatus: 'completed', matchId: 'series-done-1', seriesIndex: 1, seriesSize: 2, botAId: 601, botBId: 602, winner: 0, seriesSummary: settledSummary }),
+    pairing({ id: 32, status: 'completed', displayStatus: 'completed', matchId: 'series-done-2', seriesIndex: 2, seriesSize: 2, botAId: 602, botBId: 601, winner: 1, seriesSummary: settledSummary }),
+    pairing({
+      id: 33,
+      status: 'completed',
+      displayStatus: 'completed',
+      matchId: null,
+      seriesIndex: 1,
+      seriesSize: 1,
+      botAId: 603,
+      botBId: null,
+      isBye: true,
+      seriesSummary: { ...settledSummary, series_size: 1, completed_matches: 0, standings_points_a: 3 },
+    }),
+  ]
+  const monitor = monitorBrowser(page)
+  await installLiveApi(page, snapshot)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/contests/42/live')
+
+  await expect(page.getByText(/预赛瑞士轮 · 德州扑克/)).toBeVisible()
+  await expect(page.getByText('每次对手交锋 2 场 · 已结算 1/3 组', { exact: true })).toBeVisible()
+  await expect(page.getByText(/复式对局/)).toHaveCount(0)
+  await expect(page.getByText('本轮积分待结算', { exact: true })).toBeVisible()
+  await expect(page.getByText(/本轮交锋 2 场 · 已完成 1\/2 · 小分 1–0 · 净胜 \+8\.4BB/)).toBeVisible()
+  await expect(page.getByRole('link', { name: '第 1/2 场详情' })).toBeVisible()
+  await expect(page.getByText('第 2/2 场待调度', { exact: true })).toBeVisible()
+  await expect(page.getByText('3–0 赛事积分', { exact: true })).toBeVisible()
+  await expect(page.getByText(/本轮交锋 2 场 · 已完成 2\/2 · 小分 2–0 · 净胜 \+15\.25BB/)).toBeVisible()
+  await expect(page.getByText('轮空 · +3 赛事积分', { exact: true })).toBeVisible()
+  await expect(page.getByText('本轮没有生成实际对局。', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean()
 })

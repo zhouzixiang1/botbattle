@@ -29,6 +29,18 @@ export interface LiveContestPairing extends MatchParticipantSource {
   ended_at?: string | null
   series_index: number
   series_size: number
+  bye?: boolean
+  series_summary?: {
+    bye?: boolean
+    series_size: number
+    completed_matches: number
+    game_points_a: number | null
+    game_points_b: number | null
+    normalized_delta_a: number
+    settled: boolean
+    standings_points_a: number | null
+    standings_points_b: number | null
+  } | null
 }
 
 export interface LiveContestStanding {
@@ -49,6 +61,7 @@ export interface LiveContestStanding {
 interface LiveContestSpectatorProps {
   status: string
   stageLabel: string
+  stageType?: string
   duplicate: boolean
   snapshot?: boolean
   progress: {
@@ -75,15 +88,72 @@ function compareSchedule(a: LiveContestPairing, b: LiveContestPairing): number {
   return slot !== 0 ? slot : a.id - b.id
 }
 
+function seriesGroupKey(pairing: LiveContestPairing, stageType?: string): string {
+  if (pairing.is_bye || pairing.bye) return `bye:${pairing.id}`
+  if (!pairing.series_size || pairing.series_size <= 1) return `match:${pairing.id}`
+  const players = [
+    pairing.bot_a_id ?? pairing.owner_a_name ?? pairing.bot_a_name ?? `unknown-a-${pairing.id}`,
+    pairing.bot_b_id ?? pairing.owner_b_name ?? pairing.bot_b_name ?? `unknown-b-${pairing.id}`,
+  ].sort().join(':')
+  const round = stageType === 'swiss' ? pairing.round_num ?? 1 : 0
+  return `${pairing.stage_key || pairing.stage_idx}:${round}:${pairing.group_id || ''}:${players}`
+}
+
+function groupSeries(pairings: LiveContestPairing[], stageType?: string): LiveContestPairing[][] {
+  const groups = new Map<string, LiveContestPairing[]>()
+  for (const pairing of pairings) {
+    const key = seriesGroupKey(pairing, stageType)
+    const group = groups.get(key) || []
+    group.push(pairing)
+    groups.set(key, group)
+  }
+  return Array.from(groups.values()).map((group) => group.sort((a, b) => a.series_index - b.series_index))
+}
+
+function signedBb(value: number): string {
+  const rounded = Math.round(value * 100) / 100
+  return `${rounded > 0 ? '+' : ''}${rounded}BB`
+}
+
+function SeriesScoreline({ pairing }: { pairing: LiveContestPairing }) {
+  const summary = pairing.series_summary
+  if (pairing.is_bye || pairing.bye) {
+    const points = summary?.standings_points_a
+    return (
+      <div className="mt-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
+        <p className="text-lg font-semibold tabular-nums text-primary">轮空{points != null ? ` · +${points} 赛事积分` : ''}</p>
+        <p className="text-xs text-muted-foreground">本轮没有生成实际对局。</p>
+      </div>
+    )
+  }
+  if (!summary) return null
+  return (
+    <div className="mt-2 rounded-md border bg-muted/25 px-3 py-2">
+      <p className="text-lg font-semibold tabular-nums text-foreground">
+        {summary.settled && summary.standings_points_a != null && summary.standings_points_b != null
+          ? `${summary.standings_points_a}–${summary.standings_points_b} 赛事积分`
+          : '本轮积分待结算'}
+      </p>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+        本轮交锋 {summary.series_size} 场 · 已完成 {summary.completed_matches}/{summary.series_size}
+        {' · '}小分 {summary.game_points_a ?? 0}–{summary.game_points_b ?? 0}
+        {' · '}净胜 {signedBb(summary.normalized_delta_a)}
+      </p>
+    </div>
+  )
+}
+
 function PairingIdentityLine({
-  pairing,
+  pairings,
   showResult = false,
   duplicate = false,
 }: {
-  pairing: LiveContestPairing
+  pairings: LiveContestPairing[]
   showResult?: boolean
   duplicate?: boolean
 }) {
+  const pairing = pairings[0]
+  if (!pairing) return null
   return (
     <li className="min-w-0 py-2.5 first:pt-0 last:pb-0">
       <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -95,7 +165,7 @@ function PairingIdentityLine({
             第 {pairing.series_index ?? 1}/{pairing.series_size} 场
           </span>
         )}
-        {showResult && duplicate ? (
+        {showResult && duplicate && !pairing.is_bye && !pairing.bye ? (
           <span className="min-w-0 truncate font-medium text-foreground">复式对局已裁决</span>
         ) : showResult ? (
           <PairingResult pairing={pairing} className="min-w-0 truncate" />
@@ -129,6 +199,24 @@ function PairingIdentityLine({
           emptyLabel={pairing.is_bye ? '轮空 (bye)' : undefined}
         />
       </div>
+      <SeriesScoreline pairing={pairing} />
+      {pairings.length > 1 && (
+        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5" aria-label="本轮交锋的实际对局">
+          {pairings.map((item) => item.match_id ? (
+            <Link
+              key={item.id}
+              to={`/match/${item.match_id}`}
+              className="inline-flex min-h-11 items-center rounded-md border px-2.5 text-xs font-medium text-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-8"
+            >
+              第 {item.series_index}/{item.series_size} 场{showResult ? '回看' : '详情'}
+            </Link>
+          ) : (
+            <span key={item.id} className="inline-flex min-h-11 items-center rounded-md bg-muted px-2.5 text-xs text-muted-foreground sm:min-h-8">
+              第 {item.series_index}/{item.series_size} 场待调度
+            </span>
+          ))}
+        </div>
+      )}
     </li>
   )
 }
@@ -181,6 +269,7 @@ function ActiveTable({
 export function LiveContestSpectator({
   status,
   stageLabel,
+  stageType,
   duplicate,
   snapshot = false,
   progress: progressValue,
@@ -199,7 +288,9 @@ export function LiveContestSpectator({
     .filter((pairing) => !pairing.is_bye)
     .sort(compareSchedule)
   const recent = recentPairings
-    .filter((pairing) => !pairing.is_bye)
+  const activeGroups = groupSeries(active, stageType)
+  const upcomingGroups = groupSeries(upcoming, stageType)
+  const recentGroups = groupSeries(recent, stageType)
   const completed = Math.max(0, progressValue.completed)
   const total = Math.max(0, progressValue.total)
   const progress = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
@@ -328,7 +419,23 @@ export function LiveContestSpectator({
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{active.length} 桌</span>
           </div>
           {active.length > 0 ? (
-            <div>{active.map((pairing, index) => <ActiveTable key={pairing.id} pairing={pairing} tableNumber={index + 1} snapshot={snapshot} />)}</div>
+            <div className="divide-y divide-primary/15">
+              {activeGroups.map((group) => (
+                <div key={seriesGroupKey(group[0]!, stageType)} className="py-3 first:pt-0 last:pb-0">
+                  <SeriesScoreline pairing={group[0]!} />
+                  <div className="mt-3">
+                    {group.map((pairing) => (
+                      <ActiveTable
+                        key={pairing.id}
+                        pairing={pairing}
+                        tableNumber={active.findIndex((item) => item.id === pairing.id) + 1}
+                        snapshot={snapshot}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="flex min-h-28 items-center rounded-lg border border-dashed px-4 py-5">
               <div>
@@ -394,7 +501,7 @@ export function LiveContestSpectator({
         <section aria-labelledby="upcoming-matches-title" className="min-w-0 px-4 py-4 md:border-r">
           <h3 id="upcoming-matches-title" className="text-sm font-semibold text-foreground">接下来</h3>
           {upcoming.length > 0 ? (
-            <ul className="mt-3 divide-y divide-border">{upcoming.map((pairing) => <PairingIdentityLine key={pairing.id} pairing={pairing} />)}</ul>
+            <ul className="mt-3 divide-y divide-border">{upcomingGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} />)}</ul>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">当前阶段暂无待进行对局。</p>
           )}
@@ -402,7 +509,7 @@ export function LiveContestSpectator({
         <section aria-labelledby="recent-results-title" className="min-w-0 border-t px-4 py-4 md:border-t-0">
           <h3 id="recent-results-title" className="text-sm font-semibold text-foreground">最近赛果</h3>
           {recent.length > 0 ? (
-            <ul className="mt-3 divide-y divide-border">{recent.map((pairing) => <PairingIdentityLine key={pairing.id} pairing={pairing} showResult duplicate={duplicate} />)}</ul>
+            <ul className="mt-3 divide-y divide-border">{recentGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} showResult duplicate={duplicate} />)}</ul>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">本阶段尚无已完成对局。</p>
           )}

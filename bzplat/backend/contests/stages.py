@@ -20,7 +20,9 @@ class PairingSpec:
     series_size: int = 1
 
 
-PAIR_SERIES_STAGE_TYPES = frozenset({"round_robin"})
+PAIR_SERIES_STAGE_TYPES = frozenset(
+    {"round_robin", "double_round_robin", "swiss"}
+)
 
 
 def _series_extra_seat(
@@ -51,7 +53,11 @@ def _series_extra_seat(
 
 
 def expand_pairing_series(
-    pairings: list[PairingSpec], games_per_pair: int, *, cohort: list[int]
+    pairings: list[PairingSpec],
+    games_per_pair: int,
+    *,
+    cohort: list[int],
+    preserve_round_num: bool = False,
 ) -> list[PairingSpec]:
     """Expand one RR fixture into independent physical Matches.
 
@@ -70,6 +76,47 @@ def expand_pairing_series(
 
     rounds_per_cycle = max(int(pairing.round_num or 1) for pairing in pairings)
     expanded: list[PairingSpec] = []
+    if preserve_round_num:
+        # Swiss dispatches one series coordinate across the whole round before
+        # moving to the next coordinate.  With the contest's shared execution
+        # slot this prevents one opponent pair monopolising K consecutive jobs.
+        real_pairings = [
+            pairing
+            for pairing in pairings
+            if pairing.bot_b_id is not None and pairing.requires_match
+        ]
+        for series_index in range(1, games_per_pair + 1):
+            for pairing in real_pairings:
+                first = int(pairing.color_first or 0)
+                expanded.append(
+                    PairingSpec(
+                        bot_a_id=pairing.bot_a_id,
+                        bot_b_id=pairing.bot_b_id,
+                        round_num=int(pairing.round_num or 1),
+                        group_id=pairing.group_id,
+                        bracket_slot=pairing.bracket_slot,
+                        color_first=(
+                            first if series_index % 2 == 1 else 1 - first
+                        ),
+                        status=pairing.status,
+                        requires_match=True,
+                        series_index=series_index,
+                        series_size=games_per_pair,
+                    )
+                )
+        expanded.extend(
+            PairingSpec(
+                **{
+                    **pairing.__dict__,
+                    "series_index": 1,
+                    "series_size": 1,
+                }
+            )
+            for pairing in pairings
+            if pairing.bot_b_id is None or not pairing.requires_match
+        )
+        return expanded
+
     for pairing in pairings:
         if pairing.bot_b_id is None or not pairing.requires_match:
             expanded.append(
@@ -94,6 +141,8 @@ def expand_pairing_series(
                     bot_b_id=pairing.bot_b_id,
                     round_num=(
                         int(pairing.round_num or 1)
+                        if preserve_round_num
+                        else int(pairing.round_num or 1)
                         + (series_index - 1) * rounds_per_cycle
                     ),
                     group_id=pairing.group_id,
@@ -357,6 +406,39 @@ def swiss_rounds_needed(n: int) -> int:
     return max(1, math.ceil(math.log2(n)))
 
 
+def swiss_coverage_round_limit(n: int) -> int:
+    """Maximum no-repeat Swiss rounds for a complete opponent graph.
+
+    Even cohorts need ``n-1`` rounds.  Odd cohorts need ``n`` rounds because
+    every round contains one bye.  ``1`` keeps the historical small-cohort
+    estimator well-defined; the manager still treats fewer than two entrants
+    as an empty stage.
+    """
+    if n <= 2:
+        return 1
+    return n - 1 if n % 2 == 0 else n
+
+
+def effective_swiss_rounds(stage: dict[str, Any], n: int) -> int:
+    """Resolve the frozen/requested Swiss round count for one cohort."""
+    frozen = stage.get("effective_rounds")
+    if isinstance(frozen, int) and not isinstance(frozen, bool) and frozen >= 1:
+        return frozen
+    configured = stage.get("rounds")
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        base = configured
+    else:
+        base = swiss_rounds_needed(n)
+    if "swiss_extra_rounds" not in stage:
+        # Historical/custom snapshots retain their exact rounds contract even
+        # when it intentionally repeats opponents beyond full coverage.
+        return base
+    extra = stage.get("swiss_extra_rounds", 0)
+    if isinstance(extra, bool) or not isinstance(extra, int) or extra < 0:
+        raise ValueError("swiss_extra_rounds 须为非负整数")
+    return min(base + extra, swiss_coverage_round_limit(n))
+
+
 def generate_stage_pairings(
     stage: dict[str, Any],
     bot_ids: list[int],
@@ -378,6 +460,12 @@ def generate_stage_pairings(
             )
         return pairings
     if stype == "double_round_robin":
+        if "games_per_pair" in stage:
+            return expand_pairing_series(
+                round_robin(bot_ids, double=False),
+                stage["games_per_pair"],
+                cohort=bot_ids,
+            )
         return round_robin(bot_ids, double=True)
     if stype == "group_round_robin":
         return group_round_robin(
@@ -392,7 +480,7 @@ def generate_stage_pairings(
             double=True,
         )
     if stype == "swiss":
-        return swiss_pairings(
+        pairings = swiss_pairings(
             bot_ids,
             scores=scores,
             played=played,
@@ -400,6 +488,14 @@ def generate_stage_pairings(
             color_counts=color_counts,
             bye_counts=bye_counts,
         )
+        if "games_per_pair" in stage:
+            return expand_pairing_series(
+                pairings,
+                stage["games_per_pair"],
+                cohort=bot_ids,
+                preserve_round_num=True,
+            )
+        return pairings
     if stype == "single_elimination":
         return single_elimination(bot_ids)
     raise ValueError(f"未知阶段类型: {stype}")
@@ -410,6 +506,8 @@ def estimate_match_count(stage: dict[str, Any], n: int) -> int:
     if stype in ("round_robin",):
         return n * (n - 1) // 2 * int(stage.get("games_per_pair") or 1)
     if stype == "double_round_robin":
+        if "games_per_pair" in stage:
+            return n * (n - 1) // 2 * int(stage["games_per_pair"])
         return n * (n - 1)
     if stype.startswith("group_"):
         g = effective_group_count(n, int(stage.get("group_count") or 4))
@@ -421,8 +519,8 @@ def estimate_match_count(stage: dict[str, Any], n: int) -> int:
             total += c * (2 if double else 1)
         return total
     if stype == "swiss":
-        rounds = int(stage.get("rounds") or swiss_rounds_needed(n))
-        return rounds * (n // 2)
+        rounds = effective_swiss_rounds(stage, n)
+        return rounds * (n // 2) * int(stage.get("games_per_pair") or 1)
     if stype == "single_elimination":
         return max(0, n - 1)
     return 0

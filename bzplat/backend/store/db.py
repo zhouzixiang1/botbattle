@@ -12208,6 +12208,49 @@ class Store:
                 ).fetchone()
             )
 
+    def compare_and_swap_unstarted_contest_stages(
+        self,
+        contest_id: int,
+        *,
+        expected_status: str,
+        expected_stages_json: str,
+        stages_json: str,
+    ) -> dict:
+        """Replace one draft/open stage snapshot behind a no-schedule CAS gate."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not current:
+                raise ValueError("比赛不存在")
+            if current["showcase_key"]:
+                raise ValueError("演示赛事为只读快照")
+            if current["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("仅 draft/open 且尚未生成赛程的赛事可修改系列设置")
+            if (
+                str(current["status"]) != expected_status
+                or str(current["stages_json"] or "[]") != expected_stages_json
+            ):
+                raise ValueError("赛事系列设置已被并发修改，请刷新后重试")
+            if c.execute(
+                "SELECT 1 FROM contest_pairings WHERE contest_id=? LIMIT 1",
+                (contest_id,),
+            ).fetchone():
+                raise ValueError("赛事已生成赛程，不能修改系列设置")
+            changed = c.execute(
+                "UPDATE contests SET stages_json=? "
+                "WHERE id=? AND status=? AND stages_json=?",
+                (stages_json, contest_id, expected_status, expected_stages_json),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事系列设置已被并发修改，请刷新后重试")
+            return _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+            )
+
     def update_published_contest_schedule(
         self,
         contest_id: int,

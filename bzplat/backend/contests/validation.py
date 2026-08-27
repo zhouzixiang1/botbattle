@@ -38,20 +38,34 @@ _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
         "duplicate",
         "allow_large_round_robin",
         "games_per_pair",
+        "series_scoring",
     }),
     "double_round_robin": frozenset({
         "duplicate",
         "allow_large_round_robin",
         "ranking_mode",
         "ranking_scope",
+        "games_per_pair",
+        "series_scoring",
     }),
     "group_round_robin": frozenset({"group_count", "advance_per_group"}),
     "group_double_round_robin": frozenset({"group_count", "advance_per_group"}),
-    "swiss": frozenset({"rounds"}),
+    "swiss": frozenset({
+        "rounds",
+        "games_per_pair",
+        "series_scoring",
+        "swiss_extra_rounds",
+        "effective_rounds",
+    }),
     "single_elimination": frozenset(),
 }
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
+SERIES_SCORING_AGGREGATE = "aggregate_match_points_v1"
+_SERIES_STAGE_FIELDS = frozenset(
+    {"games_per_pair", "series_scoring", "swiss_extra_rounds", "effective_rounds"}
+)
 
 
 def validate_template_id(tid: str) -> None:
@@ -157,6 +171,22 @@ def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
         if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 0:
             raise ValueError(f"阶段 {idx + 1} rounds 须为 ≥0 的整数（0=按 log2(n) 自动）")
         out["rounds"] = rounds
+        extra_rounds = _int_field(
+            stage,
+            "swiss_extra_rounds",
+            minimum=0,
+            label=f"阶段 {idx + 1} swiss_extra_rounds",
+        )
+        if extra_rounds is not None:
+            out["swiss_extra_rounds"] = extra_rounds
+        effective_rounds = _int_field(
+            stage,
+            "effective_rounds",
+            minimum=1,
+            label=f"阶段 {idx + 1} effective_rounds",
+        )
+        if effective_rounds is not None:
+            out["effective_rounds"] = effective_rounds
 
     # 通用可选
     ac = _int_field(
@@ -222,6 +252,31 @@ def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
             )
         out["games_per_pair"] = games_per_pair
 
+    if "series_scoring" in stage:
+        series_scoring = stage["series_scoring"]
+        if series_scoring != SERIES_SCORING_AGGREGATE:
+            raise ValueError(
+                f"阶段 {idx + 1} series_scoring 仅允许 "
+                f"{SERIES_SCORING_AGGREGATE!r}"
+            )
+        if stype not in PAIR_SERIES_STAGE_TYPES:
+            raise ValueError(f"阶段 {idx + 1} type 不支持系列聚合计分")
+        out["series_scoring"] = series_scoring
+
+    if out.get("series_scoring") == SERIES_SCORING_AGGREGATE:
+        if "games_per_pair" not in out:
+            raise ValueError(f"阶段 {idx + 1} 系列聚合计分缺少 games_per_pair")
+    elif stype in {"double_round_robin", "swiss"} and "games_per_pair" in out:
+        raise ValueError(
+            f"阶段 {idx + 1} {stype} 的 games_per_pair 必须使用系列聚合计分"
+        )
+    if (
+        "swiss_extra_rounds" in out or "effective_rounds" in out
+    ) and out.get("series_scoring") != SERIES_SCORING_AGGREGATE:
+        raise ValueError(
+            f"阶段 {idx + 1} 瑞士附加轮数必须使用系列聚合计分"
+        )
+
     if "ranking_mode" in stage:
         if stage["ranking_mode"] != "replace_top":
             raise ValueError(
@@ -249,17 +304,36 @@ def configure_games_per_pair(
     games_per_pair: int | None,
     *,
     capability: dict[str, Any] | None,
+    stage_series_settings: dict[str, dict[str, Any]] | None = None,
+    stage_capabilities: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Freeze the creation-only contest series option into one stage snapshot.
+    """Freeze a code-template series selection into validated stage snapshots.
 
-    V1 deliberately supports one code-template RR stage only.  Swiss, elimination,
-    legacy double-round-robin and multi-stage graphs require different series
-    completion semantics, so accepting the field there would be misleading.
-    The game capability and its upper bound come from ``GameSpec``.
+    ``games_per_pair`` retains the legacy single-stage capability contract.
+    ``stage_series_settings`` is the stage-keyed aggregate-series contract; an
+    omitted map applies all template defaults, while an explicit map must cover
+    every advertised stage.  Both paths remain bounded by ``GameSpec``.
     """
     import copy
 
     copied = copy.deepcopy(stages)
+    if games_per_pair is not None and stage_series_settings is not None:
+        raise ValueError(
+            "games_per_pair 与 stage_series_settings 不能同时提交"
+        )
+    if capability is not None and stage_capabilities is not None:
+        raise ValueError("赛事模板不能同时声明两种系列配置能力")
+
+    if stage_capabilities is not None:
+        return _configure_stage_series_settings(
+            copied,
+            game_id,
+            stage_series_settings,
+            stage_capabilities=stage_capabilities,
+            legacy_games_per_pair=games_per_pair,
+        )
+    if stage_series_settings is not None:
+        raise ValueError("当前赛事模板不支持 stage_series_settings")
     if capability is not None:
         if not isinstance(capability, dict):
             raise ValueError("赛事模板 games_per_pair_config 非法")
@@ -319,6 +393,219 @@ def configure_games_per_pair(
     return [validate_stage(stage, idx, gid) for idx, stage in enumerate(copied)]
 
 
+def _exact_config_int(
+    value: Any, *, label: str, minimum: int | None = None
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} 须为整数")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{label} 须为 ≥{minimum} 的整数")
+    return value
+
+
+def _validated_stage_series_capabilities(
+    stages: list[dict[str, Any]],
+    game_id: str,
+    capabilities: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(capabilities, list) or not capabilities:
+        raise ValueError("赛事模板 stage_series_configs 非法")
+    stage_by_key = {
+        str(stage.get("key") or f"stage{idx + 1}"): stage
+        for idx, stage in enumerate(stages)
+    }
+    spec = _game_spec(game_id)
+    spec_max = spec.contest_games_per_pair_max
+    if spec_max is None:
+        raise ValueError("赛事模板系列能力与游戏能力不一致")
+    out: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(capabilities):
+        if not isinstance(raw, dict):
+            raise ValueError("赛事模板 stage_series_configs 非法")
+        allowed_keys = {"stage_key", "label", "games_per_pair", "swiss_extra_rounds"}
+        unexpected = set(raw) - allowed_keys
+        if unexpected:
+            raise ValueError(
+                "赛事模板 stage_series_configs 不接受字段："
+                + ", ".join(sorted(str(key) for key in unexpected))
+            )
+        stage_key = raw.get("stage_key")
+        label = raw.get("label")
+        games = raw.get("games_per_pair")
+        if (
+            not isinstance(stage_key, str)
+            or not stage_key
+            or stage_key in out
+            or stage_key not in stage_by_key
+            or not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(games, dict)
+            or set(games) != {"default", "allowed_values"}
+        ):
+            raise ValueError("赛事模板 stage_series_configs 非法")
+        stage_type = stage_by_key[stage_key].get("type", "round_robin")
+        if stage_type not in PAIR_SERIES_STAGE_TYPES:
+            raise ValueError(f"阶段 {stage_key} 不支持系列配置")
+        default = _exact_config_int(
+            games.get("default"), label=f"阶段 {stage_key} games_per_pair.default", minimum=1
+        )
+        values_raw = games.get("allowed_values")
+        if not isinstance(values_raw, list) or not values_raw:
+            raise ValueError(f"阶段 {stage_key} games_per_pair.allowed_values 非法")
+        values = [
+            _exact_config_int(
+                value,
+                label=f"阶段 {stage_key} games_per_pair.allowed_values",
+                minimum=1,
+            )
+            for value in values_raw
+        ]
+        if len(values) != len(set(values)) or values != sorted(values):
+            raise ValueError(
+                f"阶段 {stage_key} games_per_pair.allowed_values 须严格递增且不重复"
+            )
+        if default not in values or max(values) > spec_max:
+            raise ValueError(f"阶段 {stage_key} games_per_pair 能力非法")
+        normalized: dict[str, Any] = {
+            "stage_key": stage_key,
+            "label": label.strip(),
+            "games_per_pair": {
+                "default": default,
+                "allowed_values": values,
+            },
+        }
+        extra = raw.get("swiss_extra_rounds")
+        if extra is not None:
+            if (
+                stage_type != "swiss"
+                or not isinstance(extra, dict)
+                or set(extra) != {"default", "min", "max"}
+            ):
+                raise ValueError(f"阶段 {stage_key} swiss_extra_rounds 能力非法")
+            minimum = _exact_config_int(
+                extra.get("min"), label=f"阶段 {stage_key} swiss_extra_rounds.min", minimum=0
+            )
+            maximum = _exact_config_int(
+                extra.get("max"), label=f"阶段 {stage_key} swiss_extra_rounds.max", minimum=0
+            )
+            extra_default = _exact_config_int(
+                extra.get("default"),
+                label=f"阶段 {stage_key} swiss_extra_rounds.default",
+                minimum=0,
+            )
+            if not minimum <= extra_default <= maximum:
+                raise ValueError(f"阶段 {stage_key} swiss_extra_rounds 能力非法")
+            normalized["swiss_extra_rounds"] = {
+                "default": extra_default,
+                "min": minimum,
+                "max": maximum,
+            }
+        elif stage_type == "swiss":
+            raise ValueError(f"阶段 {stage_key} 缺少 swiss_extra_rounds 能力")
+        out[stage_key] = normalized
+    return out
+
+
+def _configure_stage_series_settings(
+    stages: list[dict[str, Any]],
+    game_id: str,
+    settings: dict[str, dict[str, Any]] | None,
+    *,
+    stage_capabilities: list[dict[str, Any]],
+    legacy_games_per_pair: int | None,
+) -> list[dict[str, Any]]:
+    if legacy_games_per_pair is not None:
+        raise ValueError(
+            "games_per_pair 与 stage_series_settings 不能同时提交"
+        )
+    capabilities = _validated_stage_series_capabilities(
+        stages, game_id, stage_capabilities
+    )
+    if settings is not None and not isinstance(settings, dict):
+        raise ValueError("stage_series_settings 必须是对象")
+    if settings is not None and not settings:
+        raise ValueError("stage_series_settings 不能为空对象")
+    requested = settings or {}
+    unknown = set(requested) - set(capabilities)
+    if unknown:
+        raise ValueError(
+            "stage_series_settings 包含未知阶段："
+            + ", ".join(sorted(str(key) for key in unknown))
+        )
+    if settings is not None:
+        missing = set(capabilities) - set(requested)
+        if missing:
+            raise ValueError(
+                "stage_series_settings 缺少阶段："
+                + ", ".join(sorted(missing))
+            )
+    stage_by_key = {
+        str(stage.get("key") or f"stage{idx + 1}"): stage
+        for idx, stage in enumerate(stages)
+    }
+    for stage_key, config in capabilities.items():
+        raw = requested.get(stage_key)
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError(f"阶段 {stage_key} 配置必须是对象")
+        raw = raw or {}
+        allowed_fields = {"games_per_pair"}
+        if "swiss_extra_rounds" in config:
+            allowed_fields.add("swiss_extra_rounds")
+        unexpected = set(raw) - allowed_fields
+        if unexpected:
+            raise ValueError(
+                f"阶段 {stage_key} 不接受字段："
+                + ", ".join(sorted(str(key) for key in unexpected))
+            )
+        stage = stage_by_key[stage_key]
+        existing_games = stage.get("games_per_pair")
+        selected_games = raw.get(
+            "games_per_pair",
+            existing_games
+            if existing_games is not None
+            else config["games_per_pair"]["default"],
+        )
+        selected_games = _exact_config_int(
+            selected_games, label=f"阶段 {stage_key} games_per_pair", minimum=1
+        )
+        if selected_games not in config["games_per_pair"]["allowed_values"]:
+            allowed = config["games_per_pair"]["allowed_values"]
+            raise ValueError(
+                f"阶段 {stage_key} games_per_pair 仅允许 {allowed}"
+            )
+        stage["games_per_pair"] = selected_games
+        stage["series_scoring"] = SERIES_SCORING_AGGREGATE
+        stage.pop("effective_rounds", None)
+        if "swiss_extra_rounds" in config:
+            extra_cfg = config["swiss_extra_rounds"]
+            existing_extra = stage.get("swiss_extra_rounds")
+            selected_extra = raw.get(
+                "swiss_extra_rounds",
+                existing_extra
+                if existing_extra is not None
+                else extra_cfg["default"],
+            )
+            selected_extra = _exact_config_int(
+                selected_extra,
+                label=f"阶段 {stage_key} swiss_extra_rounds",
+                minimum=0,
+            )
+            if not extra_cfg["min"] <= selected_extra <= extra_cfg["max"]:
+                raise ValueError(
+                    f"阶段 {stage_key} swiss_extra_rounds 须为 "
+                    f"{extra_cfg['min']}..{extra_cfg['max']}"
+                )
+            stage["swiss_extra_rounds"] = selected_extra
+
+    # A code-template snapshot may not carry hidden series fields on an
+    # unadvertised stage.  This also closes the custom-stage smuggling path.
+    for stage_key, stage in stage_by_key.items():
+        if stage_key not in capabilities and _SERIES_STAGE_FIELDS.intersection(stage):
+            raise ValueError(f"阶段 {stage_key} 未声明系列配置能力")
+    gid = _game_spec(game_id).game_id
+    return [validate_stage(stage, idx, gid) for idx, stage in enumerate(stages)]
+
+
 def validate_template(
     tid: str, name: str, game_id: str, match_config: Any, stages: Any
 ) -> dict:
@@ -348,4 +635,5 @@ __all__ = [
     "validate_stage",
     "validate_template",
     "configure_games_per_pair",
+    "SERIES_SCORING_AGGREGATE",
 ]

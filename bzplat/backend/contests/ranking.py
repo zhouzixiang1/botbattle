@@ -18,15 +18,41 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from bzplat.backend.contests.series import (
+    group_conceptual_series,
+    is_aggregate_series_stage,
+    summarize_conceptual_series,
+)
+
 
 def _entry_opponents_map(
-    pairings: list[dict], matches: dict[str, dict]
+    pairings: list[dict],
+    matches: dict[str, dict],
+    *,
+    stage: dict[str, Any] | None = None,
 ) -> dict[int, list[dict]]:
     """entry_id → 该阶段它打过的所有对手记录 [{opp_entry, won, draw, opp_points}]。
 
     matches: match_id → match dict（含 status/winner）。
     """
     out: dict[int, list[dict]] = {}
+    stage = stage or {}
+    if is_aggregate_series_stage(stage):
+        for rows in group_conceptual_series(stage, pairings).values():
+            summary = summarize_conceptual_series(stage, rows, matches.get)
+            if not summary["settled"]:
+                continue
+            first, second = summary["entries"]
+            winner_entry = summary["winner_entry"]
+            for me, opponent in ((first, second), (second, first)):
+                out.setdefault(me, []).append(
+                    {
+                        "opp_entry": opponent,
+                        "won": 1 if winner_entry == me else 0,
+                        "draw": 1 if winner_entry is None else 0,
+                    }
+                )
+        return out
     for p in pairings:
         mid = p.get("match_id")
         if not mid or mid not in matches:
@@ -101,6 +127,7 @@ def compute_official_ranking(
     matches: dict[str, dict],
     *,
     normalize_delta=None,
+    stage: dict[str, Any] | None = None,
 ) -> list[dict]:
     """计算全员唯一连续正式名次（含破同分明细）。
 
@@ -112,7 +139,7 @@ def compute_official_ranking(
     """
     # points 查表（entry_id → points）
     pts = {s["entry_id"]: float(s.get("points") or 0) for s in standings}
-    opp_map = _entry_opponents_map(pairings, matches)
+    opp_map = _entry_opponents_map(pairings, matches, stage=stage)
     technical_losses = _technical_losses_map(pairings, matches)
 
     rows: list[dict] = []
@@ -131,7 +158,16 @@ def compute_official_ranking(
         )
         # head-to-head 胜率（在该 entry 同分对手间的胜率）
         same_pts_opps = [o for o in opps if pts.get(o["opp_entry"], 0) == pts.get(eid, 0)]
-        h2h_wins = sum(o["won"] for o in same_pts_opps)
+        # Aggregate-series stages treat a conceptual draw as half a direct-
+        # encounter point.  Keep the historical wins/records calculation for
+        # legacy stages so old official rankings are not rewritten.
+        if is_aggregate_series_stage(stage or {}):
+            h2h_wins = sum(
+                o["won"] + (0.5 if o["draw"] else 0.0)
+                for o in same_pts_opps
+            )
+        else:
+            h2h_wins = sum(o["won"] for o in same_pts_opps)
         h2h_total = len(same_pts_opps)
         h2h_rate = h2h_wins / h2h_total if h2h_total else 0.0
         # 原始分差经当前游戏 spec 换算为可比较的单位。

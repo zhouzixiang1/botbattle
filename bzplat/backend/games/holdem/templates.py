@@ -86,11 +86,23 @@ TEMPLATES: list[dict[str, Any]] = [
         "id": "holdem_prelim_swiss",
         "name": "德州：预赛（大规模瑞士快速排名）",
         "summary": (
-            "面向大规模公开预赛，约进行 ceil(log2(人数)) 轮；总场次较少，"
-            "完整名次会更依赖破同分规则。"
+            "面向大规模公开预赛，默认在 ceil(log2(人数)) 基础上额外进行 2 轮"
+            "（受无重复对手图上限约束）；相较循环赛总场次较少，同时通过更多"
+            "不同对手与重复交锋提高稳定性。"
         ),
         "game_id": "holdem",
         "phase": "preliminary",
+        "stage_series_configs": [
+            {
+                "stage_key": "prelim",
+                "label": "预赛瑞士轮",
+                "games_per_pair": {
+                    "default": 2,
+                    "allowed_values": [1, 2, 4],
+                },
+                "swiss_extra_rounds": {"default": 2, "min": 0, "max": 4},
+            },
+        ],
         "stages": [
             {
                 "key": "prelim",
@@ -109,6 +121,24 @@ TEMPLATES: list[dict[str, Any]] = [
         "name": "德州：决赛（循环→Top8）",
         "game_id": "holdem",
         "phase": "final",
+        "stage_series_configs": [
+            {
+                "stage_key": "qualify",
+                "label": "决赛全员循环排位",
+                "games_per_pair": {
+                    "default": 2,
+                    "allowed_values": [1, 2, 4],
+                },
+            },
+            {
+                "stage_key": "final8",
+                "label": "Top 8 决胜",
+                "games_per_pair": {
+                    "default": 4,
+                    "allowed_values": [2, 4, 6, 8, 10],
+                },
+            },
+        ],
         "stages": [
             {
                 "key": "qualify",

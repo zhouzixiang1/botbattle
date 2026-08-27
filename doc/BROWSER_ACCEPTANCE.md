@@ -33,8 +33,8 @@
 | Wiki `/wiki` | 读 | 读 | 读 | 读 | INDEX、协议、开发指南、三游戏规则/示例、站内锚点与代码滚动 |
 | 裁判 `/judges` | 读 | 读 | 读 | 读 | 三游戏公开源码、文件切换、长代码局部滚动 |
 | 赛事 `/contests` | 读 | 读 | 操作 | 操作 | 游戏筛选；组织者建赛，空时间保持手动，不生成假时间 |
-| 赛事详情 `/contests/:id` | 读 | 操作 | 操作 | 操作 | 报名/换 Bot/退赛；实名赛仅本人报名（普通组织者不可代报/批量指派，admin 仅保留受审计例外）；公开成绩与组织者实名明细分口导出；开放、发布、手动/定时开赛、阶段与正式榜；瑞士轮积分同时展示真实胜/平/负与单列轮空，明确赛事积分不进入平台 Rating；公开的五类合成演示快照在访客/用户/组织者/admin 下均显示只读原因，draft 快照仅赛事 owner/admin 可见；阶段榜只含实际参赛者且刷新/滚动后无写控件 |
-| 赛事直播 `/contests/:id/live` | 读 | 读 | 读 | 读 | 独立轻量投影只显示阶段进度、真正在局桌台、下一批、最近赛果和组内/全局前列；running 可见时 2 秒，published/rest 与 finished 但正式成绩未就绪时 10 秒单飞轮询，页面隐藏暂停、离线保留末次，finished 且成绩就绪/cancelled、不可变展示快照及 404 不可见赛事停止；切赛事须 abort 旧请求，桌台入口进入真实 `/match/:id` SSE。德州系列显示第 X/K 个物理 Match，复式只把正常完成计划写成 2K 条计分 leg，技术终局不伪造缺失 leg；390/1440 浅深色无根溢出、关键目标至少 44px |
+| 赛事详情 `/contests/:id` | 读 | 操作 | 操作 | 操作 | 报名/换 Bot/退赛；实名赛仅本人报名（普通组织者不可代报/批量指派，admin 仅保留受审计例外）；公开成绩与组织者实名明细分口导出；开放、发布、手动/定时开赛、阶段与正式榜；德州预赛/决赛在 draft/open 可逐阶段调整交锋场数与附加瑞士轮，保存后实时重算实际对局/有效轮数/ETA，发布确认必须先保存且发布后冻结；瑞士轮积分同时展示真实胜/平/负与单列轮空，明确赛事积分不进入平台 Rating；公开的五类合成演示快照在访客/用户/组织者/admin 下均显示只读原因，draft 快照仅赛事 owner/admin 可见；阶段榜只含实际参赛者且刷新/滚动后无写控件 |
+| 赛事直播 `/contests/:id/live` | 读 | 读 | 读 | 读 | 独立轻量投影只显示阶段进度、真正在局桌台、下一批、最近赛果和组内/全局前列；running 可见时 2 秒，published/rest 与 finished 但正式成绩未就绪时 10 秒单飞轮询，页面隐藏暂停、离线保留末次，finished 且成绩就绪/cancelled、不可变展示快照及 404 不可见赛事停止；切赛事须 abort 旧请求，桌台入口进入真实 `/match/:id` SSE。德州系列显示第 X/K 场实际对局，复式只把正常完成计划写成 2K 条计分 leg，技术终局不伪造缺失 leg；390/1440 浅深色无根溢出、关键目标至少 44px |
 | 用户 `/user/:name` | 读 | 操作 | 操作 | 操作 | 资料、Bot、关注；长昵称/简介不溢出 |
 | 搜索 `/search`、Cmd+K | 读 | 读 | 读 | 读 | 用户/Bot/对局聚合、筛选、无结果、长关键字 |
 | 通知 `/notifications` | 门禁 | 操作 | 操作 | 操作 | 列表、未读计数、全部已读、目标链接 |
@@ -84,8 +84,9 @@
 | `bot-owner-delete.spec.ts` | U-03：owner 删除与停用分离、慢 DELETE 单提交/aria-busy、成功隐藏与停用 Bot 保留、末页回退、390px 确认按钮 44px、Console/Network clean；Chromium/Firefox/WebKit 共 6/6 项通过 |
 | `qa-regression.spec.ts` | 三视口公开页与受保护页访客门禁、U-02～U-04 的核心链路、私有 debug 折叠/纯文本/长文本移动端/无权限零请求、实时通信、协议/二进制/版本/异常终态与权限回归 |
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
-| `contest-games-per-pair.spec.ts` | O-01 的德州普通/复式单循环创建扩展：仅能力模板显示 1–10 物理 Match 选择，提交严格 `games_per_pair`，普通与复式文案区分物理 Match/计划计分 leg；模板切换重置、移动端 44px/零根溢出、非能力模板无控件与 Console/Network 隔离 |
-| `contest-live-spectator.spec.ts` | 赛事直播独立深链、轻量 `/live` 单一端点、running/published/rest/终态/不可变展示快照的轮询状态机、跨赛事迟到响应隔离、离线保留、组内名次、复式完成文案及桌台 `/match/:id` 入口；390/1440 浅深色、44px、零根溢出和 Console/Network 隔离 |
+| `contest-games-per-pair.spec.ts` | O-01 的德州普通/复式单循环创建扩展：仅能力模板显示 1–10 场实际对局选择，提交严格 `games_per_pair`，普通与复式文案区分实际对局/计划计分 leg；模板切换重置、移动端 44px/零根溢出、非能力模板无控件与 Console/Network 隔离 |
+| `contest-stage-series-settings.spec.ts` | O-01 的德州预赛/决赛逐阶段公平设置：创建时模板默认与安全档位、旧响应缺字段的前端兼容、草稿/报名中 PATCH 保存、发布前实时重算对手交锋/实际对局/有效瑞士轮/预计耗时和超 8 小时预警、确认框逐阶段复述，并硬守护 PATCH 成功后才 POST publish；发布后冻结只读、390/1440、44px、零根溢出与 Console/Network 隔离 |
+| `contest-live-spectator.spec.ts` | 赛事直播独立深链、轻量 `/live` 单一端点、running/published/rest/终态/不可变展示快照的轮询状态机、跨赛事迟到响应隔离、离线保留、组内名次、复式完成文案、预赛/决赛系列的大分/待结算/已完成场数/小分/净胜/轮空摘要及桌台 `/match/:id` 入口；390/1440 浅深色、44px、零根溢出和 Console/Network 隔离 |
 | `contest-export-identity.spec.ts` | O-03 与 A-02 的赛事导出/名册权限子集：实名参赛者经真实 UI `/register` 本人报名，组织者详情/v2 的 `registration_profile`、`identity_captured_at` 及改资料后快照稳定；普通组织者 UI 与伪造单条/批量 POST 门禁，admin 在独立赛事的受审计例外；公开成绩与组织者 v2 真实下载、29 列及稳定 ID/展示名/实名快照、公式注入与文本数字保护、非实名/公开导出零 PII；320px 零根溢出、44px 触控、键盘下载，同一断言由 Chromium/Firefox/WebKit 执行并监控 Console/Network |
 | `admin-contest-roster-assign.spec.ts` | A-02 的精确名册控制：Admin 赛事页与赛事详情均以“选择参赛用户与 Bot”为主操作，服务端 active 用户搜索与 owner/game/active/runnable Bot 过滤、暂存/换 Bot/移除、显式 entries payload、partial skipped 原位修正，以及需确认的次要全员操作；实名 organizer 仍无代报名入口。390px 零根溢出、44px 操作、键盘开关 Dialog 与 Console/Network/50380 隔离由三浏览器执行 |
 | `contest-scoring-clarity.spec.ts` | 瑞士轮 3/1/0、真实 W/D/L 与轮空分列、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下两张宽表的具名横滚区域可聚焦且页面零根溢出 |

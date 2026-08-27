@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
+import { stageSeriesDisplayLabel } from '@/components/contest/stage-series'
 import { fmtTime } from '@/lib/format'
 import { gameLabel } from '@/lib/games'
 
@@ -37,12 +38,19 @@ interface LiveContestResponse {
     key: string
     label: string
     type: string
+    games_per_pair?: number | null
+    swiss_extra_rounds?: number | null
+    effective_rounds?: number | null
+    scoring_mode?: string | null
   } | null
   series: {
     games_per_pair: number | null
     duplicate: boolean
-    scoring_legs_per_match: number
-    scoring_legs_per_pair: number | null
+    scoring_legs_per_match?: number
+    scoring_legs_per_pair?: number | null
+    scoring_mode?: string | null
+    conceptual_completed?: number
+    conceptual_total?: number
   }
   progress: {
     completed: number
@@ -80,6 +88,12 @@ function intervalForContest(contest: LiveContestResponse['contest'] | undefined)
 
 function seriesSummary(series: LiveContestResponse['series']): string | null {
   if (series.games_per_pair == null) return null
+  if (series.scoring_mode === 'aggregate_match_points_v1') {
+    const progress = series.conceptual_total != null
+      ? ` · 已结算 ${series.conceptual_completed ?? 0}/${series.conceptual_total} 组`
+      : ''
+    return `每次对手交锋 ${series.games_per_pair} 场${progress}`
+  }
   if (series.duplicate) {
     const plannedLegs = series.scoring_legs_per_pair
     return plannedLegs == null
@@ -262,6 +276,10 @@ export default function ContestLive() {
         ? `${fmtTime(live.contest.ends_at)} 结束`
         : null
   const resultsPending = status === 'finished' && !live.contest.official_results_ready
+  const liveStageLabel = stageSeriesDisplayLabel(
+    live.stage?.key,
+    live.stage?.label,
+  )
 
   return (
     <PageFrame width="wide" layout="contest-live">
@@ -277,7 +295,7 @@ export default function ContestLive() {
         title={live.contest.title}
         description={(
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span>{live.stage?.label || '等待赛程'} · {gameLabel(live.contest.game_id)}</span>
+            <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
             {seriesText && <span>{seriesText}</span>}
             {scheduleText && <span className="inline-flex items-center gap-1"><CalendarClock aria-hidden="true" className="size-3.5" />{scheduleText}</span>}
             {resultsPending && <span className="font-medium text-primary">成绩正在整理，正式名次稍后公布</span>}
@@ -292,7 +310,8 @@ export default function ContestLive() {
       {error && !offline && <ErrorMsg msg={`${error}；已保留上一次赛况。`} />}
       <LiveContestSpectator
         status={status}
-        stageLabel={live.stage?.label || ''}
+        stageLabel={liveStageLabel}
+        stageType={live.stage?.type}
         duplicate={live.series.duplicate}
         snapshot={immutableSnapshot}
         progress={live.progress}
