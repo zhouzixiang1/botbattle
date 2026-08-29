@@ -70,7 +70,7 @@ botzone create-admin alice alice@example.com 'password123'
 
 浏览器打开 <http://127.0.0.1:50380/>。样例构建、隔离冒烟和真浏览器回归命令统一见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
 
-> `platform-ctl.sh` 会优先管理工作目录匹配的已安装 user-systemd unit，否则使用 PID 文件模式；两种模式都检查健康状态并拒绝在已有监听端口上启动第二个进程。改完代码必须 `bash scripts/rebuild.sh`（build + 安全 restart）才生效。
+> `platform-ctl.sh` 会优先管理工作目录匹配的已安装 user-systemd unit，否则使用 PID 文件模式；两种模式都检查健康状态并拒绝在已有监听端口上启动第二个进程。运行时代码发布须完整执行 [`AGENTS.md` §1.8](AGENTS.md#18-合并后发布) 与[开发文档的维护排空流程](doc/DEVELOPMENT.md#计划部署先排空再停服)：ready 后还要停服、冷备、迁移预演、精确推进已审 SHA 和依赖核对，不能直接运行 `rebuild.sh`。只有冻结并审阅完整 fast-forward 区间、确认其均为纯文档/规则后才无需 restart；区间夹带运行时变更就必须在推进工作树前转完整发布流程。
 > 需要 `192.168.1.0/24` 直连时，先按[安全文档](doc/SECURITY.md#受控-lan-直连)限制主机防火墙，再显式开启 LAN bind；直连客户端网段不能加入 trusted-proxy CIDR。
 
 ## 文档

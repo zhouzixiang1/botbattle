@@ -2,48 +2,155 @@
 
 多游戏 Bot 线上对战平台（holdem 德州扑克 / gomoku 五子棋 / pencil 点格棋）：用户上传二进制 Bot，平台在沙箱中跑对局，提供观赛、回放、Glicko-2 排行榜与组织者赛事。
 
-## 开发规范（务必遵守）
+## 0. 规则作用域与优先级
 
-- **先理解再动手**：任何修改前，必须先沿调用链查到根、定位到底层实现、读懂逻辑后再改。禁止"看到表层就改"。
-- **worktree 隔离工作流**（硬约束——主目录、后端、数据库都不受开发影响）：
-  主目录只跑 `main` 的线上服务（:50380 + 主 db + 主源码），**绝不被开发分支污染**。流程：
-  1. 主目录保持 `main` 干净（只 `git pull` 同步）；50380 服务始终是 main 最新代码、线上 db 不被测试写入。
-  2. `git worktree add .worktrees/<分支名> -b feat/...`（或 `fix/...`）——共享主仓库 `.git`，秒建零拷贝。`.worktrees/` 已在 `.gitignore`（不跟踪 node_modules/dist/db 等产物）。
-  3. **worktree 跑完全独立的运行时栈**（CWD=worktree 是隔离关键）：
-    - **后端**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db BZ_INSTANCE_KEY=qa-mybranch BZ_QA_INSTANCE=1 python -m bzplat.backend.cli serve --host 127.0.0.1 --port <非50380>`（每个 worktree 替换为自己的稳定唯一 instance key）
-       （CWD=worktree → 加载 worktree 源码 + worktree/botzone.db + 独立 bot_uploads/avatars/logs；与主目录源码/db 完全隔离）
-     - **前端**：`cd .worktrees/<分支名>/bzplat/frontend && npm install && BZ_API_TARGET=http://127.0.0.1:<worktree端口> npm run dev`
-       （vite.config.ts 的 proxy 目标读 `BZ_API_TARGET` 环境变量）
-     - **严禁**前端 proxy 到 50380 线上服务（会把测试写进线上 db）；**严禁** worktree 后端用 CWD=主目录（会加载主目录源码+db）。
-  3.5. **建 worktree 时把数据库带出来 + 评估对数据库的影响**（硬约束——测试要真实数据，但绝不能写主库）：
-     - **带库**：worktree 新建时目录里没有 `botzone.db`（后端启动会建空库，缺数据导致测试不真实）。须从主目录**复制**一份主库到 worktree：
-       ```bash
-       cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
-       # 副本与主库完全独立——往 worktree 库写不会影响主库（关键：是 cp 不是软链接）
-       ```
-     - **先评估影响再动**：复制前必须想清「这个 worktree 的改动会怎么读写数据库？」——新增表/列（需迁移测试）、写业务数据（造测试数据）、只读查询（副本即可）、清空/迁移（高风险，确认在 worktree 库操作）。评估结论写进 PR 描述的「数据库影响」一栏。
-    - **起服务必须钉死 worktree 库与 Docker namespace**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db BZ_INSTANCE_KEY=qa-mybranch BZ_DOCKER_HOST=unix:///var/run/docker.sock BZ_QA_INSTANCE=1 python -m bzplat.backend.cli serve --port <非50380>`——显式 `BZ_DB_PATH=$PWD/botzone.db`（绝对路径）锁死到 worktree 库，`BZ_INSTANCE_KEY` 每个并行 worktree 替换为稳定唯一小写值，杜绝 CWD 漂移、误连主库或跨实例清理容器。关联产物（`bot_uploads/`/`avatars/`/`logs/`）也跑在 worktree 下（CWD 隔离）。
-     - **铁律：测试只能动 worktree 库，绝不动主分支库**——`/home/zzx/project/botbattle/botzone.db`（50380 服务）是**只读真相源**，任何写操作（造数据/迁移/清空/修复）都必须在 worktree 副本上进行。误写主库 = 污染线上，不可逆。验证某操作安全时，先在 worktree 库跑通再考虑是否适用于主库（且主库操作必须用户明确授权）。
-  4. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并到 main），**禁止本地 `git merge` 直推 main**。
-  5. PR 合并后**清理**：停 worktree 服务 → 主目录 `git worktree remove .worktrees/<分支名>` → 删分支（本地 + 远端）→ 主目录 `git pull` + `bash scripts/rebuild.sh`（rebuild + restart，让 50380 生效新代码）。
-- **多 agent 协作避免上下文污染**（硬约束——三条铁律，违反会污染他人工作）：
-  不同任务用独立 worktree（独立分支 + 独立目录 + 独立运行时栈）隔离；不要让一个 agent 的大改动串进另一个任务的上下文。每个 agent 只对自己的 worktree 负责，改完即合并即清。具体铁律：
-  1. **不动别人开发一半的**：动手前必须 `git worktree list` + `git branch -a` 盘点现有 worktree/分支。遇到**非自己创建的** worktree（尤其含未提交改动 `git status` 非空的）——**那是其他 agent/人在开发的，绝不删、不改、不合并、不往里提交**。不确定归属时先问用户，不要自作主张。重启/中断恢复后尤其要重新盘点（worktree 可能在中断期间被他人新增/改动）。
-  2. **端口/进程互不抢**：自己的 worktree 用 50381+ 端口（50380 是线上 main 专属），起服务前先 `ss -tlnp | grep -E '5038[0-9]|517[0-9]'` 确认端口空闲；不要 kill 非自己起的进程。
-  3. **最后不留脏分支和产物**（收尾自检清单，缺一不可）：
-     - 停掉自己起的所有服务进程（后端 serve / 前端 vite dev / 后台造数据脚本）——按 PID 精确 kill，`ps aux | grep -E 'bzplat.backend.cli serve|vite'` 确认无残留。
-     - `git worktree remove` 自己的 worktree 目录（含 node_modules/db 等产物一并清除）。
-     - **一次性临时脚本用完即删**：agent 写的数据迁移/修补/清理类脚本（`scripts/fix_*.py`、`migrate_*.py`、`cleanup_*.py`、`repair_*.py` 等）跑完必须立即删除，**不得残留在工作区/仓库**（否则会污染 `scripts/` 让后人误以为是长期运维脚本）。放 `/tmp/` 跑或跑完 `rm` 删；长期运维脚本（`platform-ctl.sh`/`rebuild.sh`/`e2e_smoke.sh`/`seed_test_accounts.py` 等）不在删除范围。
-     - 删自己的分支：本地 `git branch -D <分支>` + 远端 `git push origin --delete <分支>`（**PR 用 `--delete-branch` 合并会自动删远端，但本地分支和 remote-tracking 引用仍要手动清；中断/手动合并的更要补删**）。
-     - `git remote prune origin` 清理失效的 remote-tracking 引用。
-     - 自检：`git worktree list`（只剩 main + 别人的）、`git branch -a`（无自己的残留）、`ps aux | grep botbattle`（无自己的进程）、`ss -tlnp`（自己的端口已释放）、`ls scripts/`（无自己的临时脚本残留）。
-     - **任务被打断/会话重启时，恢复后第一件事是盘点并清理上一轮可能遗留的脏产物**（worktree/进程/分支/临时脚本），不要直接开新工作堆在上面。
-- **提交前跑测试**：`pytest`（从仓库根目录），前端改了再 `npm run build`。
-- **改动须同步三处**（提交前自检）：
-  1. **测试**：有功能/行为变更 → 在 `bzplat/backend/tests/` 加/改测试用例，覆盖新逻辑与边界。
-  2. **文档**：新增模块/接口/常量/行为 → 同步 `wiki/` 对应文档（必要时更新 `INDEX.md` 与 `AGENTS.md` 架构分层）。
-  3. **记忆**（若当前会话环境提供 memory 能力）：非显而易见的项目约定/架构决策 → 写入记忆索引 + 单独 fact；**不以仓库内缺失 MEMORY.md 为阻塞**——测试与文档必须同步。
-  不许只改代码不补测试/文档——功能交付缺测试或文档视为未完成。
+- 本文件的精确文件名是根目录 **`AGENTS.md`**，对整个仓库始终生效；不要另建 `agent.md`、`AGENT.md`、大小写不同的副本或把同一套全仓规范再复制到 `.cursor/rules/`。若未来某个子目录增加更近的 `AGENTS.md`，只能补充该目录的专属规则，不得放宽本文件的安全、隔离、测试和发布门禁。
+- 在系统、平台与开发者上位指令允许的范围内，仓库规则优先级依次为：用户本次明确要求 > 本文件 > `doc/` / `wiki/` 的领域细则 > 代码附近注释。发现互相矛盾或实现已漂移时，先停下来核对真实代码、测试和运行状态，再同步修正规则与文档；不得自行挑选最宽松解释。
+- `AGENTS.md` 是开发规范唯一总入口；`doc/DEVELOPMENT.md`、`doc/DESIGN.md`、`doc/TESTING.md`、`doc/RUNTIME.md` 和 `wiki/PROTOCOL.md` 是对应领域的展开说明。这里记录必须执行的流程和不变量，不复制会频繁漂移的历史测试数字或临时发布状态。
+- 所有“已完成”“已通过”“已部署”结论必须来自当前 checkout、当前命令和当前运行时证据。旧会话、旧提交、缓存报告或口头百分比只能作线索，不能作本次交付证明。
+
+## 1. 强制开发生命周期
+
+产生仓库变更的实现任务下面 9 个阶段缺一不可。纯只读诊断至少执行 §1.1–1.2 和证据化交付，不得为了满足流程擅自创建提交、PR 或生产写入；若诊断需要运行测试/构建/服务或生成隔离数据，则进入独立 worktree 并遵守 §1.3–1.6 与 §1.9，但不执行提交/PR/部署。诊断一旦产生仓库修改，就转为完整实现流程。
+
+### 1.1 开工或恢复：先盘点真实现场
+
+1. 从主目录只读执行并记录：
+   ```bash
+   git worktree list --porcelain
+   git branch -a --no-color
+   git status --short --branch
+   git rev-parse HEAD && git rev-parse origin/main
+   ps -eo pid,ppid,etime,args | grep -E 'bzplat.backend.cli serve|vite|pytest|playwright'
+   ss -tlnp | grep -E ':(5038[0-9]|517[0-9])\b'
+   ```
+2. 产生仓库变更或必须判断远端新鲜度时，先运行 `git fetch --prune origin`，再要求主目录的 tracked 文件与 index 干净且 `main` 与 `origin/main` 同步。纯只读诊断可不刷新共享 remote-tracking refs，但必须注明结论基于当前本地 refs。既存未跟踪冷备、运行产物或别人留下的目录不等于可删除垃圾，全部原样保留。若 tracked/index 已脏，先查明归属，不得 `reset --hard`、`checkout --`、覆盖或顺手提交。
+3. 非自己创建的 worktree、分支、进程、端口和未提交改动都属于别人。绝不删除、修改、提交、合并或终止；不确定归属时先询问。
+4. 任务被打断、上下文压缩或会话重启后，第一件事仍是重新盘点。磁盘、Git、进程、端口、数据库和测试证据优先于旧进度描述。
+
+### 1.2 明确问题：沿调用链理解后再改
+
+1. 先把用户目标拆成可验收行为、明确不做项、风险和可能影响的数据/接口/运行时；只有真正改变产品方向的歧义才提问，其余在不越界的前提下自主推进。
+2. 搜索优先使用 `rg` / `rg --files`。沿“入口/API/页面 → manager/service → Store/事务 → schema/运行时 → 读模型/前端 → 测试/文档”追到权威实现，复现或取得证据后再动手。禁止看到表层报错就加特判。
+3. 改动前读取目标目录、调用方、数据模型、既有回归和本文件相应契约。修复应落在共享真相源，而不是让多个消费者各自猜测。
+4. 诊断请求默认只读并说明根因，不擅自实现；实现请求则完成代码、测试、文档、审查和交付门禁。任何生产写入、外部消息、部署、删除或权限扩张都必须在用户授权范围内。
+
+### 1.3 建立独立 worktree 与分支
+
+1. 每个任务使用独立分支、worktree、数据库副本、端口、instance key 和运行产物目录。分支按性质使用 `feat/`、`fix/`、`refactor/`、`docs/`、`test/` 或 `chore/` 前缀，名称须能唯一对应任务：
+   ```bash
+   git worktree add .worktrees/<任务名> -b <类型>/<任务名> main
+   cp /home/zzx/project/botbattle/botzone.db .worktrees/<任务名>/botzone.db
+   ```
+2. 数据库必须是 `cp` 得到的不同 inode 普通文件，禁止软链接、bind mount 或指回主库。复制时记录来源提交、时间、路径和数据库影响评估；副本只是复制时刻快照，不能假定一直等于当前主库。
+3. 主目录 `/home/zzx/project/botbattle` 只运行 `main` 的 `50380`、主数据库和主源码。所有开发编辑、依赖安装、测试、构建和 QA 服务均在本任务 worktree 内进行。
+4. 即便是纯文档任务也要在 worktree 修改；数据库副本只作隔离基线，不需要打开。若磁盘或权限使复制不可行，先报告阻塞，不能退回主库开发。
+
+### 1.4 数据库、端口与运行时隔离
+
+1. `/home/zzx/project/botbattle/botzone.db` 是线上只读真相源。测试、迁移、造数、修复、清理和性能演练只能写 worktree 副本或由它创建的临时隔离 DB；主库写操作必须得到用户对精确目标和动作的明确授权，并走维护、冷备、预演、验收和回滚流程。
+2. 启动 QA 后端必须从 worktree CWD 锁定绝对数据库路径、唯一 instance key、canonical Docker socket 和非 50380 端口：
+   ```bash
+   cd /home/zzx/project/botbattle/.worktrees/<任务名>
+   BZ_DB_PATH="$PWD/botzone.db" \
+   BZ_INSTANCE_KEY=qa-<唯一小写标识> \
+   BZ_DOCKER_HOST=unix:///var/run/docker.sock \
+   BZ_QA_INSTANCE=1 \
+   python -m bzplat.backend.cli serve --host 127.0.0.1 --port <50381-50389空闲端口>
+   ```
+3. 前端只代理本任务后端：`BZ_API_TARGET=http://127.0.0.1:<任务端口> npm run dev`。严禁代理到 50380；人机 WebSocket QA 还必须把 `BZ_PUBLIC_ORIGIN` 精确设为浏览器实际 origin。
+4. 启动前用 `ss` 查空闲端口；进程 PID、CWD、命令、端口和日志路径都要记录。只停止自己启动且身份已核对的进程，禁止模糊 `pkill` 或跨 instance 清理 Docker。
+5. `.env`、密码、令牌、cookie、真实 PII、Bot 私有调试和环境特有的数据库路径不得写入代码、测试快照、文档、日志或 PR；本文件与开发文档中用于阐明隔离边界的 canonical 主路径/占位路径除外。测试账号和验证码能力仅允许隔离 QA。
+
+### 1.5 实现与协作
+
+1. 变更保持最小、可回滚、单一职责；优先复用已有模块、Store 事务、组件、注册表和契约，不复制第二套状态机或同义常量。
+2. 保护用户与其他 agent 的改动。文件修改使用精确 patch，提交前逐文件审阅 diff；禁止 `git reset --hard`、未经授权的 `git checkout --`、宽范围删除和把无关格式化混入功能提交。
+3. 数据更新优先走正式 API、Manager 和 Store。不得用临时 SQL 绕过权限、CAS、审计、版本冻结或生命周期；一次性诊断/迁移脚本放 `/tmp`，用完删除。需要长期保留的运维脚本必须有文档、测试、fail-closed 路径和明确参数。
+4. Schema 变更必须追加式、幂等、可从 fresh 与真实 legacy 形状升级；在同一事务里校验类型、身份、版本、拓扑和 CAS。禁止启动迁移静默重释历史业务数据，禁止把损坏值用 `bool()` / `int()` 等强转吞掉。
+5. API/读模型使用正向白名单、共享严格解析器和一致 fail-closed 语义；未知、缺失、错类型、身份漂移或结果矛盾不得被默认值猜成正常。公开接口不泄露 PII、原始 result/events、私有 seed、文件路径或内部错误细节。
+6. 前后端契约、详情/直播/列表/回放和生命周期必须共用同一权威语义；不可只修一个页面或让前端推断后端不知道的状态。
+7. 多 agent 只用于边界清楚、可并行的子任务。同一任务共享 worktree 时必须预先分配互不重叠的文件所有权，公共文件由主负责人统一合并；审查 agent 默认只读。不同任务始终使用不同 worktree，禁止借用、清理或提交他人的工作区。
+8. 非显而易见的架构约定需要同步测试、仓库文档和本文件。会话记忆只有在用户明确要求且当前环境允许时才更新；缺少记忆能力不能阻塞代码、测试和文档交付。
+
+### 1.6 测试、浏览器验收与证据
+
+1. 先跑最小复现和直接受影响测试，再扩到模块矩阵，最后按变更风险跑完整门禁。修测试只能修陈旧夹具/契约，不能为了变绿放宽正确的生产门禁。
+2. 测试环境要显式、可复现：清除无关的 `BZ_*` 注入，使用本任务 DB/instance/端口/TMPDIR，记录完整命令、退出码、通过/失败/跳过数和警告。测试运行中不得编辑同一候选；代码变化后旧结果作废。
+3. Web QA 必须实际打开隔离应用，覆盖要求的身份、路由、视口和交互，并检查页面、Console、Network、SSE/WebSocket、QA 后端日志与写目标。源码阅读、单元测试、截图或 `playwright --list` 不能替代真浏览器执行。
+4. 选择器和 fixture 必须确定性、自包含，不依赖 spec 顺序、共享 QA 库恰好有历史行、固定 sleep 或宽泛错误白名单。只允许对精确 method + pathname + 动态 ID + 浏览器错误文本的已证明客户端取消做有界处理。
+5. 长测结束或被中止后必须确认无残留 pytest/Playwright/服务进程；失败要保留 nodeid、关键 traceback、日志与 artifact，并区分生产缺陷、测试夹具、环境污染和已知外部写入。
+
+### 1.7 提交、审查与 Pull Request
+
+1. 提交前检查 `git status --short`、`git diff --stat`、完整 diff、未跟踪文件、敏感信息、运行产物、`git diff --check` 和 `git diff --cached --check`。只纳入本任务产品文件；数据库、备份、日志、上传、构建目录、截图报告、DB 邻接 flock、PID/运行时锁绝不提交。`package-lock.json` 等依赖锁文件是产品文件，依赖变化时必须与 manifest 一起提交。
+2. 提交应按可审查主题组织，消息说明结果而非过程。禁止直接在 `main` 提交、直接 push `main`、把本地 feature 分支 merge 到 `main` 或绕过评审。§1.8 在 PR 已合并后把 main **仅 fast-forward 到已 fetch 且已审阅的 `origin/main` 精确 SHA**，属于受控发布推进，不是本地合并开发分支。
+3. 所有合并走 GitHub PR：`push feature branch → gh pr create → 自动/人工审查 → 修复 finding → 重跑受影响门禁 → 合并`。若仓库配置了 GitHub checks，必须用 `gh pr checks` 确认全部通过；没有 checks 时如实记录“未配置 CI”，以本文件的本地验证矩阵和独立 review 为门禁。安全、权限、PII、事务、迁移、调度、运行时、协议和公开契约变更必须安排独立只读审查。
+4. PR 描述至少包含：问题与用户影响、实现摘要、明确不做项、依赖/数据库影响、测试与浏览器证据、部署步骤、回滚配对、兼容边界和仍待验证项。没有执行的门禁写“未运行/待验证”，不得借用旧证据。
+5. 审查顺序固定为：功能正确性 → 数据一致性/并发/幂等/恢复 → 安全/权限/PII → API 与历史兼容 → 查询/资源性能 → UI/无障碍 → 测试/文档。finding 必须有可复现调用链、严重级别和具体修法；修复后由独立审查确认。未解决 P0/P1/P2、测试红、diff-check 红、候选漂移或未知运行产物都是合并 No-Go。
+
+### 1.8 合并后发布
+
+1. “纯文档/规则”必须按主目录**实际待推进的完整 fast-forward 区间**判定，不能只看本 PR。先保持 main tracked/index 干净，只执行一次 `git fetch --prune origin`，冻结 `base_sha=$(git rev-parse HEAD)` 与 `target_sha=$(git rev-parse origin/main)`，验证 base 是 target 的祖先，并审阅 `git log --oneline "$base_sha..$target_sha"`、`git diff --name-status "$base_sha..$target_sha"`（有疑点再逐提交审阅）。只有整个区间都不影响运行代码、依赖、静态产物、配置或 schema 时，才可用不联网的 `git merge --ff-only "$target_sha"` 精确推进，并核对新 HEAD 等于 target；严禁在审阅后执行会再次 fetch 的普通 `git pull`。不为形式打断线上对局，不执行 rebuild/restart，并记录“无需运行时发布”。远端随后新增的提交留待下一轮审阅；区间只要夹带任何运行时变更或无法证明纯文档，就必须在推进工作树前转入下述完整计划部署。
+2. 后端、前端、依赖、配置或 schema 变更在旧 release 运行期间不得先 pull 覆盖工作目录，必须走计划部署，禁止直接 restart 抢断对局：
+   - 请求 deployment maintenance，确认 `running`，一次性开启 drain；
+   - 轮询到 `maintenance.ready=true`，核对 active job、上传、Local AI lease、owned task、未跟踪 Match、Docker launch journal 和恢复任务全部静默；
+   - 停服并核对 PID、50380 与本 instance 容器；保留邻接 flock 文件，确认主 DB 的 `-wal` / `-shm` / `-journal` sidecar 均不存在；
+   - 制作不同 inode 的逐字节冷备，记录 release/DB SHA-256，并通过 `cmp`、`PRAGMA integrity_check`、`PRAGMA foreign_key_check`。该冷备封存只读、绝不由目标代码打开；
+   - 涉及迁移时，从封存冷备再 `cp` 到第三个不同 inode 的临时演练 DB，只对该临时库做首次升级、二次幂等 reopen、schema/业务摘要核对和回滚预演，完成后回收演练库；
+   - 到此才执行一次 `git fetch --prune origin`，冻结并审阅精确 `base_sha` / `target_sha`，核对 main tracked/index 状态与 fast-forward 关系，再用不联网的 `git merge --ff-only "$target_sha"` 推进并核对 HEAD；严禁普通 `git pull` 在停服窗夹带未审提交。若 `package.json` / `package-lock.json` 变化，在仍停服/drain 状态执行 `(cd bzplat/frontend && npm ci)`，只按 target SHA 对应 lock 安装并保存输出，禁止无关升级；
+   - **Python 依赖变更是独立发布 No-Go 门**：当前仓库只有 `pyproject.toml` 的 `>=` 下限，生产 systemd 又固定使用 `.venv/bin/python`，不能靠原地 `pip install` 得到可复现回滚。此类 PR 必须同时引入并审核精确生产 lock/constraints、构建并验证并行的新 venv、更新受控启动指向，并保留旧 release + 旧 lock + 旧 venv 的原子切回路径；缺任一项不得部署，禁止修改正在服务的生产 `.venv`；
+   - 执行 `bash scripts/rebuild.sh`，确认 health、版本、依赖、队列、关键 API/页面、日志和只读业务摘要；依赖安装/构建失败时保持 drain，不得恢复接单；
+   - 验收后显式结束 maintenance 恢复 admission。自动排位保持关闭，除非用户另行授权开启。
+3. 主库修复、规则代际 cutover、评分重建和不可逆运维必须遵循 `doc/RUNTIME.md` 的更严格停服/digest/CAS 门禁。旧代码 release、对应依赖 lock/venv 与匹配的迁移前冷备只能在仍处于 drain、尚未恢复 admission 的同一发布窗内成对回滚，禁止只回滚一边。恢复接单后若再发现问题，必须重新进入维护、先封存当前故障库并评估新增业务写入；未经用户对数据损失的明确授权，禁止自动恢复旧冷备。
+4. 部署或会话中断后先重新读取 maintenance 与真实进程/端口/DB 状态，不能假定 drain 已解除。离线 apply 输出丢失时，只能按 `doc/RUNTIME.md` 使用同一冷备、同一 digest/cutover id 和已证明幂等的同一命令重试，不能猜测成功或换参数重跑。
+5. 部署结果必须说明实际 release、备份路径、迁移/重建输出、烟测结果、maintenance/admission/auto 最终状态；任何一步不满足即保持 drain 或在上述安全窗口内回滚，不得带病恢复接单。
+
+### 1.9 清理与交接
+
+1. 按 PID 精确停止自己启动的后端、Vite、Playwright、pytest、造数和临时任务，随后重新查询进程与端口确认已退出；不要终止 main 50380 或别人的进程。
+2. 合并并拉取 main 后，从主目录移除**自己的** worktree，删除自己的本地/远端分支并 prune：
+   ```bash
+   git worktree remove .worktrees/<任务名>
+   git branch -D <类型>/<任务名>
+   git push origin --delete <类型>/<任务名>  # 仅远端尚存在时
+   git remote prune origin
+   ```
+3. 一次性脚本、worktree 数据库、上传/头像/日志、node_modules、dist、测试报告和本任务 PID/运行时锁随本任务清理；不得删除主目录冷备、DB 邻接 flock、主锁文件或其他 worktree 的任何产物。
+4. 最终重新核对 worktree、分支、Git 状态、进程、端口和 `scripts/`。未完成或未合并的工作不得擅自销毁：保留 worktree 并准确交接分支、diff、进程、数据库副本、已跑测试和下一步。
+
+## 2. 变更对应的最低验证矩阵
+
+- **纯文档/规则**：相关链接与术语检查、被文档守护的定向 pytest、`git diff --check`；不需要启动服务或重启生产。
+- **后端逻辑**：最小反例 + 受影响文件/模块矩阵 + 仓库根完整 `pytest`；另跑 `python -m compileall -q bzplat/backend` 与 `git diff --check`。
+- **前端逻辑/UI**：`npm run test:unit`、`npm run build`、目标 Playwright；涉及用户主链路、响应式布局或发布候选时，再跑从目标提交静态收集出的完整三浏览器矩阵。
+- **API/权限/隐私**：至少覆盖访客、普通用户、owner/组织者、admin 的正反例，响应字段白名单、横向越权、PII/路径/原始结果不泄漏以及 malformed 数据 fail-closed。
+- **数据库/schema/迁移**：fresh DB、主库副本、典型旧 schema、二次 reopen/幂等、故障回滚、并发 CAS、`integrity_check=ok`、`foreign_key_check` 零行；绝不在主库试跑。
+- **事务/调度/运行时**：成功、并发竞争、取消、进程重启、错误恢复、资源不足、Bot 互斥、身份/版本漂移与持久公平回归；必要时在隔离实例真实跑一局并核对 job/attempt/Match/日志/Docker 参数。
+- **游戏规则/协议/评分**：纯裁判、engine、result contract、runner、Traditional/LongRunning、上传预检、历史回放、rating pool/cutover 与公开 Wiki 同步验证。
+- **发布候选**：完整 `pytest`、前端 unit/build、目标提交完整 Playwright、隔离 `e2e_smoke.sh`、真实 Console/Network/WS/日志/多视口检查、迁移预演和部署只读烟测。少一项只能写“待验证”，不能写“已验收”。
+
+测试数字会随仓库演进，最终以命令输出为准；不要在本文件硬编码易漂移的 passed 数或 spec 数。仓库当前没有单独的 lint 脚本，不得虚构 `npm run lint` 门禁。
+
+## 3. 交付报告与完成定义
+
+最终交付必须先给结果，再给证据，至少明确：
+
+- 改了什么、为何在权威层修、哪些文件/接口/数据受影响；
+- 数据库是只读、迁移、写业务数据还是无影响；生产主库是否完全未触碰；
+- 实际运行的测试命令与结果，哪些未运行及原因；浏览器/运行时证据是否来自真实隔离实例；
+- PR、review、merge、main pull、部署、烟测与清理各自的真实状态；
+- 已知限制、兼容边界、回滚方法和需要用户决定的剩余事项。
+
+只有同时满足以下条件，任务才可标为完成：
+
+1. 用户要求与验收行为全部实现，没有用测试或文档掩盖产品缺口；
+2. 代码位于正确架构层，安全/权限/事务/隐私/历史兼容门禁未放宽；
+3. 行为变更已有边界回归，文档与对外语义已同步；
+4. 风险对应的测试、构建、浏览器和迁移门禁全绿，候选在测试期间冻结；
+5. diff 经过自审和独立审查，无未解决 P0/P1/P2，无敏感信息和运行产物；
+6. 产生仓库变更的任务已通过 GitHub PR 合并；需要运行时发布的改动已安全部署并烟测，不需要发布的改动已明确说明。纯只读诊断则明确保持零仓库内容变更、零生产/外部写入、零 PR；若为复现生成过隔离数据库、构建产物或进程，还要如实列出并证明已清理；
+7. 自己的 worktree、分支、进程、端口和临时产物已清理，main 及其他任务未被污染。
 
 ## 文档规范（改代码必同步）
 
@@ -67,33 +174,37 @@
 
 ## 构建与运行
 
+以下开发命令只允许在本任务 worktree 中执行：
+
 ```bash
-# 后端（Python ≥ 3.12；venv 在 .venv/）
+# 必须先进入本任务 worktree
+cd /home/zzx/project/botbattle/.worktrees/<任务名>
+
+# 后端（Python ≥ 3.12；仅依赖首次安装或变更时创建私有 venv）
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'          # 装 bzplat 包 + pytest/httpx
 
 # 前端（React 19 + Vite 8 + Tailwind v4，浅色默认 + 暗色双主题）
-cd bzplat/frontend && npm install && npm run build   # 产物在 bzplat/frontend/dist/，由后端 StaticFiles 托管
-
-# 起服务（默认 127.0.0.1:50380）
-scripts/platform-ctl.sh start     # 或：botzone serve
-botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验证
+(cd bzplat/frontend && npm install && npm run build)
 ```
 
-- **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`），务必从仓库根运行。
+- **worktree Python**：新 worktree 默认没有 `.venv`。依赖不变时可从 worktree CWD 使用 `/home/zzx/project/botbattle/.venv/bin/python` 作为只读工具链；不得在任务中修改共享虚拟环境。依赖变更时在 worktree 创建自己的 `.venv` 并同时更新依赖声明/文档。
+- **生产控制**：`scripts/platform-ctl.sh` 是 50380 唯一控制入口；对既有生产实例的 stop/restart 只能在 §1.8 maintenance 门禁内从主目录使用，`status`/`logs` 可随时只读调用，首次安装或故障恢复按 `doc/DEVELOPMENT.md` / `doc/RUNTIME.md` 对应 runbook 执行。禁止 raw `botzone serve` 绕过。`botzone create-admin` 是主库写操作，只能在用户对精确账号明确授权后执行。
+- **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`），务必从本任务 worktree 根运行。
 - **本地无 Docker 跑 ELF**：`export BZ_BOT_LOCAL=1`（`BinaryRunner` 退回本机 subprocess，仅测试用）。
 - **测试/开发跳过验证码**：`export BZ_SKIP_CAPTCHA=1`（`_require_captcha` 直接放行，免验证码即可登录/注册——便于 GUI 自动化与端到端测试；**仅测试/开发环境开启，生产绝不设**）。与之对照 `BZ_TEST_CAPTCHA=1` 仍走验证码流程，只是 `/api/auth/captcha` 响应额外返回 `answer` 便于脚本读取。
-- **端到端冒烟**：`bash scripts/e2e_smoke.sh`。
-- **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
-- **改完代码必须 rebuild + restart**：`bash scripts/rebuild.sh`（`npm run build` → `platform-ctl.sh restart`）。前端产物（`bzplat/frontend/dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——不 rebuild+restart 代码不会生效（常见症状：新路由 405 Method Not Allowed）。
-- **worktree 前端独立预览**（开发期，不碰主服务 50380）：先在 worktree 起独立后端 `cd .worktrees/<分支> && python -m bzplat.backend.cli serve --port 50381`，再 `BZ_API_TARGET=http://127.0.0.1:50381 npm run dev`（vite dev server，proxy 到 worktree 后端）。详见上方「worktree 隔离工作流」。
+- **端到端冒烟**：只从本任务 worktree 根运行 `bash scripts/e2e_smoke.sh`。
+- **测试种子账号**：只在 worktree 根执行 `python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts`（建隔离角色与三游戏样例 Bot；幂等，便于对战/人类对战测试）。
+- **运行时代码发布**：前端产物由后端 StaticFiles 托管、后端代码由运行进程加载，因此运行时代码要通过 `bash scripts/rebuild.sh` 才能生效；但生产必须先完成 §1.8 的 maintenance 排空，禁止在开发 worktree 或未排空的 main 直接运行该脚本。纯文档/规则改动无需 restart。
+- **worktree 前端独立预览**：先严格按 §1.4 的完整环境变量模板启动隔离后端，再在 worktree 的 `bzplat/frontend` 执行 `BZ_API_TARGET=http://127.0.0.1:<任务端口> npm run dev`。禁止使用省略 `BZ_DB_PATH`、`BZ_INSTANCE_KEY`、`BZ_QA_INSTANCE` 的后端简写命令。
 - **日志**：`logs/app.log`（`logging_config.setup_logging`，统一格式 `时间 级别 [模块] 消息`）。排查执行队列/自动排位生产、对局、Bot 崩溃和 WS 问题在此；admin「日志」Tab 可网页查看与过滤。bot EOF 会附带 stderr 末尾。
 
 ## 关键约束（容易踩坑）
 
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
-- **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
+- **后端生产代码禁止 `print()`**：统一用 `logging.getLogger(__name__)`。测试夹具、子进程样例和 CLI 明确面向 stdout 的机器可读输出可以使用 `print()`，但测试诊断优先用 assertion/capture，日志不得泄露敏感数据。
 - **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定全站 **6 match slots / 12 sandbox units** 的代码硬顶，以及 action timeout、前台 execution aging/用户上限、自动排位 300 秒空闲与冷却门禁/单场单候选上限/bootstrap 目标、公开排名资格、赛事 scheduler 与人类对战参数；每个 job 固定占 1 match slot，赛事共享份额 1 只在 manual/human 与 contest 前台之间生效，不是额外容量。自动排位只是严格闲时的 `source=auto` 后台 producer，仅 `execution_control.auto_enabled` 管理员总开关可变；开启不等于立即运行，auto 不参与跨来源 aging、不计入前台 ETA，并在运行时保留至少 1 个 match slot。`runtime/limits.py` 以追加式历史 registry 管理 Docker 资源档位：日常节能/自动排位/人机 Bot 侧及上传预检使用每 Bot `1 CPU / 512 MiB`，锦标赛固定每 Bot `2 CPU / 2 GiB`，`remote_local`/human 不占平台沙箱；execution job 入队时冻结环境、档位版本以及 sandbox/CPU/内存资源向量，claim/Match/runner 不得降档或改绑到当前同名规格。claim 再按进程 affinity、逻辑 CPU、cgroup 祖先配额、物理内存与 cgroup 内存上限的共同最小预算逐维准入，因此可运行并发按 job 组合动态落在 1–6，六槽不等于六场最重赛事；显式注入只能收紧，不能放大 6/12 硬顶。任一非 human Bot 在全局最多参与一个 `starting/running/settling` job（同一 job 的自博弈仍只占一个 active job）。contest 公平轮转只发生在既有优先级排序中不跨 manual/human 行的连续 contest 队列段，顺序依据持久 `claimed_at`/attempt 历史，不能把低优先级赛事拉过前台边界。Bot 文件上限固定 100 MiB。全员及分组单/双循环均不设人数硬上限，完整 O(n²) 排期只扩展持久队列；历史 `allow_large_round_robin` 继续按严格布尔读取，但仅作兼容 no-op。
 
 - **闲时自动排位收口与迁移**：任一 manual/human/contest 前台成功入队/重试（尤其人类对局入队）会在同一 `BEGIN IMMEDIATE` 中取消 queued auto、让在途 auto 以 `auto_yield_foreground` 安全收口；真实赛事 guard 由 dispatcher 下一次 reconcile 事务做同样收口，auto claim 自身事务会重查 guard 以防穿透。Docker 物理启动再以 create intent 的 `BEGIN IMMEDIATE` 作为最终线性化边界：execution attempt 必须在写 intent 的同一事务内仍为当前 `starting/running` attempt 且 `cancel_requested=0`，而且 host-wide launch journal 必须先证明为 `idle`。前台/yield 先提交时，必须在 `docker create` 前拒绝启动并按普通任务取消路径清理，属于 benign cancellation，不得暂停 dispatcher；launch intent 先提交时，后到的 yield 必须沿 token/name/label/journal 做 exact cleanup，不能提前释放容量。单纯关闭管理员开关不抢占在途局。`auto_match_fair_state` 追加 `dispatch_policy_version/next_eligible_at/gate_reason` 三列以幂等升级且持久冷却；首次 `idle-only-v1` 对账取消遗留 queued auto、让在途 auto 以专用 `auto_idle_policy_cutover` 收口，并重新计 300 秒空闲窗，不得误记为有前台到达。
@@ -148,9 +259,11 @@ src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与�
 src/games/                 前端游戏注册表：GameViewSpec 集中声明 reducer/canvas（含交互 canvas 的 keyboardPicks 合法动作）、胜者/事件描述、humanPlay 动作控件与唯一 WS 信封（含 request 驱动的画布启停/行动标签）、replay HUD/摘要/进度/分段导航；页面不得 import 具体游戏 ViewModel
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
 src/pages/                 顶层路由全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
-路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
+路径别名 @/ → src/          跨目录/跨层 import 使用 @/；同目录内部可用相对路径；图标统一 lucide-react（无 emoji）
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
+
+**前端页面与无障碍规范**：新页面复用 `PageFrame → PageHeader → StickyToolbar/DataRegion`，全局 `<main>` 是默认唯一纵向滚动 owner；宽表只允许一个横向 scroll owner，长实体名/标识符复用 `EntityName`、`Identifier`、`OverflowText`。权限只增加操作和数据范围，不为访客/用户/组织者/admin 复制四套页面骨架。新增或重做 UI 至少验证 1440×900、390×844、浅/暗主题、键盘可达、触控目标不小于 44px、根级无横向溢出；避免与正文重复的 SummaryStrip、“数据概览”、步骤卡和模板化文案。TypeScript 必须继续通过 `npm run build` 所含的 strict、unused 与 side-effect import 检查。
 **下拉框统一规范**（硬约束）：所有下拉框一律用 `@/components/ui/select`（shadcn Radix Select）+ `SelectTrigger/SelectValue/SelectContent/SelectItem`，**禁止裸用原生 `<select>`**（跨设备/浏览器展开样式不统一）。迁移注意 4 点：
 1. 受控 API：`<Select value onValueChange>`（非 `onChange(e.target.value)`）。
 2. **空值哨兵**：表"全部/不过滤"的空 value `''` 不能直接传 Radix（`value=""` 被当未选/placeholder）——统一用哨兵 `'all'`：`value={x || 'all'}` + `onValueChange={(v) => setX(v === 'all' ? '' : v)}`。
@@ -192,10 +305,14 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 
 **组织者实名 + 导出**：`require_real_name` 赛事只允许参赛者本人经 `/register` 报名，并在报名时由 entry 冻结 `real_name/phone/school/student_id`、采集时间与来源；普通 organizer 不得代报名，admin 显式 override 必须写无 PII 审计。管理员代报名以精确的“活跃用户 → 该用户当前可运行、同游戏 Bot”映射为主路径，可暂存多项后一次提交；`assign_all` 只保留为需再次确认的次要快捷操作。候选筛选不替代后端门禁：Manager 与 Store 写事务仍复核用户 active、Bot owner/游戏/当前版本/协议/二进制可运行性及实名完整性，部分跳过必须逐项返回原因。legacy entry 不伪造快照，只在授权私有读取中标为 `current_profile_legacy` 并回退当前资料。`contest_entries_named` 与私有导出在同一 SQL 行内 JOIN 赛事门禁：非实名赛即使组织者/admin 请求也返回零 PII；详情继续返回顶层 `is_organizer`，`my_entry` 使用正向白名单。公开 `/official-results` JSON/CSV 永不含 PII。私有 `GET /api/contests/{id}/export?format=csv` 由组织者/admin gated；无 `schema` 的 16 列 CSV v1 保持兼容，`schema=2` 提供 29 列双语表头、稳定 entry/user/Bot ID、显示名、身份来源和阶段/成绩状态（UTF-8 BOM，文本与公式注入安全）。前端赛程：BracketTree（SVG 连接线，`bracket_slot//2` 拓扑）+ ScheduleTable（一览表）+ 阶段 Tab 显示中文标签 + 进度。
 
-## 动手前必读文档
+## 按任务必读文档
 
-- `wiki/PROTOCOL.md` —— **唯一现行通信协议**（严格信封、两种进程生命周期、response payload、握手与故障语义）。
-- `wiki/BOT_DEV.md` —— Bot 开发指南（编译、上传、调试、运行模式选择）。
-- `wiki/INDEX.md` —— 文档总入口（德州每个计分场固定 70 手 / 15×15 / N=6+900 秒，以及统一信封）。
-- `contracts/` —— 协议 JSON Schema。
-- `samples/` —— 三款游戏样例 Bot 源码。
+不要求每个任务机械通读全部文档；按影响面读取对应权威来源，涉及多个领域就合并阅读：
+
+- **开发环境、worktree、构建、部署、脚本**：`doc/DEVELOPMENT.md`。
+- **模块、数据、API、前端与安全架构**：`doc/DESIGN.md`；安全/隐私任务同时读 `doc/SECURITY.md`。
+- **测试策略、浏览器角色/视口、发布门槛**：`doc/TESTING.md` + `doc/BROWSER_ACCEPTANCE.md`。
+- **执行队列、Docker、maintenance、迁移、cutover、评分重建与回滚**：`doc/RUNTIME.md`。
+- **唯一现行 Bot 通信协议**：`wiki/PROTOCOL.md` + `contracts/`；Bot 开发/上传读 `wiki/BOT_DEV.md`，游戏规则读对应 `wiki/TEXAS.md` / `wiki/GOMOKU.md` / `wiki/PENCIL.md`。
+- **新增游戏或修改样例**：本文件“新增一款游戏的成本” + `doc/DESIGN.md` §2.3 + `samples/`。
+- **文档入口与职责**：`doc/INDEX.md`、`wiki/INDEX.md`、README。
