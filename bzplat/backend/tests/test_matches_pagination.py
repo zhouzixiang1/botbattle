@@ -269,6 +269,143 @@ def test_list_and_detail_project_only_replay_incidents(tmp_path):
     assert all("SELECT mr.events_json" not in sql for sql in match_selects)
 
 
+def test_public_match_detail_does_not_scan_replay_events(tmp_path):
+    client, store = _app(tmp_path)
+    store.upsert_replay(
+        "mh1",
+        json.dumps(
+            [
+                {"type": "move", "player": index % 2, "x": index % 15, "y": 0}
+                for index in range(2_000)
+            ]
+        ),
+    )
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        response = client.get("/api/matches/mh1")
+    finally:
+        store._conn.set_trace_callback(None)
+
+    assert response.status_code == 200
+    assert "outcome" in response.json()["match"]
+    selects = [
+        sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert not any("match_replays" in sql for sql in selects)
+    assert not any("json_each" in sql or "events_json" in sql for sql in selects)
+
+
+def test_search_and_liked_lists_project_outcomes_in_one_replay_free_query(tmp_path):
+    client, store = _app(tmp_path)
+    source = store.get_match("mh0")
+    private = "/private/bot_uploads/never-public"
+    store.create_match(
+        "wire-outcome-single",
+        bot_a_id=source["bot_a_id"],
+        bot_b_id=source["bot_b_id"],
+        owner_id=source["owner_id"],
+        game_id="holdem",
+    )
+    store.update_match(
+        "wire-outcome-single",
+        status="completed",
+        winner=0,
+        reason="completed",
+        result={
+            "rounds_played": 70,
+            "deltas": [300, -300],
+            "normalized_delta": 3,
+            "diagnostic": private,
+        },
+    )
+    store.create_match(
+        "wire-outcome-duplicate",
+        bot_a_id=source["bot_a_id"],
+        bot_b_id=source["bot_b_id"],
+        owner_id=source["owner_id"],
+        game_id="holdem",
+        match_config={"duplicate": True, "duplicate_seed": 9988},
+    )
+    store.update_match(
+        "wire-outcome-duplicate",
+        status="completed",
+        winner=None,
+        reason="completed",
+        result={
+            "rounds_played": 140,
+            "deltas": [100, -100],
+            "normalized_delta": 1,
+            "legs": [
+                {"winner": 0, "deltas": [400, -400], "rounds_played": 70},
+                {"winner": 1, "deltas": [-300, 300], "rounds_played": 70},
+            ],
+            "diagnostic": private,
+        },
+    )
+    assert store.like(source["owner_id"], "match", "wire-outcome-single")
+    assert store.like(source["owner_id"], "match", "wire-outcome-duplicate")
+
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        searched_store = store.search_matches("wire-outcome")
+        liked_store = store.list_liked_top_matches(limit=10)
+    finally:
+        store._conn.set_trace_callback(None)
+    for rows in (searched_store, liked_store):
+        selected = [row for row in rows if row["id"].startswith("wire-outcome")]
+        assert len(selected) == 2
+        assert all(
+            set(
+                (
+                    "status",
+                    "winner",
+                    "reason",
+                    "technical_loss",
+                    "result",
+                    "match_config",
+                )
+            ).issubset(row)
+            for row in selected
+        )
+    selects = [
+        sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(selects) == 2
+    assert not any(
+        "match_replays" in sql or "json_each" in sql or "events_json" in sql
+        for sql in selects
+    )
+
+    searched = client.get(
+        "/api/search?type=matches&q=wire-outcome"
+    ).json()["matches"]
+    liked = client.get("/api/matches/liked-top?limit=10").json()["matches"]
+    for rows in (searched, liked):
+        by_id = {
+            row["id"]: row for row in rows if row["id"].startswith("wire-outcome")
+        }
+        assert by_id["wire-outcome-single"]["outcome"]["score"] == {
+            "wins_a": 1,
+            "draws": 0,
+            "wins_b": 0,
+        }
+        assert by_id["wire-outcome-duplicate"]["outcome"]["score"] == {
+            "wins_a": 1,
+            "draws": 0,
+            "wins_b": 1,
+        }
+        assert by_id["wire-outcome-duplicate"]["outcome"]["planned_games"] == 2
+        assert by_id["wire-outcome-duplicate"]["result"]["legs"][0] == {
+            "winner": 0,
+            "deltas": [400, -400],
+            "rounds_played": 70,
+        }
+        assert all("match_config" not in row for row in by_id.values())
+        assert private not in json.dumps(by_id, ensure_ascii=False)
+
+
 def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     c, store = _app(tmp_path)
     private = "error:/private/bot_uploads/secret traceback"
@@ -365,8 +502,9 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     assert _replay_events(c, "active-private") == []
     assert "/private" not in json.dumps(active, ensure_ascii=False)
 
-    # Global match search is a minimal public projection. It must not return the
-    # raw result/match_config blobs or a free-form completed reason.
+    # Global match search is a minimal public projection. It may return only the
+    # sanitized compatibility result, never raw result diagnostics/match_config
+    # or a free-form completed reason.
     store.update_match(
         "mh1",
         status="completed",
@@ -377,7 +515,7 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     assert len(searched) == 1
     assert searched[0]["id"] == "mh1"
     assert searched[0]["reason"] == "completed"
-    assert "result" not in searched[0]
+    assert searched[0]["result"] == {"deltas": [1, -1]}
     assert "match_config" not in searched[0]
     assert "/private" not in json.dumps(searched, ensure_ascii=False)
 
@@ -539,8 +677,11 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
 
     detail_body = c.get("/api/matches/mh1").json()
     detail = detail_body["match"]
-    assert detail["result"]["technical_incidents_by_seat"] == {"0": 0, "1": 1}
-    assert detail["result"]["technical_incident_samples"][0]["code"] == "missing_response"
+    # Metadata detail is replay-free.  A legacy incident that exists only in
+    # events_json remains available through /replay and SSE, but must not make
+    # this endpoint scan/deserialize replay storage.
+    assert "technical_incidents_by_seat" not in detail["result"]
+    assert "technical_incident_samples" not in detail["result"]
 
     legacy_detail = c.get("/api/matches/mh0").json()
     public_events = _replay_events(c, "mh0")

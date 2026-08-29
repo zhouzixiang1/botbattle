@@ -235,7 +235,9 @@ export default function Contests() {
       return
     }
     if (!gamesPerPairReady) {
-      setFormError('请选择模板允许的每对选手交手场数')
+      setFormError(selectedTemplateIsDuplicate
+        ? '请选择模板允许的每对选手复式交锋组数'
+        : '请选择模板允许的每对选手计分场数')
       return
     }
     if (!stageSeriesReady) {
@@ -291,20 +293,21 @@ export default function Contests() {
         <ListFilter className="size-4 shrink-0 text-muted-foreground" />
         <span className="shrink-0 text-xs font-medium text-muted-foreground">游戏</span>
         <Select value={filterGame || 'all'} onValueChange={(value) => { setFilterGame(value === 'all' ? '' : value); setPage(1) }}>
-          <SelectTrigger className="w-[8.5rem] max-w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="min-h-11 w-[8.5rem] max-w-full sm:min-h-[var(--control-height)]"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部游戏</SelectItem>
             {GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}
           </SelectContent>
         </Select>
         <span className="text-xs tabular-nums text-muted-foreground sm:ml-auto">
-          共 {total} 场 · 第 {page}/{Math.max(1, Math.ceil(total / perPage))} 页
+          共 {total} 项赛事 · 第 {page}/{Math.max(1, Math.ceil(total / perPage))} 页
         </span>
         {canCreate && isLoggedIn && (
           <Button
             type="button"
             size="sm"
             variant={showCreate ? 'secondary' : 'default'}
+            className="min-h-11 sm:min-h-[var(--control-height)]"
             aria-expanded={showCreate}
             aria-controls="contest-create-panel"
             onClick={() => { setShowCreate((value) => !value); setFormError('') }}
@@ -327,7 +330,7 @@ export default function Contests() {
               <div className="min-w-0 space-y-1.5">
                 <Label>游戏</Label>
                 <Select value={formGameId} onValueChange={onFormGameChange}>
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="min-h-11 w-full sm:min-h-[var(--control-height)]"><SelectValue /></SelectTrigger>
                   <SelectContent>{GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
@@ -338,7 +341,7 @@ export default function Contests() {
                   onValueChange={(value) => { if (value && value !== TEMPLATE_PENDING_VALUE) setTemplateId(value) }}
                   disabled={templatesLoading || templates.length === 0}
                 >
-                  <SelectTrigger className="w-full" aria-describedby="contest-template-summary">
+                  <SelectTrigger className="min-h-11 w-full sm:min-h-[var(--control-height)]" aria-describedby="contest-template-summary">
                     <SelectValue>
                       {selectedTemplate
                         ? `${selectedTemplate.name}${selectedTemplate.recommended ? ' · 推荐' : ''}`
@@ -354,18 +357,22 @@ export default function Contests() {
                   </SelectContent>
                 </Select>
                 <p id="contest-template-summary" className="text-sm leading-relaxed text-muted-foreground">
-                  {selectedTemplate?.summary || '模板决定对阵覆盖、总场次与预计耗时。'}
+                  {selectedTemplate?.summary || '模板决定对阵覆盖、计分场数与预计耗时。'}
                 </p>
                 {templateError && <ErrorMsg msg={templateError} className="text-xs" />}
               </div>
-              <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>
-              <div className="space-y-1.5"><Label htmlFor="contest-desc">说明</Label><Input id="contest-desc" value={description} onChange={(event) => setDescription(event.target.value)} /></div>
+              <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" className="min-h-11 sm:min-h-[var(--control-height)]" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>
+              <div className="space-y-1.5"><Label htmlFor="contest-desc">说明</Label><Input id="contest-desc" className="min-h-11 sm:min-h-[var(--control-height)]" value={description} onChange={(event) => setDescription(event.target.value)} /></div>
             </div>
             {gamesPerPairConfig && (
               <fieldset className="grid min-w-0 gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-[minmax(12rem,15rem)_minmax(0,1fr)] sm:items-end">
-                <legend className="sr-only">每对选手交手场数</legend>
+                <legend className="sr-only">
+                  {selectedTemplateIsDuplicate ? '每对选手复式交锋组数' : '每对选手计分场数'}
+                </legend>
                 <div className="min-w-0 space-y-1.5">
-                  <span id="contest-games-per-pair-label" className="block text-sm font-medium leading-none">每对选手交手场数</span>
+                  <span id="contest-games-per-pair-label" className="block text-sm font-medium leading-none">
+                    {selectedTemplateIsDuplicate ? '每对选手复式交锋组数' : '每对选手计分场数'}
+                  </span>
                   <Select value={String(gamesPerPair)} onValueChange={(value) => setGamesPerPair(Number(value))}>
                     <SelectTrigger
                       className="min-h-11 w-full"
@@ -379,15 +386,17 @@ export default function Contests() {
                         { length: gamesPerPairConfig.max - gamesPerPairConfig.min + 1 },
                         (_, index) => gamesPerPairConfig.min + index,
                       ).map((count) => (
-                        <SelectItem key={count} value={String(count)}>{count} 场</SelectItem>
+                        <SelectItem key={count} value={String(count)}>
+                          {count} {selectedTemplateIsDuplicate ? '组' : '场'}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <p id="contest-games-per-pair-help" className="text-sm leading-relaxed text-muted-foreground">
                   {selectedTemplateIsDuplicate
-                    ? `${gamesPerPair} 场复式对局 · 正常完成时 ${gamesPerPair * 2} 局计分。每场实际对局内部仍使用同副牌换座 2 leg，对局数不是 leg 数。`
-                    : `每对选手进行 ${gamesPerPair} 场独立实际对局；场数越多，发牌与座位波动越小，总赛程也越长。`}
+                    ? `${gamesPerPair} 组复式交锋 · ${gamesPerPair * 2} 场计分。每组由两场同牌换座的 70 手计分场组成，两场分别计胜、平、负。`
+                    : `每对选手进行 ${gamesPerPair} 场计分，每场独立判定胜、平、负；场数越多，发牌与座位波动越小，总赛程也越长。`}
                 </p>
               </fieldset>
             )}
@@ -408,9 +417,9 @@ export default function Contests() {
               <fieldset className="min-w-0">
                 <legend className="mb-1.5 text-xs font-medium text-muted-foreground">时间编排</legend>
                 <div className="grid min-w-0 gap-2 sm:grid-cols-3">
-                  <div className="space-y-1"><Label htmlFor="contest-opens" className="text-xs">开放报名</Label><Input id="contest-opens" type="datetime-local" value={regOpensAt} onChange={(event) => setRegOpensAt(event.target.value)} /></div>
-                  <div className="space-y-1"><Label htmlFor="contest-closes" className="text-xs">报名截止</Label><Input id="contest-closes" type="datetime-local" value={regClosesAt} onChange={(event) => setRegClosesAt(event.target.value)} /></div>
-                  <div className="space-y-1"><Label htmlFor="contest-starts" className="text-xs">比赛开始</Label><Input id="contest-starts" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></div>
+                  <div className="space-y-1"><Label htmlFor="contest-opens" className="text-xs">开放报名</Label><Input id="contest-opens" className="min-h-11 sm:min-h-[var(--control-height)]" type="datetime-local" value={regOpensAt} onChange={(event) => setRegOpensAt(event.target.value)} /></div>
+                  <div className="space-y-1"><Label htmlFor="contest-closes" className="text-xs">报名截止</Label><Input id="contest-closes" className="min-h-11 sm:min-h-[var(--control-height)]" type="datetime-local" value={regClosesAt} onChange={(event) => setRegClosesAt(event.target.value)} /></div>
+                  <div className="space-y-1"><Label htmlFor="contest-starts" className="text-xs">比赛开始</Label><Input id="contest-starts" className="min-h-11 sm:min-h-[var(--control-height)]" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></div>
                 </div>
               </fieldset>
               <Button type="submit" disabled={creating || !templateReady || !gamesPerPairReady || !stageSeriesReady} aria-busy={creating} className="min-h-11 w-full lg:w-auto">
@@ -423,7 +432,7 @@ export default function Contests() {
 
       <DataRegion
         title="赛事列表"
-        description={`按创建时间排列真实赛事；每页 ${perPage} 场。`}
+        description={`按创建时间排列真实赛事；每页 ${perPage} 项。`}
       >
             {listError ? (
               <ErrorMsg msg={listError} className="px-4 py-6" />

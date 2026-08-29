@@ -92,7 +92,7 @@ export interface HumanPlayViewSpec {
 export interface ReplayNavigationSpec {
   unitLabel: string
   boundaries: (events: RawEvent[]) => number[]
-  /** 可选分段标签；复式赛等需要同时表达 leg 和局内序号。 */
+  /** 可选分段标签；复式交锋组等需要同时表达计分场和场内序号。 */
   label?: (segment: number, events: RawEvent[]) => string
 }
 
@@ -108,7 +108,17 @@ export interface ReplayViewSpec {
   progress: (vm: unknown) => number | null
   /** 可选固定/动态总进度；例如 Holdem 的 70 手。 */
   progressTotal?: (vm: unknown) => number | null
-  /** 可选的对阵摘要（例如德州累计筹码）。 */
+  /**
+   * 当前计分场已经完成的权威进度。技术终局可能已经开始一手、却尚未
+   * 完成任何一手；通用页据此隐藏伪造的 1/N 进度。未声明时沿用
+   * `progress`，适合没有多计分场边界的棋类。
+   */
+  completedProgress?: (vm: unknown) => number | null
+  /** 跨全部计分场已经完成的权威进度，用于判断整条回放是否确实为 0。 */
+  totalCompletedProgress?: (vm: unknown) => number | null
+  /** 可选的当前计分范围，例如复式德州的“第 2/2 场”。 */
+  progressScopeLabel?: (vm: unknown) => string | null
+  /** 可选的对阵摘要（例如德州本场筹码与复式交锋组合计）。 */
   Summary?: ComponentType<GameAuxiliaryProps>
   /** 可选的画面辅助 HUD（例如点格棋比分与棋钟）。 */
   Hud?: ComponentType<GameAuxiliaryProps>

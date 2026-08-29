@@ -47,6 +47,16 @@ async function mockContestDetail(page: import('@playwright/test').Page) {
           owner_b_display: 'Beta 所有者',
           status: 'completed',
           match_winner: 1,
+          outcome: {
+            kind: 'single',
+            planned_games: 1,
+            completed_games: 1,
+            score: { wins_a: 0, draws: 0, wins_b: 1 },
+            rounds_played: 1,
+            normalized_delta_a: -1,
+            games: [{ index: 1, winner: 1, rounds_played: 1, normalized_delta_a: -1 }],
+            termination: { kind: 'normal', reason: 'completed', loser: null },
+          },
           match_id: 'mobile-card-contest-match',
           scheduled_at: '2026-08-11T12:30:00+00:00',
         }],
@@ -79,7 +89,7 @@ async function mockBotDetail(page: import('@playwright/test').Page) {
             name: 'mobile_alpha',
             display_name: '移动端 Alpha Bot',
             description: '响应式身份卡测试',
-            game_id: 'gomoku',
+            game_id: 'holdem',
             owner_id: 11,
             owner_name: 'owner_alpha',
             owner_display: 'Alpha 所有者',
@@ -124,13 +134,26 @@ async function mockBotDetail(page: import('@playwright/test').Page) {
           matches: [{
             id: 'mobile-card-match',
             status: 'completed',
-            game_id: 'gomoku',
+            game_id: 'holdem',
             match_type: 'challenge',
-            winner: 1,
+            winner: null,
             bot_a_id: BOT_ID,
             bot_b_id: 902,
             bot_a: { id: BOT_ID, name: 'mobile_alpha', display_name: '移动端 Alpha Bot', owner_name: 'owner_alpha', owner_display: 'Alpha 所有者', is_human: false },
             bot_b: { id: 902, name: 'mobile_beta', display_name: '移动端 Beta Bot', owner_name: 'owner_beta', owner_display: 'Beta 所有者', is_human: false },
+            outcome: {
+              kind: 'duplicate',
+              planned_games: 2,
+              completed_games: 2,
+              score: { wins_a: 1, draws: 0, wins_b: 1 },
+              rounds_played: 140,
+              normalized_delta_a: 0,
+              games: [
+                { index: 1, winner: 0, rounds_played: 70, normalized_delta_a: 70 },
+                { index: 2, winner: 1, rounds_played: 70, normalized_delta_a: -70 },
+              ],
+              termination: { kind: 'normal', reason: 'completed', loser: null },
+            },
             created_at: '2026-08-11T12:30:00+00:00',
           }],
         }),
@@ -154,7 +177,9 @@ test('mobile Bot history shows both identities, owners, nature and result withou
   await expect(card).toContainText('移动端 Beta Bot')
   await expect(card).toContainText('Beta 所有者')
   await expect(card.locator('[data-match-nature="challenge"]')).toHaveText('用户挑战')
-  await expect(card.getByText('负', { exact: true })).toBeVisible()
+  await expect(card.getByText('复式 · 1胜 / 0平 / 1负', { exact: true })).toBeVisible()
+  await expect(card.locator('[data-participant-state="winner"]')).toHaveCount(0)
+  await expect(card.locator('[data-participant-state="loser"]')).toHaveCount(0)
   const replay = card.getByRole('link', { name: '查看对局回放' })
   expect((await replay.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await expect(page.getByRole('table', { name: 'Bot 对局历史' })).toBeHidden()
@@ -185,7 +210,8 @@ test('mobile contest schedule cards keep both participants, round, status and re
   await expect(card).toContainText(/R\d+/)
   const result = card.locator('[data-pairing-result]')
   await expect(result).toHaveAttribute('data-pairing-result', 'decided')
-  await expect(result).toHaveText('移动端 Beta Bot 胜')
+  await expect(result).toContainText('移动端 Beta Bot胜')
+  await expect(result).toContainText('已完成 1/1 场计分')
   const matchLink = card.getByRole('link', { name: '查看对局' })
   if (await matchLink.count()) expect((await matchLink.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await expect(page.getByRole('table', { name: '赛事对阵一览表' })).toBeHidden()

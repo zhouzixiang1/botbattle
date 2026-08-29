@@ -13,6 +13,20 @@ const USER = {
 
 const MIN_MOBILE_TOUCH_PX = 44
 
+function optionalGetAborts(pathname: string) {
+  return [
+    'net::ERR_ABORTED',
+    'NS_BINDING_ABORTED',
+    'Load request cancelled',
+  ].map((errorText) => ({
+    kind: 'requestfailed' as const,
+    method: 'GET',
+    pathname,
+    errorText,
+    optional: true,
+  }))
+}
+
 async function expectMobileTouchTargets(root: Locator, label: string) {
   const undersized = await root
     .locator('button, a[href], input, textarea, label[for="upload-file"]:has(input[type="file"])')
@@ -272,9 +286,11 @@ test('admin initiator picker follows the selected position without an owner filt
     })
   })
   let posted: Record<string, unknown> | null = null
+  let postedPublicId = ''
   await page.route('**/api/matches/challenge', async (route) => {
     posted = route.request().postDataJSON() as Record<string, unknown>
     const publicId = String(posted.request_id)
+    postedPublicId = publicId
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
@@ -330,10 +346,16 @@ test('admin initiator picker follows the selected position without an owner filt
     my_seat: 1,
   })
   await expect(page.locator('main')).not.toContainText('玩家 1只能使用自己的 Bot')
+  await expect(page.getByRole('heading', { name: '执行请求已受理' })).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('已取消')
 
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])
-  await monitor.expectClean()
+  // The durable request id intentionally starts recovery polling before the POST
+  // response arrives. A terminal POST response closes that polling scope; Chromium
+  // may surface the now-obsolete exact GET as an abort. Keep the allowance bound to
+  // this one request id so unrelated network failures and repeated aborts still fail.
+  await monitor.expectClean(optionalGetAborts(`/api/execution-requests/${postedPublicId}`))
 })
 
 test('two online local Bots create one unrated practice request without horizontal overflow', async ({ page }) => {

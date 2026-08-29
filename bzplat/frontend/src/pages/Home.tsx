@@ -13,6 +13,7 @@ import {
 
 import { apiGet, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
 import { Button } from '@/components/ui/button'
@@ -30,8 +31,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { fmtTime } from '@/lib/format'
 import { GAMES, gameIcon, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import type { MatchOutcomeSource } from '@/lib/match-outcome'
+import { outcomeSeatLabels } from '@/lib/match-seats'
 
-interface Match extends MatchParticipantSource {
+interface Match extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   status: string
   bot_a_id: number | null
@@ -42,12 +45,13 @@ interface Match extends MatchParticipantSource {
   contest_id?: string | number | null
 }
 
-interface LikedMatch extends MatchParticipantSource {
+interface LikedMatch extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   game_id: string
   likes_count: number
   views_count: number
   match_type?: string
+  status?: string
   created_at?: string
 }
 
@@ -115,7 +119,7 @@ export default function Home() {
         </Button>
       </StickyToolbar>
 
-      <DataRegion title="最新对局" description="同一赛事连续开赛时只保留最近一场，方便浏览不同来源的对局。">
+      <DataRegion title="最新对局" description="同一赛事连续开赛时只保留最近一条记录，方便浏览不同来源的对局。">
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
         ) : loading ? (
@@ -152,7 +156,16 @@ export default function Home() {
                           <TableCell className="whitespace-normal">
                             <MatchParticipants source={match} />
                           </TableCell>
-                          <TableCell><StatusBadge status={match.status} /></TableCell>
+                          <TableCell>
+                            <div className="space-y-1">
+                              <StatusBadge status={match.status} />
+                              <MatchOutcome
+                                source={match}
+                                seatLabels={outcomeSeatLabels(match)}
+                                primaryOnly
+                              />
+                            </div>
+                          </TableCell>
                           <TableCell className="text-right">
                             <Button asChild variant="ghost" size="xs">
                               <Link to={`/match/${encodeURIComponent(match.id)}`}>
@@ -179,6 +192,12 @@ export default function Home() {
                       <span className="ml-auto"><StatusBadge status={match.status} /></span>
                     </div>
                     <MatchParticipants source={match} className="mt-2" />
+                    <MatchOutcome
+                      source={match}
+                      seatLabels={outcomeSeatLabels(match)}
+                      primaryOnly
+                      className="mt-1.5"
+                    />
                     <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
                       <time className="min-w-0 font-mono tabular-nums">{fmtTime(match.created_at)}</time>
                       <Link className="shrink-0 whitespace-nowrap font-medium text-primary" to={`/match/${encodeURIComponent(match.id)}`}>
@@ -225,6 +244,14 @@ function LikedTopMatches() {
               <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
               <div className="min-w-0">
                 <MatchParticipants source={match} />
+                {(match.outcome || match.status) && (
+                  <MatchOutcome
+                    source={match}
+                    seatLabels={outcomeSeatLabels(match)}
+                    primaryOnly
+                    className="mt-1"
+                  />
+                )}
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                   <span>{gameLabel(match.game_id)}</span>
                   <MatchNatureBadge matchType={match.match_type} source={match} />

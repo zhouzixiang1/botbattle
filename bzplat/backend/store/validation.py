@@ -11,6 +11,27 @@ from .schema import STATUS_COMPLETED
 _NO_OPPONENT_STAGE_TYPES = frozenset({"swiss", "single_elimination"})
 
 
+def exact_nonnegative_int(value: object) -> int | None:
+    """Return an exact non-negative integer, never a coerced lookalike.
+
+    Several historical SQLite tables are not STRICT.  Lifecycle coordinates
+    read from them therefore must reject REAL/text values instead of routing
+    them through ``int(...)`` (for example ``0.5`` becoming stage zero).
+    ``bool`` is rejected explicitly even though it subclasses ``int``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def exact_sqlite_bool(value: object) -> bool | None:
+    """Return an exact SQLite 0/1 flag, rejecting truthy imported values."""
+    value = exact_nonnegative_int(value)
+    if value not in (0, 1):
+        return None
+    return bool(value)
+
+
 def is_authoritative_no_opponent_pairing(
     stage_type: object,
     pairing: Mapping[str, Any],
@@ -78,6 +99,8 @@ def validate_contest_times(
 
 
 __all__ = [
+    "exact_nonnegative_int",
+    "exact_sqlite_bool",
     "is_authoritative_no_opponent_pairing",
     "validate_contest_times",
 ]

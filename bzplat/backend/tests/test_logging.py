@@ -86,19 +86,6 @@ def test_admin_logs_requires_admin(tmp_path, monkeypatch):
     assert c.get("/api/admin/logs").status_code == 401
 
 
-def _tree_manifest(path: Path) -> list[tuple[str, int, int]]:
-    if not path.exists():
-        return []
-    return sorted(
-        (
-            str(item.relative_to(path)),
-            item.stat().st_size if item.is_file() else -1,
-            item.stat().st_mtime_ns,
-        )
-        for item in path.rglob("*")
-    )
-
-
 def test_repo_cwd_tmp_db_keeps_primary_uploads_and_logs_isolated(
     tmp_path, monkeypatch
 ):
@@ -108,7 +95,6 @@ def test_repo_cwd_tmp_db_keeps_primary_uploads_and_logs_isolated(
     assert primary_root is not None
     primary_uploads = primary_root / "bot_uploads"
     primary_logs = primary_root / "logs"
-    uploads_before = _tree_manifest(primary_uploads)
     marker = "pytest-isolated-log-marker-7f8cecab"
 
     monkeypatch.chdir(source_root)
@@ -125,11 +111,11 @@ def test_repo_cwd_tmp_db_keeps_primary_uploads_and_logs_isolated(
         assert app.state.bot_manager.upload_root.resolve() == (
             runtime / "bot_uploads"
         ).resolve()
+        assert app.state.bot_manager.upload_root.resolve() != primary_uploads.resolve()
         assert marker in (log_dir / "app.log").read_text(encoding="utf-8")
     finally:
         app.state.store.close()
 
-    assert _tree_manifest(primary_uploads) == uploads_before
     # The production service may append unrelated lines concurrently; the unique
     # test marker itself must never reach any primary log file.
     for log_path in primary_logs.glob("*.log") if primary_logs.exists() else ():

@@ -120,7 +120,7 @@ def test_swap_bot_keeps_history_points(tmp_path):
             match_config={},
         )
         s.update_match(mid, status="completed", winner=0,
-                       result={"rounds_played": 2, "deltas": [100, -100]},
+                       result={"rounds_played": 70, "deltas": [100, -100]},
                        reason="completed")
         s.update_contest_pairing(p["id"], match_id=mid, status="running")
     class _FakeOrch:
@@ -136,6 +136,118 @@ def test_swap_bot_keeps_history_points(tmp_path):
     assert after[e1["id"]] == 6.0, (
         f"换 Bot 后 entry1 应保留 6 分（entry 身份为键），实际 {after[e1['id']]}"
     )
+    s.close()
+
+
+def test_bind_uses_current_entry_bot_but_history_reads_frozen_pairing(tmp_path):
+    s = _store(tmp_path)
+    organizer = s.create_user(
+        "bind-org", "bind-org@example.com", "x", role="organizer"
+    )["id"]
+    user_a = s.create_user("bind-a", "bind-a@example.com", "x")["id"]
+    user_b = s.create_user("bind-b", "bind-b@example.com", "x")["id"]
+    bot_a = s.create_bot(
+        user_a, "bind-bot-a", binary_path="/tmp", format="elf", game_id="holdem"
+    )["id"]
+    bot_b = s.create_bot(
+        user_b, "bind-bot-b", binary_path="/tmp", format="elf", game_id="holdem"
+    )["id"]
+    stage = (
+        '[{"key":"rr","type":"round_robin","scoring":"poker_3_1_0",'
+        '"games_per_pair":2,"series_scoring":'
+        '"independent_scoring_game_points_v1"}]'
+    )
+    contest = s.create_contest(
+        "Bind identity",
+        organizer_id=organizer,
+        status="published",
+        game_id="holdem",
+        stages_json=stage,
+    )
+    entry_a = s.add_contest_entry(contest["id"], user_a, bot_a)
+    entry_b = s.add_contest_entry(contest["id"], user_b, bot_b)
+    pairings = s.create_contest_stage_pairings(
+        contest["id"],
+        0,
+        [
+            {
+                "bot_a_id": bot_a,
+                "bot_b_id": bot_b,
+                "stage_key": "rr",
+                "entry_a_id": entry_a["id"],
+                "entry_b_id": entry_b["id"],
+                "series_index": index,
+                "series_size": 2,
+                "pairing_seed": 8_100 + index,
+            }
+            for index in (1, 2)
+        ],
+        expected_current_stage_idx=0,
+    )
+    for index, pairing in enumerate(pairings, 1):
+        s.create_match(
+            f"bind-identity-{index}",
+            bot_a,
+            bot_b,
+            owner_id=organizer,
+            contest_id=contest["id"],
+            match_type="contest",
+            game_id="holdem",
+            match_config={"duplicate": False},
+        )
+        if index == 1:
+            bound = s.bind_contest_pairing_match(
+                contest["id"],
+                pairing["id"],
+                f"bind-identity-{index}",
+                require_execution_admission=False,
+            )
+            assert bound["match_id"] == "bind-identity-1"
+
+    # Binding is the transaction linearization boundary.  A low-level import
+    # that damages the durable cursor between manager read and bind must not
+    # activate the prepared Match under an invented stage zero.
+    with s._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET current_stage_idx=0.5 WHERE id=?",
+            (contest["id"],),
+        )
+    with pytest.raises(ValueError, match="当前阶段已变化"):
+        s.bind_contest_pairing_match(
+            contest["id"],
+            pairings[1]["id"],
+            "bind-identity-2",
+            require_execution_admission=False,
+        )
+    with s._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET current_stage_idx=0 WHERE id=?",
+            (contest["id"],),
+        )
+
+    replacement = s.create_bot(
+        user_a,
+        "bind-bot-a-new",
+        binary_path="/tmp",
+        format="elf",
+        game_id="holdem",
+    )["id"]
+    s.update_entry(contest["id"], user_a, bot_id=replacement)
+    with pytest.raises(ValueError, match="参赛项与冻结 Bot"):
+        s.bind_contest_pairing_match(
+            contest["id"],
+            pairings[1]["id"],
+            "bind-identity-2",
+            require_execution_admission=False,
+        )
+    unchanged = next(
+        row
+        for row in s.list_contest_pairings(contest["id"], stage_idx=0)
+        if row["id"] == pairings[1]["id"]
+    )
+    assert unchanged["match_id"] is None
     s.close()
 
 

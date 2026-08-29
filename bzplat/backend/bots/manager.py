@@ -419,7 +419,9 @@ class BotManager:
                     "unsafe_upload_root", "dry-run manager 不得创建 bot_uploads"
                 )
             existed = os.path.lexists(root)
-            root.mkdir(parents=True, exist_ok=True)
+            # Do not inherit a cooperative developer umask such as 0002: the
+            # cold-cutover trust boundary rejects group-writable roots.
+            root.mkdir(mode=0o755, parents=True, exist_ok=True)
             if root.is_symlink() or not root.is_dir():
                 raise BotError("unsafe_upload_root", "canonical bot_uploads 创建失败")
             if not existed:
@@ -818,7 +820,7 @@ class BotManager:
                                     f"Bot 版本根不得是符号链接或非目录: {bot_dir}",
                                 )
                             if not bot_dir.exists():
-                                bot_dir.mkdir()
+                                bot_dir.mkdir(mode=0o755)
                                 created_bot_dirs.append(bot_dir)
                                 self._fsync_path(root, directory=True)
                             bot_dir_stat = bot_dir.lstat()

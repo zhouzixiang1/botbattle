@@ -5,6 +5,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError, apiFetch, errMsg } from '@/api'
 import {
   LiveContestSpectator,
+  type LiveContestCounts,
   type LiveContestPairing,
   type LiveContestStanding,
 } from '@/components/contest/LiveContestSpectator'
@@ -51,13 +52,14 @@ interface LiveContestResponse {
     scoring_mode?: string | null
     conceptual_completed?: number
     conceptual_total?: number
-  }
+  } | null
   progress: {
     completed: number
     total: number
     running: number
     pending: number
   }
+  counts?: LiveContestCounts
   active: LiveContestPairing[]
   upcoming: LiveContestPairing[]
   recent: LiveContestPairing[]
@@ -87,20 +89,21 @@ function intervalForContest(contest: LiveContestResponse['contest'] | undefined)
 }
 
 function seriesSummary(series: LiveContestResponse['series']): string | null {
+  if (series == null) return '赛制配置暂不可用'
   if (series.games_per_pair == null) return null
   if (series.scoring_mode === 'aggregate_match_points_v1') {
     const progress = series.conceptual_total != null
       ? ` · 已结算 ${series.conceptual_completed ?? 0}/${series.conceptual_total} 组`
       : ''
-    return `每次对手交锋 ${series.games_per_pair} 场${progress}`
+    return `旧版系列结算 · 每次对手交锋 ${series.games_per_pair} 场，完整系列只记 1 次胜、平、负${progress}`
   }
   if (series.duplicate) {
-    const plannedLegs = series.scoring_legs_per_pair
-    return plannedLegs == null
-      ? `${series.games_per_pair} 场复式对局`
-      : `${series.games_per_pair} 场复式对局 · 正常完成时 ${plannedLegs} 局计分`
+    const plannedGames = series.scoring_legs_per_pair
+    return plannedGames == null
+      ? `${series.games_per_pair} 组复式交锋`
+      : `${series.games_per_pair} 组复式交锋 · ${plannedGames} 场计分`
   }
-  return `每对选手交手 ${series.games_per_pair} 场`
+  return `每对选手交手 ${series.games_per_pair} 场计分`
 }
 
 function ContestLiveSkeleton() {
@@ -312,9 +315,11 @@ export default function ContestLive() {
         status={status}
         stageLabel={liveStageLabel}
         stageType={live.stage?.type}
-        duplicate={live.series.duplicate}
+        duplicate={live.series?.duplicate === true}
+        legacyAggregate={live.series?.scoring_mode === 'aggregate_match_points_v1'}
         snapshot={immutableSnapshot}
         progress={live.progress}
+        counts={live.counts}
         activePairings={live.active}
         upcomingPairings={live.upcoming}
         recentPairings={live.recent}

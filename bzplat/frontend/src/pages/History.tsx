@@ -4,6 +4,7 @@ import { ListFilter, Swords } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import Pagination from '@/components/Pagination'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
@@ -11,8 +12,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { fmtTime } from '@/lib/format'
 import { GAMES, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import type { MatchOutcomeSource } from '@/lib/match-outcome'
+import { outcomeSeatLabels } from '@/lib/match-seats'
 
-interface Match extends MatchParticipantSource {
+interface Match extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   status: string
   bot_a_id: number | null
@@ -102,8 +105,8 @@ export default function History() {
       </StickyToolbar>
 
       <DataRegion
-        title={`对局记录 · 共 ${total} 场`}
-        description={gameId || status ? `已应用筛选条件 · 每页 ${PAGE_SIZE} 场` : `按创建时间查看 · 每页 ${PAGE_SIZE} 场`}
+        title={`对局记录 · 共 ${total} 条`}
+        description={gameId || status ? `已应用筛选条件 · 每页 ${PAGE_SIZE} 条` : `按创建时间查看 · 每页 ${PAGE_SIZE} 条`}
       >
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
@@ -125,6 +128,12 @@ export default function History() {
                 </span>
                 <div className="min-w-0">
                   <MatchParticipants source={match} variant="panel" className="items-stretch gap-1.5 sm:gap-2" />
+                  <MatchOutcome
+                    source={match}
+                    seatLabels={outcomeSeatLabels(match)}
+                    normalizedUnit={match.game_id === 'holdem' ? 'BB' : undefined}
+                    className="mt-1.5"
+                  />
                   <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     <span className="font-mono tabular-nums sm:hidden">序号 {(page - 1) * PAGE_SIZE + index + 1}</span>
                     <MatchNatureBadge matchType={match.match_type} source={match} />

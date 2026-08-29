@@ -117,5 +117,5 @@ function formatNet(value: number): string {
 export function holdemEndSummary(vm: unknown): string | null {
   const state = vm as HoldemViewModel | null
   if (!state?.seats) return null
-  return `累计 ${formatNet(state.seats[0]?.net ?? 0)} / ${formatNet(state.seats[1]?.net ?? 0)}`
+  return `本场净胜 ${formatNet(state.seats[0]?.net ?? 0)} / ${formatNet(state.seats[1]?.net ?? 0)}`
 }

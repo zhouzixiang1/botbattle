@@ -92,11 +92,25 @@ _CONTEST_IDENTITY_PRIVATE_HEADERS = {
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.series import (
+    contest_match_binding_is_valid,
+    contest_pairing_roster_binding_is_valid,
     group_conceptual_series,
     is_aggregate_series_stage,
     summarize_conceptual_series,
 )
-from bzplat.backend.contests.presentation import build_stage_summaries
+from bzplat.backend.contests.validation import (
+    SERIES_SCORING_AGGREGATE,
+    SERIES_SCORING_INDEPENDENT,
+    active_contest_entries,
+    stage_duplicate_mode,
+    stage_scoring_contract_is_valid,
+)
+from bzplat.backend.contests.presentation import (
+    build_stage_counts,
+    build_stage_summaries,
+    expected_stage_topology,
+)
+from bzplat.backend.contests.stages import effective_swiss_rounds
 from bzplat.backend.contests.showcase import (
     ShowcaseReadOnlyError,
     public_description as contest_public_description,
@@ -107,6 +121,10 @@ from bzplat.backend.contests.templates import list_templates, points_for_result
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games.base import MatchRecordExportError
 from bzplat.backend.matches import MatchOrchestrator
+from bzplat.backend.matches.public_outcome import (
+    build_public_outcome,
+    normalized_delta_value,
+)
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     BOT_UPLOAD_ADMISSION_WAIT_SEC,
@@ -158,7 +176,11 @@ from bzplat.backend.store.schema import (
     is_supported_binary_metadata,
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
-from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
+from bzplat.backend.store.validation import (
+    exact_nonnegative_int,
+    exact_sqlite_bool,
+    is_authoritative_no_opponent_pairing,
+)
 router = APIRouter()
 _T = TypeVar("_T")
 _BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
@@ -493,7 +515,10 @@ def _with_seat_info(m: dict, store=None) -> dict:
     """观赛座位身份：委托 matches.seat_info（人类座改写真人用户名）。"""
     from bzplat.backend.matches.seat_info import with_seat_info
 
+    spec = game_registry.get(str(m.get("game_id") or ""))
+    outcome = build_public_outcome(m, spec)
     public_match = sanitize_public_match(m) or m
+    public_match["outcome"] = outcome
     human_user = None
     if store is not None and public_match and public_match.get("match_type") == "human" and public_match.get("human_user_id") is not None:
         try:
@@ -526,6 +551,7 @@ _PUBLIC_MATCH_LIST_FIELDS = frozenset(
         "bot_b_environment",
         "technical_loss",
         "result",
+        "outcome",
         "bot_a",
         "bot_b",
     }
@@ -611,7 +637,11 @@ def _public_match_list_rows(
 
     projected: list[dict] = []
     for row in rows:
-        public = with_seat_info(sanitize_public_match(row) or row) or row
+        spec = game_registry.get(str(row.get("game_id") or ""))
+        outcome = build_public_outcome(row, spec)
+        sanitized = sanitize_public_match(row) or row
+        sanitized["outcome"] = outcome
+        public = with_seat_info(sanitized) or sanitized
         # 用正向白名单锁定公开列表契约：Store 为技术故障归一携带的
         # _replay_events_json，以及未来新增的执行/关联列，都不能因忘记更新黑名单
         # 而静默泄漏。Bot id 仍是公开详情路由键，但 UI 不得用它当名称兜底。
@@ -2387,7 +2417,7 @@ def match_detail(
     if response is not None:
         response.headers["Vary"] = "Authorization, Cookie"
     store = _store(request)
-    m = store.get_match_detailed(match_id)
+    m = store.get_match_detailed(match_id, include_replay_incidents=False)
     if not m:
         raise HTTPException(404, "对局不存在")
     public_match = _with_seat_info(m, store=store)
@@ -3175,6 +3205,9 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
         isinstance(stages, list)
         and len(stages) == 1
         and isinstance(stages[0], dict)
+        and stage_scoring_contract_is_valid(
+            stages[0], game_id=contest.get("game_id")
+        )
         and stages[0].get("type", "round_robin") == "round_robin"
     ):
         value = stages[0].get("games_per_pair")
@@ -3188,7 +3221,11 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
         for index, stage in enumerate(stages):
             if (
                 not isinstance(stage, dict)
-                or stage.get("series_scoring") != "aggregate_match_points_v1"
+                or not stage_scoring_contract_is_valid(
+                    stage, game_id=contest.get("game_id")
+                )
+                or stage.get("series_scoring")
+                not in {SERIES_SCORING_INDEPENDENT, "aggregate_match_points_v1"}
             ):
                 continue
             games = stage.get("games_per_pair")
@@ -3248,7 +3285,23 @@ _PUBLIC_PAIRING_INTERNAL_FIELDS = (
     "color_first",
     "match_status",
     "_match_created_at",
+    "_match_id",
+    "_match_contest_id",
+    "_match_game_id",
+    "_match_type",
+    "_match_bot_a_id",
+    "_match_bot_b_id",
+    "_entry_a_user_id",
+    "_entry_b_user_id",
+    "_pairing_bot_a_owner_id",
+    "_pairing_bot_b_owner_id",
+    "_raw_entry_a_id",
+    "_raw_entry_b_id",
+    "_explicit_series_marker",
     "_match_result_json",
+    "_match_config_json",
+    "_match_reason",
+    "_match_technical_loss",
 )
 
 _PUBLIC_PAIRING_FIELDS = frozenset(
@@ -3280,6 +3333,7 @@ _PUBLIC_PAIRING_FIELDS = frozenset(
         "match_winner",
         "is_bye",
         "display_status",
+        "outcome",
     }
 )
 
@@ -3302,8 +3356,15 @@ def _contest_stage_types(contest: dict[str, Any]) -> dict[int, object]:
     }
 
 
-def _contest_stage_configs(contest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the frozen stage list, treating malformed legacy JSON as empty."""
+def _contest_stage_configs(
+    contest: dict[str, Any],
+) -> list[dict[str, Any] | None]:
+    """Return frozen stage coordinates with non-object entries as sentinels.
+
+    Keeping ``None`` in place makes every contest projection fail closed at the
+    damaged index.  Filtering or coercing it to ``{}`` would either shift later
+    stages or guess ordinary single-game semantics.
+    """
     raw = contest.get("stages_json") or "[]"
     if isinstance(raw, list):
         parsed = raw
@@ -3314,7 +3375,7 @@ def _contest_stage_configs(contest: dict[str, Any]) -> list[dict[str, Any]]:
             parsed = []
     if not isinstance(parsed, list):
         return []
-    return [stage if isinstance(stage, dict) else {} for stage in parsed]
+    return [stage if isinstance(stage, dict) else None for stage in parsed]
 
 
 def _live_pairing_sort_key(row: dict[str, Any]) -> tuple[bool, str, int, int]:
@@ -3342,17 +3403,31 @@ def _latest_actual_timestamp(values: list[object]) -> str:
 
 
 def _public_contest_pairings(
-    rows: list[dict], *, stage_types: dict[int, object] | None = None
+    rows: list[dict],
+    *,
+    stage_types: dict[int, object] | None = None,
+    stage_configs: list[dict[str, Any] | None] | None = None,
+    game_id: str | None = None,
+    expected_entry_bots: dict[int, int | None] | None = None,
+    expected_entry_users: dict[int, int] | None = None,
+    current_stage_idx: int | None = None,
+    require_current_entry_bots: bool = False,
 ) -> list[dict]:
     """Return schedule rows with public Bot/user identity and no execution keys."""
     known_stage_types = stage_types or {}
+    stages = stage_configs or []
+    spec = game_registry.get(game_id) if game_id is not None else None
     projected: list[dict] = []
     for row in rows:
         public = dict(row)
-        try:
-            stage_idx = int(row.get("stage_idx") or 0)
-        except (TypeError, ValueError):
-            stage_idx = -1
+        raw_stage_idx = row["stage_idx"] if "stage_idx" in row else 0
+        stage_idx = (
+            raw_stage_idx
+            if isinstance(raw_stage_idx, int)
+            and not isinstance(raw_stage_idx, bool)
+            and raw_stage_idx >= 0
+            else -1
+        )
         # bot_b_id 可能因历史硬删除被 SET NULL，legacy pairing 也可能没有 entry id。
         # 赛制类型与四项权威条件必须同时成立；歧义一律 fail closed。
         public["is_bye"] = is_authoritative_no_opponent_pairing(
@@ -3366,6 +3441,58 @@ def _public_contest_pairings(
             public["display_status"] = "queued"
         else:
             public["display_status"] = STATUS_PENDING
+        stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
+        duplicate = stage_duplicate_mode(stage)
+        compact_match = {
+            "id": row.get("_match_id"),
+            "status": row.get("match_status"),
+            "winner": row.get("match_winner"),
+            "reason": row.get("_match_reason"),
+            "technical_loss": row.get("_match_technical_loss"),
+            "result": row.get("_match_result_json"),
+            "match_config": row.get("_match_config_json"),
+            "contest_id": row.get("_match_contest_id"),
+            "game_id": row.get("_match_game_id"),
+            "match_type": row.get("_match_type"),
+            "bot_a_id": row.get("_match_bot_a_id"),
+            "bot_b_id": row.get("_match_bot_b_id"),
+        }
+        match_binding_consistent = contest_match_binding_is_valid(
+            row,
+            compact_match,
+            expected_contest_id=(
+                int(row["contest_id"])
+                if isinstance(row.get("contest_id"), int)
+                and not isinstance(row.get("contest_id"), bool)
+                else None
+            ),
+            expected_game_id=game_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=bool(
+                require_current_entry_bots
+                and current_stage_idx is not None
+                and stage_idx == current_stage_idx
+            ),
+        )
+        if (
+            spec is not None
+            and row.get("match_id")
+            and stage is not None
+            and stage_scoring_contract_is_valid(stage, game_id=game_id)
+            and match_binding_consistent
+        ):
+            public["outcome"] = build_public_outcome(
+                compact_match,
+                spec,
+                duplicate=duplicate,
+                expected_duplicate=duplicate,
+                require_frozen_duplicate=(
+                    stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT
+                ),
+            )
+        else:
+            public["outcome"] = None
         for field in _PUBLIC_PAIRING_INTERNAL_FIELDS:
             public.pop(field, None)
         projected.append(
@@ -3501,16 +3628,24 @@ def contest_detail(
     entries_page: int | None = None, entries_per_page: int = 50,
     user=Depends(optional_user),
 ):
-    c = _store(request).get_contest(contest_id)
-    if not c:
+    store = _store(request)
+    snapshot = store.contest_projection_snapshot(
+        contest_id,
+        include_entries=True,
+        include_entry_identity=True,
+        identity_viewer_user_id=(int(user["id"]) if user else None),
+        identity_viewer_is_admin=bool(user and user.get("role") == ROLE_ADMIN),
+        include_stage_results=True,
+    )
+    if snapshot is None:
         raise HTTPException(404, "比赛不存在")
+    c = snapshot["contest"]
     # hidden 赛事仅本赛事 organizer/admin 可见（不是任意 organizer）。
     if (
         c.get("status") in _CONTEST_HIDDEN_STATUSES
         and not _can_view_hidden_contest(c, user)
     ):
         raise HTTPException(404, "比赛不存在")
-    store = _store(request)
     is_organizer = bool(
         user
         and (
@@ -3521,52 +3656,107 @@ def contest_detail(
     include_identity = bool(
         is_organizer and int(c.get("require_real_name") or 0)
     )
-    # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
-    # 否则保持旧的全量列表契约（pairings/standings 不分页——stage 级，量小）。
-    entries_result = store.contest_entries_named(
-        contest_id,
-        page=entries_page,
-        per_page=entries_per_page,
-        include_identity=include_identity,
-    )
-    if isinstance(entries_result, dict):
-        entries = entries_result["items"]
+    # The full roster is already needed by standings and was read beside the
+    # contest/pairings in one SQLite snapshot. Paginate that frozen list in
+    # memory so page metadata cannot race a registration or stage transition.
+    stage_entries = snapshot["entries"]
+    if entries_page is not None:
+        page = max(1, int(entries_page))
+        per_page = max(1, min(200, int(entries_per_page)))
+        offset = (page - 1) * per_page
+        entries = stage_entries[offset : offset + per_page]
         entries_meta = {
-            "entries_page": entries_result["page"],
-            "entries_per_page": entries_result["per_page"],
-            "entries_total": entries_result["total"],
+            "entries_page": page,
+            "entries_per_page": per_page,
+            "entries_total": len(stage_entries),
         }
     else:
-        entries = entries_result
+        entries = stage_entries
         entries_meta = {}
     # 阶段投影依赖 entry_a_id / entry_b_id 求实际参赛者；响应才裁掉这些
     # 内部关联键。不能拿 public pairings 反哺内部 presentation，否则阶段榜会变空。
-    raw_pairings = store.contest_bracket(contest_id)
-    pairings = _public_contest_pairings(
-        raw_pairings, stage_types=_contest_stage_types(c)
+    raw_pairings = snapshot["pairings"]
+    stages = _contest_stage_configs(c)
+    raw_current_stage_idx = c.get("current_stage_idx", 0)
+    current_stage_valid = bool(
+        isinstance(raw_current_stage_idx, int)
+        and not isinstance(raw_current_stage_idx, bool)
+        and 0 <= raw_current_stage_idx < len(stages)
     )
-    stage_entries = (
-        entries
-        if not isinstance(entries_result, dict)
-        else store.contest_entries_named(contest_id, include_identity=False)
+    current_stage_idx = raw_current_stage_idx if current_stage_valid else -1
+    entry_bots = {
+        int(entry["id"]): entry.get("bot_id") for entry in stage_entries
+    }
+    entry_users = {
+        int(entry["id"]): int(entry["user_id"]) for entry in stage_entries
+    }
+    pairings = _public_contest_pairings(
+        raw_pairings,
+        stage_types=_contest_stage_types(c),
+        stage_configs=stages,
+        game_id=str(c.get("game_id") or ""),
+        expected_entry_bots=entry_bots,
+        expected_entry_users=entry_users,
+        current_stage_idx=current_stage_idx,
+        require_current_entry_bots=c.get("status") in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+        ),
     )
     stage_summaries = build_stage_summaries(
-        _contests(request), c, stage_entries, raw_pairings
+        _contests(request),
+        c,
+        stage_entries,
+        raw_pairings,
+        stage_results=snapshot["stage_results"],
     )
-    standings = _contests(request).standings(contest_id)
-    # 给 standings 补 bot 名（standings 只有 bot_id）
+    current_pairings = [
+        row
+        for row in raw_pairings
+        if isinstance(row.get("stage_idx"), int)
+        and not isinstance(row.get("stage_idx"), bool)
+        and row.get("stage_idx") == current_stage_idx
+    ]
+    standings = (
+        _contests(request).standings(
+            contest_id,
+            stage_idx=current_stage_idx,
+            pairings=current_pairings,
+            entries=stage_entries,
+            contest=c,
+        )
+        if current_stage_valid
+        else []
+    )
+    bot_names = {
+        int(entry["bot_id"]): entry.get("bot_display") or entry.get("bot_name")
+        for entry in stage_entries
+        if entry.get("bot_id") is not None
+    }
     for s in standings:
-        b = store.get_bot(s.get("bot_id"))
-        if b:
-            s["bot_name"] = b.get("display_name") or b.get("name")
+        bot_id = s.get("bot_id")
+        if bot_id is not None and int(bot_id) in bot_names:
+            s["bot_name"] = bot_names[int(bot_id)]
     try:
-        estimate = _contests(request).estimate(contest_id)
+        estimate = _contests(request).estimate(
+            contest_id,
+            contest=c,
+            entries=stage_entries,
+            pairings=raw_pairings,
+        )
     except ValueError:
         estimate = None
     # my_entry 必须使用正向白名单；contest_entries 新增任何内部快照列都不会
     # 因 SELECT * 自动进入公开响应。实名详情只在实名赛 + 组织者/admin 下投影。
     my_entry = _public_my_contest_entry(
-        store.get_entry(contest_id, user["id"]) if user else None
+        next(
+            (
+                entry
+                for entry in stage_entries
+                if user is not None and int(entry["user_id"]) == int(user["id"])
+            ),
+            None,
+        )
     )
     if include_identity:
         response.headers.update(_CONTEST_IDENTITY_PRIVATE_HEADERS)
@@ -3613,18 +3803,53 @@ def contest_live(
         raise HTTPException(404, "比赛不存在", headers=_DEBUG_NO_STORE_HEADERS)
 
     stages = _contest_stage_configs(contest)
-    stage_idx = int(contest.get("current_stage_idx") or 0)
+    raw_stage_idx = contest.get("current_stage_idx", 0)
+    stage_idx = (
+        raw_stage_idx
+        if isinstance(raw_stage_idx, int)
+        and not isinstance(raw_stage_idx, bool)
+        and raw_stage_idx >= 0
+        else -1
+    )
     stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
+    duplicate_mode = stage_duplicate_mode(stage)
+    active_snapshot_entries = active_contest_entries(snapshot["entries"])
+    roster_semantics_valid = active_snapshot_entries is not None
+    stage_semantics_valid = bool(
+        roster_semantics_valid
+        and stage_scoring_contract_is_valid(
+            stage, game_id=str(contest.get("game_id") or "")
+        )
+    )
     stage_type = stage.get("type") if stage else None
     raw_pairings = snapshot["pairings"]
     public_rows = _public_contest_pairings(
         raw_pairings,
         stage_types={stage_idx: stage_type},
+        stage_configs=stages,
+        game_id=str(contest.get("game_id") or ""),
+        expected_entry_bots={
+            int(entry["id"]): entry.get("bot_id")
+            for entry in snapshot["entries"]
+        },
+        expected_entry_users={
+            int(entry["id"]): int(entry["user_id"])
+            for entry in snapshot["entries"]
+        },
+        current_stage_idx=stage_idx,
+        require_current_entry_bots=contest.get("status") in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+        ),
     )
     public_by_id = {int(row["id"]): row for row in public_rows}
     conceptual_series_total = 0
     conceptual_series_completed = 0
-    if stage is not None and is_aggregate_series_stage(stage):
+    if (
+        stage is not None
+        and stage_semantics_valid
+        and is_aggregate_series_stage(stage)
+    ):
         match_by_id: dict[str, dict[str, Any]] = {}
         for row in raw_pairings:
             match_id = row.get("match_id")
@@ -3639,15 +3864,43 @@ def contest_live(
             else:
                 result = raw_result if isinstance(raw_result, dict) else {}
             match_by_id[str(match_id)] = {
+                "id": str(match_id),
                 "status": row.get("match_status"),
                 "winner": row.get("match_winner"),
+                "reason": row.get("_match_reason"),
+                "technical_loss": row.get("_match_technical_loss"),
                 "result": result,
+                "match_config": row.get("_match_config_json"),
+                "contest_id": row.get("_match_contest_id"),
+                "game_id": row.get("_match_game_id"),
+                "match_type": row.get("_match_type"),
+                "bot_a_id": row.get("_match_bot_a_id"),
+                "bot_b_id": row.get("_match_bot_b_id"),
             }
-        normalize_delta = game_registry.get(
+        aggregate_game_spec = game_registry.get(
             str(contest.get("game_id") or "")
-        ).normalize_delta
+        )
+        normalize_delta = aggregate_game_spec.normalize_delta
         for rows in group_conceptual_series(stage, raw_pairings).values():
-            summary = summarize_conceptual_series(stage, rows, match_by_id.get)
+            summary = summarize_conceptual_series(
+                stage,
+                rows,
+                match_by_id.get,
+                game_spec=aggregate_game_spec,
+                expected_contest_id=contest_id,
+                expected_entry_bots={
+                    int(entry["id"]): entry.get("bot_id")
+                    for entry in snapshot["entries"]
+                },
+                expected_entry_users={
+                    int(entry["id"]): int(entry["user_id"])
+                    for entry in snapshot["entries"]
+                },
+                require_current_entry_bots=contest.get("status") in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                ),
+            )
             conceptual_series_total += 1
             conceptual_series_completed += int(bool(summary["settled"]))
             for row in rows:
@@ -3658,8 +3911,8 @@ def contest_live(
                     "completed_matches": summary["completed_matches"],
                     "game_points_a": summary["game_points"][entry_a],
                     "game_points_b": summary["game_points"][entry_b],
-                    "normalized_delta_a": normalize_delta(
-                        int(summary["deltas"][entry_a])
+                    "normalized_delta_a": normalized_delta_value(
+                        normalize_delta, int(summary["deltas"][entry_a])
                     ),
                     "settled": bool(summary["settled"]),
                     "standings_points_a": summary["standings_points"][entry_a],
@@ -3667,6 +3920,24 @@ def contest_live(
                 }
         for row in raw_pairings:
             if not is_authoritative_no_opponent_pairing(stage_type, row):
+                continue
+            if not contest_pairing_roster_binding_is_valid(
+                row,
+                expected_contest_id=contest_id,
+                expected_entry_bots={
+                    int(entry["id"]): entry.get("bot_id")
+                    for entry in snapshot["entries"]
+                },
+                expected_entry_users={
+                    int(entry["id"]): int(entry["user_id"])
+                    for entry in snapshot["entries"]
+                },
+                require_current_entry_bots=contest.get("status") in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                ),
+                require_opponent=False,
+            ):
                 continue
             conceptual_series_total += 1
             conceptual_series_completed += 1
@@ -3719,26 +3990,43 @@ def contest_live(
         selected = rows if limit is None else rows[:limit]
         return [public_by_id[int(row["id"])] for row in selected]
 
-    stage_entry_ids = {
-        int(entry_id)
-        for row in raw_pairings
-        for entry_id in (row.get("entry_a_id"), row.get("entry_b_id"))
-        if entry_id is not None
-    }
-    stage_entries = [
-        entry
-        for entry in snapshot["entries"]
-        if int(entry["id"]) in stage_entry_ids
-    ]
+    if stage and (
+        not stage_semantics_valid
+        or stage.get("series_scoring") in {
+            SERIES_SCORING_INDEPENDENT,
+            SERIES_SCORING_AGGREGATE,
+        }
+    ):
+        # The current strict-v1 cohort is frozen by elimination state, not by
+        # whatever fixture rows happen to survive.  Using the latter would hide
+        # an entrant and shrink totals when an entire opponent group is missing.
+        stage_entries = list(active_snapshot_entries or [])
+    else:
+        stage_entry_ids = {
+            int(entry_id)
+            for row in raw_pairings
+            for entry_id in (row.get("entry_a_id"), row.get("entry_b_id"))
+            if isinstance(entry_id, int) and not isinstance(entry_id, bool)
+        }
+        stage_entries = [
+            entry
+            for entry in snapshot["entries"]
+            if int(entry["id"]) in stage_entry_ids
+        ]
     entry_names = {
         int(entry["id"]): entry.get("bot_display") or entry.get("bot_name")
         for entry in stage_entries
     }
-    ranked_rows = _contests(request).standings(
-        contest_id,
-        pairings=raw_pairings,
-        entries=stage_entries,
-        contest=contest,
+    ranked_rows = (
+        _contests(request).standings(
+            contest_id,
+            stage_idx=stage_idx,
+            pairings=raw_pairings,
+            entries=stage_entries,
+            contest=contest,
+        )
+        if stage_semantics_valid and stage_idx >= 0
+        else []
     )
     if str(stage_type or "").startswith("group_"):
         group_positions: dict[str, int] = {}
@@ -3771,18 +4059,26 @@ def contest_live(
                 "byes": int(row.get("byes") or 0),
                 "delta_total": int(row.get("delta_total") or 0),
                 "group_id": row.get("group_id") or "",
+                "counts": row.get("counts") or {
+                    "encounter_groups": 0,
+                    "unique_opponents": 0,
+                    "match_jobs": 0,
+                    "scoring_games": 0,
+                },
             }
         )
 
     public_contest = _contest_for_api(contest)
-    aggregate_series = bool(stage and is_aggregate_series_stage(stage))
+    aggregate_series = bool(
+        stage and stage_semantics_valid and is_aggregate_series_stage(stage)
+    )
     games_per_pair = (
         stage.get("games_per_pair")
-        if aggregate_series and stage is not None
+        if stage is not None and stage.get("games_per_pair") is not None
         else public_contest.get("games_per_pair")
     )
-    duplicate = bool(stage and stage.get("duplicate"))
-    legs_per_match = 2 if duplicate else 1
+    duplicate = duplicate_mode
+    legs_per_match = 2 if duplicate is True else 1 if duplicate is False else None
     updated_candidates = [
         contest.get("created_at"),
     ]
@@ -3797,6 +4093,66 @@ def contest_live(
         )
     updated_at = _latest_actual_timestamp(updated_candidates)
 
+    expected_entry_ids = (
+        {int(entry["id"]) for entry in stage_entries}
+        if stage_semantics_valid
+        else None
+    )
+    expected_rounds = (
+        effective_swiss_rounds(stage, len(expected_entry_ids))
+        if stage_semantics_valid
+        and stage is not None
+        and stage.get("type") == "swiss"
+        and expected_entry_ids is not None
+        else None
+    )
+    counts = build_stage_counts(
+        stage or {},
+        raw_pairings,
+        game_id=str(contest.get("game_id") or ""),
+        expected_entry_ids=expected_entry_ids,
+        expected_swiss_rounds=expected_rounds,
+        expected_contest_id=contest_id,
+        expected_entry_bots={
+            int(entry["id"]): entry.get("bot_id")
+            for entry in snapshot["entries"]
+        },
+        expected_entry_users={
+            int(entry["id"]): int(entry["user_id"])
+            for entry in snapshot["entries"]
+        },
+        require_current_entry_bots=contest.get("status") in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+        ),
+    )
+    if not stage_semantics_valid:
+        counts["encounter_groups"]["completed"] = 0
+        counts["match_jobs"]["completed"] = 0
+        counts["scoring_games"]["completed"] = 0
+        counts["scoring_games"]["terminal_unplayed"] = 0
+    topology = expected_stage_topology(
+        stage or {},
+        expected_entry_ids,
+        expected_swiss_rounds=expected_rounds,
+        game_id=str(contest.get("game_id") or ""),
+    )
+    if aggregate_series and topology is not None:
+        conceptual_series_total = int(topology["encounter_groups"]) + max(
+            0,
+            int(topology["pairing_rows"]) - int(topology["match_jobs"]),
+        )
+    progress_total = (
+        int(topology["pairing_rows"])
+        if topology is not None
+        else len(raw_pairings)
+    )
+    progress_completed = len(completed_raw) if stage_semantics_valid else 0
+    progress_pending = max(
+        len(pending_raw),
+        progress_total - progress_completed - len(active_raw),
+    )
+
     return {
         "contest": {
             "id": int(contest["id"]),
@@ -3808,8 +4164,8 @@ def contest_live(
             "rest_ends_at": contest.get("rest_ends_at"),
             "showcase": bool(contest.get("showcase_key")),
             "immutable": bool(contest.get("showcase_key")),
-            "official_results_ready": bool(
-                int(contest.get("official_results_ready") or 0)
+            "official_results_ready": (
+                exact_sqlite_bool(contest.get("official_results_ready")) is True
             ),
         },
         "stage": (
@@ -3832,7 +4188,9 @@ def contest_live(
             else None
         ),
         "series": (
-            {
+            None
+            if not stage_semantics_valid
+            else {
                 "games_per_pair": games_per_pair,
                 "duplicate": False,
                 "scoring_mode": "aggregate_match_points_v1",
@@ -3843,20 +4201,26 @@ def contest_live(
             else {
                 "games_per_pair": games_per_pair,
                 "duplicate": duplicate,
+                **(
+                    {"scoring_mode": stage.get("series_scoring")}
+                    if stage is not None and stage.get("series_scoring") is not None
+                    else {}
+                ),
                 "scoring_legs_per_match": legs_per_match,
                 "scoring_legs_per_pair": (
                     int(games_per_pair) * legs_per_match
-                    if games_per_pair is not None
+                    if games_per_pair is not None and legs_per_match is not None
                     else None
                 ),
             }
         ),
         "progress": {
-            "completed": len(completed_raw),
-            "total": len(raw_pairings),
+            "completed": progress_completed,
+            "total": progress_total,
             "running": len(active_raw),
-            "pending": len(pending_raw),
+            "pending": progress_pending,
         },
+        "counts": counts,
         "active": public_subset(active_raw),
         "upcoming": public_subset(pending_raw, 6),
         "recent": public_subset(completed_raw, 8),
@@ -3871,18 +4235,36 @@ def contest_bracket(
     contest_id: int, request: Request, user=Depends(optional_user)
 ):
     """对阵图数据；隐藏赛事沿用 detail 的 owner/admin 可见性。"""
-    contest = _store(request).get_contest(contest_id)
-    if not contest:
+    snapshot = _store(request).contest_projection_snapshot(
+        contest_id, include_entries=False
+    )
+    if snapshot is None:
         raise HTTPException(404, "比赛不存在")
+    contest = snapshot["contest"]
     if (
         contest.get("status") in _CONTEST_HIDDEN_STATUSES
         and not _can_view_hidden_contest(contest, user)
     ):
         raise HTTPException(404, "比赛不存在")
+    raw_current_stage_idx = contest.get("current_stage_idx", 0)
+    current_stage_idx = (
+        raw_current_stage_idx
+        if isinstance(raw_current_stage_idx, int)
+        and not isinstance(raw_current_stage_idx, bool)
+        and raw_current_stage_idx >= 0
+        else -1
+    )
     return {
         "pairings": _public_contest_pairings(
-            _store(request).contest_bracket(contest_id),
+            snapshot["pairings"],
             stage_types=_contest_stage_types(contest),
+            stage_configs=_contest_stage_configs(contest),
+            game_id=str(contest.get("game_id") or ""),
+            current_stage_idx=current_stage_idx,
+            require_current_entry_bots=contest.get("status") in (
+                CONTEST_PUBLISHED,
+                CONTEST_RUNNING,
+            ),
         )
     }
 
@@ -4187,17 +4569,16 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
     c = store.get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
-    if not int(c.get("official_results_ready") or 0):
+    if exact_sqlite_bool(c.get("official_results_ready")) is not True:
         raise HTTPException(409, "正式名次尚未生成（赛事未结束或排名未落库）")
     rows = store.list_official_results(contest_id)
     # replace_top 的正式榜同时包含决赛选手和预赛未晋级者；积分只在各自
     # 来源阶段内可比较。先统一补齐读模型，再由 JSON/CSV 两种表示复用。
     stage_entry_ids: dict[int, set[int]] = {}
     for result in store.list_stage_results(contest_id):
-        try:
-            stage = int(result.get("stage_idx") or 0)
-            entry = int(result["entry_id"])
-        except (KeyError, TypeError, ValueError):
+        stage = exact_nonnegative_int(result.get("stage_idx"))
+        entry = exact_nonnegative_int(result.get("entry_id"))
+        if stage is None or entry is None:
             continue
         stage_entry_ids.setdefault(stage, set()).add(entry)
     rows = with_official_result_provenance(
@@ -6162,7 +6543,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "请求/响应信封、两种运行模式与动作编码"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
     {"slug": "local-ai", "file": "LOCAL_AI.md", "title": "本地 Bot 接入", "summary": "在自己的电脑运行 Bot，由平台负责裁判、回放与技术判定"},
-    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
+    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "每个计分场固定 70 手、请求字段与完整示例"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "指定开局、交换、五手二打、禁手与 v2 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
     {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/数值评分/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},

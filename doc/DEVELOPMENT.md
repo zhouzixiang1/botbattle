@@ -436,7 +436,7 @@ python scripts/seed_contest_showcase.py rollback \
 | `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 按内容同步的三游戏样例 Bot） |
 | `scripts/seed_contest_showcase.py` | 生成/验收/白名单回滚六个长期只读赛事快照；绝对 DB 路径必填，主运行时另需停服确认 |
-| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 5 spec / 56 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口、长文本滚动、排行榜密度及 3 条 Holdem HUD/复式/真人公开信息回归；最终同一代码 HEAD 全量执行真值见 `TESTING.md`） |
+| `bzplat/frontend/e2e/*.spec.ts` | 访客/用户/组织者/admin 真浏览器回归；覆盖 Console+Network+SSE+WS、多视口、赛事计分/赛果、Holdem HUD/复式/真人公开信息。用 `playwright test --list` 获取目标 HEAD 的实时数量，最终执行真值见 `TESTING.md`，不在文档硬编码易漂移计数 |
 
 ### 6.5 评分投影维护命令
 

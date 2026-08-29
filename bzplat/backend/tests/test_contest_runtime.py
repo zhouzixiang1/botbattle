@@ -3,9 +3,9 @@
 验证：
 1. matches 表有 match_seed + technical_loss 列
 2. generate_deal_sequence 确定性（同 seed 同序列）
-3. engine deal_sequence 注入（绕开 rng，两 leg 同牌序）
-4. GameSpec.build_match_plan：duplicate 返 2 leg（seat_swap），普通返 1 leg
-5. run_duplicate：两 leg 合并 net + 判胜负（不启 Docker，用 callable）
+3. engine deal_sequence 注入（绕开 rng，两个计分场同牌序）
+4. GameSpec.build_match_plan：duplicate 返两个换座计分场，普通返一个计分场
+5. duplicate 的同牌序输入确定性（不启 Docker，用 callable）
 """
 from __future__ import annotations
 
@@ -37,19 +37,19 @@ def test_generate_deal_sequence_deterministic():
     assert len(ds1) == 2 and all(len(hand) == 52 for hand in ds1)
 
 
-def test_holdem_build_match_plan_duplicate_returns_two_legs():
-    """holdem spec build_match_plan：duplicate=True 返 2 leg（seat_swap False+True）。"""
+def test_holdem_build_match_plan_duplicate_returns_two_scoring_games():
+    """duplicate=True 返回两个同牌换座的 70 手计分场。"""
     spec = registry.get("holdem")
     legs = spec.build_match_plan(123, {"duplicate": True})
     assert len(legs) == 2
     assert legs[0]["seat_swap"] is False
     assert legs[1]["seat_swap"] is True
-    # 两 leg 共享同 deal_sequence（消除运气）
+    # 两个计分场共享同 deal_sequence（消除发牌差异）
     assert legs[0]["params"]["deal_sequence"] == legs[1]["params"]["deal_sequence"]
 
 
-def test_holdem_build_match_plan_nonduplicate_single_leg():
-    """duplicate=False 返单 leg。"""
+def test_holdem_build_match_plan_nonduplicate_single_scoring_game():
+    """duplicate=False 返回一个计分场。"""
     spec = registry.get("holdem")
     legs = spec.build_match_plan(123, {"duplicate": False})
     assert len(legs) == 1
@@ -68,12 +68,8 @@ def test_non_holdem_spec_has_no_build_match_plan():
         assert registry.get(gid).build_match_plan is None
 
 
-def test_run_duplicate_merges_legs(tmp_path):
-    """run_duplicate 跑两 leg（用 callable），合并 net 判胜负。
-
-    用 callable bot（不启 Docker）：leg1 A=fold B=call → A 输盲注；
-    leg2 seat_swap（B=seat0 A=seat1）→ 同牌局对调，合并 net。
-    """
+def test_duplicate_deal_sequence_is_deterministic(tmp_path):
+    """复式两场共享牌序时，相同输入产生相同本场裁判结果。"""
     import asyncio
     import os
 
@@ -82,9 +78,8 @@ def test_run_duplicate_merges_legs(tmp_path):
 
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    # 用 callable 风格的 run_duplicate（需用 run_callables 路径——但 run_duplicate 用 binary）。
-    # 这里只验证 build_match_plan 逻辑 + deal_sequence 注入，真跑 binary 在 e2e 测。
-    # 改测：直接验证 engine 带 deal_sequence 跑出的 net 与不带的一致性（同 seed）。
+    # 这里只验证 build_match_plan 依赖的 deal_sequence 注入；真跑两场
+    # binary 的独立胜负由 duplicate 端到端测试覆盖。
     from bzplat.backend.games.holdem.engine import MatchSession
 
     async def decide_fold(player, req):
@@ -93,7 +88,7 @@ def test_run_duplicate_merges_legs(tmp_path):
     async def decide_call(player, req):
         return {"a": "k"}  # 一直 check/call
 
-    # 用 deal_sequence 跑两 leg（seat 不对调，仅验牌序一致）
+    # 分别运行两个独立计分场（此处不换座，只验证牌序一致）。
     ds = generate_deal_sequence(3, seed=7)
     s1 = MatchSession(num_hands=3, deal_sequence=ds)
     r1 = asyncio.run(s1.run_async(decide_fold))

@@ -100,6 +100,13 @@ def _verify_projection(store: Store) -> None:
         )
 
 
+def _valid_contest_stages_json() -> str:
+    """Freeze the minimal real stage contract required by contest claims."""
+    return json.dumps(
+        [{"key": "rr", "type": "round_robin", "scoring": "poker_3_1_0"}]
+    )
+
+
 def _bot(store: Store, key: str, *, game_id: str = "holdem") -> dict:
     user = store.create_user(
         f"user-{key}", f"{key}@example.test", "test-password-hash"
@@ -1301,6 +1308,7 @@ def test_dispatcher_claims_foreground_sources_and_holds_auto_outside_idle_policy
         bots[3]["user_id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -1429,6 +1437,7 @@ def test_priority_aging_auto_switch_and_contest_share(queue_store):
         organizer,
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing_one = store.add_pairing(
         contest["id"],
@@ -1753,6 +1762,7 @@ def test_idle_only_aging_and_contest_share_never_consider_auto(queue_store):
         bots[0]["user_id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairings = [
         store.add_pairing(
@@ -2910,6 +2920,7 @@ def test_contest_share_never_leaves_capacity_idle(queue_store):
         organizer,
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairings = [
         store.add_pairing(
@@ -2975,6 +2986,7 @@ def test_contest_jobs_do_not_consume_organizer_personal_queue_limits(queue_store
         organizer["id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -3023,6 +3035,15 @@ def test_contest_claim_obeys_start_and_pairing_schedule_gates(queue_store):
         bots[0]["user_id"],
         status="published",
         game_id="holdem",
+        stages_json=json.dumps(
+            [
+                {
+                    "key": "rr",
+                    "type": "round_robin",
+                    "scoring": "poker_3_1_0",
+                }
+            ]
+        ),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -3070,6 +3091,70 @@ def test_contest_claim_obeys_start_and_pairing_schedule_gates(queue_store):
     assert claimed and claimed["public_id"] == job["public_id"]
 
 
+@pytest.mark.parametrize("damaged_cursor", [0.5, -1, "bad"])
+def test_contest_claim_rejects_malformed_persisted_stage_cursor(
+    queue_store, damaged_cursor
+):
+    store = queue_store
+    bots = [_bot(store, f"cursor-claim-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "Malformed claim cursor",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps(
+            [
+                {
+                    "key": "rr",
+                    "type": "round_robin",
+                    "scoring": "poker_3_1_0",
+                    "duplicate": False,
+                    "games_per_pair": 1,
+                    "series_scoring": "independent_scoring_game_points_v1",
+                }
+            ]
+        ),
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        stage_idx=0,
+    )
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET current_stage_idx=? WHERE id=?",
+            (damaged_cursor, contest["id"]),
+        )
+
+    assert _claim(store, slots=1, units=2) is None
+    terminal = store.executions.get(job["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["terminal_reason"] == "contest_pairing_changed"
+    assert terminal["current_match_id"] is None
+    persisted_pairing = store.list_contest_pairings(contest["id"])[0]
+    assert persisted_pairing["status"] == "pending"
+    assert persisted_pairing["match_id"] is None
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM matches_index mi "
+        "JOIN matches_holdem m ON m.id=mi.id WHERE m.contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 0
 def test_public_pause_reason_is_sanitized_but_admin_keeps_diagnostic(queue_store):
     store = queue_store
     raw_reason = "Docker inspect internal operator diagnostic"
@@ -4233,7 +4318,10 @@ def test_repeated_runtime_recovery_uses_persistent_exponential_backoff(
         row = store.executions.get(job["public_id"])
         assert row["status"] == "queued"
         assert row["failure_count"] == failure_count
-        retry_at = datetime.fromisoformat(row["next_attempt_at"])
+        retry_deadline = str(row["next_attempt_at"])
+        fraction = retry_deadline.rpartition(".")[2]
+        assert len(fraction) == 6 and fraction.isdigit()
+        retry_at = datetime.fromisoformat(retry_deadline)
         observed_delay = (retry_at - before).total_seconds()
         assert expected_delay - 1 <= observed_delay <= expected_delay + 1
 
@@ -4285,6 +4373,7 @@ def test_confirmed_cleanup_preserves_manual_and_contest_failure_semantics(
         contest_bots[0]["user_id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -4369,6 +4458,7 @@ def test_human_and_contest_eventful_restart_use_source_specific_recovery(queue_s
         bots[1]["user_id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -4971,7 +5061,11 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
     store = queue_store
     bots = [_bot(store, f"dual-capacity-{index}") for index in range(6)]
     contest = store.create_contest(
-        "Dual capacity", bots[0]["user_id"], status="running", game_id="holdem"
+        "Dual capacity",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairings = [
         store.add_pairing(
@@ -5055,7 +5149,11 @@ def test_dual_official_matches_require_full_aggregate_host_budget(
     store = queue_store
     bots = [_bot(store, f"dual-host-gate-{index}") for index in range(4)]
     contest = store.create_contest(
-        "Dual host gate", bots[0]["user_id"], status="running", game_id="holdem"
+        "Dual host gate",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairings = [
         store.add_pairing(
@@ -5119,6 +5217,7 @@ def test_untracked_running_match_charges_max_profile_before_second_slot_claim(
         bots[2]["user_id"],
         status="running",
         game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],
@@ -5192,7 +5291,11 @@ def test_official_profile_waits_on_undersized_host_without_downgrade(
     pair = (_bot(store, "host-gate-a"), _bot(store, "host-gate-b"))
     _verify_projection(store)
     contest = store.create_contest(
-        "Host gate", pair[0]["user_id"], status="running", game_id="holdem"
+        "Host gate",
+        pair[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
     )
     pairing = store.add_pairing(
         contest["id"],

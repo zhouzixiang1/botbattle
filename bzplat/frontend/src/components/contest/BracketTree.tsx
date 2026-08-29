@@ -1,8 +1,9 @@
 /**
  * 淘汰赛对阵树（single_elimination 专用赛程表展示）。
  *
- * 读 contest_pairings 的 bracket_slot（standard seeding 槽位）+ match_winner，
- * 递归画树状对阵图：每轮一列，胜者高亮、连接线、轮次标题。
+ * 读 contest_pairings 的 bracket_slot（standard seeding 槽位）+ 公开 outcome，
+ * 递归画树状对阵图：每轮一列，单场权威胜者高亮、连接线、轮次标题。
+ * 普通单场 outcome 保留真平局；复式 outcome 只展示两场计分，不伪造组级胜者。
  * 大规模（如 500 人 = 9 轮 512 槽）→ 横向滚动 + 可选「折叠到指定轮次」只显示关注轮。
  *
  * bracket_slot 语义（来自 stages.py _seed_bracket）：
@@ -14,11 +15,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
 import { MatchParticipants } from '@/components/MatchParticipants'
-import { PairingResult } from '@/components/contest/pairing-result'
+import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/ui/status'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import { outcomeParticipantStates, type PublicMatchOutcome } from '@/lib/match-outcome'
 
 export interface BracketPairing extends MatchParticipantSource {
   id: number
@@ -28,8 +30,10 @@ export interface BracketPairing extends MatchParticipantSource {
   bot_b_id: number | null
   is_bye?: boolean
   match_winner?: number | null
+  outcome?: PublicMatchOutcome | null
   match_id?: string | null
   status?: string
+  display_status?: string | null
   scheduled_at?: string | null
 }
 
@@ -37,6 +41,7 @@ interface Props {
   pairings: BracketPairing[]
   /** 已完成轮数（用于默认展开到哪轮）；不传则展开全部 */
   completedRounds?: number
+  duplicate?: boolean
 }
 
 /** 排期时间格式化为紧凑的 MM-DD HH:mm（仅在展示空间有限的对阵卡里用）。 */
@@ -48,7 +53,7 @@ function fmtScheduled(iso: string | null | undefined): string | null {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-export default function BracketTree({ pairings, completedRounds }: Props) {
+export default function BracketTree({ pairings, completedRounds, duplicate = false }: Props) {
   // 按轮次分组
   const rounds = useMemo(() => {
     const byRound = new Map<number, BracketPairing[]>()
@@ -158,12 +163,13 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
               key={r.round}
               variant={r.round <= expandTo ? 'default' : 'outline'}
               size="xs"
+              className="min-h-11 sm:min-h-8"
               onClick={() => setExpandTo(r.round)}
             >
               R{r.round}
             </Button>
           ))}
-          <Button variant="ghost" size="xs" onClick={() => setExpandTo(maxRound)}>
+          <Button variant="ghost" size="xs" className="min-h-11 sm:min-h-8" onClick={() => setExpandTo(maxRound)}>
             全部
           </Button>
         </div>
@@ -203,7 +209,7 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                   onClick={() => toggleCollapse(r.round)}
                   aria-expanded={!isCollapsed}
                   aria-controls={roundPanelId}
-                  className="mb-2 w-full justify-start text-foreground hover:text-primary"
+                  className="mb-2 min-h-11 w-full justify-start text-foreground hover:text-primary sm:min-h-8"
                 >
                   {isCollapsed ? <ChevronRight aria-hidden="true" className="size-3.5" /> : <ChevronDown aria-hidden="true" className="size-3.5" />}
                   第 {r.round} 轮
@@ -212,12 +218,13 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                 {!isCollapsed && (
                   <div id={roundPanelId} className="space-y-2">
                     {r.pairings.map((p) => {
-                      const w = p.match_winner
+                      const status = effectivePairingStatus(p)
                       // 轮空由后端在裁掉 entry id 前显式派生；bot 被删也会令
                       // bot_b_id=NULL，不能据此猜成 bye。
-                      const isBye = p.is_bye === true && p.status === 'completed'
-                      const aWin = isBye || w === 0
-                      const bWin = !isBye && w === 1
+                      const isBye = p.is_bye === true && status === 'completed'
+                      const states = isBye
+                        ? ['winner', 'neutral'] as const
+                        : outcomeParticipantStates(p.outcome)
                       const scheduled = fmtScheduled(p.scheduled_at)
                       return (
                         <div
@@ -227,15 +234,12 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                             else cardRefs.current.delete(p.id)
                           }}
                           className={`rounded-lg border bg-card p-2 text-xs shadow-sm ${
-                            w != null ? 'border-primary/30' : 'border-border'
+                            status === 'completed' ? 'border-primary/30' : 'border-border'
                           }`}
                         >
                           <MatchParticipants
                             source={p}
-                            states={[
-                              aWin ? 'winner' : bWin && !isBye ? 'loser' : 'neutral',
-                              bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral',
-                            ]}
+                            states={states}
                             secondEmptyLabel={p.is_bye === true ? '轮空 (bye)' : undefined}
                             className="gap-1"
                           />
@@ -244,19 +248,20 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                             {scheduled && (
                               <span className="text-[10px] text-muted-foreground">{scheduled}</span>
                             )}
-                            {p.status && p.status !== 'completed' && (
-                              <StatusBadge status={p.status} />
+                            {status && status !== 'completed' && (
+                              <StatusBadge status={status} />
                             )}
-                            {p.status === 'completed' && (
+                            {status === 'completed' && (
                               <PairingResult pairing={p} className="text-[10px]" />
                             )}
                           </div>
-                          {p.match_id && p.status === 'completed' && (
+                          {p.match_id && status === 'completed' && (
                             <Link
                               to={`/match/${p.match_id}`}
-                              className="mt-1 block text-center text-[10px] text-primary hover:underline"
+                              aria-label={duplicate ? '查看复式回放' : '查看计分场'}
+                              className="mt-1 flex min-h-11 items-center justify-center text-center text-xs text-primary hover:underline sm:min-h-8"
                             >
-                              查看
+                              {duplicate ? '复式回放' : '查看'}
                             </Link>
                           )}
                         </div>

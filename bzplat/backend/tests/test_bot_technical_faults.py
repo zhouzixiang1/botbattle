@@ -10,19 +10,25 @@ from types import SimpleNamespace
 import pytest
 
 from bzplat.backend.crypto import hash_password
+from bzplat.backend.contests.manager import ContestManager
+from bzplat.backend.contests.series import series_rows_settled
+from bzplat.backend.contests.validation import SERIES_SCORING_INDEPENDENT
+from bzplat.backend.games import registry
 from bzplat.backend.matches.orchestrator import (
     MatchOrchestrator,
     _technical_incident_summary,
 )
+from bzplat.backend.matches.public_outcome import build_public_outcome
 from bzplat.backend.matches.runner import MatchRunner, _botzone_decide
 from bzplat.backend.runtime.binary_runner import (
+    BotCrashedError,
     BotDecisionTimeoutError,
     BotProtocolError,
     BotTechnicalError,
 )
 from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import STATUS_COMPLETED
+from bzplat.backend.store.schema import STATUS_COMPLETED, TYPE_LADDER
 from bzplat.backend.tests.execution_helpers import (
     challenge_and_start,
     human_and_start,
@@ -92,6 +98,9 @@ class _ScriptedTransport:
 
     async def stop_session(self, sid):
         self._sessions.pop(sid, None)
+
+    async def cleanup_execution(self, _execution_scope):
+        self._sessions.clear()
 
 
 @pytest.mark.parametrize(
@@ -231,6 +240,54 @@ def test_first_missing_response_stops_every_game_before_fake_completion(game_id)
     assert not [event for event in events if event["type"] == "settle"]
 
 
+def test_holdem_runtime_crash_propagates_out_of_single_game_runner():
+    events: list[dict] = []
+    runner = MatchRunner(
+        _ScriptedTransport(BotCrashedError("runtime eof")),
+        action_timeout=0.1,
+    )
+
+    with pytest.raises(BotCrashedError) as raised:
+        asyncio.run(
+            runner.run_binaries(
+                "/private/a.bin",
+                "/private/b.bin",
+                game_id="holdem",
+                on_event=lambda _kind, event: events.append(event),
+            )
+        )
+
+    assert raised.value.crashed_seat == 0
+    assert not [event for event in events if event["type"] == "match_end"]
+    assert not [event for event in events if event["type"] == "settle"]
+
+
+def test_holdem_runtime_crash_stops_duplicate_before_second_scoring_game():
+    events: list[dict] = []
+    runner = MatchRunner(
+        _ScriptedTransport(BotCrashedError("runtime eof")),
+        action_timeout=0.1,
+    )
+
+    with pytest.raises(BotCrashedError) as raised:
+        asyncio.run(
+            runner.run_duplicate(
+                "/private/a.bin",
+                "/private/b.bin",
+                game_id="holdem",
+                seed=42,
+                on_event=lambda _kind, event: events.append(event),
+            )
+        )
+
+    assert raised.value.crashed_seat == 0
+    assert raised.value.crashed_leg == 0
+    starts = [event for event in events if event["type"] == "match_start"]
+    assert starts == [{"type": "match_start", "game_id": "holdem", "leg": 0}]
+    assert not [event for event in events if event.get("leg") == 1]
+    assert not [event for event in events if event["type"] == "match_end"]
+
+
 def test_protocol_valid_but_game_illegal_move_stays_with_the_judge():
     events: list[dict] = []
     runner = MatchRunner(
@@ -310,10 +367,54 @@ class _TechnicalRunner:
         return await self._fail(**kwargs)
 
     async def run_duplicate(self, *_args, **kwargs):
+        on_event = kwargs.get("on_event")
+        if on_event is not None:
+            leg = self.exc.leg if self.exc.leg is not None else 0
+            on_event(
+                "match_start",
+                {"type": "match_start", "game_id": "holdem", "leg": leg},
+            )
         return await self._fail(**kwargs)
 
     async def run_bot_vs_human(self, *_args, **kwargs):
         return await self._fail(**kwargs)
+
+
+class _SecondGameTechnicalRunner(_TechnicalRunner):
+    """Emit one complete game plus a partial second game before failing."""
+
+    async def run_duplicate(self, *_args, **kwargs):
+        on_event = kwargs.get("on_event")
+        assert on_event is not None
+        on_event(
+            "match_start",
+            {"type": "match_start", "game_id": "holdem", "leg": 0},
+        )
+        for hand in range(70):
+            on_event("settle", {"type": "settle", "hand": hand, "leg": 0})
+        on_event(
+            "match_start",
+            {"type": "match_start", "game_id": "holdem", "leg": 1},
+        )
+        for hand in range(5):
+            on_event("settle", {"type": "settle", "hand": hand, "leg": 1})
+        return await self._fail(**kwargs)
+
+
+class _NeverStartInvalidContractRunner:
+    """Guard that records any attempt to start an invalid frozen plan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.action_timeout = 1.0
+
+    async def run_binaries(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("invalid contest contract must not start a Bot")
+
+    async def run_duplicate(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("invalid contest contract must not start a Bot")
 
 
 def _run_challenge(orch: MatchOrchestrator, bot_a: int, bot_b: int, owner: int, **kwargs):
@@ -327,6 +428,357 @@ def _run_challenge(orch: MatchOrchestrator, bot_a: int, bot_b: int, owner: int, 
         return match_id
 
     return asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("stage_patch", "match_duplicate"),
+    [
+        ({"duplicate": False}, "false"),
+        ({"duplicate": False}, True),
+        ({"duplicate": "false"}, False),
+        ({"duplicate": False, "series_scoring": "unknown"}, False),
+    ],
+)
+def test_strict_contest_execution_rejects_malformed_or_mismatched_duplicate_plan(
+    store, stage_patch, match_duplicate
+):
+    """Execution must agree with the validated stage before any Bot starts."""
+    owner, bot_a, version_a = _user_bot(store, "contracta", "holdem")
+    other, bot_b, version_b = _user_bot(store, "contractb", "holdem")
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "games_per_pair": 1,
+        "series_scoring": SERIES_SCORING_INDEPENDENT,
+        **stage_patch,
+    }
+    bindable_stage = (
+        {**stage, "series_scoring": SERIES_SCORING_INDEPENDENT}
+        if stage.get("series_scoring") == "unknown"
+        else stage
+    )
+    contest = store.create_contest(
+        "Execution contract",
+        owner["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([bindable_stage]),
+    )
+    entry_a = store.add_contest_entry(
+        contest["id"], owner["id"], bot_a["id"]
+    )
+    entry_b = store.add_contest_entry(
+        contest["id"], other["id"], bot_b["id"]
+    )
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bot_a["id"],
+        bot_b["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+        bot_a_version_id=version_a["id"],
+        bot_b_version_id=version_b["id"],
+    )
+    match = store.create_match(
+        f"invalid-contract-{pairing['id']}",
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=owner["id"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="holdem",
+        match_config={
+            "duplicate": match_duplicate,
+            "_bot_a_version_id": version_a["id"],
+            "_bot_b_version_id": version_b["id"],
+        },
+    )
+    store.bind_contest_pairing_match(
+        contest["id"],
+        pairing["id"],
+        match["id"],
+        require_execution_admission=False,
+    )
+    if bindable_stage is not stage:
+        # Simulate a damaged/imported active snapshot after a once-valid bind;
+        # the write boundary itself correctly rejects this marker today.
+        store.update_contest(contest["id"], stages_json=json.dumps([stage]))
+    runner = _NeverStartInvalidContractRunner()
+    orchestrator = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+
+    asyncio.run(
+        orchestrator._MatchOrchestrator__run_match_inner(match["id"])
+    )
+
+    persisted = store.get_match(match["id"])
+    assert persisted["status"] == "aborted"
+    assert persisted["reason"] == "invalid_match_config"
+    assert runner.calls == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["match_type", "contest_id", "bot_seats", "version"],
+)
+def test_linked_contest_identity_drift_aborts_before_any_bot_session(
+    store, corruption
+):
+    owner, bot_a, version_a = _user_bot(store, f"identity-a-{corruption}", "holdem")
+    other, bot_b, version_b = _user_bot(store, f"identity-b-{corruption}", "holdem")
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "games_per_pair": 1,
+        "duplicate": False,
+        "series_scoring": SERIES_SCORING_INDEPENDENT,
+    }
+    contest = store.create_contest(
+        f"Execution identity {corruption}",
+        owner["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )
+    entry_a = store.add_contest_entry(contest["id"], owner["id"], bot_a["id"])
+    entry_b = store.add_contest_entry(contest["id"], other["id"], bot_b["id"])
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bot_a["id"],
+        bot_b["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+        bot_a_version_id=version_a["id"],
+        bot_b_version_id=version_b["id"],
+    )
+    match_id = f"identity-drift-{corruption}"
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=owner["id"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="holdem",
+        match_config={
+            "duplicate": False,
+            "_bot_a_version_id": version_a["id"],
+            "_bot_b_version_id": version_b["id"],
+        },
+    )
+    store.bind_contest_pairing_match(
+        contest["id"],
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
+    current_config = dict(store.get_match(match_id)["match_config"])
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if corruption == "match_type":
+            connection.execute(
+                "UPDATE matches_holdem SET match_type='challenge' WHERE id=?",
+                (match_id,),
+            )
+        elif corruption == "contest_id":
+            connection.execute(
+                "UPDATE matches_holdem SET contest_id=NULL WHERE id=?",
+                (match_id,),
+            )
+        elif corruption == "bot_seats":
+            connection.execute(
+                "UPDATE matches_holdem SET bot_a_id=?,bot_b_id=? WHERE id=?",
+                (bot_b["id"], bot_a["id"], match_id),
+            )
+        else:
+            current_config["_bot_a_version_id"] = version_a["id"] + 10_000
+            connection.execute(
+                "UPDATE matches_holdem SET match_config=? WHERE id=?",
+                (json.dumps(current_config), match_id),
+            )
+
+    runner = _NeverStartInvalidContractRunner()
+    orchestrator = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+    asyncio.run(
+        orchestrator._MatchOrchestrator__run_match_inner(match_id)
+    )
+    persisted = store.get_match(match_id)
+    assert persisted["status"] == "aborted"
+    assert persisted["reason"] == "invalid_match_config"
+    assert runner.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("tag", "series_scoring", "expected_deltas"),
+    [
+        ("independent", SERIES_SCORING_INDEPENDENT, [0, 0]),
+        ("aggregate", "aggregate_match_points_v1", [1, -1]),
+    ],
+)
+def test_contest_technical_margin_is_neutral_only_for_independent_v1(
+    store, tag, series_scoring, expected_deltas
+):
+    owner, bot_a, version_a = _user_bot(
+        store, f"contest-tech-a-{tag}", "holdem"
+    )
+    other, bot_b, version_b = _user_bot(
+        store, f"contest-tech-b-{tag}", "holdem"
+    )
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "games_per_pair": 1,
+        "duplicate": False,
+        "series_scoring": series_scoring,
+    }
+    contest = store.create_contest(
+        f"Contest technical {series_scoring}",
+        owner["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )
+    entry_a = store.add_contest_entry(contest["id"], owner["id"], bot_a["id"])
+    entry_b = store.add_contest_entry(contest["id"], other["id"], bot_b["id"])
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bot_a["id"],
+        bot_b["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+        bot_a_version_id=version_a["id"],
+        bot_b_version_id=version_b["id"],
+        series_index=1,
+        series_size=1,
+    )
+    match_id = f"contest-technical-{pairing['id']}"
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=owner["id"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="holdem",
+        match_config={
+            "duplicate": False,
+            "_bot_a_version_id": version_a["id"],
+            "_bot_b_version_id": version_b["id"],
+        },
+    )
+    store.bind_contest_pairing_match(
+        contest["id"],
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
+    exc = BotProtocolError(
+        "Bot response is invalid",
+        error_code="invalid_json",
+        failed_seat=1,
+        turn=1,
+    )
+    orchestrator = MatchOrchestrator(
+        store, runner=_TechnicalRunner(exc), max_concurrent=1
+    )
+
+    asyncio.run(
+        orchestrator._MatchOrchestrator__run_match_inner(match_id)
+    )
+
+    match = store.get_match(match_id)
+    assert match["status"] == STATUS_COMPLETED
+    assert match["winner"] == 0
+    assert match["result"]["deltas"] == expected_deltas
+    standings = ContestManager(store, _NeverStartInvalidContractRunner()).standings(
+        contest["id"], stage_idx=0
+    )
+    assert [(row["points"], row["delta_total"]) for row in standings] == [
+        (3.0, expected_deltas[0]),
+        (0.0, expected_deltas[1]),
+    ]
+
+
+def test_ladder_technical_margin_preserves_rating_delta_total(store):
+    owner, bot_a, _ = _user_bot(store, "ladder-tech-a", "holdem")
+    _, bot_b, _ = _user_bot(store, "ladder-tech-b", "holdem")
+    exc = BotProtocolError(
+        "Bot response is invalid",
+        error_code="invalid_json",
+        failed_seat=1,
+        turn=1,
+    )
+    orchestrator = MatchOrchestrator(
+        store, runner=_TechnicalRunner(exc), max_concurrent=1
+    )
+
+    match_id = _run_challenge(
+        orchestrator,
+        bot_a["id"],
+        bot_b["id"],
+        owner["id"],
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+    )
+
+    assert store.get_match(match_id)["result"]["deltas"] == [1, -1]
+    assert store.get_rating(bot_a["id"], game_id="holdem")["delta_total"] == 1
+    assert store.get_rating(bot_b["id"], game_id="holdem")["delta_total"] == -1
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_holdem_runtime_crash_persists_one_authoritative_technical_game(
+    store, duplicate
+):
+    owner, bot_a, _ = _user_bot(store, f"crasha{int(duplicate)}", "holdem")
+    _, bot_b, _ = _user_bot(store, f"crashb{int(duplicate)}", "holdem")
+    runner = MatchRunner(
+        _ScriptedTransport(BotCrashedError("runtime eof")),
+        action_timeout=0.1,
+    )
+    orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+
+    match_id = _run_challenge(
+        orch,
+        bot_a["id"],
+        bot_b["id"],
+        owner["id"],
+        game_id="holdem",
+        duplicate=duplicate,
+        duplicate_seed=42 if duplicate else None,
+    )
+
+    match = store.get_match(match_id)
+    assert match["status"] == STATUS_COMPLETED
+    assert match["reason"] == "technical_loss"
+    assert match["technical_loss"] == 1
+    assert match["winner"] == 1
+    assert match["result"]["rounds_played"] == 0
+    assert match["result"]["deltas"] == [-1, 1]
+    assert "legs" not in match["result"]
+    outcome = build_public_outcome(match, registry.get("holdem"))
+    assert outcome is not None
+    assert outcome["kind"] == ("duplicate" if duplicate else "single")
+    assert outcome["planned_games"] == (2 if duplicate else 1)
+    assert outcome["completed_games"] == 1
+    assert outcome["score"] == {"wins_a": 0, "draws": 0, "wins_b": 1}
+    replay = json.loads(store.get_replay(match_id)["events_json"])
+    if duplicate:
+        assert replay[0] == {
+            "type": "match_start",
+            "game_id": "holdem",
+            "leg": 0,
+        }
+        assert replay[-1]["leg"] == 0
+        assert not [event for event in replay if event.get("leg") == 1]
 
 
 @pytest.mark.parametrize("game_id", ["holdem", "gomoku", "pencil"])
@@ -380,6 +832,8 @@ def test_protocol_fault_is_scored_technical_loss_for_every_bot_game(
     # Attributable technical losses are intentionally scored for non-contest bots.
     assert store.get_rating(bot_a["id"], game_id=game_id)["matches_played"] == 1
     assert store.get_rating(bot_b["id"], game_id=game_id)["matches_played"] == 1
+    assert store.get_rating(bot_a["id"], game_id=game_id)["delta_total"] == 1
+    assert store.get_rating(bot_b["id"], game_id=game_id)["delta_total"] == -1
     log_text = caplog.text
     for fragment in (
         f"match_id={match_id}",
@@ -423,6 +877,141 @@ def test_timeout_and_duplicate_faults_are_not_normal_completed_results(store):
     assert match["winner"] == 0
     assert "legs" not in match["result"]
     assert match["result"]["technical_incident_samples"][0]["leg"] == 1
+    replay = json.loads(store.get_replay(match_id)["events_json"])
+    assert replay[0]["type"] == "match_start"
+    assert replay[0]["leg"] == 1
+    assert replay[-1]["type"] == "match_end"
+    assert replay[-1]["leg"] == 1
+
+
+def test_duplicate_second_game_technical_progress_is_independent_and_scoreable(store):
+    owner, bot_a, _ = _user_bot(store, "duppartiala", "holdem")
+    other, bot_b, _ = _user_bot(store, "duppartialb", "holdem")
+    exc = BotDecisionTimeoutError(
+        "Bot 未在决策时限内输出完整响应行",
+        error_code="decision_timeout",
+        failed_seat=1,
+        turn=6,
+        leg=1,
+    )
+    orch = MatchOrchestrator(
+        store, runner=_SecondGameTechnicalRunner(exc), max_concurrent=1
+    )
+
+    match_id = _run_challenge(
+        orch,
+        bot_a["id"],
+        bot_b["id"],
+        owner["id"],
+        game_id="holdem",
+        duplicate=True,
+        duplicate_seed=42,
+    )
+
+    match = store.get_match(match_id)
+    assert match["status"] == STATUS_COMPLETED
+    assert match["technical_loss"] == 1
+    assert match["winner"] == 0
+    # The first game's 70 hands remain in replay, but are not borrowed by the
+    # authoritative technical scoring record for game 2.
+    assert match["result"]["rounds_played"] == 5
+    assert match["result"]["deltas"] == [1, -1]
+    assert "legs" not in match["result"]
+    outcome = build_public_outcome(match, registry.get("holdem"))
+    assert outcome is not None
+    assert outcome["completed_games"] == 1
+    assert outcome["rounds_played"] == 5
+    assert outcome["score"] == {"wins_a": 1, "draws": 0, "wins_b": 0}
+    assert outcome["games"][0]["index"] == 2
+    replay = json.loads(store.get_replay(match_id)["events_json"])
+    assert [event["leg"] for event in replay if event["type"] == "match_start"] == [0, 1]
+    assert replay[-1]["type"] == "match_end"
+    assert replay[-1]["leg"] == 1
+
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "games_per_pair": 1,
+        "duplicate": True,
+        "series_scoring": SERIES_SCORING_INDEPENDENT,
+        "scoring": "poker_3_1_0",
+    }
+    strict_result = {
+        **match["result"],
+        "deltas": [0, 0],
+        "normalized_delta": 0,
+    }
+    strict_match = {
+        **match,
+        "contest_id": 99,
+        "game_id": "holdem",
+        "match_type": "contest",
+        "result": strict_result,
+    }
+    pairing = {
+        "entry_a_id": 11,
+        "entry_b_id": 22,
+        "match_id": match_id,
+        "round_num": 1,
+        "series_index": 1,
+        "series_size": 1,
+        "match_status": "completed",
+        "match_winner": 0,
+        # ContestManager's public snapshot path now validates the complete
+        # durable pairing↔Match identity before it consumes a result.  This
+        # test runs the technical engine through a generic challenge first, so
+        # provide the production-shaped frozen contest projection explicitly
+        # for the standings half of the assertion.
+        "contest_id": 99,
+        "bot_a_id": bot_a["id"],
+        "bot_b_id": bot_b["id"],
+        "bot_a_version_id": match["match_config"]["_bot_a_version_id"],
+        "bot_b_version_id": match["match_config"]["_bot_b_version_id"],
+        "_raw_entry_a_id": 11,
+        "_raw_entry_b_id": 22,
+        "_explicit_series_marker": 1,
+        "_entry_a_user_id": owner["id"],
+        "_entry_b_user_id": other["id"],
+        "_pairing_bot_a_owner_id": owner["id"],
+        "_pairing_bot_b_owner_id": other["id"],
+        "_match_result_json": strict_result,
+        "_match_config_json": match["match_config"],
+        "_match_reason": match["reason"],
+        "_match_technical_loss": 1,
+        "_match_contest_id": 99,
+        "_match_game_id": "holdem",
+        "_match_type": "contest",
+        "_match_bot_a_id": bot_a["id"],
+        "_match_bot_b_id": bot_b["id"],
+    }
+    assert series_rows_settled(
+        stage,
+        [pairing],
+        lambda current_id: strict_match if current_id == match_id else None,
+        game_spec=registry.get("holdem"),
+    ) is True
+    standings = ContestManager(None, None).standings(
+        99,
+        contest={
+            "id": 99,
+            "game_id": "holdem",
+            "current_stage_idx": 0,
+            "stages_json": [stage],
+        },
+        entries=[
+            {"id": 11, "bot_id": bot_a["id"], "user_id": owner["id"]},
+            {"id": 22, "bot_id": bot_b["id"], "user_id": other["id"]},
+        ],
+        pairings=[pairing],
+    )
+    by_entry = {row["entry_id"]: row for row in standings}
+    assert (by_entry[11]["points"], by_entry[22]["points"]) == (3, 0)
+    assert by_entry[11]["counts"] == {
+        "encounter_groups": 1,
+        "unique_opponents": 1,
+        "match_jobs": 1,
+        "scoring_games": 1,
+    }
 
 
 def test_bot_protocol_fault_in_human_match_blames_only_the_bot(store):
@@ -450,6 +1039,7 @@ def test_bot_protocol_fault_in_human_match_blames_only_the_bot(store):
     assert match["reason"] == "protocol_error"
     assert match["winner"] == 1  # human seat wins
     assert match["technical_loss"] == 1
+    assert match["result"]["deltas"] == [-1, 1]
     # Human matches never affect the Bot's ladder rating.
     assert store.get_rating(bot["id"], game_id="gomoku")["matches_played"] == 0
 

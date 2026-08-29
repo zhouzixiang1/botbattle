@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from bzplat.backend.contests.manager import ContestManager
+from bzplat.backend.contests.validation import contest_current_stage_index
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
 from bzplat.backend.tests.execution_helpers import (
@@ -72,6 +73,106 @@ def _entry_state(store: Store, contest_id: int) -> dict[int, tuple[int, int]]:
         entry["user_id"]: (int(entry["seed"]), int(entry["eliminated"]))
         for entry in store.list_contest_entries(contest_id)
     }
+
+
+@pytest.mark.parametrize("raw", [0.5, -1, "0", True, None])
+def test_current_stage_cursor_parser_rejects_coercible_or_missing_values(raw):
+    assert (
+        contest_current_stage_index(
+            {"current_stage_idx": raw}, stage_count=1
+        )
+        is None
+    )
+    assert contest_current_stage_index({}, stage_count=1) == 0
+
+
+@pytest.mark.parametrize("corruption", ["contest_cursor", "pairing_cursor"])
+def test_malformed_stage_cursor_blocks_scoring_completion_and_force_finish(
+    tmp_path, corruption
+):
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    for entry in entries:
+        store.update_entry(
+            contest_id, entry["user_id"], eliminated=0
+        )
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": False,
+        "games_per_pair": 1,
+        "series_scoring": "independent_scoring_game_points_v1",
+    }
+    store.update_contest(
+        contest_id,
+        status="published",
+        current_stage_idx=0,
+        stages_json=json.dumps([stage]),
+    )
+    pairing = store.add_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        stage_idx=0,
+        stage_key="rr",
+    )
+    match_id = f"malformed-stage-{corruption}"
+    store.create_match(
+        match_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        owner_id=entries[0]["user_id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+        match_config={"duplicate": False},
+    )
+    store.bind_contest_pairing_match(
+        contest_id,
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        reason="completed",
+        result={"rounds_played": 70, "deltas": [100, -100]},
+    )
+    store.complete_contest_pairing_for_match(contest_id, match_id)
+    store.update_contest(contest_id, status="running")
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if corruption == "contest_cursor":
+            connection.execute(
+                "UPDATE contests SET current_stage_idx=0.5 WHERE id=?",
+                (contest_id,),
+            )
+        else:
+            connection.execute(
+                "UPDATE contest_pairings SET stage_idx=0.5 WHERE id=?",
+                (pairing["id"],),
+            )
+
+    manager = ContestManager(store, _SuccessOrch())
+    if corruption == "contest_cursor":
+        assert manager.standings(contest_id) == []
+    else:
+        assert all(row["points"] == 0 for row in manager.standings(contest_id))
+    assert manager._stage_done(contest_id, 0) is False
+    assert manager._has_unfinished_pairings(contest_id) is True
+    with pytest.raises(ValueError):
+        asyncio.run(manager.finish(contest_id))
+    asyncio.run(manager.handle_match_done(match_id, contest_id))
+    state = store.get_contest(contest_id)
+    assert state["status"] == "running"
+    assert state["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
+    store.close()
 
 
 def test_publish_pairing_batch_failure_rolls_back_state_and_rows(
@@ -630,9 +731,13 @@ def test_finished_unready_official_results_recover_atomically_after_restart(
     assert failed_state["status"] == "finished"
     assert failed_state["official_results_ready"] == 0
     assert store.list_official_results(contest_id) == []
+    public_stage_rows = store.list_stage_results(contest_id, stage_idx=0)
+    assert len(public_stage_rows) == 2
+    assert all("official_rank" not in row for row in public_stage_rows)
     store.close()  # TEMP trigger disappears: model the recovering process.
 
     recovered = Store(str(db_path))
+    assert recovered.get_match(match_id)["result"]["rounds_played"] == 70
     recovery_manager = ContestManager(recovered, _SuccessOrch())
     assert asyncio.run(recovery_manager.reconcile_running_contests()) == 1
     ready_state = recovered.get_contest(contest_id)

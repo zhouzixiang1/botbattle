@@ -202,7 +202,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     await expectNoRootOverflow(page, 'bots')
 
     await selectAdminModule(page, '对局')
-    await expect(page.getByText(/共 \d+ 局/)).toBeVisible()
+    await expect(page.getByText(/共 \d+ 条对局记录/)).toBeVisible()
     if (viewport.interactive) {
       const completedMatchesPromise = page.waitForResponse((response) => {
         const url = new URL(response.url())
@@ -220,7 +220,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
       expect(completedMatches.matches.length).toBeGreaterThan(0)
       expect(completedMatches.matches.every((match) => match.status === 'completed')).toBe(true)
       await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(completedMatches.matches.length)
-      await expect(page.getByText(/共 \d+ 局/)).toBeVisible()
+      await expect(page.getByText(/共 \d+ 条对局记录/)).toBeVisible()
 
       const abnormalMatchesPromise = page.waitForResponse((response) => {
         const url = new URL(response.url())
@@ -320,6 +320,60 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }, async () => {})
   })
 }
+
+test('admin match records show duplicate scoring games instead of treating a null winner as a draw', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ADMIN)
+  await page.route('**/api/matches?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        total: 1,
+        matches: [{
+          id: 'admin-duplicate-outcome',
+          game_id: 'holdem',
+          status: 'completed',
+          match_type: 'contest',
+          winner: null,
+          reason: 'completed',
+          contest_id: 42,
+          created_at: '2026-08-28T12:00:00+08:00',
+          bot_a_id: 41,
+          bot_b_id: 42,
+          bot_a: { id: 41, name: 'admin_alpha', owner_name: 'alpha_owner' },
+          bot_b: { id: 42, name: 'admin_beta', owner_name: 'beta_owner' },
+          outcome: {
+            kind: 'duplicate',
+            planned_games: 2,
+            completed_games: 2,
+            score: { wins_a: 1, draws: 0, wins_b: 1 },
+            rounds_played: 140,
+            normalized_delta_a: 0,
+            games: [
+              { index: 1, winner: 0, rounds_played: 70, normalized_delta_a: 70 },
+              { index: 2, winner: 1, rounds_played: 70, normalized_delta_a: -70 },
+            ],
+            termination: { kind: 'normal', reason: 'completed', loser: null },
+          },
+          result: { rounds_played: 140, deltas: [0, 0], normalized_delta: 0 },
+        }],
+      }),
+    })
+  })
+
+  await page.goto('/#/admin')
+  await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
+  await selectAdminModule(page, '对局')
+  const row = page.getByRole('table').locator('tbody tr').filter({ hasText: 'admin_alpha' })
+  const outcome = row.locator('[data-match-outcome-kind="duplicate"]')
+  await expect(outcome).toContainText('admin_alpha 1胜 · 平 0 · admin_beta 1胜')
+  await expect(row).toContainText('2/2 场计分 · 140 手')
+  await expect(outcome).toContainText('已完成 2/2 场计分')
+  await expect(outcome).toContainText('第 1 场：admin_alpha胜')
+  await expect(row).not.toContainText('平局')
+  await monitor.expectClean()
+})
 
 test('admin queue switch enables idle-only scheduling without promising immediate execution', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1144,6 +1198,16 @@ test('contest detail changes its primary content and actions with lifecycle stag
           stage_idx: 1,
           status: 'completed',
           match_winner: 0,
+          outcome: {
+            kind: 'single',
+            planned_games: 1,
+            completed_games: 1,
+            score: { wins_a: 1, draws: 0, wins_b: 0 },
+            rounds_played: 70,
+            normalized_delta_a: 1,
+            games: [{ index: 1, winner: 0, rounds_played: 70, normalized_delta_a: 1 }],
+            termination: { kind: 'normal', reason: 'completed', loser: null },
+          },
         }] : [],
         standings: finished ? [{ bot_id: 11, bot_name: 'winner_bot', points: 3, wins: 1, draws: 0, losses: 0, delta_total: 100 }] : [],
         entries_total: finished ? 1 : 0,
@@ -1170,7 +1234,7 @@ test('contest detail changes its primary content and actions with lifecycle stag
   const contestTabs = page.getByRole('tablist').first()
   expect(await contestTabs.evaluate((element) => getComputedStyle(element).overflowY)).toBe('hidden')
   await page.getByRole('tab', { name: /对阵/ }).click()
-  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: 'winner_bot 胜' })).toBeVisible()
+  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: 'winner_bot胜' })).toBeVisible()
 
   await page.goto('/#/contests/902')
   await expect(page.getByRole('tab', { name: /选手/ })).toHaveAttribute('data-state', 'active')

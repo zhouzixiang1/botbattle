@@ -16,7 +16,7 @@ export interface SeatState {
   allin: boolean
   isWinner: boolean
   lastAction?: { action: string; amount: number } | null
-  // 本手累计净盈亏（来自 settle.deltas 累加）
+  // 当前计分场累计净盈亏（复式进入第二场时归零）
   net: number
 }
 
@@ -28,14 +28,19 @@ export interface HoldemViewModel {
   totalHands: number
   /** 当前 duplicate leg（0-based）；普通对局固定为 0。 */
   leg: number
-  /** Holdem duplicate 固定两局同副牌换座；普通对局为 1。 */
+  /** Holdem duplicate 固定两场同副牌换座；普通对局为 1。 */
   totalLegs: number
   isDuplicate: boolean
-  /** 当前 leg 是否已收到 hand_start；换局的 match_start 单帧为 false。 */
+  /** 当前 leg 是否已收到 hand_start；换场的 match_start 单帧为 false。 */
   legStarted: boolean
   /** 当前可见前缀已开始/已结算的全局手数（跨 leg）。 */
   handsStarted: number
   completedHands: number
+  /** 当前计分场已开始/已结算手数，复式换场时归零。 */
+  currentGameHandsStarted: number
+  currentGameCompletedHands: number
+  /** 全部计分场按物理 Bot 座位累计的分差，仅作复式次级摘要。 */
+  combinedNets: [number, number]
   /** 当前街已处理的动作数，用于 snapshot 后继续严格推导行动权。 */
   streetActions: number
   sbSeat: number // 本手 SB（按钮）座位
@@ -82,7 +87,7 @@ export function holdemPhysicalPairForEvent<T>(values: readonly T[], event: RawEv
 export function latestHoldemHandAction(events: RawEvent[]): RawEvent | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     if (events[index]?.type === 'action') return events[index]
-    // match_start 是 duplicate 换局边界；不得穿过它沿用上一局动作。
+    // match_start 是 duplicate 换场边界；不得穿过它沿用上一场动作。
     if (events[index]?.type === 'hand_start' || events[index]?.type === 'match_start') {
       return undefined
     }
@@ -119,6 +124,9 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
   let legStarted = false
   let handsStarted = 0
   let completedHands = 0
+  let currentGameHandsStarted = 0
+  let currentGameCompletedHands = 0
+  let combinedNets: [number, number] = [0, 0]
   let streetActions = 0
   let sbSeat = 0
   let street: Street = 'preflop'
@@ -138,6 +146,15 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       if (eventLeg !== leg) {
         leg = eventLeg
         legStarted = false
+        // Public replay strips every engine-level terminal marker, but older
+        // or raw replays may still contain the previous scoring game's
+        // match_end.  A new scoring-game boundary is authoritative: never let
+        // that terminal state leak into the next game's live HUD/canvas.
+        matchOver = false
+        matchWinner = null
+        status = 'live'
+        currentGameHandsStarted = 0
+        currentGameCompletedHands = 0
         streetActions = 0
         hand = 0
         sbSeat = 0
@@ -146,12 +163,9 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
         pot = 0
         toAct = null
         lastSettle = null
-        // 换局后筹码/盲注由下一个 hand_start 权威覆盖；在两者
-        // 之间的单帧只保留跨局物理 Bot 累计值，不泄漏上局牌面。
-        const cumulativeNet: [number, number] = [seats[0].net, seats[1].net]
+        // 换场后筹码/盲注由下一个 hand_start 权威覆盖；当前场净值
+        // 必须归零，跨场合计只保存在 combinedNets 的次级摘要中。
         seats = freshSeats()
-        seats[0].net = cumulativeNet[0]
-        seats[1].net = cumulativeNet[1]
       }
     }
     switch (ev.type) {
@@ -167,6 +181,9 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
           legStarted = sub.legStarted
           handsStarted = sub.handsStarted
           completedHands = sub.completedHands
+          currentGameHandsStarted = sub.currentGameHandsStarted
+          currentGameCompletedHands = sub.currentGameCompletedHands
+          combinedNets = sub.combinedNets
           streetActions = sub.streetActions
           sbSeat = sub.sbSeat
           street = sub.street
@@ -184,6 +201,7 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       case 'hand_start': {
         legStarted = true
         handsStarted += 1
+        currentGameHandsStarted += 1
         streetActions = 0
         hand = Number(ev.hand ?? hand)
         sbSeat = holdemPhysicalSeatForEvent(ev.sb ?? 0, ev)
@@ -307,6 +325,7 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       }
       case 'settle': {
         completedHands += 1
+        currentGameCompletedHands += 1
         const rawWinners = (ev.winners as number[] | undefined) ?? []
         const winners = rawWinners.map((winner) => holdemPhysicalSeatForEvent(winner, ev))
         const deltas = holdemPhysicalPairForEvent(
@@ -329,6 +348,8 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
         seats[1].isWinner = winners.includes(1)
         seats[0].net += Number(deltas[0] ?? 0)
         seats[1].net += Number(deltas[1] ?? 0)
+        combinedNets[0] += Number(deltas[0] ?? 0)
+        combinedNets[1] += Number(deltas[1] ?? 0)
         pot = 0
         toAct = null
         lastSettle = {
@@ -344,12 +365,19 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       case 'match_end': {
         matchOver = true
         status = 'match_end'
-        // 公开 replay/live 只有平台权威 winner/reason/deltas 一套终局。
-        if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
+        // 只有正常完成的 canonical delta 才是筹码合计。技术终局的 ±1
+        // 是胜负哨兵，不能覆盖事件前缀已经归约出的本场/复式组合计筹码。
+        const normalCompletion = String(ev.reason ?? '') === 'completed'
+        if (normalCompletion && Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
           const da = Number(ev.deltas[0])
           const db = Number(ev.deltas[1])
-          seats[0].net = da
-          seats[1].net = db
+          combinedNets = [da, db]
+          // 普通对局的当前场就是整场；复式的 canonical deltas 是两场
+          // 合计，只能进入次级摘要，不能覆盖第二场已经归零重算的 net。
+          if (!isDuplicate) {
+            seats[0].net = da
+            seats[1].net = db
+          }
         }
         matchWinner = ev.winner === null || ev.winner === undefined
           ? null
@@ -387,6 +415,9 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
     legStarted,
     handsStarted,
     completedHands,
+    currentGameHandsStarted,
+    currentGameCompletedHands,
+    combinedNets,
     streetActions,
     sbSeat,
     street,

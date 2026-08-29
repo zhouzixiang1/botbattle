@@ -254,7 +254,7 @@ for (const viewport of VIEWPORTS) {
       const main = page.locator('main')
       await expect(main.getByRole('heading', { name: '排行榜', exact: true })).toBeVisible()
       await expect(main).toContainText('每款游戏独立使用 Glicko-2 数值评分')
-      await expect(main).toContainText('Rating 由 Glicko-2 根据对手实力与不确定度更新，不等于胜场累计')
+      await expect(main).toContainText('Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加')
       await expect(main).toContainText('赛事积分不进入平台 Rating')
       await expect(main.locator('[data-slot="summary-strip"]')).toHaveCount(0)
       await expect(main.getByText('Bot 总数', { exact: true })).toHaveCount(0)

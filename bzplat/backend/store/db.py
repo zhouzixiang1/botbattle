@@ -28,6 +28,8 @@ from .public_contract import (
     sanitize_public_event_prefix,
     sanitize_public_incident,
     sanitize_public_match,
+    sanitize_public_contest_tiebreaks,
+    sanitize_public_stage_result_payload,
 )
 
 from .schema import (
@@ -73,6 +75,7 @@ from .schema import (
     require_supported_binary_metadata,
 )
 from .validation import (
+    exact_nonnegative_int,
     is_authoritative_no_opponent_pairing,
     validate_contest_times,
 )
@@ -422,6 +425,13 @@ def _apply_effective_entry_ids(row: dict, *fields: tuple[str, str]) -> dict:
     return row
 
 
+def _apply_public_stage_result_payload(row: dict) -> dict:
+    """Replace the private payload envelope with its bounded public fields."""
+    payload = sanitize_public_stage_result_payload(row.pop("payload_json", None))
+    row.update(payload)
+    return row
+
+
 def _delete_comment_likes_for(
     conn: sqlite3.Connection,
     where_sql: str,
@@ -689,11 +699,11 @@ def _canonical_public_match_end(
         break
 
     winner = match.get("winner")
-    try:
-        winner = int(winner) if winner is not None else None
-    except (TypeError, ValueError):
-        winner = None
-    if winner not in (0, 1):
+    if (
+        isinstance(winner, bool)
+        or not isinstance(winner, int)
+        or winner not in (0, 1)
+    ):
         winner = None
     return {
         "type": "match_end",
@@ -886,10 +896,19 @@ def _parse_match_json_cols(m: dict | None) -> dict | None:
         raw = m.get(k)
         if isinstance(raw, str):
             try:
-                m[k] = json.loads(raw) if raw else {}
+                parsed = json.loads(raw)
             except (ValueError, TypeError):
-                m[k] = {}
-        elif m.get(k) is None:
+                parsed = {}
+                if k == "match_config":
+                    m["_match_config_malformed"] = 1
+            if k == "match_config" and not isinstance(parsed, dict):
+                m["_match_config_malformed"] = 1
+                parsed = {}
+            m[k] = parsed
+        elif raw is None:
+            m[k] = {}
+        elif k == "match_config" and not isinstance(raw, dict):
+            m["_match_config_malformed"] = 1
             m[k] = {}
     return _with_technical_incident_diagnostics(m)
 
@@ -939,6 +958,201 @@ def _technical_incident_projection_sql(alias: str = "m") -> str:
         f"WHERE mr.match_id={alias}.id AND je.type='object' "
         "AND json_extract(je.value, '$.type') "
         f"IN ({event_types})), '[]')"
+    )
+
+
+def _contest_pairing_identity_invalid_sql(alias: str = "m") -> str:
+    """SQL predicate for pairing/roster/Match identity drift.
+
+    The expression is evaluated inside a correlated ``contest_pairings cp``
+    projection.  JSON guards precede every version lookup so malformed imported
+    configuration becomes a sentinel, never a SQLite ``malformed JSON`` 500.
+    """
+    checks: list[str] = []
+    safe_stage_idx = (
+        "CASE WHEN typeof(cp.stage_idx)='integer' AND cp.stage_idx>=0 "
+        "THEN cp.stage_idx ELSE 0 END"
+    )
+    marker_path = f"'$[' || ({safe_stage_idx}) || '].series_scoring'"
+    explicit_series_marker = (
+        "CASE WHEN c.id IS NOT NULL AND json_valid(c.stages_json) "
+        f"THEN json_extract(c.stages_json,{marker_path}) END "
+        "IN ('independent_scoring_game_points_v1','aggregate_match_points_v1')"
+    )
+    for suffix in ("a", "b"):
+        entry = f"cp.entry_{suffix}_id"
+        bot = f"cp.bot_{suffix}_id"
+        version = f"cp.bot_{suffix}_version_id"
+        path = f"'$._bot_{suffix}_version_id'"
+        checks.extend(
+            (
+                # Explicit series snapshots freeze entry coordinates.  Only
+                # markerless legacy rows may recover a uniquely owned entry
+                # from the frozen Bot id.
+                f"({entry} IS NULL AND ({explicit_series_marker} OR {bot} IS NULL "
+                "OR (SELECT COUNT(*) FROM contest_entries legacy_ce "
+                "JOIN bots legacy_bot ON legacy_bot.id=legacy_ce.bot_id "
+                f"WHERE legacy_ce.contest_id=cp.contest_id AND legacy_ce.bot_id={bot} "
+                "AND legacy_ce.user_id=legacy_bot.owner_id)!=1))",
+                f"({entry} IS NOT NULL AND NOT EXISTS("
+                "SELECT 1 FROM contest_entries ce "
+                f"WHERE ce.id={entry} AND ce.contest_id=cp.contest_id))",
+                f"({entry} IS NOT NULL AND {bot} IS NOT NULL AND NOT EXISTS("
+                "SELECT 1 FROM contest_entries ce JOIN bots frozen_bot "
+                f"ON frozen_bot.id={bot} WHERE ce.id={entry} "
+                "AND ce.contest_id=cp.contest_id "
+                "AND ce.user_id=frozen_bot.owner_id))",
+                f"({version} IS NOT NULL AND (NOT json_valid({alias}.match_config) "
+                f"OR json_type({alias}.match_config,{path})!='integer' "
+                f"OR json_extract({alias}.match_config,{path})!={version}))",
+                f"({version} IS NULL AND CASE WHEN json_valid({alias}.match_config) "
+                f"THEN json_type({alias}.match_config,{path}) END IS NOT NULL)",
+            )
+        )
+    return "(" + " OR ".join(checks) + ")"
+
+
+def _contest_pairing_explicit_series_marker_sql(
+    pairing_alias: str = "p", contest_alias: str = "pairing_contest"
+) -> str:
+    """Return 1 only when the pairing's frozen stage has a known marker."""
+    safe_idx = (
+        f"CASE WHEN typeof({pairing_alias}.stage_idx)='integer' "
+        f"AND {pairing_alias}.stage_idx>=0 THEN {pairing_alias}.stage_idx ELSE 0 END"
+    )
+    path = f"'$[' || ({safe_idx}) || '].series_scoring'"
+    return (
+        f"CASE WHEN json_valid({contest_alias}.stages_json) AND "
+        f"json_extract({contest_alias}.stages_json,{path}) IN "
+        "('independent_scoring_game_points_v1','aggregate_match_points_v1') "
+        "THEN 1 ELSE 0 END"
+    )
+
+
+def _contest_stage_has_explicit_series_marker(
+    stages_json: Any, stage_idx: Any
+) -> bool | None:
+    """Return marker presence, or ``None`` for a malformed frozen stage."""
+    try:
+        stages = json.loads(stages_json) if isinstance(stages_json, str) else stages_json
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(stages, list)
+        or isinstance(stage_idx, bool)
+        or not isinstance(stage_idx, int)
+        or stage_idx < 0
+        or stage_idx >= len(stages)
+        or not isinstance(stages[stage_idx], dict)
+    ):
+        return None
+    marker = stages[stage_idx].get("series_scoring")
+    if marker is None:
+        return False
+    if marker in (
+        "independent_scoring_game_points_v1",
+        "aggregate_match_points_v1",
+    ):
+        return True
+    return None
+
+
+def _contest_expected_duplicate_projection_sql(alias: str = "m") -> str:
+    """Project a linked contest stage's scoring shape without another query.
+
+    ``NULL`` means this Match is not linked to a contest pairing.  ``0``/``1``
+    are authoritative single/duplicate expectations.  ``-1`` is deliberately
+    malformed so the public outcome builder fails closed when the pairing points
+    at a missing/non-object stage or a non-boolean ``duplicate`` value.
+    """
+    stage_path = "'$[' || cp.stage_idx || ']'"
+    duplicate_path = f"({stage_path} || '.duplicate')"
+    return (
+        "(CASE WHEN EXISTS(SELECT 1 FROM contest_pairings linked "
+        f"WHERE linked.match_id={alias}.id) THEN "
+        "(SELECT CASE "
+        f"WHEN {alias}.contest_id IS NULL "
+        f"OR cp.contest_id!={alias}.contest_id OR c.id IS NULL "
+        f"OR {alias}.match_type!='{TYPE_CONTEST}' "
+        f"OR {alias}.game_id!=c.game_id "
+        f"OR {alias}.bot_a_id IS NOT cp.bot_a_id "
+        f"OR {alias}.bot_b_id IS NOT cp.bot_b_id "
+        f"OR {_contest_pairing_identity_invalid_sql(alias)} THEN -1 "
+        "WHEN typeof(cp.stage_idx)!='integer' OR cp.stage_idx<0 THEN -1 "
+        "WHEN NOT json_valid(c.stages_json) THEN -1 "
+        f"WHEN json_type(c.stages_json, {stage_path}) IS NOT 'object' THEN -1 "
+        f"WHEN json_type(c.stages_json, {duplicate_path}) IS NULL THEN 0 "
+        f"WHEN json_type(c.stages_json, {duplicate_path}) = 'true' THEN 1 "
+        f"WHEN json_type(c.stages_json, {duplicate_path}) = 'false' THEN 0 "
+        "ELSE -1 END "
+        "FROM contest_pairings cp "
+        "LEFT JOIN contests c ON c.id=cp.contest_id "
+        f"WHERE cp.match_id={alias}.id "
+        "ORDER BY cp.id LIMIT 1) "
+        f"WHEN {alias}.contest_id IS NOT NULL THEN -1 ELSE NULL END)"
+    )
+
+
+def _contest_require_frozen_duplicate_projection_sql(alias: str = "m") -> str:
+    """Project whether linked contest scoring uses the strict v1 contract."""
+    stage_path = "'$[' || cp.stage_idx || ']'"
+    scoring_path = f"({stage_path} || '.series_scoring')"
+    return (
+        "(CASE WHEN EXISTS(SELECT 1 FROM contest_pairings linked "
+        f"WHERE linked.match_id={alias}.id) THEN "
+        "(SELECT CASE "
+        f"WHEN {alias}.contest_id IS NULL "
+        f"OR cp.contest_id!={alias}.contest_id OR c.id IS NULL "
+        f"OR {alias}.match_type!='{TYPE_CONTEST}' "
+        f"OR {alias}.game_id!=c.game_id "
+        f"OR {alias}.bot_a_id IS NOT cp.bot_a_id "
+        f"OR {alias}.bot_b_id IS NOT cp.bot_b_id "
+        f"OR {_contest_pairing_identity_invalid_sql(alias)} THEN -1 "
+        "WHEN typeof(cp.stage_idx)!='integer' OR cp.stage_idx<0 THEN -1 "
+        "WHEN NOT json_valid(c.stages_json) THEN -1 "
+        f"WHEN json_type(c.stages_json, {stage_path}) IS NOT 'object' THEN -1 "
+        f"WHEN json_type(c.stages_json, {scoring_path}) IS NULL THEN 0 "
+        f"WHEN json_type(c.stages_json, {scoring_path})!='text' THEN -1 "
+        f"WHEN json_extract(c.stages_json, {scoring_path})="
+        "'independent_scoring_game_points_v1' THEN 1 "
+        f"WHEN json_extract(c.stages_json, {scoring_path})="
+        "'aggregate_match_points_v1' THEN 0 ELSE -1 END "
+        "FROM contest_pairings cp "
+        "LEFT JOIN contests c ON c.id=cp.contest_id "
+        f"WHERE cp.match_id={alias}.id "
+        "ORDER BY cp.id LIMIT 1) "
+        f"WHEN {alias}.contest_id IS NOT NULL THEN -1 ELSE NULL END)"
+    )
+
+
+def _contest_stage_config_projection_sql(alias: str = "m") -> str:
+    """Project the linked frozen stage object for full read-side validation.
+
+    Shape/binding corruption is already represented by the sibling duplicate
+    projections' ``-1`` sentinel.  For a valid coordinate this bounded JSON
+    object lets the shared public builder reject damaged K/scoring/advance
+    fields consistently across match list/detail and contest surfaces.
+    """
+    stage_path = "'$[' || cp.stage_idx || ']'"
+    return (
+        "(CASE WHEN EXISTS(SELECT 1 FROM contest_pairings linked "
+        f"WHERE linked.match_id={alias}.id) THEN "
+        "(SELECT CASE "
+        f"WHEN {alias}.contest_id IS NULL "
+        f"OR cp.contest_id!={alias}.contest_id OR c.id IS NULL "
+        f"OR {alias}.match_type!='{TYPE_CONTEST}' "
+        f"OR {alias}.game_id!=c.game_id "
+        f"OR {alias}.bot_a_id IS NOT cp.bot_a_id "
+        f"OR {alias}.bot_b_id IS NOT cp.bot_b_id "
+        f"OR {_contest_pairing_identity_invalid_sql(alias)} THEN NULL "
+        "WHEN typeof(cp.stage_idx)!='integer' OR cp.stage_idx<0 THEN NULL "
+        "WHEN NOT json_valid(c.stages_json) THEN NULL "
+        f"WHEN json_type(c.stages_json, {stage_path}) IS NOT 'object' THEN NULL "
+        f"ELSE json_extract(c.stages_json, {stage_path}) END "
+        "FROM contest_pairings cp "
+        "LEFT JOIN contests c ON c.id=cp.contest_id "
+        f"WHERE cp.match_id={alias}.id "
+        "ORDER BY cp.id LIMIT 1) ELSE NULL END)"
     )
 
 
@@ -1010,9 +1224,14 @@ def _loads_json(raw: str | None, *, default: Any) -> Any:
 def _contest_stage_type(stages_json: str | None, stage_idx: int) -> object:
     """Resolve one persisted stage type without guessing from keys/templates."""
     stages = _loads_json(stages_json, default=[])
-    if not isinstance(stages, list) or not 0 <= int(stage_idx) < len(stages):
+    stage_idx = exact_nonnegative_int(stage_idx)
+    if (
+        not isinstance(stages, list)
+        or stage_idx is None
+        or stage_idx >= len(stages)
+    ):
         return None
-    stage = stages[int(stage_idx)]
+    stage = stages[stage_idx]
     return stage.get("type") if isinstance(stage, dict) else None
 
 
@@ -3627,7 +3846,7 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             continue
         _spec = _game_registry.get(_gid)
         for _match_row in conn.execute(
-            f"SELECT id,status,winner,result FROM {_tbl}"
+            f"SELECT id,status,winner,technical_loss,result FROM {_tbl}"
         ).fetchall():
             _raw_text = _match_row["result"]
             try:
@@ -3637,6 +3856,10 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             if not isinstance(_raw_result, dict):
                 _raw_result = {}
 
+            _has_legacy_rounds = (
+                "rounds_played" in _raw_result
+                or "hands_played" in _raw_result
+            )
             _rounds_candidate = _raw_result.get(
                 "rounds_played", _raw_result.get("hands_played", 0)
             )
@@ -3646,6 +3869,25 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
                 or _rounds_candidate < 0
             ):
                 _rounds_candidate = 0
+            elif (
+                not _has_legacy_rounds
+                and _match_row["status"] == STATUS_COMPLETED
+                and _match_row["technical_loss"] in (0, False)
+                and _spec.fixed_rounds_per_match is not None
+            ):
+                # Old normal Holdem rows predate the public progress field.  A
+                # missing value has one unambiguous GameSpec default; explicit
+                # zero/malformed values remain untouched and fail closed.  A
+                # legacy duplicate stores two physical games in ``legs``.
+                _legacy_legs = _raw_result.get("legs")
+                _game_count = (
+                    len(_legacy_legs)
+                    if isinstance(_legacy_legs, list) and _legacy_legs
+                    else 1
+                )
+                _rounds_candidate = (
+                    _spec.fixed_rounds_per_match * _game_count
+                )
 
             try:
                 _migrated_deltas = _canonical_deltas(_raw_result.get("deltas"))
@@ -4535,13 +4777,20 @@ class Store:
         with self._tx() as c:
             sel = (
                 "m.id, m.game_id, m.status, m.winner, m.reason, "
+                "m.technical_loss, m.result, m.match_config, "
                 "m.match_type, m.contest_id, m.created_at, "
                 "m.bot_a_id, m.bot_b_id, m.human_user_id, m.human_seat, "
                 "ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display, "
                 "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
                 "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
-                "hu.username AS human_user_name, hu.display_name AS human_user_display"
+                "hu.username AS human_user_name, hu.display_name AS human_user_display, "
+                f"{_contest_expected_duplicate_projection_sql('m')} "
+                "AS _contest_expected_duplicate, "
+                f"{_contest_require_frozen_duplicate_projection_sql('m')} "
+                "AS _contest_require_frozen_duplicate, "
+                f"{_contest_stage_config_projection_sql('m')} "
+                "AS _contest_stage_config_json"
             )
             join_bots = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
@@ -4570,7 +4819,10 @@ class Store:
             if game_id:
                 tbl = _matches_table(game_id)
                 sql = f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql} ORDER BY m.created_at DESC LIMIT ?"
-                return [_row(r) for r in c.execute(sql, params + [lim])]
+                return [
+                    _parse_match_json_cols(_row(r))
+                    for r in c.execute(sql, params + [lim])
+                ]
 
             # 跨游戏 UNION ALL
             subselects = []
@@ -4581,7 +4833,12 @@ class Store:
             sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ?"
             # 子查询数 = 已注册游戏数，WHERE 参数须按此倍数复制（每个子查询一份）。
             # 不得硬编码 * 3——新增第 4 游戏会触发 Incorrect number of bindings。
-            return [_row(r) for r in c.execute(sql, params * len(_all_game_ids()) + [lim])]
+            return [
+                _parse_match_json_cols(_row(r))
+                for r in c.execute(
+                    sql, params * len(_all_game_ids()) + [lim]
+                )
+            ]
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._tx() as c:
@@ -7415,15 +7672,15 @@ class Store:
                 row["starts_at"] is not None
                 or row["ends_at"] is not None
                 or row["rest_ends_at"] is not None
-                or int(row["current_stage_idx"] or 0) != 0
-                or int(row["official_results_ready"] or 0) != 0
+                or exact_nonnegative_int(row["current_stage_idx"]) != 0
+                or exact_nonnegative_int(row["official_results_ready"]) != 0
             ):
                 raise ValueError(f"赛事 {contest_id} 已进入赛程，禁止迁移")
             stages = _loads_json(row["stages_json"], default=None)
             if not isinstance(stages, list) or not stages:
                 raise ValueError(f"赛事 {contest_id} 阶段配置无效，禁止迁移")
-            current_stage_idx = int(row["current_stage_idx"] or 0)
-            if current_stage_idx < 0 or current_stage_idx >= len(stages):
+            current_stage_idx = exact_nonnegative_int(row["current_stage_idx"])
+            if current_stage_idx is None or current_stage_idx >= len(stages):
                 raise ValueError(f"赛事 {contest_id} 当前阶段越界，禁止迁移")
 
             entry_rows = c.execute(
@@ -9766,24 +10023,45 @@ class Store:
                 self._attach_rating_settlement_state_tx(c, result)
             return result
 
-    def get_match_detailed(self, match_id: str) -> dict | None:
+    def get_match_detailed(
+        self,
+        match_id: str,
+        *,
+        include_replay_incidents: bool = True,
+    ) -> dict | None:
         """get_match + JOIN bots(ba/bb 名/display) + users(owner 名/display)。
         统一观赛/回放页座位身份显示用（bot_a/bot_b 各含 name/display_name +
         owner_name/owner_display）。人类对局(match_type=human)时 bot_a_id==bot_b_id
         复用同一 bot 行——人类侧靠 human_seat 区分（api 层标 is_human）。
+
+        Public metadata callers pass ``include_replay_incidents=False`` so
+        outcome rendering never opens ``match_replays.events_json``.  The
+        opt-in default preserves the older diagnostics Store contract for
+        internal/admin readers until those callers migrate explicitly.
         """
         with self._tx() as c:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
+            replay_projection = (
+                f", {_technical_incident_projection_sql('m')} "
+                "AS _replay_incident_events_json"
+                if include_replay_incidents
+                else ""
+            )
             sel = (
                 "m.*, "
                 "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
                 "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
                 "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
-                f"{_technical_incident_projection_sql('m')} "
-                "AS _replay_incident_events_json"
+                f"{_contest_expected_duplicate_projection_sql('m')} "
+                "AS _contest_expected_duplicate, "
+                f"{_contest_require_frozen_duplicate_projection_sql('m')} "
+                "AS _contest_require_frozen_duplicate, "
+                f"{_contest_stage_config_projection_sql('m')} "
+                "AS _contest_stage_config_json"
+                f"{replay_projection}"
             )
             sql = (
                 f"SELECT {sel} FROM {tbl} m "
@@ -9991,6 +10269,12 @@ class Store:
                 "ub.display_name AS bot_b_owner_display, "
                 "hu.username AS human_user_name, "
                 "hu.display_name AS human_user_display, "
+                f"{_contest_expected_duplicate_projection_sql('m')} "
+                "AS _contest_expected_duplicate, "
+                f"{_contest_require_frozen_duplicate_projection_sql('m')} "
+                "AS _contest_require_frozen_duplicate, "
+                f"{_contest_stage_config_projection_sql('m')} "
+                "AS _contest_stage_config_json, "
                 f"{_technical_incident_projection_sql('m')} "
                 "AS _replay_incident_events_json"
             )
@@ -10060,14 +10344,21 @@ class Store:
         lim = max(1, min(limit, 50))
         with self._tx() as c:
             sel = (
-                "m.id, m.game_id, m.status, m.winner, m.likes_count, "
+                "m.id, m.game_id, m.status, m.winner, m.reason, "
+                "m.technical_loss, m.result, m.match_config, m.likes_count, "
                 "m.views_count, m.created_at, m.match_type, m.contest_id, "
                 "m.bot_a_id, m.bot_b_id, m.human_user_id, m.human_seat, "
                 "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
                 "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
                 "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
-                "hu.username AS human_user_name, hu.display_name AS human_user_display"
+                "hu.username AS human_user_name, hu.display_name AS human_user_display, "
+                f"{_contest_expected_duplicate_projection_sql('m')} "
+                "AS _contest_expected_duplicate, "
+                f"{_contest_require_frozen_duplicate_projection_sql('m')} "
+                "AS _contest_require_frozen_duplicate, "
+                f"{_contest_stage_config_projection_sql('m')} "
+                "AS _contest_stage_config_json"
             )
             join = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
@@ -10083,7 +10374,10 @@ class Store:
                 subs.append(f"SELECT {sel} FROM {tbl} m {join} {where}")
             union = " UNION ALL ".join(subs)
             sql = f"SELECT * FROM ({union}) ORDER BY likes_count DESC, views_count DESC LIMIT ?"
-            return [_row(r) for r in c.execute(sql, (lim,))]
+            return [
+                _parse_match_json_cols(_row(r))
+                for r in c.execute(sql, (lim,))
+            ]
 
     # ── match_replays ─────────────────────────────────────────
 
@@ -12011,6 +12305,9 @@ class Store:
         validate_contest_times(
             registration_opens_at, registration_closes_at, starts_at
         )
+        current_stage_idx = exact_nonnegative_int(current_stage_idx)
+        if current_stage_idx is None:
+            raise ValueError("赛事当前阶段必须是非负整数")
         gid = _registered_game_id(game_id)
         with self._tx() as c:
             contract = _active_game_contract_tx(c, gid)
@@ -12136,6 +12433,16 @@ class Store:
             "require_real_name",
         }
         clean = {k: v for k, v in fields.items() if k in allowed}
+        if "current_stage_idx" in clean:
+            stage_idx = exact_nonnegative_int(clean["current_stage_idx"])
+            if stage_idx is None:
+                raise ValueError("赛事当前阶段必须是非负整数")
+            clean["current_stage_idx"] = stage_idx
+        if "official_results_ready" in clean:
+            ready = exact_nonnegative_int(clean["official_results_ready"])
+            if ready not in (0, 1):
+                raise ValueError("正式名次就绪标记必须是 0 或 1")
+            clean["official_results_ready"] = ready
         sets = [f"{k}=?" for k in clean]
         vals = list(clean.values())
         with self._tx() as c:
@@ -12216,7 +12523,15 @@ class Store:
         expected_stages_json: str,
         stages_json: str,
     ) -> dict:
-        """Replace one draft/open stage snapshot behind a no-schedule CAS gate."""
+        """Replace one draft/open stage snapshot behind a zero-progress CAS gate.
+
+        A pairing is not the only durable proof that a contest has started.  A
+        dispatcher may already have created an execution job or Match, and a
+        damaged/imported history may retain stage/official results without its
+        pairing row.  Recheck every execution/result surface in the same
+        ``BEGIN IMMEDIATE`` transaction as the stage update so a settings patch
+        can never rewrite the rules underneath such progress.
+        """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             current = c.execute(
@@ -12233,11 +12548,47 @@ class Store:
                 or str(current["stages_json"] or "[]") != expected_stages_json
             ):
                 raise ValueError("赛事系列设置已被并发修改，请刷新后重试")
-            if c.execute(
-                "SELECT 1 FROM contest_pairings WHERE contest_id=? LIMIT 1",
-                (contest_id,),
-            ).fetchone():
-                raise ValueError("赛事已生成赛程，不能修改系列设置")
+            if (
+                exact_nonnegative_int(current["current_stage_idx"]) != 0
+                or exact_nonnegative_int(current["official_results_ready"]) != 0
+            ):
+                raise ValueError("赛事已有阶段或正式结果进度，不能修改系列设置")
+            progress_exists = any(
+                (
+                    c.execute(
+                        "SELECT 1 FROM contest_pairings "
+                        "WHERE contest_id=? LIMIT 1",
+                        (contest_id,),
+                    ).fetchone(),
+                    c.execute(
+                        "SELECT 1 FROM execution_jobs "
+                        "WHERE contest_id=? LIMIT 1",
+                        (contest_id,),
+                    ).fetchone(),
+                    c.execute(
+                        "SELECT 1 FROM contest_stage_results "
+                        "WHERE contest_id=? LIMIT 1",
+                        (contest_id,),
+                    ).fetchone(),
+                    c.execute(
+                        "SELECT 1 FROM contest_official_results "
+                        "WHERE contest_id=? LIMIT 1",
+                        (contest_id,),
+                    ).fetchone(),
+                    *(
+                        c.execute(
+                            f"SELECT 1 FROM {_matches_table(game_id)} "
+                            "WHERE contest_id=? LIMIT 1",
+                            (contest_id,),
+                        ).fetchone()
+                        for game_id in _all_game_ids()
+                    ),
+                )
+            )
+            if progress_exists:
+                raise ValueError(
+                    "赛事已生成赛程、执行任务、对局或结果，不能修改系列设置"
+                )
             changed = c.execute(
                 "UPDATE contests SET stages_json=? "
                 "WHERE id=? AND status=? AND stages_json=?",
@@ -12273,6 +12624,9 @@ class Store:
             raise ValueError(
                 f"published 赛事不能修改字段: {', '.join(sorted(unknown))}"
             )
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
         plans = sorted(
             (
                 int(row["id"]),
@@ -12293,7 +12647,7 @@ class Store:
                 return None
             if current["status"] != CONTEST_PUBLISHED:
                 raise ValueError("仅排期已发布赛事可以重排待开赛对局")
-            if int(current["current_stage_idx"] or 0) != int(stage_idx):
+            if exact_nonnegative_int(current["current_stage_idx"]) != stage_idx:
                 raise ValueError("赛事当前阶段已变化，拒绝重排")
             if c.execute(
                 "SELECT 1 FROM contest_pairings "
@@ -12589,7 +12943,8 @@ class Store:
         """组织者/admin 删除名册；状态复核与 DELETE 同一事务。"""
         with self._tx() as c:
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,game_id,stages_json FROM contests WHERE id=?",
+                (contest_id,),
             ).fetchone()
             if not contest:
                 raise ValueError("赛事不存在")
@@ -12603,6 +12958,14 @@ class Store:
 
     def update_entry(self, contest_id: int, user_id: int, **fields: Any) -> dict | None:
         allowed = {"bot_id", "group_id", "seed", "eliminated", "dispatched_at"}
+        if "eliminated" in fields:
+            eliminated = fields["eliminated"]
+            if (
+                isinstance(eliminated, bool)
+                or not isinstance(eliminated, int)
+                or eliminated not in (0, 1)
+            ):
+                raise ValueError("eliminated 仅允许整数 0 或 1")
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
@@ -12673,6 +13036,9 @@ class Store:
         series_index: int = 1,
         series_size: int = 1,
     ) -> dict:
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
         series_index, series_size = _pairing_series_fields(
             {"series_index": series_index, "series_size": series_size}
         )
@@ -12754,6 +13120,12 @@ class Store:
         """
         if not pairing_rows:
             raise ValueError("赛事阶段对阵批次不能为空")
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_current_stage_idx = exact_nonnegative_int(
+            expected_current_stage_idx
+        )
+        if stage_idx is None or expected_current_stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
         columns = (
             "contest_id",
             "round_num",
@@ -12789,8 +13161,8 @@ class Store:
                 raise ValueError("赛事不存在")
             if contest["status"] in (CONTEST_FINISHED, CONTEST_CANCELLED):
                 raise ValueError("终态赛事不能生成新阶段对阵")
-            current_idx = int(contest["current_stage_idx"] or 0)
-            if current_idx != int(expected_current_stage_idx):
+            current_idx = exact_nonnegative_int(contest["current_stage_idx"])
+            if current_idx is None or current_idx != expected_current_stage_idx:
                 raise ValueError("赛事当前阶段已变化，拒绝重复生成对阵")
             if stage_idx not in (current_idx, current_idx + 1):
                 raise ValueError("赛事阶段只能生成当前阶段或紧邻的下一阶段")
@@ -12896,6 +13268,12 @@ class Store:
         """
         if not pairing_rows:
             raise ValueError("赛事轮次对阵批次不能为空")
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_current_stage_idx = exact_nonnegative_int(
+            expected_current_stage_idx
+        )
+        if stage_idx is None or expected_current_stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
         normalized_series = _pairing_series_batch(pairing_rows)
         previous_round = int(expected_previous_max_round)
         target_round = previous_round + 1
@@ -12938,11 +13316,12 @@ class Store:
                 raise ValueError("赛事不存在")
             if contest["status"] != CONTEST_RUNNING:
                 raise ValueError("仅运行中的赛事可追加后续轮次")
-            if int(contest["current_stage_idx"] or 0) != int(
-                expected_current_stage_idx
+            if (
+                exact_nonnegative_int(contest["current_stage_idx"])
+                != expected_current_stage_idx
             ):
                 raise ValueError("赛事当前阶段已变化，拒绝追加轮次")
-            if int(stage_idx) != int(expected_current_stage_idx):
+            if stage_idx != expected_current_stage_idx:
                 raise ValueError("只能向赛事当前阶段追加轮次")
 
             round_state = c.execute(
@@ -13014,14 +13393,32 @@ class Store:
         with self._tx() as c:
             sql = (
                 "SELECT p.*, legacy_a.entry_id AS _effective_entry_a_id, "
-                "legacy_b.entry_id AS _effective_entry_b_id "
+                "legacy_b.entry_id AS _effective_entry_b_id, "
+                "p.entry_a_id AS _raw_entry_a_id, "
+                "p.entry_b_id AS _raw_entry_b_id, "
+                + _contest_pairing_explicit_series_marker_sql()
+                + " AS _explicit_series_marker, "
+                "ea.user_id AS _entry_a_user_id, "
+                "eb.user_id AS _entry_b_user_id, "
+                "ba.owner_id AS _pairing_bot_a_owner_id, "
+                "bb.owner_id AS _pairing_bot_b_owner_id "
                 "FROM contest_pairings p "
+                "LEFT JOIN contests pairing_contest "
+                "ON pairing_contest.id=p.contest_id "
                 f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
                 "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
                 "AND p.contest_id=legacy_a.contest_id "
                 f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
                 "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
                 "AND p.contest_id=legacy_b.contest_id "
+                "LEFT JOIN contest_entries ea "
+                "ON ea.id=COALESCE(p.entry_a_id,legacy_a.entry_id) "
+                "AND ea.contest_id=p.contest_id "
+                "LEFT JOIN contest_entries eb "
+                "ON eb.id=COALESCE(p.entry_b_id,legacy_b.entry_id) "
+                "AND eb.contest_id=p.contest_id "
+                "LEFT JOIN bots ba ON ba.id=p.bot_a_id "
+                "LEFT JOIN bots bb ON bb.id=p.bot_b_id "
                 "WHERE p.contest_id=?"
             )
             params: list[Any] = [contest_id]
@@ -13039,6 +13436,56 @@ class Store:
             ]
 
     list_contest_pairings = list_pairings
+
+    def get_contest_pairing_for_match(self, match_id: str) -> dict | None:
+        """Return the unique frozen contest pairing linked to one Match.
+
+        Execution validation cannot trust the Match's own ``contest_id`` or
+        ``match_type``: those are exactly the imported fields it is checking.
+        Resolve by the pairing table's unique ``match_id`` instead and project
+        the same roster/owner evidence used by standings and public APIs.
+        """
+        if not isinstance(match_id, str) or not match_id:
+            return None
+        with self._tx() as c:
+            sql = (
+                "SELECT p.*, legacy_a.entry_id AS _effective_entry_a_id, "
+                "legacy_b.entry_id AS _effective_entry_b_id, "
+                "p.entry_a_id AS _raw_entry_a_id, "
+                "p.entry_b_id AS _raw_entry_b_id, "
+                + _contest_pairing_explicit_series_marker_sql()
+                + " AS _explicit_series_marker, "
+                "ea.user_id AS _entry_a_user_id, "
+                "eb.user_id AS _entry_b_user_id, "
+                "ba.owner_id AS _pairing_bot_a_owner_id, "
+                "bb.owner_id AS _pairing_bot_b_owner_id "
+                "FROM contest_pairings p "
+                "LEFT JOIN contests pairing_contest "
+                "ON pairing_contest.id=p.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
+                "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
+                "AND p.contest_id=legacy_a.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
+                "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
+                "AND p.contest_id=legacy_b.contest_id "
+                "LEFT JOIN contest_entries ea "
+                "ON ea.id=COALESCE(p.entry_a_id,legacy_a.entry_id) "
+                "AND ea.contest_id=p.contest_id "
+                "LEFT JOIN contest_entries eb "
+                "ON eb.id=COALESCE(p.entry_b_id,legacy_b.entry_id) "
+                "AND eb.contest_id=p.contest_id "
+                "LEFT JOIN bots ba ON ba.id=p.bot_a_id "
+                "LEFT JOIN bots bb ON bb.id=p.bot_b_id "
+                "WHERE p.match_id=? ORDER BY p.id LIMIT 1"
+            )
+            raw = c.execute(sql, (match_id,)).fetchone()
+            if raw is None:
+                return None
+            return _apply_effective_entry_ids(
+                _row(raw),
+                ("entry_a_id", "_effective_entry_a_id"),
+                ("entry_b_id", "_effective_entry_b_id"),
+            )
 
     def delete_unstarted_contest_pairings(
         self, contest_id: int, pairing_ids: list[int]
@@ -13080,6 +13527,9 @@ class Store:
         ``BEGIN IMMEDIATE`` 后再比对一次，阻止多进程/外部写在
         check→replace 窗口中被覆盖。
         """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
         expected_ids = sorted({int(pairing_id) for pairing_id in expected_existing_ids})
         normalized_series = _pairing_series_batch(pairing_rows)
         columns = (
@@ -13114,7 +13564,7 @@ class Store:
             ).fetchone()
             if not contest or contest["status"] != CONTEST_PUBLISHED:
                 raise ValueError("published 赛事状态已变化，拒绝重建对阵")
-            if int(contest["current_stage_idx"] or 0) != int(stage_idx):
+            if exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx:
                 raise ValueError("published 赛事当前阶段已变化，拒绝重建对阵")
             stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
 
@@ -13212,13 +13662,30 @@ class Store:
         params: tuple[int, ...] = (
             (contest_id,) if stage_idx is None else (contest_id, stage_idx)
         )
-        result_projection = "m.created_at AS _match_created_at"
+        result_projection = (
+            "m.created_at AS _match_created_at, "
+            "m.id AS _match_id, "
+            "m.contest_id AS _match_contest_id, "
+            "m.game_id AS _match_game_id, "
+            "m.match_type AS _match_type, "
+            "m.bot_a_id AS _match_bot_a_id, "
+            "m.bot_b_id AS _match_bot_b_id"
+        )
         if include_result:
-            result_projection += ", m.result AS _match_result_json"
+            result_projection += (
+                ", m.result AS _match_result_json, "
+                "m.match_config AS _match_config_json, "
+                "m.reason AS _match_reason, "
+                "m.technical_loss AS _match_technical_loss"
+            )
         rows = c.execute(
             "SELECT p.*, "
             "COALESCE(p.entry_a_id, legacy_a.entry_id) AS _effective_entry_a_id, "
             "COALESCE(p.entry_b_id, legacy_b.entry_id) AS _effective_entry_b_id, "
+            "p.entry_a_id AS _raw_entry_a_id, "
+            "p.entry_b_id AS _raw_entry_b_id, "
+            + _contest_pairing_explicit_series_marker_sql()
+            + " AS _explicit_series_marker, "
             "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
             "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
             "COALESCE(ua.username,eua.username) AS owner_a_name, "
@@ -13227,24 +13694,32 @@ class Store:
             "COALESCE(ub.display_name,eub.display_name) AS owner_b_display, "
             "m.winner AS match_winner, m.status AS match_status, "
             "m.started_at AS started_at, m.ended_at AS ended_at, "
+            "ea.user_id AS _entry_a_user_id, "
+            "eb.user_id AS _entry_b_user_id, "
+            "ba.owner_id AS _pairing_bot_a_owner_id, "
+            "bb.owner_id AS _pairing_bot_b_owner_id, "
             + result_projection
             + " FROM contest_pairings p "
+            "LEFT JOIN contests pairing_contest "
+            "ON pairing_contest.id=p.contest_id "
             "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
             "LEFT JOIN bots bb ON p.bot_b_id=bb.id "
             "LEFT JOIN users ua ON ba.owner_id=ua.id "
             "LEFT JOIN users ub ON bb.owner_id=ub.id "
-            "LEFT JOIN contest_entries ea ON p.entry_a_id=ea.id "
-            "AND ea.contest_id=p.contest_id "
-            "LEFT JOIN contest_entries eb ON p.entry_b_id=eb.id "
-            "AND eb.contest_id=p.contest_id "
-            "LEFT JOIN users eua ON ea.user_id=eua.id "
-            "LEFT JOIN users eub ON eb.user_id=eub.id "
             f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
             "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
             "AND p.contest_id=legacy_a.contest_id "
             f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
             "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
             "AND p.contest_id=legacy_b.contest_id "
+            "LEFT JOIN contest_entries ea "
+            "ON COALESCE(p.entry_a_id,legacy_a.entry_id)=ea.id "
+            "AND ea.contest_id=p.contest_id "
+            "LEFT JOIN contest_entries eb "
+            "ON COALESCE(p.entry_b_id,legacy_b.entry_id)=eb.id "
+            "AND eb.contest_id=p.contest_id "
+            "LEFT JOIN users eua ON ea.user_id=eua.id "
+            "LEFT JOIN users eub ON eb.user_id=eub.id "
             f"LEFT JOIN {tbl} m ON p.match_id=m.id "
             "WHERE p.contest_id=? "
             + stage_filter
@@ -13269,13 +13744,24 @@ class Store:
             gid = _registered_game_id(contest["game_id"] if contest else None)
             return self._contest_bracket_tx(c, contest_id, gid)
 
-    def contest_live_snapshot(self, contest_id: int) -> dict[str, Any] | None:
-        """Return one transactionally consistent, replay-free live projection input.
+    def contest_projection_snapshot(
+        self,
+        contest_id: int,
+        *,
+        stage_idx: int | None = None,
+        current_stage_only: bool = False,
+        include_entries: bool = True,
+        include_entry_identity: bool = False,
+        identity_viewer_user_id: int | None = None,
+        identity_viewer_is_admin: bool = False,
+        include_stage_results: bool = False,
+    ) -> dict[str, Any] | None:
+        """Return one replay-free contest read snapshot with compact results.
 
-        The fixed three SELECTs are independent of pairing count: contest state,
-        current-stage pairings joined with compact Match results, then the frozen
-        roster needed for standings.  Explicit ``BEGIN`` makes those reads one
-        SQLite snapshot even when another process advances a stage concurrently.
+        Query count is constant in pairing count: contest, one joined pairing
+        query, optionally one frozen-roster query, and optionally one persisted
+        stage-results query. Private result/identity columns are consumed by
+        domain projection and never cross the public allowlist.
         """
         with self._tx() as c:
             c.execute("BEGIN")
@@ -13284,7 +13770,29 @@ class Store:
             )
             if contest is None:
                 return None
-            stage_idx = int(contest.get("current_stage_idx") or 0)
+            include_entry_identity = bool(
+                include_entry_identity
+                and int(contest.get("require_real_name") or 0)
+                and (
+                    identity_viewer_is_admin
+                    or (
+                        identity_viewer_user_id is not None
+                        and int(contest.get("organizer_id") or 0)
+                        == int(identity_viewer_user_id)
+                    )
+                )
+            )
+            if current_stage_only:
+                if stage_idx is not None:
+                    raise ValueError("current_stage_only 与 stage_idx 不能同时指定")
+                raw_current_stage = contest.get("current_stage_idx", 0)
+                stage_idx = (
+                    raw_current_stage
+                    if isinstance(raw_current_stage, int)
+                    and not isinstance(raw_current_stage, bool)
+                    and raw_current_stage >= 0
+                    else -1
+                )
             pairings = self._contest_bracket_tx(
                 c,
                 contest_id,
@@ -13292,18 +13800,94 @@ class Store:
                 stage_idx=stage_idx,
                 include_result=True,
             )
-            entries = [
-                _row(row)
-                for row in c.execute(
-                    "SELECT e.id,e.bot_id,e.user_id,e.seed,e.group_id,e.eliminated,"
-                    "b.name AS bot_name,b.display_name AS bot_display "
-                    "FROM contest_entries e "
-                    "LEFT JOIN bots b ON b.id=e.bot_id "
-                    "WHERE e.contest_id=? ORDER BY e.registered_at,e.id",
-                    (contest_id,),
-                ).fetchall()
-            ]
-            return {"contest": contest, "pairings": pairings, "entries": entries}
+            entries: list[dict[str, Any]] = []
+            if include_entries:
+                identity_columns = ""
+                identity_join = ""
+                if include_entry_identity:
+                    gate = "COALESCE(identity_gate.require_real_name,0)=1"
+                    identity_columns = (
+                        ", identity_gate.require_real_name AS _identity_required, "
+                        + _contest_identity_projection_sql(gate_sql=gate)
+                    )
+                    identity_join = (
+                        "JOIN contests identity_gate "
+                        "ON identity_gate.id=e.contest_id "
+                    )
+                entries_sql = (
+                    "SELECT e.id,e.contest_id,e.bot_id,e.user_id,e.registered_at,"
+                    "e.seed,e.group_id,e.eliminated,e.dispatched_at,"
+                    "b.name AS bot_name,b.display_name AS bot_display,"
+                    "b.game_id,u.username AS username,u.username AS owner_name,"
+                    "u.display_name AS owner_display"
+                    + identity_columns
+                    + " FROM contest_entries e "
+                    + identity_join
+                    + "LEFT JOIN bots b ON b.id=e.bot_id "
+                    "LEFT JOIN users u ON u.id=e.user_id "
+                    "WHERE e.contest_id=? ORDER BY e.seed,e.registered_at,e.id"
+                )
+                entries = [
+                    _row(row)
+                    for row in c.execute(
+                        entries_sql,
+                        (contest_id,),
+                    ).fetchall()
+                ]
+                for entry in entries:
+                    identity_required = bool(
+                        int(entry.pop("_identity_required", 0) or 0)
+                    )
+                    if not identity_required:
+                        for field in (
+                            *_CONTEST_IDENTITY_PROFILE_FIELDS,
+                            "identity_source",
+                            "identity_captured_at",
+                            "identity_complete",
+                        ):
+                            entry.pop(field, None)
+            stage_results: list[dict[str, Any]] = []
+            if include_stage_results:
+                stage_results = [
+                    _apply_public_stage_result_payload(
+                        _apply_effective_entry_ids(
+                            _row(row), ("entry_id", "_effective_entry_id")
+                        )
+                    )
+                    for row in c.execute(
+                        "SELECT result.*, legacy.entry_id AS _effective_entry_id, "
+                        "b.name AS bot_name,b.display_name AS bot_display "
+                        "FROM contest_stage_results result "
+                        "LEFT JOIN bots b ON b.id=result.bot_id "
+                        f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy "
+                        "ON result.entry_id IS NULL AND result.bot_id=legacy.bot_id "
+                        "AND result.contest_id=legacy.contest_id "
+                        "WHERE result.contest_id=? "
+                        "ORDER BY result.stage_idx,result.points DESC,"
+                        "result.delta_total DESC",
+                        (contest_id,),
+                    ).fetchall()
+                ]
+            return {
+                "contest": contest,
+                "pairings": pairings,
+                "entries": entries,
+                "stage_results": stage_results,
+            }
+
+    def contest_live_snapshot(self, contest_id: int) -> dict[str, Any] | None:
+        """Return one transactionally consistent, replay-free live projection input.
+
+        The fixed three SELECTs are independent of pairing count: contest state,
+        current-stage pairings joined with compact Match results, then the frozen
+        roster needed for standings.  Explicit ``BEGIN`` makes those reads one
+        SQLite snapshot even when another process advances a stage concurrently.
+        """
+        return self.contest_projection_snapshot(
+            contest_id,
+            current_stage_only=True,
+            include_entries=True,
+        )
 
     def contest_entries_named(
         self,
@@ -13425,6 +14009,11 @@ class Store:
         )
         if immutable:
             raise ValueError("赛事对阵发布身份字段不可修改")
+        if "stage_idx" in fields:
+            stage_idx = exact_nonnegative_int(fields["stage_idx"])
+            if stage_idx is None:
+                raise ValueError("赛事阶段坐标必须是非负整数")
+            fields["stage_idx"] = stage_idx
         allowed = {
             "match_id",
             "status",
@@ -13486,6 +14075,7 @@ class Store:
         game_id: str,
         winner: int,
         result: dict[str, Any],
+        duplicate: bool = False,
         activate_running: bool = False,
         require_execution_admission: bool = True,
     ) -> dict:
@@ -13499,8 +14089,14 @@ class Store:
         """
         gid = _registered_game_id(game_id)
         table = _matches_table(gid)
-        if int(winner) not in (0, 1):
+        if (
+            isinstance(winner, bool)
+            or not isinstance(winner, int)
+            or winner not in (0, 1)
+        ):
             raise ValueError("技术赛果 winner 必须为 0 或 1")
+        if not isinstance(duplicate, bool):
+            raise ValueError("技术赛果 duplicate 必须为布尔值")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             contract = _active_game_contract_tx(c, gid)
@@ -13509,7 +14105,7 @@ class Store:
             )
             contest = c.execute(
                 "SELECT status,organizer_id,game_id,ruleset_version,protocol_version,"
-                "rating_pool_id "
+                "rating_pool_id,stages_json,current_stage_idx "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -13532,6 +14128,18 @@ class Store:
             ).fetchone()
             if pairing is None:
                 raise ValueError("对阵已被派发或状态已变化")
+            pairing_stage_idx = exact_nonnegative_int(pairing["stage_idx"])
+            if (
+                pairing_stage_idx is None
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != pairing_stage_idx
+            ):
+                raise ValueError("赛事当前阶段已变化，不能写入技术赛果")
+            explicit_marker = _contest_stage_has_explicit_series_marker(
+                contest["stages_json"], pairing_stage_idx
+            )
+            if explicit_marker is None:
+                raise ValueError("赛事阶段系列计分契约无效")
             bot_a_id = pairing["bot_a_id"]
             bot_b_id = pairing["bot_b_id"]
             if bot_a_id is None or bot_b_id is None:
@@ -13546,14 +14154,38 @@ class Store:
                 for row in identities
             ):
                 raise ValueError("技术赛果 Bot 不存在或游戏/协议不一致")
+            for suffix, bot_id in (("a", bot_a_id), ("b", bot_b_id)):
+                entry_id = pairing[f"entry_{suffix}_id"]
+                if entry_id is None and explicit_marker:
+                    raise ValueError("技术赛果缺少冻结参赛项身份")
+                if entry_id is not None:
+                    entry = c.execute(
+                        "SELECT contest_id,bot_id FROM contest_entries WHERE id=?",
+                        (entry_id,),
+                    ).fetchone()
+                    if (
+                        entry is None
+                        or entry["contest_id"] != contest_id
+                        or entry["bot_id"] != bot_id
+                    ):
+                        raise ValueError("技术赛果参赛项与冻结 Bot 身份不一致")
+                version_id = pairing[f"bot_{suffix}_version_id"]
+                if version_id is not None and c.execute(
+                    "SELECT 1 FROM bot_versions WHERE id=? AND bot_id=?",
+                    (version_id, bot_id),
+                ).fetchone() is None:
+                    raise ValueError("技术赛果 Bot 版本与冻结对阵不一致")
             created_at = _now()
-            config_json = json.dumps(
-                {
-                    "_rating_eligible": False,
-                    "_rating_reason": "contest",
-                },
-                ensure_ascii=False,
-            )
+            config = {
+                "_rating_eligible": False,
+                "_rating_reason": "contest",
+                "duplicate": duplicate,
+            }
+            for suffix in ("a", "b"):
+                version_id = pairing[f"bot_{suffix}_version_id"]
+                if version_id is not None:
+                    config[f"_bot_{suffix}_version_id"] = int(version_id)
+            config_json = json.dumps(config, ensure_ascii=False)
             c.execute(
                 f"INSERT INTO {table}(id,bot_a_id,bot_b_id,owner_id,"
                 "contest_id,reason,match_type,status,game_id,ruleset_version,"
@@ -13649,7 +14281,9 @@ class Store:
                 c, maintenance_only=not require_execution_admission
             )
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,game_id,stages_json,current_stage_idx "
+                "FROM contests WHERE id=?",
+                (contest_id,),
             ).fetchone()
             allowed = ("published", "running")
             if not contest or contest["status"] not in allowed:
@@ -13660,6 +14294,81 @@ class Store:
             ).fetchone()
             if already_bound:
                 raise ValueError("同一对局不能绑定到多个赛事对阵")
+            pairing = c.execute(
+                "SELECT * FROM contest_pairings WHERE id=? AND contest_id=?",
+                (pairing_id, contest_id),
+            ).fetchone()
+            table = self._match_table_of(c, match_id)
+            match = (
+                c.execute(
+                    f"SELECT id,contest_id,game_id,match_type,bot_a_id,bot_b_id,"
+                    f"match_config "
+                    f"FROM {table} WHERE id=?",
+                    (match_id,),
+                ).fetchone()
+                if table is not None
+                else None
+            )
+            if (
+                pairing is None
+                or match is None
+                or match["contest_id"] != contest_id
+                or match["game_id"] != contest["game_id"]
+                or match["match_type"] != TYPE_CONTEST
+                or match["bot_a_id"] != pairing["bot_a_id"]
+                or match["bot_b_id"] != pairing["bot_b_id"]
+            ):
+                raise ValueError("对局与赛事对阵身份不一致")
+            pairing_stage_idx = exact_nonnegative_int(pairing["stage_idx"])
+            if (
+                pairing_stage_idx is None
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != pairing_stage_idx
+            ):
+                raise ValueError("赛事当前阶段已变化，不能绑定对局")
+            explicit_marker = _contest_stage_has_explicit_series_marker(
+                contest["stages_json"], pairing_stage_idx
+            )
+            if explicit_marker is None:
+                raise ValueError("赛事阶段系列计分契约无效")
+            for suffix in ("a", "b"):
+                entry_id = pairing[f"entry_{suffix}_id"]
+                if entry_id is None:
+                    # Pre-entry legacy pairings remain readable/bindable.  All
+                    # current lifecycle writers freeze entry ids and are checked
+                    # below before their Match can become authoritative.
+                    if explicit_marker:
+                        raise ValueError("对局缺少冻结参赛项身份")
+                    continue
+                entry = c.execute(
+                    "SELECT contest_id,bot_id FROM contest_entries WHERE id=?",
+                    (entry_id,),
+                ).fetchone()
+                if (
+                    entry is None
+                    or entry["contest_id"] != contest_id
+                    or entry["bot_id"] != pairing[f"bot_{suffix}_id"]
+                ):
+                    raise ValueError("对阵参赛项与冻结 Bot 身份不一致")
+            try:
+                frozen_config = json.loads(match["match_config"])
+            except (TypeError, ValueError):
+                frozen_config = None
+            if not isinstance(frozen_config, dict):
+                raise ValueError("对局冻结配置无效")
+            for suffix in ("a", "b"):
+                pairing_version = pairing[f"bot_{suffix}_version_id"]
+                match_version = frozen_config.get(f"_bot_{suffix}_version_id")
+                if pairing_version is None and match_version is None:
+                    continue
+                if (
+                    isinstance(pairing_version, bool)
+                    or not isinstance(pairing_version, int)
+                    or isinstance(match_version, bool)
+                    or not isinstance(match_version, int)
+                    or pairing_version != match_version
+                ):
+                    raise ValueError("对局与对阵冻结 Bot 版本不一致")
             cur = c.execute(
                 "UPDATE contest_pairings SET match_id=?, status='running' "
                 "WHERE id=? AND contest_id=? AND status='pending' AND match_id IS NULL",
@@ -13931,8 +14640,10 @@ class Store:
     ) -> list[dict]:
         with self._tx() as c:
             sql = (
-                "SELECT result.*, legacy.entry_id AS _effective_entry_id "
+                "SELECT result.*, legacy.entry_id AS _effective_entry_id, "
+                "b.name AS bot_name,b.display_name AS bot_display "
                 "FROM contest_stage_results result "
+                "LEFT JOIN bots b ON b.id=result.bot_id "
                 f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy "
                 "ON result.entry_id IS NULL AND result.bot_id=legacy.bot_id "
                 "AND result.contest_id=legacy.contest_id "
@@ -13944,11 +14655,41 @@ class Store:
                 params.append(stage_idx)
             sql += " ORDER BY result.stage_idx, result.points DESC, result.delta_total DESC"
             return [
-                _apply_effective_entry_ids(
-                    _row(r), ("entry_id", "_effective_entry_id")
+                _apply_public_stage_result_payload(
+                    _apply_effective_entry_ids(
+                        _row(r), ("entry_id", "_effective_entry_id")
+                    )
                 )
                 for r in c.execute(sql, params)
             ]
+
+    def list_stage_result_recovery_snapshots(
+        self, contest_id: int, *, stage_idx: int
+    ) -> list[dict]:
+        """Return the private, bounded rank coordinate for crash recovery.
+
+        Public stage-result readers deliberately discard every payload field
+        except the allow-listed tie-break projection.  Recovery reads the same
+        bounded projection together with the persisted rank column, without
+        exposing arbitrary future envelope fields as API data.
+        """
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT * FROM contest_stage_results "
+                "WHERE contest_id=? AND stage_idx=? ORDER BY entry_id",
+                (contest_id, stage_idx),
+            ).fetchall()
+        snapshots: list[dict] = []
+        for raw in rows:
+            row = _row(raw)
+            payload = _loads_json(row.pop("payload_json", None), default={})
+            if not isinstance(payload, dict):
+                payload = {}
+            row["tiebreaks"] = sanitize_public_contest_tiebreaks(
+                payload.get("tiebreaks")
+            )
+            snapshots.append(row)
+        return snapshots
 
     # ── contest_official_results（P2 全员正式名次）─────────────
 
@@ -13975,6 +14716,9 @@ class Store:
                 (contest_id,),
             )
             for row in result_rows:
+                stage_idx = exact_nonnegative_int(row.get("stage_idx", 0))
+                if stage_idx is None:
+                    raise ValueError("正式名次阶段坐标必须是非负整数")
                 c.execute(
                     "INSERT INTO contest_official_results"
                     "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
@@ -13982,7 +14726,7 @@ class Store:
                     (
                         contest_id,
                         row["entry_id"],
-                        int(row.get("stage_idx") or 0),
+                        stage_idx,
                         row["rank"],
                         row.get("points") or 0,
                         row.get("bot_id"),

@@ -223,13 +223,83 @@ def test_duplicate_uses_the_frozen_profile_for_both_seats(monkeypatch):
     )
 
     assert result.legs == [
-        {"winner": None, "deltas": [0, 0]},
-        {"winner": None, "deltas": [0, 0]},
+        {"winner": None, "deltas": [0, 0], "rounds_played": 0},
+        {"winner": None, "deltas": [0, 0], "rounds_played": 0},
     ]
     assert transport.prepared == [
         ("/bots/high-a", PLATFORM_HIGH_PROFILE),
         ("/bots/high-b", PLATFORM_HIGH_PROFILE),
+        ("/bots/high-a", PLATFORM_HIGH_PROFILE),
+        ("/bots/high-b", PLATFORM_HIGH_PROFILE),
     ]
+    assert len(transport.stopped) == 4
+
+
+@pytest.mark.parametrize("runtime_mode", ["traditional", "longrunning"])
+def test_duplicate_restarts_both_bot_sessions_for_every_scoring_game(
+    monkeypatch, runtime_mode
+):
+    observed: list[tuple[int, int, str, int]] = []
+
+    async def fake_decide(
+        transport,
+        session_id,
+        _request,
+        *,
+        failed_seat,
+        leg,
+        **_kwargs,
+    ):
+        session = transport._sessions[session_id]
+        observed.append((leg, failed_seat, session_id, session.turn))
+        session.turn += 1
+        session.requests.append({"leg": leg})
+        session.responses.append(0)
+        return {"response": 0}
+
+    async def fake_run_session(_game_id, decide, **_kwargs):
+        await decide(0, {"turn": 1})
+        await decide(1, {"turn": 2})
+        return SimpleNamespace(
+            rounds=[],
+            rounds_played=0,
+            events=[],
+            net=[0, 0],
+            final_chips=[0, 0],
+        )
+
+    monkeypatch.setattr(runner_module, "_botzone_decide", fake_decide)
+    monkeypatch.setattr(runner_module, "run_session", fake_run_session)
+    transport = _ProfileTransport()
+    result = asyncio.run(
+        MatchRunner(transport).run_duplicate(
+            "/bots/stateful-a",
+            "/bots/stateful-b",
+            game_id="holdem",
+            seed=7,
+            runtime_modes=(runtime_mode, runtime_mode),
+            duplicate=True,
+        )
+    )
+
+    assert len(result.legs) == 2
+    assert [(leg, seat, turn) for leg, seat, _sid, turn in observed] == [
+        (0, 0, 0),
+        (0, 1, 0),
+        (1, 1, 0),
+        (1, 0, 0),
+    ]
+    # Four distinct logical/process sessions prove that neither Traditional
+    # history nor LongRunning process memory crosses the scoring-game boundary.
+    assert len({session_id for _leg, _seat, session_id, _turn in observed}) == 4
+    assert transport._sessions == {}
+    assert len(transport.stopped) == 4
+    if runtime_mode == "traditional":
+        assert len(transport.prepared) == 4
+        assert transport.started == []
+    else:
+        assert transport.prepared == []
+        assert len(transport.started) == 4
 
 
 def test_human_runner_uses_the_frozen_legacy_low_profile():

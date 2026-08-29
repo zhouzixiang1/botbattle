@@ -57,6 +57,26 @@ def _setup_contest(app, tmp_path: Path, *, status="running"):
     return store, org, cid, b1, b2
 
 
+def _persist_prepared_contest_match(store, match_id: str, args, kwargs) -> str:
+    """Persist the identity-complete prepared Match expected by the bind CAS."""
+    bot_a_id, bot_b_id = (int(args[0]), int(args[1]))
+    store.create_match(
+        match_id,
+        bot_a_id,
+        bot_b_id,
+        owner_id=int(kwargs["owner_user_id"]),
+        contest_id=int(kwargs["contest_id"]),
+        match_type=str(kwargs["match_type"]),
+        game_id=str(kwargs["game_id"]),
+        match_config={
+            "duplicate": False,
+            "_bot_a_version_id": kwargs.get("bot_a_version_id"),
+            "_bot_b_version_id": kwargs.get("bot_b_version_id"),
+        },
+    )
+    return match_id
+
+
 def test_dispatch_no_double_under_concurrent_overlap(tmp_path):
     """并发 _dispatch_pending 调用不应双发——锁串行化，每 pairing 只 1 个 match。"""
     async def exercise():
@@ -70,6 +90,7 @@ def test_dispatch_no_double_under_concurrent_overlap(tmp_path):
             async def challenge(self, *a, **kw):
                 await asyncio.sleep(0.05)  # 让出控制权，制造交错窗口
                 mid = f"m{len(dispatched)}"
+                _persist_prepared_contest_match(store, mid, a, kw)
                 dispatched.append(mid)
                 return mid
 
@@ -106,6 +127,9 @@ def test_cancel_waits_for_dispatch_and_rechecks_running_state(tmp_path):
             async def challenge(self, *args, **kwargs):
                 entered.set()
                 await release.wait()
+                _persist_prepared_contest_match(
+                    store, "locked-match", args, kwargs
+                )
                 dispatched.append("locked-match")
                 return "locked-match"
 

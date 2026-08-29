@@ -151,6 +151,11 @@ class GameSpec:
 
     default_scoring: str = "poker_3_1_0"
 
+    # 固定长度游戏的权威单场轮数。公开赛果只用它回填旧版本复式 leg
+    # （旧 JSON 尚未逐 leg 持久化 rounds_played）；可变长度游戏保持 None，
+    # 通用投影不得按 game_id 猜测或用总轮数平均分摊。
+    fixed_rounds_per_match: int | None = None
+
     # 公开裁判元信息（GET /api/judges 展示用）
     code_path: str = ""
     summary: str = ""
@@ -166,11 +171,12 @@ class GameSpec:
     # 避免 protocol.py 成为无法审计的 import shim；游戏模块仍只能导出自己的 builder。
     shared_source_files: tuple[str, ...] = ()
 
-    # P4 duplicate：构造多 leg 对局计划（默认单 leg；holdem 覆写返回 2 leg 同 deal_sequence）。
-    # 返回 list[LegSpec]，每 leg 含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
+    # duplicate 多计分场计划；Holdem 返回两场同牌换座的独立 70 手计划。
+    # 每项含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
     build_match_plan: Callable[[int, dict[str, Any]], list[dict[str, Any]]] | None = None
 
-    # 模板显式开放的单阶段 round_robin 每对选手独立对局场数上限。
+    # 模板显式开放的单阶段 round_robin 每对选手对局记录数上限；
+    # 复式模板中该记录就是一组同牌换座交锋。
     # None 表示该游戏不具备此能力；通用赛事层还必须同时看到模板的
     # games_per_pair_config 才能启用，绝不从 stage type 或 game_id 推断。
     # 未声明该字段的旧模板与旧赛事继续保持历史赛制语义。
@@ -204,6 +210,15 @@ class GameSpec:
             )
         ):
             raise ValueError("contest_games_per_pair_max 必须为 >=2 的整数或 None")
+        if (
+            self.fixed_rounds_per_match is not None
+            and (
+                isinstance(self.fixed_rounds_per_match, bool)
+                or not isinstance(self.fixed_rounds_per_match, int)
+                or self.fixed_rounds_per_match < 1
+            )
+        ):
+            raise ValueError("fixed_rounds_per_match 必须为正整数或 None")
         judge_file = f"{self.game_id}_judge.py"
         files = tuple(self.source_files) or (
             judge_file,

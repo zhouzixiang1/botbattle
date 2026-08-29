@@ -98,12 +98,12 @@ function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
   if (event.type === 'illegal') {
     return `${actor(event.player)} · 非法动作${phaseSuffix(event)}`
   }
-  if (event.type === 'time_out') return `${actor(event.seat)} · 累计棋钟耗尽`
+  if (event.type === 'time_out') return `${actor(event.seat)} · 全场棋钟耗尽`
   if (event.type === 'time_used') {
     return `${actor(event.seat)} · 已用 ${displaySeconds(event.used)} · 剩余 ${displaySeconds(event.remaining)}`
   }
   if (event.type === 'match_end') {
-    const outcome = event.winner == null ? '平局' : `${actor(event.winner)}获胜`
+    const outcome = event.winner == null ? '赛果已结算' : `${actor(event.winner)}获胜`
     return `结束 · ${outcome} · ${gomokuTerminalReason(event.reason, 'completed').label}`
   }
   return event.type || '?'

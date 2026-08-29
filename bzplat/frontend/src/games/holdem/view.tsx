@@ -23,7 +23,7 @@ export function describeHoldemEvent(event: RawEvent, seats?: SeatInfo[]): string
     river: '河牌',
   }
   const eventLeg = holdemEventLeg(event)
-  const legPrefix = eventLeg === null ? '' : `第 ${eventLeg + 1} 局 · `
+  const legPrefix = eventLeg === null ? '' : `第 ${eventLeg + 1} 场 · `
   if (event.type === 'action') {
     const action = actions[String(event.action)] ?? String(event.action ?? '?')
     const physicalSeat = holdemPhysicalSeatForEvent(event.player, event)
@@ -43,16 +43,18 @@ export function describeHoldemEvent(event: RawEvent, seats?: SeatInfo[]): string
     return `${legPrefix}${street}发牌：${(event.dealt as string[] | undefined)?.join(' ') ?? ''}`
   }
   if (event.type === 'deal_hole') return `${legPrefix}发放底牌`
-  if (event.type === 'match_start') return `${legPrefix}对局开始`
+  if (event.type === 'match_start') return eventLeg === null ? '对局开始' : `第 ${eventLeg + 1} 场开始`
   if (event.type === 'match_end') {
-    // winner=null 也可能是 duplicate 每局独立计分，不能在无上下文的时序里猜成普通平局。
+    // winner=null 可能是真平，也可能是复式没有单一整场胜者；精确赛果
+    // 只由 metadata.outcome 展示，时间线不在缺少上下文时猜测。
     const outcome = event.winner == null
-      ? '无单一整场胜者'
+      ? '赛果已结算'
       : `${eventSeatSubject(seats, event.winner, `座位 ${displaySeat(event.winner)}`)} 获胜`
     return `结束 · ${outcome} · ${resolveTerminalReason(event.reason, 'completed').label}`
   }
   if (event.type === 'turn') {
-    return `轮到 ${eventSeatSubject(seats, event.player, `座位 ${displaySeat(event.player)}`)}`
+    const physicalSeat = holdemPhysicalSeatForEvent(event.player, event)
+    return `${legPrefix}轮到 ${eventSeatSubject(seats, physicalSeat, `座位 ${displaySeat(physicalSeat)}`)}`
   }
   if (event.type === 'your_turn') return '轮到你'
   return event.type || '?'
@@ -67,7 +69,7 @@ export function holdemHandBoundaries(events: RawEvent[]): number[] {
   return boundaries
 }
 
-/** 分段导航在 duplicate 中保留局内手号，不把第二局写成“第 71 手”。 */
+/** 分段导航在 duplicate 中保留场内手号，不把第二场写成“第 71 手”。 */
 export function holdemHandLabel(segment: number, events: RawEvent[]): string {
   const starts = events.filter((event) => event.type === 'hand_start')
   const event = starts[segment]
@@ -77,5 +79,5 @@ export function holdemHandLabel(segment: number, events: RawEvent[]): string {
   const handNumber = Number.isInteger(hand) && hand >= 0 ? hand + 1 : segment + 1
   return eventLeg === null
     ? `第 ${handNumber} 手`
-    : `第 ${eventLeg + 1} 局 · 第 ${handNumber} 手`
+    : `第 ${eventLeg + 1} 场 · 第 ${handNumber} 手`
 }

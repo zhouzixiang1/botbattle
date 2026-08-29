@@ -21,15 +21,34 @@ from bzplat.backend.contests.templates import (
     resolve_template,
 )
 from bzplat.backend.contests.series import (
-    aggregate_series_rows_settled,
+    conceptual_series_key,
+    contest_match_binding_is_valid,
+    contest_pairing_roster_binding_is_valid,
     group_conceptual_series,
     is_aggregate_series_stage,
+    match_scoring_result_is_valid,
+    series_rows_settled,
+    swiss_bye_points,
     summarize_conceptual_series,
 )
 from bzplat.backend.contests.showcase import is_showcase, require_mutable
+from bzplat.backend.contests.validation import (
+    SERIES_SCORING_AGGREGATE,
+    SERIES_SCORING_INDEPENDENT,
+    active_contest_entries,
+    contest_current_stage_index,
+    contest_entry_eliminated,
+    stage_duplicate_mode,
+    stage_scoring_contract_is_valid,
+)
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.runtime.binary_integrity import require_binary_file_integrity
 from bzplat.backend.matches.result_contract import build_result_payload
+from bzplat.backend.matches.public_outcome import (
+    normalized_delta_value,
+    planned_match_games,
+    scoring_games_for_match,
+)
 from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
 from bzplat.backend.store import (
@@ -37,8 +56,12 @@ from bzplat.backend.store import (
     ExecutionQueueClosed,
     Store,
 )
-from bzplat.backend.store.db import match_deltas
+from bzplat.backend.store.public_contract import (
+    sanitize_public_contest_tiebreaks,
+)
 from bzplat.backend.store.validation import (
+    exact_nonnegative_int,
+    exact_sqlite_bool,
     is_authoritative_no_opponent_pairing,
     validate_contest_times as _validate_contest_times,
 )
@@ -71,11 +94,19 @@ def _now() -> str:
 def _parse_stages(c: dict) -> list[dict]:
     raw = c.get("stages_json") or "[]"
     if isinstance(raw, list):
-        return raw
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(parsed, list) or any(
+        not isinstance(stage, dict) for stage in parsed
+    ):
+        # Preserve stage coordinates by rejecting the whole malformed snapshot;
+        # filtering non-object elements would shift every later stage index.
         return []
+    return parsed
 
 
 def _estimate_sec_per_match(gid: str, cfg: dict) -> int:
@@ -271,29 +302,53 @@ class ContestManager:
         return list(raw) if isinstance(raw, list) else None
 
     @staticmethod
+    def _games_per_pair_capability(template_id: object) -> dict[str, Any] | None:
+        template = get_template(str(template_id or ""))
+        raw = template.get("games_per_pair_config") if template else None
+        return dict(raw) if isinstance(raw, dict) else None
+
+    @staticmethod
     def _matches_template_stage_topology(
         template_id: object, stages: list[dict[str, Any]]
     ) -> bool:
-        """Whether a persisted snapshot still has its code template's graph.
+        """Whether a persisted snapshot still matches its code-owned topology.
 
         Older callers may combine a built-in ``template_id`` with explicit custom
         stages.  The identifier alone therefore cannot authorize injecting new
-        code-template defaults at publish time.
+        code-template defaults at publish time.  Only the fields advertised by
+        ``stage_series_configs`` are mutable here; every other persisted stage
+        field is part of the frozen template snapshot.  Comparing just key/type
+        would, for example, let a custom ``rounds`` or ``advance_count`` inherit
+        defaults intended for a different tournament graph.
         """
         template = get_template(str(template_id or ""))
         template_stages = template.get("stages") if template else None
         if not isinstance(template_stages, list) or len(template_stages) != len(stages):
             return False
 
-        def topology(rows: list[dict[str, Any]]) -> tuple[tuple[str, str], ...] | None:
-            out: list[tuple[str, str]] = []
-            for index, row in enumerate(rows):
+        configurable_series_fields = frozenset(
+            {
+                "games_per_pair",
+                "series_scoring",
+                "swiss_extra_rounds",
+                "effective_rounds",
+            }
+        )
+
+        def topology(
+            rows: list[dict[str, Any]],
+        ) -> tuple[tuple[tuple[str, Any], ...], ...] | None:
+            out: list[tuple[tuple[str, Any], ...]] = []
+            for row in rows:
                 if not isinstance(row, dict):
                     return None
                 out.append(
-                    (
-                        str(row.get("key") or f"stage{index + 1}"),
-                        str(row.get("type") or "round_robin"),
+                    tuple(
+                        sorted(
+                            (key, value)
+                            for key, value in row.items()
+                            if key not in configurable_series_fields
+                        )
                     )
                 )
             return tuple(out)
@@ -308,10 +363,15 @@ class ContestManager:
     ) -> list[dict[str, Any]]:
         """Apply current code-template defaults only at the unstarted boundary."""
         capabilities = self._stage_series_capabilities(contest.get("template_id"))
-        if capabilities is None:
+        pair_capability = self._games_per_pair_capability(
+            contest.get("template_id")
+        )
+        if capabilities is None and pair_capability is None:
             if settings is not None:
                 raise ValueError("当前赛事模板不支持 stage_series_settings")
             return stages
+        if capabilities is None and settings is not None:
+            raise ValueError("当前赛事模板不支持 stage_series_settings")
         if not self._matches_template_stage_topology(
             contest.get("template_id"), stages
         ):
@@ -319,6 +379,38 @@ class ContestManager:
                 raise ValueError("自定义阶段拓扑不支持 stage_series_settings")
             return stages
         from bzplat.backend.contests.validation import configure_games_per_pair
+
+        if capabilities is None:
+            # The first configurable RR templates persisted ``games_per_pair``
+            # but predated the scoring marker.  Preserve their frozen K and
+            # duplicate topology while upgrading only an omitted/legacy
+            # aggregate marker.  Explicit unknown marker values remain damaged
+            # input and are rejected by the lifecycle validator below.
+            assert pair_capability is not None
+            if len(stages) != 1:
+                return stages
+            stage = dict(stages[0])
+            marker_present = "series_scoring" in stage
+            marker = stage.get("series_scoring")
+            if marker == SERIES_SCORING_INDEPENDENT:
+                return stages
+            if marker_present and marker != SERIES_SCORING_AGGREGATE:
+                return stages
+            selected_games = stage.get(
+                "games_per_pair", pair_capability.get("default")
+            )
+            stage.pop("games_per_pair", None)
+            stage.pop("series_scoring", None)
+            return configure_games_per_pair(
+                [stage],
+                _stored_game_id(
+                    contest, entity=f"赛事 #{contest.get('id')}"
+                ),
+                selected_games,
+                capability=pair_capability,
+                stage_series_settings=None,
+                stage_capabilities=None,
+            )
 
         return configure_games_per_pair(
             stages,
@@ -328,6 +420,107 @@ class ContestManager:
             stage_series_settings=settings,
             stage_capabilities=capabilities,
         )
+
+    def _migrate_unstarted_series_snapshot_for_lifecycle(
+        self,
+        contest: dict[str, Any],
+        stages: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Persist a required built-in default migration behind the full CAS.
+
+        Publish/start may read an older built-in snapshot that predates the
+        independent-scoring marker.  Merely computing current defaults and
+        letting ``_prepare_initial_contest`` overwrite ``stages_json`` would
+        bypass the zero-progress gate used by the explicit settings endpoint.
+        Only when the semantic stage snapshot actually changes do we perform
+        the same transactional CAS, then re-read its authoritative result.
+        Participant-dependent ``effective_rounds`` is frozen later at the
+        normal publication boundary and is not itself a migration trigger.
+        """
+        configured = self._configured_unstarted_series_stages(contest, stages)
+        # Publishing is the last boundary before schedule rows become durable.
+        # Validate the would-be migrated snapshot *before* its CAS write; a
+        # malformed custom/built-in drift must not receive even a partial marker
+        # migration and then fail later after pairings exist.
+        self._validated_lifecycle_stages(contest, configured)
+        if configured == stages:
+            return contest, stages
+        updated = self.store.compare_and_swap_unstarted_contest_stages(
+            int(contest["id"]),
+            expected_status=str(contest["status"]),
+            expected_stages_json=str(contest.get("stages_json") or "[]"),
+            stages_json=json.dumps(configured, ensure_ascii=False),
+        )
+        migrated = _parse_stages(updated)
+        if not migrated:
+            raise ValueError(f"赛事 #{contest.get('id')} 缺少有效阶段快照")
+        return updated, migrated
+
+    @staticmethod
+    def _validated_lifecycle_stages(
+        contest: dict[str, Any], stages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return canonical stages safe to publish/start, or fail before writes.
+
+        Read models intentionally accept bounded legacy history.  Draft/open
+        lifecycle transitions are stricter: they create new schedule and Match
+        rows, so every stage must pass the complete creation validator under the
+        contest's registered game.  This also freezes legacy omitted defaults
+        without truthy/int coercion.
+        """
+        from bzplat.backend.contests.validation import validate_stage
+
+        game_id = _stored_game_id(
+            contest, entity=f"赛事 #{contest.get('id')}"
+        )
+        if not stages:
+            raise ValueError(f"赛事 #{contest.get('id')} 缺少有效阶段快照")
+        if contest_current_stage_index(contest, stage_count=len(stages)) is None:
+            raise ValueError(f"赛事 #{contest.get('id')} 当前阶段游标无效")
+        return [
+            validate_stage(stage, index, game_id)
+            for index, stage in enumerate(stages)
+        ]
+
+    @staticmethod
+    def _validated_active_lifecycle_stages(
+        contest: dict[str, Any], stages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Validate reached history without rewriting its scoring semantics.
+
+        Published/running pre-v1 stages can legitimately omit fields which the
+        current creation schema freezes explicitly.  Legacy aggregate stages
+        must also retain their frozen one-series result.  Both use the bounded
+        read contract without being rewritten; an explicit aggregate marker is
+        nevertheless checked by that predicate through the same full structural
+        validator as new stages.  New v1 stages use the creation validator.
+        """
+        from bzplat.backend.contests.validation import validate_stage
+
+        game_id = _stored_game_id(
+            contest, entity=f"赛事 #{contest.get('id')}"
+        )
+        if not stages:
+            raise ValueError(f"赛事 #{contest.get('id')} 缺少有效阶段快照")
+        validated: list[dict[str, Any]] = []
+        for index, stage in enumerate(stages):
+            mode = stage.get("series_scoring")
+            if (
+                mode == SERIES_SCORING_INDEPENDENT
+                and stage.get("type") == "swiss"
+                and "swiss_extra_rounds" in stage
+                and "effective_rounds" not in stage
+            ):
+                raise ValueError(
+                    f"阶段 {index + 1} 缺少已发布的 effective_rounds"
+                )
+            if mode != SERIES_SCORING_INDEPENDENT:
+                if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+                    raise ValueError(f"阶段 {index + 1} 计分契约无效")
+                validated.append(dict(stage))
+            else:
+                validated.append(validate_stage(stage, index, game_id))
+        return validated
 
     @staticmethod
     def _freeze_effective_stage_values(
@@ -440,9 +633,11 @@ class ContestManager:
             if status != CONTEST_PUBLISHED:
                 return self.store.update_contest(contest_id, **fields)
 
-            stage_idx = int(contest.get("current_stage_idx") or 0)
             stages = _parse_stages(contest)
-            if stage_idx < 0 or stage_idx >= len(stages):
+            stage_idx = contest_current_stage_index(
+                contest, stage_count=len(stages)
+            )
+            if stage_idx is None:
                 raise ValueError("赛事当前阶段不存在，不能重排")
             pairings = self.store.list_contest_pairings(contest_id)
             if any(pairing.get("match_id") for pairing in pairings):
@@ -460,7 +655,7 @@ class ContestManager:
                     ),
                 }
                 for pairing in pairings
-                if int(pairing.get("stage_idx") or 0) == stage_idx
+                if exact_nonnegative_int(pairing.get("stage_idx")) == stage_idx
                 and pairing.get("status") == STATUS_PENDING
                 and not pairing.get("match_id")
             ]
@@ -746,7 +941,9 @@ class ContestManager:
         if c["status"] not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_REST):
             raise ValueError("当前状态不可更换 Bot（仅开赛前或休息期可换）")
         stages = _parse_stages(c)
-        idx = int(c.get("current_stage_idx") or 0)
+        idx = contest_current_stage_index(c, stage_count=len(stages))
+        if idx is None:
+            raise ValueError("赛事当前阶段游标损坏，不能更换 Bot")
         stage = stages[idx] if 0 <= idx < len(stages) else {}
         if c["status"] == CONTEST_REST and not stage.get("allow_bot_swap_in_rest", True):
             raise ValueError("本阶段休息不允许换 Bot")
@@ -808,14 +1005,19 @@ class ContestManager:
         for st in stages:
             t = st.get("type") or ""
             if t in ("round_robin", "double_round_robin"):
-                if st.get("allow_large_round_robin"):
+                allow_large = st.get("allow_large_round_robin", False)
+                if not isinstance(allow_large, bool):
+                    raise ValueError("allow_large_round_robin 必须是布尔值")
+                if allow_large:
                     continue  # 决赛等白名单模板旁路护栏（组织者自负规模）
                 if n > limit:
                     raise ValueError(
                         f"全员{t} 人数 {n} 超过上限 {limit}，请改用 Swiss/分组模板"
                     )
             elif t in ("group_round_robin", "group_double_round_robin"):
-                gc = max(1, int(st.get("group_count") or 4))
+                gc = st.get("group_count", 4)
+                if isinstance(gc, bool) or not isinstance(gc, int) or gc < 1:
+                    raise ValueError("group_count 须为 ≥1 的整数")
                 per_group = math.ceil(n / gc)
                 if per_group > limit:
                     raise ValueError(
@@ -938,7 +1140,12 @@ class ContestManager:
         # published 态：pairing 已存在，直接改 scheduled_at=now 立即开打（不重新生成）
         if c["status"] == CONTEST_PUBLISHED:
             now = _now()
-            stage_idx = int(c.get("current_stage_idx") or 0)
+            stages = _parse_stages(c)
+            stage_idx = contest_current_stage_index(
+                c, stage_count=len(stages)
+            )
+            if stage_idx is None:
+                raise ValueError("赛事当前阶段游标损坏，拒绝开赛")
             # 硬崩可能留下“有行但只有半批”的首阶段。手动开赛前
             # 先做完整性对账，不得只把残缺的几场改成 now 就开打。
             self._ensure_published_pairings_locked(contest_id, stage_idx)
@@ -997,8 +1204,12 @@ class ContestManager:
         stages = _parse_stages(c)
         if not stages:
             raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
-        stages = self._configured_unstarted_series_stages(c, stages)
+        c, stages = self._migrate_unstarted_series_snapshot_for_lifecycle(
+            c, stages
+        )
+        stages = self._validated_lifecycle_stages(c, stages)
         stages = self._freeze_effective_stage_values(stages, len(entries))
+        stages = self._validated_lifecycle_stages(c, stages)
 
         self._guard_full_rr(stages, len(entries))
 
@@ -1066,8 +1277,12 @@ class ContestManager:
         stages = _parse_stages(c)
         if not stages:
             raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
-        stages = self._configured_unstarted_series_stages(c, stages)
+        c, stages = self._migrate_unstarted_series_snapshot_for_lifecycle(
+            c, stages
+        )
+        stages = self._validated_lifecycle_stages(c, stages)
         stages = self._freeze_effective_stage_values(stages, len(entries))
+        stages = self._validated_lifecycle_stages(c, stages)
 
         self._guard_full_rr(stages, len(entries))
 
@@ -1120,6 +1335,12 @@ class ContestManager:
 
     def _initial_lifecycle_snapshot(self, contest: dict, entries: list[dict]) -> dict:
         """记录初始阶段会修改的最小字段，供失败补偿。调用方须持赛事锁。"""
+        elimination_states: dict[int, int] = {}
+        for entry in entries:
+            eliminated = contest_entry_eliminated(entry)
+            if eliminated is None:
+                raise ValueError("参赛者淘汰状态损坏，拒绝启动赛事")
+            elimination_states[int(entry["user_id"])] = int(eliminated)
         return {
             "contest": {
                 key: contest.get(key)
@@ -1136,7 +1357,7 @@ class ContestManager:
             "entries": {
                 e["user_id"]: {
                     "seed": e.get("seed") or 0,
-                    "eliminated": int(e.get("eliminated") or 0),
+                    "eliminated": elimination_states[int(e["user_id"])],
                 }
                 for e in entries
             },
@@ -1259,15 +1480,16 @@ class ContestManager:
         损坏数据误当完整。首阶段没有“上一阶段积分”，不读当前残缺
         pairing 的 standings，避免已落盘 bye 分反过来改变恢复排序。
         """
-        stages = _parse_stages(contest)
+        stages = self._validated_active_lifecycle_stages(
+            contest, _parse_stages(contest)
+        )
         if stage_idx < 0 or stage_idx >= len(stages):
             raise ValueError("赛事当前阶段不存在")
         stage = stages[stage_idx]
-        entries = [
-            entry
-            for entry in self.store.list_contest_entries(contest["id"])
-            if not entry.get("eliminated")
-        ]
+        entry_rows = self.store.list_contest_entries(contest["id"])
+        entries = active_contest_entries(entry_rows)
+        if entries is None:
+            raise ValueError("参赛者淘汰状态损坏，拒绝生成阶段对阵")
         prior_scores: dict[int, float] = {}
         if stage_idx > 0:
             prior_scores = {
@@ -1313,11 +1535,14 @@ class ContestManager:
         """
         c = self.store.get_contest(contest_id)
         require_mutable(c)
-        stages = _parse_stages(c)
+        stages = self._validated_active_lifecycle_stages(c, _parse_stages(c))
+        current_idx = contest_current_stage_index(c, stage_count=len(stages))
+        if current_idx is None:
+            raise ValueError("赛事当前阶段游标损坏，拒绝生成阶段对阵")
         if stage_idx < 0 or stage_idx >= len(stages):
             self._finish_adjudicated_contest_locked(
                 contest_id,
-                int(c.get("current_stage_idx") or 0),
+                current_idx,
                 gate_stage_idx=stage_idx,
                 context="invalid-stage",
             )
@@ -1328,7 +1553,7 @@ class ContestManager:
         if not specs:
             self._finish_adjudicated_contest_locked(
                 contest_id,
-                int(c.get("current_stage_idx") or 0),
+                current_idx,
                 gate_stage_idx=stage_idx,
                 context="empty-stage",
             )
@@ -1402,7 +1627,6 @@ class ContestManager:
         # 完整 pairing 批次 + 阶段游标/状态是一个持久化单元。首阶段 publish/start
         # 显式传 activate_running=False，仍由首场 bind 把 published 切 running；后续
         # stage 则在批次提交时离开 rest/推进 current_stage_idx，崩溃后可直接重派。
-        current_idx = int(c.get("current_stage_idx") or 0)
         transition_to_running = bool(
             activate_running
             and (schedule_immediately or stage_idx > current_idx)
@@ -1426,26 +1650,52 @@ class ContestManager:
                 self._ensure_published_pairings_locked(contest_id, stage_idx)
 
     @staticmethod
-    def _pairing_batch_signature(rows: list[dict]) -> Counter:
-        """对阵批次的业务签名（忽略 DB id/时间/版本快照）。"""
-        return Counter(
-            (
-                int(row.get("round_num") or 1),
-                row.get("entry_a_id"),
-                row.get("entry_b_id"),
-                row.get("bot_a_id"),
-                row.get("bot_b_id"),
-                row.get("stage_key") or "",
-                row.get("group_id") or "",
-                row.get("bracket_slot"),
-                int(row.get("color_first") or 0),
-                row.get("pairing_seed"),
-                int(row.get("series_index") or 1),
-                int(row.get("series_size") or 1),
-                row.get("status") or "pending",
-            )
-            for row in rows
-        )
+    def _pairing_batch_signature(rows: list[dict]) -> Counter | None:
+        """对阵批次的业务签名（忽略 DB id/时间/版本快照）。
+
+        持久坐标只接受精确整数。损坏批次返回 ``None``，让 published
+        恢复逻辑在无真实进度时原子重建；不能把 ``False``、浮点或文本
+        通过 ``int(... or default)`` 猜成合法坐标。
+        """
+        signature: Counter = Counter()
+        for row in rows:
+            raw_round = row["round_num"] if "round_num" in row else 1
+            raw_color = row["color_first"] if "color_first" in row else 0
+            raw_index = row["series_index"] if "series_index" in row else 1
+            raw_size = row["series_size"] if "series_size" in row else 1
+            if (
+                isinstance(raw_round, bool)
+                or not isinstance(raw_round, int)
+                or raw_round < 1
+                or isinstance(raw_color, bool)
+                or not isinstance(raw_color, int)
+                or raw_color not in (0, 1)
+                or isinstance(raw_index, bool)
+                or not isinstance(raw_index, int)
+                or raw_index < 1
+                or isinstance(raw_size, bool)
+                or not isinstance(raw_size, int)
+                or raw_size < 1
+            ):
+                return None
+            signature[
+                (
+                    raw_round,
+                    row.get("entry_a_id"),
+                    row.get("entry_b_id"),
+                    row.get("bot_a_id"),
+                    row.get("bot_b_id"),
+                    row.get("stage_key") or "",
+                    row.get("group_id") or "",
+                    row.get("bracket_slot"),
+                    raw_color,
+                    row.get("pairing_seed"),
+                    raw_index,
+                    raw_size,
+                    row.get("status") or "pending",
+                )
+            ] += 1
+        return signature
 
     def _ensure_published_pairings_locked(
         self, contest_id: int, stage_idx: int
@@ -1460,6 +1710,11 @@ class ContestManager:
         if not contest or contest["status"] != CONTEST_PUBLISHED:
             return
         require_mutable(contest)
+        frozen_stages = self._validated_active_lifecycle_stages(
+            contest, _parse_stages(contest)
+        )
+        if stage_idx < 0 or stage_idx >= len(frozen_stages):
+            raise ValueError("published 赛事阶段索引无效")
         stage, specs, bot_to_entry = self._stage_pairing_plan(contest, stage_idx)
         if not specs:
             raise ValueError("published 赛事无法生成完整对阵")
@@ -1660,10 +1915,40 @@ class ContestManager:
             return "blocked"
 
         winner = 1 if reason_a is not None else 0
-        ea, eb = ((-1, 1) if winner == 1 else (1, -1))
         import secrets
 
         mid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
+        stages = _parse_stages(contest)
+        stage_idx = pairing.get("stage_idx")
+        stage_valid = bool(
+            isinstance(stage_idx, int)
+            and not isinstance(stage_idx, bool)
+            and 0 <= stage_idx < len(stages)
+        )
+        stage = stages[int(stage_idx)] if stage_valid else None
+        duplicate = stage_duplicate_mode(stage)
+        if not stage_scoring_contract_is_valid(stage, game_id=gid):
+            logger.error(
+                "contest pairing blocked by malformed duplicate mode: "
+                "contest=%s pairing=%s stage=%s",
+                contest["id"],
+                pairing["id"],
+                stage_idx,
+            )
+            return "blocked"
+        # Only the new independent game-points contract makes a technical
+        # referee decision margin-neutral. Running aggregate/pre-marker history
+        # keeps its frozen +/-1 series/tie-break semantics.
+        neutral_technical_delta = (
+            stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT
+        )
+        ea, eb = (
+            (0, 0)
+            if neutral_technical_delta
+            else ((-1, 1) if winner == 1 else (1, -1))
+        )
+        if duplicate and game_registry.get(gid).build_match_plan is None:
+            raise ValueError(f"游戏 {gid} 不支持 duplicate 技术赛果")
         self.store.adjudicate_unavailable_contest_pairing(
             contest["id"],
             pairing["id"],
@@ -1675,6 +1960,7 @@ class ContestManager:
                 rounds_played=0,
                 deltas=[ea, eb],
             ),
+            duplicate=duplicate,
             activate_running=activate_running,
             require_execution_admission=self._requires_live_admission(),
         )
@@ -1711,6 +1997,25 @@ class ContestManager:
         # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
         if not c or c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
             return
+        stages = _parse_stages(c)
+        persisted_stage_idx = contest_current_stage_index(
+            c, stage_count=len(stages)
+        )
+        requested_stage_idx = exact_nonnegative_int(stage_idx)
+        if (
+            persisted_stage_idx is None
+            or requested_stage_idx is None
+            or requested_stage_idx != persisted_stage_idx
+        ):
+            logger.error(
+                "contest dispatch blocked by malformed/stale stage cursor: "
+                "contest=%s requested=%r persisted=%r",
+                contest_id,
+                stage_idx,
+                c.get("current_stage_idx"),
+            )
+            return
+        stage_idx = requested_stage_idx
         # Scheduler/reconcile/completion callbacks are retry loops.  Hold the
         # existing pairing exactly as-is during deployment instead of creating
         # a technical result, binding a match or moving published -> running.
@@ -1728,13 +2033,22 @@ class ContestManager:
             self._ensure_published_pairings_locked(contest_id, stage_idx)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
-        # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
-        # 时走复式赛制——每对阵跑 1 场 duplicate 对局（2 leg 同副牌交换座位，合并 net 判胜）。
-        # 棋类（build_match_plan is None）即便误标 duplicate 也走原单 leg 路径（不破坏现有赛制）。
-        stages = _parse_stages(c)
-        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        # duplicate 阶段由 GameSpec 冻结多场计划；每个物理 Match 内的场次
+        # 独立判胜计分，同牌换座后的组合 delta 只用于破同分。
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
         spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
-        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
+        duplicate = stage_duplicate_mode(stage_cfg)
+        if not stage_scoring_contract_is_valid(stage_cfg, game_id=gid):
+            logger.error(
+                "contest dispatch blocked by malformed duplicate mode: "
+                "contest=%s stage=%s",
+                contest_id,
+                stage_idx,
+            )
+            return
+        want_duplicate = bool(
+            duplicate and spec is not None and spec.build_match_plan is not None
+        )
         # ``running`` 或已有 match_id 表示本批次前已有真实进度。此时某一场准备失败
         # 不能把整个 start API 报成“全失败”：保留已启动场，失败 pairing 仍 pending，
         # 记录日志并让 scheduler 后续重试。仅 published 且零进度的首场失败向上抛。
@@ -1772,7 +2086,7 @@ class ContestManager:
                 break
             # 冻结快照已在 pairing 行；直接开打
             # duplicate=True 时使用发布批次冻结的 pairing_seed；恢复重建仍得到
-            # 同一 seed，保证两 leg 同副牌可复现且不依赖数据库行 id。
+            # 同一 seed 保证两个换座计分场同牌可复现，且不依赖数据库行 id。
             try:
                 await self._prepare_bind_start_pairing(
                     c,
@@ -1916,9 +2230,13 @@ class ContestManager:
             if not contest:
                 return False
             require_mutable(contest)
+            official_ready = exact_sqlite_bool(
+                contest.get("official_results_ready")
+            )
             if (
                 contest["status"] == CONTEST_FINISHED
-                or int(contest.get("official_results_ready") or 0)
+                or official_ready is None
+                or official_ready
                 or self.store.list_official_results(contest_id)
             ):
                 raise ValueError("已完成或已有正式赛果的赛事不能删除")
@@ -1951,15 +2269,38 @@ class ContestManager:
             c = contest
         else:
             c = self.store.get_contest(contest_id)
-        stages = _parse_stages(c or {})
-        if stage_idx is None:
-            stage_idx = int((c or {}).get("current_stage_idx") or 0)
-        stage = stages[stage_idx] if stages and 0 <= stage_idx < len(stages) else {}
         if not c:
             return []
+        stages = _parse_stages(c)
+        current_stage_idx = contest_current_stage_index(
+            c, stage_count=len(stages)
+        )
+        if current_stage_idx is None:
+            return []
+        if stage_idx is None:
+            stage_idx = current_stage_idx
+        if (
+            isinstance(stage_idx, bool)
+            or not isinstance(stage_idx, int)
+            or stage_idx < 0
+        ):
+            return []
+        stage_valid = bool(0 <= stage_idx < len(stages))
+        stage = stages[stage_idx] if stage_valid else {}
         # 默认 scoring 只能从赛事声明的已注册游戏派生。
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         default_scoring = game_registry.get(gid).default_scoring
+        game_spec = game_registry.get(gid)
+        stage_contract_valid = bool(
+            stage_valid
+            and stage_scoring_contract_is_valid(stage, game_id=gid)
+        )
+        duplicate = stage_duplicate_mode(stage) if stage_contract_valid else None
+        planned_games = (
+            planned_match_games(game_spec, duplicate=duplicate)
+            if duplicate is not None
+            else 1
+        )
         scoring = stage["scoring"] if "scoring" in stage else default_scoring
 
         entry_rows = (
@@ -1967,12 +2308,44 @@ class ContestManager:
             if entries is not None
             else self.store.list_contest_entries(contest_id)
         )
+        active_entry_rows = active_contest_entries(entry_rows)
+        if active_entry_rows is None:
+            # The persisted SQLite flag has no CHECK constraint.  Imported
+            # values such as -1/2 cannot be interpreted as elimination because
+            # doing so would silently shrink the authoritative cohort.
+            return []
         pairing_rows = (
             pairings
             if pairings is not None
             else self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         )
-        if stage_idx > 0 and pairing_rows:
+        expected_entry_bots = {
+            int(entry["id"]): entry.get("bot_id") for entry in entry_rows
+        }
+        expected_entry_users = {
+            int(entry["id"]): int(entry["user_id"]) for entry in entry_rows
+        }
+        require_current_entry_bots = bool(
+            stage_idx == current_stage_idx
+            and c.get("status") in (CONTEST_PUBLISHED, CONTEST_RUNNING)
+        )
+        if not stage_valid or duplicate is None:
+            # A corrupt/non-object stage snapshot has no trustworthy scoring or
+            # participant topology.  Keep the roster visible with zero totals,
+            # but never reinterpret linked results as a default single stage.
+            entry_rows = active_entry_rows
+        elif (
+            stage.get("series_scoring")
+            in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT}
+            and stage_idx > 0
+        ):
+            # Explicit-series topology is derived from the frozen active
+            # cohort.  The lifecycle marks non-qualifiers eliminated before it
+            # materializes the next stage, so surviving pairing rows are not an
+            # authoritative participant list: an imported/deleted whole
+            # opponent group must leave that entrant visible at zero/pending.
+            entry_rows = active_entry_rows
+        elif stage_idx > 0 and pairing_rows:
             participant_entry_ids = {
                 int(entry_id)
                 for pairing in pairing_rows
@@ -2003,12 +2376,26 @@ class ContestManager:
                 "byes": 0,
                 "delta_total": 0,
                 "group_id": e.get("group_id") or "",
-                "eliminated": int(e.get("eliminated") or 0),
+                "eliminated": int(contest_entry_eliminated(e) is True),
+                "counts": {
+                    "encounter_groups": 0,
+                    "unique_opponents": 0,
+                    "match_jobs": 0,
+                    "scoring_games": 0,
+                },
             }
             for e in entry_rows
         }
+        encounter_keys: dict[int, set[tuple[int, int, int]]] = {
+            int(entry_id): set() for entry_id in stats
+        }
+        opponent_ids: dict[int, set[int]] = {
+            int(entry_id): set() for entry_id in stats
+        }
+        matches_by_id: dict[str, dict[str, Any]] = {}
+        if not stage_valid or duplicate is None:
+            return list(stats.values())
         if is_aggregate_series_stage(stage):
-            matches_by_id: dict[str, dict[str, Any]] = {}
             for pairing in pairing_rows:
                 match_id = pairing.get("match_id")
                 if not match_id:
@@ -2016,6 +2403,14 @@ class ContestManager:
                         stage.get("type") == "swiss"
                         and is_authoritative_no_opponent_pairing(
                             stage.get("type"), pairing
+                        )
+                        and contest_pairing_roster_binding_is_valid(
+                            pairing,
+                            expected_contest_id=contest_id,
+                            expected_entry_bots=expected_entry_bots,
+                            expected_entry_users=expected_entry_users,
+                            require_current_entry_bots=require_current_entry_bots,
+                            require_opponent=False,
                         )
                     ):
                         entry_id = pairing.get("entry_a_id")
@@ -2035,9 +2430,18 @@ class ContestManager:
                     else:
                         result = raw_result if isinstance(raw_result, dict) else {}
                     matches_by_id[str(match_id)] = {
+                        "id": str(match_id),
                         "status": pairing.get("match_status"),
                         "winner": pairing.get("match_winner"),
                         "result": result,
+                        "reason": pairing.get("_match_reason"),
+                        "technical_loss": pairing.get("_match_technical_loss"),
+                        "match_config": pairing.get("_match_config_json"),
+                        "contest_id": pairing.get("_match_contest_id"),
+                        "game_id": pairing.get("_match_game_id"),
+                        "match_type": pairing.get("_match_type"),
+                        "bot_a_id": pairing.get("_match_bot_a_id"),
+                        "bot_b_id": pairing.get("_match_bot_b_id"),
                     }
                 else:
                     match = self.store.get_match(str(match_id))
@@ -2046,11 +2450,26 @@ class ContestManager:
 
             for rows in group_conceptual_series(stage, pairing_rows).values():
                 summary = summarize_conceptual_series(
-                    stage, rows, matches_by_id.get
+                    stage,
+                    rows,
+                    matches_by_id.get,
+                    game_spec=game_spec,
+                    expected_contest_id=contest_id,
+                    expected_entry_bots=expected_entry_bots,
+                    expected_entry_users=expected_entry_users,
+                    require_current_entry_bots=require_current_entry_bots,
                 )
                 first, second = summary["entries"]
                 if first not in stats or second not in stats:
                     continue
+                completed_matches = int(summary["completed_matches"])
+                for entry_id in (first, second):
+                    stats[entry_id]["counts"]["match_jobs"] += completed_matches
+                    if completed_matches:
+                        stats[entry_id]["counts"]["encounter_groups"] += 1
+                if completed_matches:
+                    opponent_ids[first].add(second)
+                    opponent_ids[second].add(first)
                 if summary["settled"]:
                     for entry_id in (first, second):
                         stats[entry_id]["delta_total"] += int(
@@ -2059,6 +2478,7 @@ class ContestManager:
                         stats[entry_id]["points"] += float(
                             summary["standings_points"][entry_id]
                         )
+                        stats[entry_id]["counts"]["scoring_games"] += 1
                     winner_entry = summary["winner_entry"]
                     if winner_entry is None:
                         stats[first]["draws"] += 1
@@ -2071,9 +2491,31 @@ class ContestManager:
                 if group_id:
                     stats[first]["group_id"] = group_id
                     stats[second]["group_id"] = group_id
+            for entry_id, opponents in opponent_ids.items():
+                stats[entry_id]["counts"]["unique_opponents"] = len(opponents)
             rows = list(stats.values())
             rows.sort(key=lambda row: (-row["points"], -row["delta_total"]))
-            return rows
+            # Running legacy aggregate stages remain on their frozen one-score-
+            # per-series semantics, but their live order must use the exact
+            # historical official tie-break chain that advancement/finalize
+            # will consume.  A points/delta-only preview could otherwise show
+            # a different qualifier until the instant the stage is snapshotted.
+            from bzplat.backend.contests import ranking as _ranking
+
+            return _ranking.compute_official_ranking(
+                rows,
+                pairing_rows,
+                matches_by_id,
+                normalize_delta=game_spec.normalize_delta,
+                stage=stage,
+                planned_games_per_match=planned_games,
+                fixed_rounds_per_match=game_spec.fixed_rounds_per_match,
+                game_id=gid,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
+            )
 
         for p in pairing_rows:
             mid = p.get("match_id")
@@ -2084,11 +2526,21 @@ class ContestManager:
                 # 是直接晋级，不在此计分。
                 if stage.get("type") == "swiss" and (
                     is_authoritative_no_opponent_pairing(stage.get("type"), p)
+                    and contest_pairing_roster_binding_is_valid(
+                        p,
+                        expected_contest_id=contest_id,
+                        expected_entry_bots=expected_entry_bots,
+                        expected_entry_users=expected_entry_users,
+                        require_current_entry_bots=require_current_entry_bots,
+                        require_opponent=False,
+                    )
                 ):
                     entry_id = p.get("entry_a_id")
                     if entry_id in stats:
-                        stats[entry_id]["points"] += points_for_result(
-                            scoring, 0, 0
+                        stats[entry_id]["points"] += swiss_bye_points(
+                            stage,
+                            scoring=scoring,
+                            scoring_games_per_match=planned_games,
                         )
                         stats[entry_id]["byes"] += 1
                 continue
@@ -2102,90 +2554,194 @@ class ContestManager:
                 else:
                     result = raw_result if isinstance(raw_result, dict) else {}
                 m = {
+                    "id": str(mid),
                     "status": p.get("match_status"),
                     "winner": p.get("match_winner"),
                     "result": result,
+                    "reason": p.get("_match_reason"),
+                    "technical_loss": p.get("_match_technical_loss"),
+                    "match_config": p.get("_match_config_json"),
+                    "contest_id": p.get("_match_contest_id"),
+                    "game_id": p.get("_match_game_id"),
+                    "match_type": p.get("_match_type"),
+                    "bot_a_id": p.get("_match_bot_a_id"),
+                    "bot_b_id": p.get("_match_bot_b_id"),
                 }
             else:
                 m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
                 continue
+            matches_by_id[str(mid)] = m
             ea_id = p.get("entry_a_id")
             eb_id = p.get("entry_b_id")
             if ea_id not in stats or eb_id not in stats:
                 continue
-            # result.legs（复式赛制）：每 leg 独立判胜负，按"打了两场"逐场累加。
-            # 无 legs（普通赛制）：单场胜负累加（原逻辑）。
-            result = m.get("result") or {}
-            legs_data = result.get("legs") if isinstance(result, dict) else None
-            if legs_data:
-                # 复式：逐 leg 累加 points/wins/draws/losses/delta_total
-                for lg in legs_data:
-                    lg_winner = lg.get("winner")
-                    lg_deltas = lg.get("deltas") or [0, 0]
-                    stats[ea_id]["delta_total"] += int(lg_deltas[0])
-                    stats[eb_id]["delta_total"] += int(lg_deltas[1])
-                    stats[ea_id]["points"] += points_for_result(scoring, lg_winner, 0)
-                    stats[eb_id]["points"] += points_for_result(scoring, lg_winner, 1)
-                    if lg_winner == 0:
-                        stats[ea_id]["wins"] += 1
-                        stats[eb_id]["losses"] += 1
-                    elif lg_winner == 1:
-                        stats[eb_id]["wins"] += 1
-                        stats[ea_id]["losses"] += 1
-                    else:
-                        stats[ea_id]["draws"] += 1
-                        stats[eb_id]["draws"] += 1
-            else:
-                # 普通赛制：单场胜负累加
-                delta_a, delta_b = match_deltas(m)
-                stats[ea_id]["delta_total"] += delta_a
-                stats[eb_id]["delta_total"] += delta_b
-                wa = points_for_result(scoring, m["winner"], 0)
-                wb = points_for_result(scoring, m["winner"], 1)
-                stats[ea_id]["points"] += wa
-                stats[eb_id]["points"] += wb
-                if m["winner"] == 0:
+            if not contest_match_binding_is_valid(
+                p,
+                m,
+                expected_contest_id=contest_id,
+                expected_game_id=gid,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
+            ):
+                continue
+            games = scoring_games_for_match(
+                m,
+                duplicate=duplicate,
+                planned_games=planned_games,
+                fixed_rounds_per_match=game_spec.fixed_rounds_per_match,
+                require_frozen_duplicate=(
+                    stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT
+                ),
+                normalize_delta=game_spec.normalize_delta,
+            )
+            if not games:
+                continue
+            # A completed database row is not an authoritative played job until
+            # its shared scoring parser succeeds.  Keep personal job/opponent/
+            # encounter counts aligned with stage progress and W/D/L instead of
+            # exposing malformed history as a zero-game opponent encounter.
+            stats[ea_id]["counts"]["match_jobs"] += 1
+            stats[eb_id]["counts"]["match_jobs"] += 1
+            opponent_ids[int(ea_id)].add(int(eb_id))
+            opponent_ids[int(eb_id)].add(int(ea_id))
+            encounter_key = conceptual_series_key(stage, p)
+            if encounter_key is not None:
+                encounter_keys[int(ea_id)].add(encounter_key)
+                encounter_keys[int(eb_id)].add(encounter_key)
+            for game in games:
+                if game.deltas is not None:
+                    stats[ea_id]["delta_total"] += int(game.deltas[0])
+                    stats[eb_id]["delta_total"] += int(game.deltas[1])
+                stats[ea_id]["points"] += points_for_result(
+                    scoring, game.winner, 0
+                )
+                stats[eb_id]["points"] += points_for_result(
+                    scoring, game.winner, 1
+                )
+                stats[ea_id]["counts"]["scoring_games"] += 1
+                stats[eb_id]["counts"]["scoring_games"] += 1
+                if game.winner == 0:
                     stats[ea_id]["wins"] += 1
                     stats[eb_id]["losses"] += 1
-                elif m["winner"] == 1:
+                elif game.winner == 1:
                     stats[eb_id]["wins"] += 1
                     stats[ea_id]["losses"] += 1
                 else:
                     stats[ea_id]["draws"] += 1
                     stats[eb_id]["draws"] += 1
-            gid = p.get("group_id") or ""
-            if gid:
-                stats[ea_id]["group_id"] = gid
-                stats[eb_id]["group_id"] = gid
+            group_id = p.get("group_id") or ""
+            if group_id:
+                stats[ea_id]["group_id"] = group_id
+                stats[eb_id]["group_id"] = group_id
+        for entry_id, keys in encounter_keys.items():
+            stats[entry_id]["counts"]["encounter_groups"] = len(keys)
+            stats[entry_id]["counts"]["unique_opponents"] = len(
+                opponent_ids[entry_id]
+            )
         rows = list(stats.values())
         rows.sort(key=lambda r: (-r["points"], -r["delta_total"]))
+        if stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT:
+            from bzplat.backend.contests import ranking as _ranking
+
+            return _ranking.compute_official_ranking(
+                rows,
+                pairing_rows,
+                matches_by_id,
+                normalize_delta=game_spec.normalize_delta,
+                stage=stage,
+                planned_games_per_match=planned_games,
+                fixed_rounds_per_match=game_spec.fixed_rounds_per_match,
+                game_id=gid,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
+            )
         return rows
 
     def _stage_done(self, contest_id: int, stage_idx: int) -> bool:
         contest = self.store.get_contest(contest_id)
+        if not contest:
+            return False
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
         stages = _parse_stages(contest or {})
+        current_stage_idx = contest_current_stage_index(
+            contest, stage_count=len(stages)
+        )
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if current_stage_idx is None or stage_idx != current_stage_idx:
+            return False
         stage_type = (
             stages[stage_idx].get("type")
             if 0 <= stage_idx < len(stages)
             else None
         )
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
-        if not pairings:
-            return False
         stage = (
             stages[stage_idx]
             if 0 <= stage_idx < len(stages) and isinstance(stages[stage_idx], dict)
-            else {}
+            else None
         )
-        if is_aggregate_series_stage(stage):
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            return False
+        assert stage is not None
+        game_spec = game_registry.get(game_id)
+        duplicate = stage_duplicate_mode(stage)
+        if duplicate is None:
+            return False
+        planned_games = planned_match_games(game_spec, duplicate=duplicate)
+        entries = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entries)
+        if active_entries is None:
+            return False
+        expected_entry_ids = [
+            int(entry["id"])
+            for entry in active_entries
+        ]
+        cumulative_deltas: dict[int, int] = {
+            int(entry_id): 0 for entry_id in expected_entry_ids
+        }
+        if not pairings:
+            # An explicit series marker has a derivable empty topology only for
+            # a zero/one-person cohort.  This also keeps already-running legacy
+            # aggregate stages from wedging after the scoring cutover.  Any
+            # larger empty graph is missing durable fixture rows.
+            return bool(
+                stage.get("series_scoring")
+                in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT}
+                and len(expected_entry_ids) <= 1
+            )
+        if "games_per_pair" in stage:
             real_pairings = [
                 pairing
                 for pairing in pairings
                 if not is_authoritative_no_opponent_pairing(stage_type, pairing)
             ]
-            if not aggregate_series_rows_settled(
-                stage, real_pairings, self.store.get_match
+            if not series_rows_settled(
+                stage,
+                real_pairings,
+                self.store.get_match,
+                game_spec=game_spec,
+                all_pairings=pairings,
+                expected_entry_ids=expected_entry_ids,
+                expected_swiss_rounds=(
+                    effective_swiss_rounds(stage, len(expected_entry_ids))
+                    if stage.get("type") == "swiss"
+                    else None
+                ),
+                expected_contest_id=contest_id,
+                expected_entry_bots={
+                    int(entry["id"]): entry.get("bot_id") for entry in entries
+                },
+                expected_entry_users={
+                    int(entry["id"]): int(entry["user_id"]) for entry in entries
+                },
+                require_current_entry_bots=contest.get("status") in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                ),
             ):
                 return False
         for p in pairings:
@@ -2193,6 +2749,23 @@ class ContestManager:
             # 已完成轮空。真实对手 Bot 被 FK SET NULL 后仍保留 entry_b_id，
             # 必须阻断阶段推进。
             if is_authoritative_no_opponent_pairing(stage_type, p):
+                if not contest_pairing_roster_binding_is_valid(
+                    p,
+                    expected_contest_id=contest_id,
+                    expected_entry_bots={
+                        int(entry["id"]): entry.get("bot_id") for entry in entries
+                    },
+                    expected_entry_users={
+                        int(entry["id"]): int(entry["user_id"])
+                        for entry in entries
+                    },
+                    require_current_entry_bots=contest.get("status") in (
+                        CONTEST_PUBLISHED,
+                        CONTEST_RUNNING,
+                    ),
+                    require_opponent=False,
+                ):
+                    return False
                 continue
             mid = p.get("match_id")
             if not mid:
@@ -2201,8 +2774,49 @@ class ContestManager:
             # aborted 只表示对局被取消/未产生裁决，绝不是赛制上的
             # “已完成”。把它算作终态会让 KO 在 winner=None 时固定
             # 晋级座位 0，也会给 RR/Swiss 静默吞分。
-            if not m or m["status"] != STATUS_COMPLETED:
+            if not match_scoring_result_is_valid(
+                stage,
+                m,
+                game_spec=game_spec,
+                pairing=p,
+                expected_contest_id=contest_id,
+                expected_entry_bots={
+                    int(entry["id"]): entry.get("bot_id") for entry in entries
+                },
+                expected_entry_users={
+                    int(entry["id"]): int(entry["user_id"]) for entry in entries
+                },
+                require_current_entry_bots=contest.get("status") in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                ),
+            ):
                 return False
+            games = scoring_games_for_match(
+                m,
+                duplicate=duplicate,
+                planned_games=planned_games,
+                fixed_rounds_per_match=game_spec.fixed_rounds_per_match,
+                require_frozen_duplicate=(
+                    stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT
+                ),
+                normalize_delta=game_spec.normalize_delta,
+            )
+            if not games:
+                return False
+            entry_a = int(p["entry_a_id"])
+            entry_b = int(p["entry_b_id"])
+            cumulative_deltas[entry_a] = cumulative_deltas.get(entry_a, 0) + sum(
+                int(game.deltas[0]) for game in games
+            )
+            cumulative_deltas[entry_b] = cumulative_deltas.get(entry_b, 0) + sum(
+                int(game.deltas[1]) for game in games
+            )
+        if any(
+            normalized_delta_value(game_spec.normalize_delta, delta) is None
+            for delta in cumulative_deltas.values()
+        ):
+            return False
         return True
 
     def _snapshot_stage_results(self, contest_id: int, stage_idx: int) -> None:
@@ -2217,6 +2831,12 @@ class ContestManager:
         for i, s in enumerate(self._rank_stage_rows(contest_id, stage_idx)):
             group_key = s.get("group_id") or "_"
             group_ranks[group_key] += 1
+            tiebreaks = sanitize_public_contest_tiebreaks(s.get("tiebreaks"))
+            if tiebreaks is None:
+                # A completed independent snapshot must retain the exact
+                # ranking chain that selected advancement.  Refuse a partial
+                # durable row instead of later presenting a different order.
+                raise ValueError("阶段破同分明细无效，无法固化阶段结果")
             self.store.upsert_stage_result(
                 contest_id,
                 stage_idx,
@@ -2230,6 +2850,11 @@ class ContestManager:
                 delta_total=s["delta_total"],
                 group_id=s.get("group_id") or "",
                 rank_in_group=(group_ranks[group_key] if grouped else i + 1),
+                payload_json=json.dumps(
+                    {"tiebreaks": tiebreaks},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             )
 
     def _mark_stage_pairings_done(self, contest_id: int, stage_idx: int) -> None:
@@ -2284,11 +2909,34 @@ class ContestManager:
     def _advance_participants(self, contest_id: int, stage_idx: int) -> None:
         """根据阶段配置标记淘汰（不晋级者）。"""
         c = self.store.get_contest(contest_id)
-        stages = _parse_stages(c)
-        if stage_idx < 0 or stage_idx >= len(stages):
+        if not c:
             return
+        stages = _parse_stages(c)
+        current_stage_idx = contest_current_stage_index(c, stage_count=len(stages))
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if current_stage_idx is None or stage_idx != current_stage_idx:
+            raise ValueError("赛事当前阶段游标损坏或已变化，拒绝计算晋级名单")
         stage = stages[stage_idx]
+        game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            # Recovery/resume can reach this helper independently of the usual
+            # completed-stage gate.  Never coerce a damaged frozen advance
+            # count and permanently eliminate entrants under invented rules.
+            raise ValueError("阶段计分契约无效，拒绝计算晋级名单")
+        entries = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entries)
+        if active_entries is None:
+            raise ValueError("参赛者淘汰状态损坏，拒绝计算晋级名单")
         standings = self._rank_stage_rows(contest_id, stage_idx)
+        expected_entry_ids = {int(entry["id"]) for entry in active_entries}
+        ranked_entry_ids = {
+            row.get("entry_id")
+            for row in standings
+            if isinstance(row.get("entry_id"), int)
+            and not isinstance(row.get("entry_id"), bool)
+        }
+        if ranked_entry_ids != expected_entry_ids:
+            raise ValueError("阶段排名不完整，拒绝计算晋级名单")
         # P0：advance 以 entry_id 为键（与 standings 一致，换 Bot 不影响晋级判定）
         advance: set[int] = set()
         if stage.get("advance_per_group"):
@@ -2307,7 +2955,7 @@ class ContestManager:
             # 默认全部晋级（如单阶段 RR）
             advance = {s["entry_id"] for s in standings}
 
-        for e in self.store.list_contest_entries(contest_id):
+        for e in entries:
             if e["id"] not in advance:
                 self.store.update_entry(contest_id, e["user_id"], eliminated=1)
 
@@ -2319,9 +2967,11 @@ class ContestManager:
         if not contest:
             return []
         stages = _parse_stages(contest)
-        stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
         game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
         standings = self.standings(contest_id, stage_idx=stage_idx)
+        if stage is None:
+            return standings
         pairings = self.store.list_contest_pairings(
             contest_id, stage_idx=stage_idx
         )
@@ -2331,12 +2981,41 @@ class ContestManager:
             for match_id in match_ids
             if match_id
         }
+        entries = self.store.list_contest_entries(contest_id)
+        game_spec = game_registry.get(game_id)
+        duplicate = stage_duplicate_mode(stage)
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            return standings
+        current_stage_idx = contest_current_stage_index(
+            contest, stage_count=len(stages)
+        )
+        if current_stage_idx is None:
+            return []
         return _ranking.compute_official_ranking(
             standings,
             pairings,
             {key: value for key, value in matches.items() if value},
-            normalize_delta=game_registry.get(game_id).normalize_delta,
+            normalize_delta=game_spec.normalize_delta,
             stage=stage,
+            planned_games_per_match=planned_match_games(
+                game_spec, duplicate=duplicate
+            ),
+            fixed_rounds_per_match=game_spec.fixed_rounds_per_match,
+            game_id=game_id,
+            expected_contest_id=contest_id,
+            expected_entry_bots={
+                int(entry["id"]): entry.get("bot_id") for entry in entries
+            },
+            expected_entry_users={
+                int(entry["id"]): int(entry["user_id"]) for entry in entries
+            },
+            require_current_entry_bots=bool(
+                stage_idx == current_stage_idx
+                and contest.get("status") in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                )
+            ),
         )
 
     async def handle_match_done(
@@ -2415,8 +3094,19 @@ class ContestManager:
                                         old_execution["public_id"],
                                     )
                                     return self.store.get_contest(contest_id)
+                            pairing_stage_idx = exact_nonnegative_int(
+                                pairing.get("stage_idx")
+                            )
+                            if pairing_stage_idx is None:
+                                logger.error(
+                                    "contest pairing has malformed stage cursor: "
+                                    "contest=%s pairing=%s",
+                                    contest_id,
+                                    pairing.get("id"),
+                                )
+                                return self.store.get_contest(contest_id)
                             await self._dispatch_pending_locked(
-                                contest_id, int(pairing.get("stage_idx") or 0)
+                                contest_id, pairing_stage_idx
                             )
                     return self.store.get_contest(contest_id)
                 if match.get("status") == STATUS_COMPLETED:
@@ -2426,9 +3116,14 @@ class ContestManager:
                 result = await self._maybe_finish_locked(contest_id)
                 latest = self.store.get_contest(contest_id)
                 if latest and latest.get("status") == CONTEST_RUNNING:
-                    await self._dispatch_pending_locked(
-                        contest_id, int(latest.get("current_stage_idx") or 0)
+                    latest_stages = _parse_stages(latest)
+                    latest_stage_idx = contest_current_stage_index(
+                        latest, stage_count=len(latest_stages)
                     )
+                    if latest_stage_idx is not None:
+                        await self._dispatch_pending_locked(
+                            contest_id, latest_stage_idx
+                        )
                 return result or self.store.get_contest(contest_id)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
@@ -2451,7 +3146,16 @@ class ContestManager:
         if c["status"] == CONTEST_REST:
             return await self._maybe_auto_resume(contest_id)
 
-        stage_idx = int(c.get("current_stage_idx") or 0)
+        raw_stages = _parse_stages(c)
+        stage_idx = contest_current_stage_index(
+            c, stage_count=len(raw_stages)
+        )
+        if stage_idx is None:
+            logger.error(
+                "contest %s has malformed current_stage_idx; lifecycle blocked",
+                contest_id,
+            )
+            return None
         self._sync_completed_pairings(contest_id, stage_idx)
         # Mirroring an already completed match is part of draining that active
         # work.  New rounds, stage snapshots and lifecycle transitions are not:
@@ -2459,7 +3163,19 @@ class ContestManager:
         # scheduler write after the execution callback has quiesced.
         if self._execution_admission_error() is not None:
             return self.store.get_contest(contest_id)
-        stages = _parse_stages(c)
+        try:
+            stages = self._validated_active_lifecycle_stages(c, raw_stages)
+        except ValueError as exc:
+            # A damaged future stage is part of the same frozen lifecycle
+            # contract.  Block before snapshotting the current ranking,
+            # eliminating entrants, or creating any next-stage pairing; those
+            # writes are irreversible even if dispatch later fails closed.
+            logger.error(
+                "contest %s has invalid frozen stage contract: %s",
+                contest_id,
+                exc,
+            )
+            return None
         if not self._stage_done(contest_id, stage_idx):
             # 瑞士制：当前轮完成则生成下一轮
             if stages and 0 <= stage_idx < len(stages):
@@ -2568,11 +3284,20 @@ class ContestManager:
             if is_showcase(contest):
                 continue
             self._backfill_actual_start(contest)
+            raw_pairings = self.store.list_contest_pairings(contest["id"])
             stage_indices = {
-                int(pairing.get("stage_idx") or 0)
-                for pairing in self.store.list_contest_pairings(contest["id"])
+                exact_nonnegative_int(pairing.get("stage_idx"))
+                for pairing in raw_pairings
             }
+            if None in stage_indices:
+                logger.error(
+                    "skip contest reconciliation for malformed pairing stage: "
+                    "contest=%s",
+                    contest["id"],
+                )
+                continue
             for stage_idx in stage_indices:
+                assert stage_idx is not None
                 self._sync_completed_pairings(contest["id"], stage_idx)
 
         # 1. 清理未绑定 prepared 幽灵 + 复位已绑定死 pairing。
@@ -2602,11 +3327,36 @@ class ContestManager:
             # force-finish/回调竞态；replace_official_results 自身是完整批次事务。
             async with self._lock(contest_id):
                 latest = self.store.get_contest(contest_id)
+                official_ready = (
+                    exact_sqlite_bool(latest.get("official_results_ready"))
+                    if latest
+                    else None
+                )
                 if (
                     latest
                     and latest["status"] == CONTEST_FINISHED
-                    and not int(latest.get("official_results_ready") or 0)
+                    and official_ready is False
                 ):
+                    latest_stages = _parse_stages(latest)
+                    stage_idx = contest_current_stage_index(
+                        latest, stage_count=len(latest_stages)
+                    )
+                    if stage_idx is None:
+                        logger.error(
+                            "skip official-results recovery for malformed "
+                            "current_stage_idx contest=%s",
+                            contest_id,
+                        )
+                        return
+                    # Stage snapshots are written before the terminal official
+                    # batch.  If that final transaction alone failed, recover
+                    # the already adjudicated order verbatim: reopening the DB
+                    # may normalize old Match JSON under a newer result schema,
+                    # and recomputing would silently rewrite history.
+                    if self._finalize_official_results_from_stage_snapshots(
+                        contest_id, stage_idx
+                    ):
+                        return
                     # A terminal status alone is not proof that every durable
                     # pairing was adjudicated.  Recovery uses the same
                     # all-stage fail-closed gate as automatic and force finish.
@@ -2617,11 +3367,20 @@ class ContestManager:
                             contest_id,
                         )
                         return
-                    stage_idx = int(latest.get("current_stage_idx") or 0)
                     self._finalize_official_results(contest_id, stage_idx)
             return
         if initial and initial["status"] == CONTEST_PUBLISHED:
-            stage_idx = int(initial.get("current_stage_idx") or 0)
+            initial_stages = _parse_stages(initial)
+            stage_idx = contest_current_stage_index(
+                initial, stage_count=len(initial_stages)
+            )
+            if stage_idx is None:
+                logger.error(
+                    "skip published recovery for malformed current_stage_idx "
+                    "contest=%s",
+                    contest_id,
+                )
+                return
             await self.ensure_published_pairings(contest_id, stage_idx)
             # 恢复后仅派发 scheduled_at<=now 的场次；未到点的仍保持
             # published，不把“启动恢复”偷换成“手动立即开赛”。
@@ -2636,7 +3395,16 @@ class ContestManager:
         if c["status"] == CONTEST_REST:
             return  # rest 期交由 _maybe_auto_resume（启动时点未到则等）
 
-        stage_idx = int(c.get("current_stage_idx") or 0)
+        current_stages = _parse_stages(c)
+        stage_idx = contest_current_stage_index(
+            c, stage_count=len(current_stages)
+        )
+        if stage_idx is None:
+            logger.error(
+                "skip running recovery for malformed current_stage_idx contest=%s",
+                contest_id,
+            )
+            return
         # 第二轮：重派 pending 无 match_id 的 pairing（死而复生 + 新生成轮）。
         # 单侧 Bot 不可用时会落 completed 技术判负；双方不可用时
         # 明确保持 pending 阻塞，不伪造无 winner 的 aborted 结果。
@@ -2668,11 +3436,22 @@ class ContestManager:
             return
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
-        # duplicate 标志（复审 P2-2），否则同赛事出现 duplicate/单 leg 混合。
-        stages = _parse_stages(c)
-        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        # duplicate 标志（复审 P2-2），否则同赛事会混入普通单场对局。
+        stages = self._validated_active_lifecycle_stages(c, _parse_stages(c))
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
         spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
-        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
+        duplicate = stage_duplicate_mode(stage_cfg)
+        if not stage_scoring_contract_is_valid(stage_cfg, game_id=gid):
+            logger.error(
+                "contest redispatch blocked by malformed duplicate mode: "
+                "contest=%s stage=%s",
+                contest_id,
+                stage_idx,
+            )
+            return
+        want_duplicate = bool(
+            duplicate and spec is not None and spec.build_match_plan is not None
+        )
         pending = [
             p
             for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
@@ -2704,6 +3483,147 @@ class ContestManager:
                     p["id"],
                 )
 
+    def _stage_ranking_from_recovery_snapshot(
+        self, contest_id: int, stage_idx: int
+    ) -> list[dict[str, Any]] | None:
+        """Validate and restore one exact stage ranking without Match replay.
+
+        A partial snapshot must never become an official table.  Participant
+        identity is derived from the durable pairing topology (or the only
+        active entrant in the legitimate zero-pairing case), while the exact
+        global rank and tie-break values come from the pre-terminal snapshot.
+        """
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return None
+        stages = _parse_stages(contest)
+        if contest_current_stage_index(contest, stage_count=len(stages)) is None:
+            return None
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None or not 0 <= stage_idx < len(stages):
+            return None
+        stage = stages[stage_idx]
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            return None
+
+        entry_rows = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entry_rows)
+        if active_entries is None:
+            return None
+        entries = {int(entry["id"]): entry for entry in entry_rows}
+        pairings = self.store.list_contest_pairings(
+            contest_id, stage_idx=stage_idx
+        )
+        expected: set[int] = set()
+        for pairing in pairings:
+            for key in ("entry_a_id", "entry_b_id"):
+                value = pairing.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return None
+                expected.add(value)
+        if not expected:
+            active = {int(entry["id"]) for entry in active_entries}
+            if len(active) > 1:
+                return None
+            expected = active
+
+        snapshots = self.store.list_stage_result_recovery_snapshots(
+            contest_id, stage_idx=stage_idx
+        )
+        if len(snapshots) != len(expected):
+            return None
+        grouped = str(stage.get("type") or "").startswith("group_")
+        restored: list[dict[str, Any]] = []
+        seen_entries: set[int] = set()
+        seen_ranks: set[int] = set()
+        for snapshot in snapshots:
+            entry_id = snapshot.get("entry_id")
+            if (
+                isinstance(entry_id, bool)
+                or not isinstance(entry_id, int)
+                or entry_id not in expected
+                or entry_id not in entries
+                or entry_id in seen_entries
+            ):
+                return None
+            # Non-group snapshots persist the exact stage-global selection as
+            # rank_in_group.  A grouped snapshot only records per-group ranks,
+            # so it fails closed instead of inventing an inter-group order.
+            rank = None if grouped else snapshot.get("rank_in_group")
+            if (
+                isinstance(rank, bool)
+                or not isinstance(rank, int)
+                or rank < 1
+                or rank in seen_ranks
+                or not isinstance(snapshot.get("tiebreaks"), dict)
+            ):
+                return None
+            seen_entries.add(entry_id)
+            seen_ranks.add(rank)
+            entry = entries[entry_id]
+            restored.append(
+                {
+                    "entry_id": entry_id,
+                    "bot_id": snapshot.get("bot_id"),
+                    "user_id": entry.get("user_id"),
+                    "rank": rank,
+                    "points": snapshot.get("points") or 0,
+                    "wins": snapshot.get("wins") or 0,
+                    "draws": snapshot.get("draws") or 0,
+                    "losses": snapshot.get("losses") or 0,
+                    "delta_total": snapshot.get("delta_total") or 0,
+                    "group_id": snapshot.get("group_id") or "",
+                    "tiebreaks": snapshot["tiebreaks"],
+                }
+            )
+        if seen_entries != expected or seen_ranks != set(
+            range(1, len(expected) + 1)
+        ):
+            return None
+        restored.sort(key=lambda row: row["rank"])
+        return restored
+
+    def _finalize_official_results_from_stage_snapshots(
+        self, contest_id: int, stage_idx: int
+    ) -> bool:
+        """Publish a complete pre-terminal snapshot after an interrupted commit."""
+        from bzplat.backend.contests import ranking as _ranking
+
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return False
+        stages = _parse_stages(contest)
+        if not 0 <= stage_idx < len(stages):
+            return False
+        current = self._stage_ranking_from_recovery_snapshot(
+            contest_id, stage_idx
+        )
+        if current is None:
+            return False
+        stage = stages[stage_idx]
+        ranking_rows = current
+        if stage.get("ranking_mode") == "replace_top" and stage_idx > 0:
+            previous = self._stage_ranking_from_recovery_snapshot(
+                contest_id, stage_idx - 1
+            )
+            scope = stage.get("ranking_scope", 8)
+            if (
+                previous is None
+                or isinstance(scope, bool)
+                or not isinstance(scope, int)
+            ):
+                return False
+            ranking_rows = _ranking.merge_replace_top(
+                previous, current, scope=scope
+            )
+        _ranking.persist_official_results(
+            self.store, contest_id, ranking_rows, stage_idx=stage_idx
+        )
+        return True
+
     def _finalize_official_results(self, contest_id: int, stage_idx: int) -> None:
         """计算全员正式名次（破同分）并落库 contest_official_results。
 
@@ -2715,16 +3635,23 @@ class ContestManager:
         if not c:
             return
         stages = _parse_stages(c)
-        cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
+        game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        if not stage_scoring_contract_is_valid(cur_stage, game_id=game_id):
+            raise ValueError("阶段计分契约无效，拒绝固化正式排名")
+        assert cur_stage is not None
+
         def _rank_stage(sidx: int) -> list[dict]:
             return self._rank_stage_rows(contest_id, sidx)
 
         ranking_rows = _rank_stage(stage_idx)
         # replace_top 合成榜（决赛：末阶段 Top8 + 前一阶段未晋级者）
         if cur_stage.get("ranking_mode") == "replace_top" and stage_idx > 0:
-            scope = int(cur_stage.get("ranking_scope") or 8)
+            scope = cur_stage.get("ranking_scope", 8)
             stage1_ranking = _rank_stage(stage_idx - 1)
-            ranking_rows = _ranking.merge_replace_top(stage1_ranking, ranking_rows, scope=scope)
+            ranking_rows = _ranking.merge_replace_top(
+                stage1_ranking, ranking_rows, scope=scope
+            )
         _ranking.persist_official_results(
             self.store, contest_id, ranking_rows, stage_idx=stage_idx
         )
@@ -2733,24 +3660,82 @@ class ContestManager:
         self, contest_id: int, stage_idx: int, stage: dict
     ) -> bool:
         """瑞士轮当前轮完成后生成下一轮。返回是否生成了新一轮（True=阶段未完成）。"""
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return False
+        stages = _parse_stages(contest)
+        current_stage_idx = contest_current_stage_index(
+            contest, stage_count=len(stages)
+        )
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if current_stage_idx is None or stage_idx != current_stage_idx:
+            return False
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            return False
+        game_spec = game_registry.get(game_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
             return False
-        max_round = max(int(p.get("round_num") or 1) for p in pairings)
+        round_numbers: list[int] = []
+        for pairing in pairings:
+            raw_round = pairing.get("round_num")
+            if (
+                isinstance(raw_round, bool)
+                or not isinstance(raw_round, int)
+                or raw_round < 1
+            ):
+                return False
+            round_numbers.append(raw_round)
+        max_round = max(round_numbers)
+        entries = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entries)
+        if active_entries is None:
+            return False
+        expected_entry_bots = {
+            int(entry["id"]): entry.get("bot_id") for entry in entries
+        }
+        expected_entry_users = {
+            int(entry["id"]): int(entry["user_id"]) for entry in entries
+        }
+        require_current_entry_bots = contest.get("status") in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+        )
 
         def _is_adjudicated(pairing: dict[str, Any]) -> bool:
             """A Swiss history row is either a strict bye or a completed match."""
             if is_authoritative_no_opponent_pairing(
                 stage.get("type"), pairing
             ):
-                return True
+                return contest_pairing_roster_binding_is_valid(
+                    pairing,
+                    expected_contest_id=contest_id,
+                    expected_entry_bots=expected_entry_bots,
+                    expected_entry_users=expected_entry_users,
+                    require_current_entry_bots=require_current_entry_bots,
+                    require_opponent=False,
+                )
             match_id = pairing.get("match_id")
             if not match_id:
                 return False
             match = self.store.get_match(match_id)
-            return bool(match and match["status"] == STATUS_COMPLETED)
+            return match_scoring_result_is_valid(
+                stage,
+                match,
+                game_spec=game_spec,
+                pairing=pairing,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
+            )
 
-        if is_aggregate_series_stage(stage):
+        expected_entry_ids = [
+            int(entry["id"])
+            for entry in active_entries
+        ]
+        if "games_per_pair" in stage:
             real_pairings = [
                 pairing
                 for pairing in pairings
@@ -2758,8 +3743,18 @@ class ContestManager:
                     stage.get("type"), pairing
                 )
             ]
-            if not aggregate_series_rows_settled(
-                stage, real_pairings, self.store.get_match
+            if not series_rows_settled(
+                stage,
+                real_pairings,
+                self.store.get_match,
+                game_spec=game_spec,
+                all_pairings=pairings,
+                expected_entry_ids=expected_entry_ids,
+                expected_swiss_rounds=max_round,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
             ):
                 return False
 
@@ -2768,14 +3763,23 @@ class ContestManager:
         # otherwise drift in R1 could be skipped merely because R2 completed.
         if not all(_is_adjudicated(pairing) for pairing in pairings):
             return False
-        total_rounds = effective_swiss_rounds(
-            stage, len(self.store.list_contest_entries(contest_id))
-        )
+        total_rounds = effective_swiss_rounds(stage, len(expected_entry_ids))
         if max_round >= total_rounds:
             return False
         # 生成下一轮（P0：standings 键 entry_id；P1：bot_id 取 entry 当前值——
         # dispatch 换 Bot 后下一轮用新 Bot，已发布轮冻结不受影响）
         standings = self.standings(contest_id, stage_idx=stage_idx)
+        standings_entry_ids = {
+            row.get("entry_id")
+            for row in standings
+            if isinstance(row.get("entry_id"), int)
+            and not isinstance(row.get("entry_id"), bool)
+        }
+        if standings_entry_ids != set(expected_entry_ids):
+            # The shared ranking path returns no rows when cumulative normalized
+            # deltas or another frozen scoring invariant are malformed.  Never
+            # turn that fail-closed signal into an empty next-round batch.
+            return False
         # entry_id → 该 entry 当前 bot_id（dispatch 后是新 Bot）
         entries = {e["id"]: e for e in self.store.list_contest_entries(contest_id)}
         entry_to_bot = {s["entry_id"]: entries.get(s["entry_id"], {}).get("bot_id") for s in standings}
@@ -2790,7 +3794,8 @@ class ContestManager:
         bot_ids = [
             entry_to_bot[s["entry_id"]]
             for s in standings
-            if not s.get("eliminated") and entry_to_bot.get(s["entry_id"]) is not None
+            if s.get("eliminated") == 0
+            and entry_to_bot.get(s["entry_id"]) is not None
         ]
         played: set[tuple[int, int]] = set()
         bye_counts_by_entry: Counter[int] = Counter()
@@ -2904,24 +3909,77 @@ class ContestManager:
         复现修复：500 人压测发现 KO 只跑四分之一就 finished——_stage_done 只看现有 pairing，
         但 single_elimination 只生成首轮，后续轮需根据胜者推进。
         """
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return "blocked"
+        stages = _parse_stages(contest)
+        current_stage_idx = contest_current_stage_index(
+            contest, stage_count=len(stages)
+        )
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if current_stage_idx is None or stage_idx != current_stage_idx:
+            return "blocked"
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
+        if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+            return "blocked"
+        game_spec = game_registry.get(game_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
             return "blocked"
-        max_round = max(int(p.get("round_num") or 1) for p in pairings)
-        cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
+        entries = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entries)
+        if active_entries is None:
+            return "blocked"
+        expected_entry_bots = {
+            int(entry["id"]): entry.get("bot_id") for entry in entries
+        }
+        expected_entry_users = {
+            int(entry["id"]): int(entry["user_id"]) for entry in entries
+        }
+        require_current_entry_bots = contest.get("status") in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+        )
+        round_numbers = [exact_nonnegative_int(p.get("round_num")) for p in pairings]
+        if any(round_num is None or round_num < 1 for round_num in round_numbers):
+            return "blocked"
+        max_round = max(round_num for round_num in round_numbers if round_num is not None)
+        cur = [
+            p
+            for p, round_num in zip(pairings, round_numbers)
+            if round_num == max_round
+        ]
         # 当前轮全部完成
         winners: list[tuple[int, int | None]] = []  # (bot_id, entry_id)
         for p in cur:
             # 权威 no-opponent pairing 视为已完成，胜者为轮空者 bot_a。
             # entry_b_id 仍存在的 deleted-opponent 行绝不能晋级座位 A。
             if is_authoritative_no_opponent_pairing(stage.get("type"), p):
+                if not contest_pairing_roster_binding_is_valid(
+                    p,
+                    expected_contest_id=contest_id,
+                    expected_entry_bots=expected_entry_bots,
+                    expected_entry_users=expected_entry_users,
+                    require_current_entry_bots=require_current_entry_bots,
+                    require_opponent=False,
+                ):
+                    return "blocked"
                 winners.append((p["bot_a_id"], p.get("entry_a_id")))
                 continue
             mid = p.get("match_id")
             if not mid:
                 return "blocked"
             m = self.store.get_match(mid)
-            if not m or m["status"] != STATUS_COMPLETED:
+            if not match_scoring_result_is_valid(
+                stage,
+                m,
+                game_spec=game_spec,
+                pairing=p,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=require_current_entry_bots,
+            ):
                 return "blocked"
             w = m.get("winner")
             if w not in (0, 1):
@@ -3032,8 +4090,10 @@ class ContestManager:
         # running.  Gate before either write so deployment cannot leave a
         # misleading running stage with no admissible execution.
         self._require_execution_admission()
-        stage_idx = int(c.get("current_stage_idx") or 0)
-        stages = _parse_stages(c)
+        stages = self._validated_active_lifecycle_stages(c, _parse_stages(c))
+        stage_idx = contest_current_stage_index(c, stage_count=len(stages))
+        if stage_idx is None:
+            raise ValueError("赛事当前阶段游标损坏，拒绝恢复")
         if stage_idx + 1 >= len(stages):
             return self._finish_adjudicated_contest_locked(
                 contest_id,
@@ -3055,7 +4115,12 @@ class ContestManager:
                 self._require_execution_admission()
                 if c["status"] == CONTEST_REST:
                     return await self._resume_locked(contest_id)
-                stage_idx = int(c.get("current_stage_idx") or 0)
+                stages = _parse_stages(c)
+                stage_idx = contest_current_stage_index(
+                    c, stage_count=len(stages)
+                )
+                if stage_idx is None:
+                    raise ValueError("赛事当前阶段游标损坏，拒绝推进")
                 if not self._stage_done(contest_id, stage_idx):
                     raise ValueError("当前阶段对阵尚未全部完成")
                 return (
@@ -3122,7 +4187,10 @@ class ContestManager:
         require_mutable(c)
         if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             raise ValueError("仅运行中/休息中的赛事可强制结束")
-        stage_idx = int(c.get("current_stage_idx") or 0)
+        stages = _parse_stages(c)
+        stage_idx = contest_current_stage_index(c, stage_count=len(stages))
+        if stage_idx is None:
+            raise ValueError("赛事当前阶段游标损坏，拒绝结束")
         result = self._finish_adjudicated_contest_locked(
             contest_id,
             stage_idx,
@@ -3155,25 +4223,49 @@ class ContestManager:
         contest = self.store.get_contest(contest_id)
         if not contest:
             return True
+        game_id = _stored_game_id(contest, entity=f"赛事 #{contest_id}")
+        game_spec = game_registry.get(game_id)
         stages = _parse_stages(contest or {})
-        persisted_stage_idx = int(contest.get("current_stage_idx") or 0)
-        explicit_next_stage = through_stage_idx is not None
-        current_stage_idx = (
-            persisted_stage_idx
-            if through_stage_idx is None
-            else int(through_stage_idx)
+        persisted_stage_idx = contest_current_stage_index(
+            contest, stage_count=len(stages)
         )
+        if persisted_stage_idx is None:
+            return True
+        explicit_next_stage = through_stage_idx is not None
+        if through_stage_idx is None:
+            current_stage_idx = persisted_stage_idx
+        elif (
+            isinstance(through_stage_idx, bool)
+            or not isinstance(through_stage_idx, int)
+        ):
+            return True
+        else:
+            current_stage_idx = through_stage_idx
         if current_stage_idx < 0 or current_stage_idx >= len(stages):
             return True
 
+        entries = self.store.list_contest_entries(contest_id)
+        active_entries = active_contest_entries(entries)
+        if active_entries is None:
+            return True
+        expected_entry_bots = {
+            int(entry["id"]): entry.get("bot_id") for entry in entries
+        }
+        expected_entry_users = {
+            int(entry["id"]): int(entry["user_id"]) for entry in entries
+        }
         pairings_by_stage: dict[int, list[dict[str, Any]]] = {
             stage_idx: [] for stage_idx in range(current_stage_idx + 1)
         }
         for pairing in self.store.list_contest_pairings(contest_id):
-            stage_idx = int(pairing.get("stage_idx") or 0)
+            stage_idx = exact_nonnegative_int(pairing.get("stage_idx"))
             # Future/unknown-stage rows are lifecycle drift, not evidence that
             # the reached stage graph is complete.
-            if stage_idx < 0 or stage_idx > current_stage_idx or stage_idx >= len(stages):
+            if (
+                stage_idx is None
+                or stage_idx > current_stage_idx
+                or stage_idx >= len(stages)
+            ):
                 return True
             pairings_by_stage[stage_idx].append(pairing)
             stage_type = (
@@ -3182,23 +4274,65 @@ class ContestManager:
                 else None
             )
             if is_authoritative_no_opponent_pairing(stage_type, pairing):
+                if not contest_pairing_roster_binding_is_valid(
+                    pairing,
+                    expected_contest_id=contest_id,
+                    expected_entry_bots=expected_entry_bots,
+                    expected_entry_users=expected_entry_users,
+                    require_current_entry_bots=bool(
+                        stage_idx >= persisted_stage_idx
+                        and contest.get("status") in (
+                            CONTEST_PUBLISHED,
+                            CONTEST_RUNNING,
+                        )
+                    ),
+                    require_opponent=False,
+                ):
+                    return True
                 continue
             match_id = pairing.get("match_id")
             if not match_id:
                 return True
             match = self.store.get_match(match_id)
-            if not match or match.get("status") != STATUS_COMPLETED:
+            if not match_scoring_result_is_valid(
+                stages[stage_idx],
+                match,
+                game_spec=game_spec,
+                pairing=pairing,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=bool(
+                    stage_idx >= persisted_stage_idx
+                    and contest.get("status") in (
+                        CONTEST_PUBLISHED,
+                        CONTEST_RUNNING,
+                    )
+                ),
+            ):
                 return True
 
-        entries = self.store.list_contest_entries(contest_id)
-        active_entry_count = sum(
-            not bool(entry.get("eliminated"))
-            for entry in entries
-        )
+        active_entry_count = len(active_entries)
+        active_entry_ids = {int(entry["id"]) for entry in active_entries}
+        frozen_stage_participants: dict[int, set[int]] = {}
+        for result in self.store.list_stage_results(contest_id):
+            result_stage_idx = result.get("stage_idx")
+            entry_id = result.get("entry_id")
+            if (
+                isinstance(result_stage_idx, int)
+                and not isinstance(result_stage_idx, bool)
+                and isinstance(entry_id, int)
+                and not isinstance(entry_id, bool)
+            ):
+                frozen_stage_participants.setdefault(
+                    result_stage_idx, set()
+                ).add(entry_id)
         for stage_idx, stage_pairings in pairings_by_stage.items():
             if stage_pairings:
                 stage = stages[stage_idx]
-                if is_aggregate_series_stage(stage):
+                if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+                    return True
+                if "games_per_pair" in stage:
                     real_pairings = [
                         pairing
                         for pairing in stage_pairings
@@ -3206,8 +4340,43 @@ class ContestManager:
                             stage.get("type"), pairing
                         )
                     ]
-                    if not aggregate_series_rows_settled(
-                        stage, real_pairings, self.store.get_match
+                    if not series_rows_settled(
+                        stage,
+                        real_pairings,
+                        self.store.get_match,
+                        game_spec=game_spec,
+                        all_pairings=stage_pairings,
+                        expected_entry_ids=(
+                            active_entry_ids
+                            if stage_idx >= persisted_stage_idx
+                            else frozen_stage_participants.get(
+                                stage_idx, active_entry_ids
+                            )
+                        ),
+                        expected_swiss_rounds=(
+                            effective_swiss_rounds(
+                                stage,
+                                len(
+                                    active_entry_ids
+                                    if stage_idx >= persisted_stage_idx
+                                    else frozen_stage_participants.get(
+                                        stage_idx, active_entry_ids
+                                    )
+                                ),
+                            )
+                            if stage.get("type") == "swiss"
+                            else None
+                        ),
+                        expected_contest_id=contest_id,
+                        expected_entry_bots=expected_entry_bots,
+                        expected_entry_users=expected_entry_users,
+                        require_current_entry_bots=bool(
+                            stage_idx >= persisted_stage_idx
+                            and contest.get("status") in (
+                                CONTEST_PUBLISHED,
+                                CONTEST_RUNNING,
+                            )
+                        ),
                     ):
                         return True
                 continue
@@ -3224,20 +4393,47 @@ class ContestManager:
             return True
         return False
 
-    def estimate(self, contest_id: int) -> dict:
-        c = self.store.get_contest(contest_id)
+    def estimate(
+        self,
+        contest_id: int,
+        *,
+        contest: dict[str, Any] | None = None,
+        entries: list[dict[str, Any]] | None = None,
+        pairings: list[dict[str, Any]] | None = None,
+    ) -> dict:
+        """Estimate from one optional frozen read snapshot.
+
+        The public detail endpoint injects contest/roster/pairings from a single
+        Store transaction. Other callers retain the historical Store-backed
+        behavior without duplicating the estimation formula.
+        """
+        c = contest if contest is not None else self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
-        n = len(self.store.list_contest_entries(contest_id))
+        entry_rows = (
+            entries
+            if entries is not None
+            else self.store.list_contest_entries(contest_id)
+        )
+        if active_contest_entries(entry_rows) is None:
+            raise ValueError("参赛者淘汰状态损坏，无法估算赛事")
+        pairing_rows = (
+            pairings
+            if pairings is not None
+            else self.store.list_contest_pairings(contest_id)
+        )
+        n = len(entry_rows)
         stages = _parse_stages(c)
         # 旧 draft/open 内建模板可以尚未持久化当前系列默认值。发布/启动会在
         # 冻结边界注入这些值，因此预估也必须基于同一份内存投影，避免 API
         # 先低报 K/轮数、实际发布后突然膨胀。这里只读计算，不静默改写快照。
         if (
             c.get("status") in (CONTEST_DRAFT, CONTEST_OPEN)
-            and not self.store.list_contest_pairings(contest_id)
+            and not pairing_rows
         ):
             stages = self._configured_unstarted_series_stages(c, stages)
+        if contest_current_stage_index(c, stage_count=len(stages)) is None:
+            raise ValueError("赛事当前阶段游标损坏，无法估算赛事")
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         spec = game_registry.get(gid)
         # estimate 按晋级契约传播各 stage 人数。与 _advance_participants 一致，
@@ -3252,10 +4448,13 @@ class ContestManager:
         sec_per = _estimate_sec_per_match(gid, {})
         stage_estimates: list[dict[str, Any]] = []
         for st in stages:
+            if not stage_scoring_contract_is_valid(st, game_id=gid):
+                raise ValueError("阶段计分版本配置无效")
             stage_matches = estimate_match_count(st, cur_n)
             total += stage_matches
             leg_count = 1
-            if st.get("duplicate"):
+            duplicate = stage_duplicate_mode(st)
+            if duplicate:
                 if spec.build_match_plan is None:
                     raise ValueError(f"游戏 {gid} 不支持 duplicate 赛制")
                 match_plan = spec.build_match_plan(0, {"duplicate": True})

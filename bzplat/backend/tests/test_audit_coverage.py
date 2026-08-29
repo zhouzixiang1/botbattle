@@ -460,6 +460,8 @@ def test_bot_crashed_is_technical_loss_in_normal_match(store: Store):
     assert m["reason"] == "technical_loss"
     assert m["winner"] == 0  # 座位 1 的 bb 崩溃，座位 0 胜
     assert m["technical_loss"] == 1
+    # Generic/rated Matches keep the historical +/-1 technical margin.  Only
+    # frozen independent-v1 contests neutralize a referee decision to [0, 0].
     assert m["result"]["deltas"] == [1, -1]
     # 技术判负也是 completed：非赛事对局须与正常完成走同一评分/pair_stats 契约。
     rating_a = store.get_rating(ba["id"])
@@ -467,6 +469,8 @@ def test_bot_crashed_is_technical_loss_in_normal_match(store: Store):
     assert rating_a["matches_played"] == rating_b["matches_played"] == 1
     assert rating_a["wins"] == 1 and rating_a["losses"] == 0
     assert rating_b["wins"] == 0 and rating_b["losses"] == 1
+    assert rating_a["delta_total"] == 1
+    assert rating_b["delta_total"] == -1
     h2h = store.head_to_head(ba["id"], bb["id"])
     assert h2h is not None
     assert h2h["a_wins"] == 1 and h2h["a_losses"] == 0
@@ -1466,14 +1470,30 @@ def test_contest_crash_blames_correct_seat_bot_b(store: Store):
     # 建一个 running 赛事 + 报名
     cid = store.create_contest(
         "t", ua["id"], game_id="gomoku", template_id="gomoku_rr",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]
+        ),
     )["id"]
     store.update_contest(cid, status=CONTEST_RUNNING)
-    store.add_contest_entry(cid, ua["id"], ba["id"])
-    store.add_contest_entry(cid, ub["id"], bb["id"])
+    entry_a = store.add_contest_entry(cid, ua["id"], ba["id"])
+    entry_b = store.add_contest_entry(cid, ub["id"], bb["id"])
+    pairing = store.add_contest_pairing(
+        cid,
+        ba["id"],
+        bb["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+    )
     mid = _new_match_id()
     store.create_match(
         mid, ba["id"], bb["id"], owner_id=ua["id"], contest_id=cid,
         game_id="gomoku", match_type=TYPE_CONTEST,
+        match_config={"duplicate": False},
+    )
+    store.bind_contest_pairing_match(
+        cid, pairing["id"], mid, require_execution_admission=False
     )
 
     async def run():
@@ -1514,14 +1534,30 @@ def test_contest_crash_blames_correct_seat_bot_a(store: Store):
 
     cid = store.create_contest(
         "t2", ub["id"], game_id="gomoku", template_id="gomoku_rr",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]
+        ),
     )["id"]
     store.update_contest(cid, status=CONTEST_RUNNING)
-    store.add_contest_entry(cid, ua["id"], ba["id"])
-    store.add_contest_entry(cid, ub["id"], bb["id"])
+    entry_a = store.add_contest_entry(cid, ua["id"], ba["id"])
+    entry_b = store.add_contest_entry(cid, ub["id"], bb["id"])
+    pairing = store.add_contest_pairing(
+        cid,
+        ba["id"],
+        bb["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+    )
     mid = _new_match_id()
     store.create_match(
         mid, ba["id"], bb["id"], owner_id=ub["id"], contest_id=cid,
         game_id="gomoku", match_type=TYPE_CONTEST,
+        match_config={"duplicate": False},
+    )
+    store.bind_contest_pairing_match(
+        cid, pairing["id"], mid, require_execution_admission=False
     )
 
     async def run():
@@ -1598,11 +1634,8 @@ def test_board_engine_still_treats_illegal_move_as_error():
     assert result.reason == "error"
 
 
-def test_holdem_engine_crash_judges_defeat():
-    """holdem 引擎：BotCrashedError 对齐裁判→判负（对手赢全部筹码），不中止整场。
-
-    三游戏统一：崩溃=判负（pencil 2-0 / gomoku 对手赢 / holdem 对手赢全部筹码）。
-    """
+def test_holdem_engine_propagates_crash_for_technical_terminal():
+    """Holdem 崩溃向编排层透传，不能产出不足 70 手的普通结果。"""
     from bzplat.backend.games.holdem.engine import MatchSession
 
     sess = MatchSession(num_hands=10)
@@ -1610,12 +1643,10 @@ def test_holdem_engine_crash_judges_defeat():
     def crashing_decide(player_idx, request):
         raise BotCrashedError("simulated holdem bot crash")
 
-    result = asyncio.run(sess.run_async(crashing_decide))
-    # Botzone 计分：崩溃方判负 → 本手全筹码（STARTING_STACK）输给对手，net 体现为
-    # 崩溃方 -STARTING_STACK、对手 +STARTING_STACK（final_chips = 累计净输赢）
-    assert result.final_chips[1] > result.final_chips[0]
-    assert result.final_chips[0] == -20000  # 崩溃方净输 20000
-    assert result.final_chips[1] == 20000   # 对手净赢 20000
+    with pytest.raises(BotCrashedError, match="simulated holdem bot crash"):
+        asyncio.run(sess.run_async(crashing_decide))
+    assert sess.rounds == []
+    assert not [event for event in sess.events if event["type"] == "match_end"]
 
 
 # ── start_session 文件不存在 → BotCrashedError（异常类型契约）─────────────────
