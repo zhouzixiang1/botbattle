@@ -668,6 +668,7 @@ def test_orchestrator_batches_debug_and_persistence_failure_never_changes_result
             bot_a["id"], bot_b["id"], owner["id"], game_id="holdem"
         )
         await orch._tasks[match_id]
+        assert store.executions.finalize_ready() == 1
         return match_id
 
     match_id = asyncio.run(run_one())

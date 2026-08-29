@@ -704,6 +704,10 @@ CREATE INDEX IF NOT EXISTS idx_execution_jobs_source
     ON execution_jobs(source,status,created_at);
 CREATE INDEX IF NOT EXISTS idx_execution_jobs_source_terminal
     ON execution_jobs(source,status,terminal_at);
+-- 赛事公平轮转只从持久 claim/attempt 历史派生。按 source + contest 缩小
+-- execution_jobs 扫描范围；claimed_at/id 同时覆盖常见终态历史，无需另建游标表。
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_contest_claim_history
+    ON execution_jobs(source,contest_id,claimed_at,id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_current_match
     ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_active_contest_pairing
@@ -1305,7 +1309,7 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     bot_a_version_id INTEGER,  -- P1：发布轮冻结的 bot 版本（→ bot_versions.binary_path）
     bot_b_version_id INTEGER,
-    pairing_seed    INTEGER,   -- P1：轮次确定性 seed（duplicate/复现用）
+    pairing_seed    INTEGER,   -- P1：私密冻结 seed（duplicate/复现用）
     published_at    TEXT,      -- P1：发布时间戳（非 NULL = 已发布轮，dispatch 不改）
     scheduled_at    TEXT,      -- 计划开赛时间（NULL=立即可打；逐场排期用，scheduler 到点 dispatch）
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
@@ -1317,7 +1321,13 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     color_first     INTEGER NOT NULL DEFAULT 0,
     series_index    INTEGER NOT NULL DEFAULT 1 CHECK(series_index>=1),
     series_size     INTEGER NOT NULL DEFAULT 1 CHECK(series_size>=1),
-    CONSTRAINT chk_contest_pairing_series CHECK(series_index<=series_size)
+    tiebreak_group  INTEGER NOT NULL DEFAULT 0 CHECK(tiebreak_group>=0),
+    tiebreak_game   INTEGER NOT NULL DEFAULT 0 CHECK(tiebreak_game>=0),
+    CONSTRAINT chk_contest_pairing_series CHECK(series_index<=series_size),
+    CONSTRAINT chk_contest_pairing_tiebreak CHECK(
+        (tiebreak_group=0 AND tiebreak_game=0)
+        OR (tiebreak_group>=1 AND tiebreak_game IN (1,2))
+    )
 );
 
 CREATE TABLE IF NOT EXISTS contest_stage_results (
@@ -1398,6 +1408,16 @@ SCHEMA = SCHEMA.replace(
 )
 SCHEMA = SCHEMA.replace(
     "__MATCH_DEBUG_MAX_ENTRY_BYTES__", str(MATCH_DEBUG_MAX_ENTRY_BYTES)
+)
+
+# ``SCHEMA`` executes before legacy columns are added, so an index that names
+# ``pairing_seed`` cannot live in the executescript without breaking upgrades
+# from a pre-seed contest_pairings table. _migrate executes this canonical SQL
+# after adding the column for both fresh and upgraded databases.
+CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL = (
+    "CREATE INDEX idx_contest_pairings_seed_lookup "
+    "ON contest_pairings(contest_id,stage_idx,pairing_seed) "
+    "WHERE pairing_seed IS NOT NULL"
 )
 
 # 角色
@@ -1522,6 +1542,7 @@ CONTEST_RUNNING = "running"
 CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
+ELIMINATION_TIEBREAK_PAIRED_SWAP = "paired_swap_until_decided"
 
 # 赛事报名实名来源。持久化只写报名时快照；旧报名在私有读边界派生 legacy
 # 来源，不回写本常量，避免把当前资料伪装成历史快照。

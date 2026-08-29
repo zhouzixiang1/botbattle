@@ -867,23 +867,21 @@ def _create_historical_showcase_contest(
 ) -> dict[str, Any]:
     """Create only the isolated, soon-to-be-frozen historical showcase graph.
 
-    The named Gomoku KO template remains readable for old contests but is not a
-    product creation option because a drawn elimination match has no sourced
-    tie-break rule.  Showcase snapshots intentionally preserve that historical
-    lifecycle, so they persist its validated stage snapshot through the low-level
-    Store API instead of weakening ``ContestManager.create`` for real contests.
+    The named Gomoku KO template is now a product creation option with an
+    explicit tie-break rule.  Showcase snapshots intentionally preserve the
+    older lifecycle graph, so they persist that validated historical stage
+    snapshot through the low-level Store API rather than inheriting new template
+    semantics during a fresh seed.
     """
     from bzplat.backend.contests.templates import get_template
     from bzplat.backend.contests.validation import validate_stage
 
     template = get_template(HISTORICAL_SHOWCASE_TEMPLATE_ID)
-    if template is None or template.get("creation_enabled", True) is not False:
+    if template is None or template.get("game_id") != SHOWCASE_GAME_ID:
         raise ShowcaseSeedError("历史演示模板契约异常")
-    raw_stages = (
-        _running_stages()
-        if key == "contest_lifecycle_running"
-        else template["stages"]
-    )
+    raw_stages = _running_stages()
+    if key != "contest_lifecycle_running":
+        raw_stages[0].pop("round_stagger_minutes", None)
     stages = [
         validate_stage(stage, idx, SHOWCASE_GAME_ID)
         for idx, stage in enumerate(raw_stages)

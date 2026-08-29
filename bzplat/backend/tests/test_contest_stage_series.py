@@ -408,7 +408,7 @@ def test_template_wire_defaults_overrides_and_strict_rejection(tmp_path, monkeyp
     assert "额外进行 2 轮" in templates["holdem_prelim_swiss"]["summary"]
     assert [
         config["games_per_pair"]["default"]
-        for config in templates["holdem_final_ranked"]["stage_series_configs"]
+        for config in templates["holdem_swiss_top8_ranked"]["stage_series_configs"]
     ] == [2, 4]
 
     prelim = client.post(
@@ -429,16 +429,16 @@ def test_template_wire_defaults_overrides_and_strict_rejection(tmp_path, monkeyp
         headers=headers,
         json={
             "title": "configured final",
-            "template_id": "holdem_final_ranked",
+            "template_id": "holdem_swiss_top8_ranked",
             "stage_series_settings": {
-                "qualify": {"games_per_pair": 4},
+                "swiss": {"games_per_pair": 4, "swiss_extra_rounds": 2},
                 "final8": {"games_per_pair": 8},
             },
         },
     )
     assert final.status_code == 200, final.text
     assert final.json()["contest"]["stage_series_settings"] == {
-        "qualify": {"games_per_pair": 4},
+        "swiss": {"games_per_pair": 4, "swiss_extra_rounds": 2},
         "final8": {"games_per_pair": 8},
     }
 
@@ -461,7 +461,7 @@ def test_template_wire_defaults_overrides_and_strict_rejection(tmp_path, monkeyp
         headers=headers,
         json={
             "title": "unknown stage",
-            "template_id": "holdem_final_ranked",
+            "template_id": "holdem_swiss_top8_ranked",
             "stage_series_settings": {"other": {"games_per_pair": 2}},
         },
     )
@@ -471,8 +471,10 @@ def test_template_wire_defaults_overrides_and_strict_rejection(tmp_path, monkeyp
         headers=headers,
         json={
             "title": "missing final stage",
-            "template_id": "holdem_final_ranked",
-            "stage_series_settings": {"qualify": {"games_per_pair": 2}},
+            "template_id": "holdem_swiss_top8_ranked",
+            "stage_series_settings": {
+                "swiss": {"games_per_pair": 2, "swiss_extra_rounds": 2}
+            },
         },
     )
     assert missing.status_code == 400
@@ -481,8 +483,10 @@ def test_template_wire_defaults_overrides_and_strict_rejection(tmp_path, monkeyp
         ContestManager(store, _NoDispatch()).create(
             owner["id"],
             "manager missing final stage",
-            template_id="holdem_final_ranked",
-            stage_series_settings={"qualify": {"games_per_pair": 2}},
+            template_id="holdem_swiss_top8_ranked",
+            stage_series_settings={
+                "swiss": {"games_per_pair": 2, "swiss_extra_rounds": 2}
+            },
         )
     for bad in (True, 3, 10):
         rejected = client.post(
@@ -560,6 +564,7 @@ def test_generation_round_interleaving_coverage_cap_and_stage_estimate(tmp_path)
             "estimated_matches": 12,
             "estimated_execution_legs": 12,
             "eta_seconds": 840,
+            "unbounded_tiebreak": False,
         }
     ]
     store.close()
@@ -1802,8 +1807,8 @@ def test_custom_topology_with_builtin_id_publishes_legacy_and_rejects_series_pat
         "games_per_pair",
         "swiss_extra_rounds",
         "series_scoring",
-        "effective_rounds",
     }.intersection(stage)
+    assert stage["effective_rounds"] == 1
     assert len(store.list_contest_pairings(contest["id"], stage_idx=0)) == 1
     store.close()
 
@@ -1849,8 +1854,8 @@ def test_builtin_id_with_same_keys_but_changed_stage_field_is_custom_topology(
         "games_per_pair",
         "swiss_extra_rounds",
         "series_scoring",
-        "effective_rounds",
     }.intersection(stage)
+    assert stage["effective_rounds"] == 1
     assert len(store.list_contest_pairings(contest["id"], stage_idx=0)) == 1
     store.close()
 

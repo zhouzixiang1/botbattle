@@ -99,6 +99,7 @@ from bzplat.backend.contests.series import (
     summarize_conceptual_series,
 )
 from bzplat.backend.contests.validation import (
+    ELIMINATION_TIEBREAK_PAIRED_SWAP,
     SERIES_SCORING_AGGREGATE,
     SERIES_SCORING_INDEPENDENT,
     active_contest_entries,
@@ -106,6 +107,7 @@ from bzplat.backend.contests.validation import (
     stage_scoring_contract_is_valid,
 )
 from bzplat.backend.contests.presentation import (
+    build_elimination_tiebreak_projection,
     build_stage_counts,
     build_stage_summaries,
     expected_stage_topology,
@@ -3321,6 +3323,8 @@ _PUBLIC_PAIRING_FIELDS = frozenset(
         "bracket_slot",
         "series_index",
         "series_size",
+        "tiebreak_group",
+        "tiebreak_game",
         "series_summary",
         "bot_a_name",
         "bot_a_display",
@@ -3442,6 +3446,28 @@ def _public_contest_pairings(
         else:
             public["display_status"] = STATUS_PENDING
         stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else None
+        raw_tiebreak_group = row.get("tiebreak_group", 0)
+        raw_tiebreak_game = row.get("tiebreak_game", 0)
+        tiebreak_coordinate_valid = bool(
+            isinstance(raw_tiebreak_group, int)
+            and not isinstance(raw_tiebreak_group, bool)
+            and isinstance(raw_tiebreak_game, int)
+            and not isinstance(raw_tiebreak_game, bool)
+            and (
+                (raw_tiebreak_group == 0 and raw_tiebreak_game == 0)
+                or (
+                    raw_tiebreak_group >= 1
+                    and raw_tiebreak_game in (1, 2)
+                    and isinstance(stage, dict)
+                    and stage.get("type") == "single_elimination"
+                    and stage.get("tiebreak")
+                    == ELIMINATION_TIEBREAK_PAIRED_SWAP
+                )
+            )
+        )
+        if not tiebreak_coordinate_valid:
+            public["tiebreak_group"] = None
+            public["tiebreak_game"] = None
         duplicate = stage_duplicate_mode(stage)
         compact_match = {
             "id": row.get("_match_id"),
@@ -3480,6 +3506,7 @@ def _public_contest_pairings(
             and row.get("match_id")
             and stage is not None
             and stage_scoring_contract_is_valid(stage, game_id=game_id)
+            and tiebreak_coordinate_valid
             and match_binding_consistent
         ):
             public["outcome"] = build_public_outcome(
@@ -4131,6 +4158,31 @@ def contest_live(
         counts["match_jobs"]["completed"] = 0
         counts["scoring_games"]["completed"] = 0
         counts["scoring_games"]["terminal_unplayed"] = 0
+    elimination_tiebreak = (
+        build_elimination_tiebreak_projection(
+            stage,
+            raw_pairings,
+            game_id=str(contest.get("game_id") or ""),
+            contest_id=contest_id,
+            expected_entry_bots={
+                int(entry["id"]): entry.get("bot_id")
+                for entry in snapshot["entries"]
+            },
+            expected_entry_users={
+                int(entry["id"]): int(entry["user_id"])
+                for entry in snapshot["entries"]
+            },
+            require_current_entry_bots=contest.get("status") in (
+                CONTEST_PUBLISHED,
+                CONTEST_RUNNING,
+            ),
+            project_legacy_draw_blocked=(
+                contest.get("status") == CONTEST_RUNNING
+            ),
+        )
+        if stage_semantics_valid and stage is not None
+        else None
+    )
     topology = expected_stage_topology(
         stage or {},
         expected_entry_ids,
@@ -4183,6 +4235,9 @@ def contest_live(
                 "swiss_extra_rounds": stage.get("swiss_extra_rounds"),
                 "effective_rounds": stage.get("effective_rounds"),
                 "scoring_mode": stage.get("series_scoring"),
+                "tiebreak": (
+                    stage.get("tiebreak") if stage_semantics_valid else None
+                ),
             }
             if stage is not None
             else None
@@ -4221,6 +4276,7 @@ def contest_live(
             "pending": progress_pending,
         },
         "counts": counts,
+        "elimination_tiebreak": elimination_tiebreak,
         "active": public_subset(active_raw),
         "upcoming": public_subset(pending_raw, 6),
         "recent": public_subset(completed_raw, 8),

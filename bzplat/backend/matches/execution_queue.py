@@ -21,9 +21,12 @@ from bzplat.backend.runtime.config import (
     EXECUTION_CONTEST_SHARE_SLOTS,
     EXECUTION_POLL_SECONDS,
     EXECUTION_USER_ACTIVE_LIMIT,
+    MAX_CONCURRENT_MATCHES,
 )
 from bzplat.backend.runtime.limits import effective_host_resource_budget
 from bzplat.backend.store.execution import (
+    BOT_EXCLUSIVITY_POLICY,
+    CONTEST_FAIRNESS_POLICY,
     DockerLaunchInvariantError,
     ExecutionInvariantError,
     ExecutionMaintenanceConflict,
@@ -66,10 +69,20 @@ class ExecutionDispatcher:
         self.orch = orch
         self.store = store
         self.repo = store.executions
-        self.max_match_slots = max(1, int(max_match_slots))
+        self.max_match_slots = max(
+            1, min(int(max_match_slots), MAX_CONCURRENT_MATCHES)
+        )
+        requested_sandbox_units = (
+            self.max_match_slots * 2
+            if max_sandbox_units is None
+            else int(max_sandbox_units)
+        )
         self.max_sandbox_units = max(
             1,
-            int(max_sandbox_units or self.max_match_slots * 2),
+            min(
+                requested_sandbox_units,
+                MAX_CONCURRENT_MATCHES * 2,
+            ),
         )
         self.auto_capability_enabled = bool(auto_capability_enabled)
         self.contest_reconciler = contest_reconciler
@@ -866,6 +879,13 @@ class ExecutionDispatcher:
                 snap["capacity"],
                 include_host_resources=include_internal,
             ),
+            # Reconstruct this fixed allowlist instead of forwarding arbitrary
+            # repository state.  Internal service timestamps, attempt ids,
+            # contest ids, and active Bot ids never cross the API boundary.
+            "fairness": {
+                "contest": CONTEST_FAIRNESS_POLICY,
+                "bot_exclusivity": BOT_EXCLUSIVITY_POLICY,
+            },
             "active": [self._public_job(row) for row in active],
             "queued": [
                 self._public_job(

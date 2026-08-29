@@ -15,6 +15,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
 import { MatchParticipants } from '@/components/MatchParticipants'
+import { bracketConnectorEdges } from '@/components/contest/bracket-connectors'
 import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -35,6 +36,8 @@ export interface BracketPairing extends MatchParticipantSource {
   status?: string
   display_status?: string | null
   scheduled_at?: string | null
+  tiebreak_group?: number | null
+  tiebreak_game?: number | null
 }
 
 interface Props {
@@ -80,14 +83,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
 
   // ── 连接线（SVG overlay）──────────────────────────────────────
   // 拓扑：(round R, bracket_slot s) → 下一轮 bracket_slot = s // 2
-  const successorLookup = useMemo(() => {
-    const map = new Map<string, BracketPairing>()
-    for (const p of pairings) {
-      const key = `${p.round_num ?? 1}:${p.bracket_slot ?? 0}`
-      map.set(key, p)
-    }
-    return map
-  }, [pairings])
+  const connectorEdges = useMemo(() => bracketConnectorEdges(pairings), [pairings])
 
   // pairing 卡片 ref map（key=pairing.id），供 getBoundingClientRect 量像素位置
   const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map())
@@ -104,13 +100,9 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
     }
     const cRect = container.getBoundingClientRect()
     const next: { d: string }[] = []
-    for (const p of pairings) {
-      if (p.round_num == null || p.bracket_slot == null) continue
-      const nextSlot = Math.floor(p.bracket_slot / 2)
-      const target = successorLookup.get(`${p.round_num + 1}:${nextSlot}`)
-      if (!target) continue
-      const src = cardRefs.current.get(p.id)
-      const dst = cardRefs.current.get(target.id)
+    for (const edge of connectorEdges) {
+      const src = cardRefs.current.get(edge.sourceId)
+      const dst = cardRefs.current.get(edge.targetId)
       if (!src || !dst) continue
       const s = src.getBoundingClientRect()
       const d = dst.getBoundingClientRect()
@@ -130,7 +122,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
   useLayoutEffect(() => {
     measure()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairings, expandTo, collapsed, measureTick, successorLookup])
+  }, [pairings, expandTo, collapsed, measureTick, connectorEdges])
 
   // 浏览器窗口尺寸变化 → 卡片位置变了，重新量
   useEffect(() => {
@@ -237,6 +229,11 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                             status === 'completed' ? 'border-primary/30' : 'border-border'
                           }`}
                         >
+                          {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
+                            <Badge variant="outline" className="mb-2 text-[10px]">
+                              决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
+                            </Badge>
+                          )}
                           <MatchParticipants
                             source={p}
                             states={states}

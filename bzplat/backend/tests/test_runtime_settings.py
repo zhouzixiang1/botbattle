@@ -29,34 +29,41 @@ from bzplat.backend.store.schema import (
 )
 
 
-def test_ceiling_formula():
-    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
-        assert concurrent_ceiling() == 2
-    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=1):
-        assert concurrent_ceiling() == 1
-    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=7):
-        assert concurrent_ceiling() == 1
-    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=16):
-        assert concurrent_ceiling() == 2
-        assert clamp_concurrent(99) == 2
-        assert clamp_concurrent(2) == 2
-        assert default_max_concurrent() == 2
+def test_slot_ceiling_is_six_and_does_not_prejudge_job_resource_profiles():
+    for logical_cpus in (1, 7, 8, 16, 24, 64):
+        with mock.patch(
+            "bzplat.backend.runtime.limits.os.cpu_count",
+            return_value=logical_cpus,
+        ):
+            assert concurrent_ceiling() == 6
+            assert clamp_concurrent(99) == 6
+            assert clamp_concurrent(2) == 2
+            assert default_max_concurrent() == 6
 
 
 def test_explicit_startup_override_cannot_bypass_global_match_cap(tmp_path):
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
         client, app = _admin_client(tmp_path, max_concurrent=99)
 
-    assert app.state.runtime_ceiling == 2
-    assert app.state.orch.max_concurrent == 2
-    assert app.state.execution_dispatcher.max_match_slots == 2
-    assert app.state.execution_dispatcher.max_sandbox_units == 4
+    assert app.state.runtime_ceiling == 6
+    assert app.state.orch.max_concurrent == 6
+    assert app.state.execution_dispatcher.max_match_slots == 6
+    assert app.state.execution_dispatcher.max_sandbox_units == 12
 
     response = client.get("/api/admin/settings/runtime")
     assert response.status_code == 200
     capacity = response.json()["queue"]["capacity"]
-    assert capacity["match_slots"]["capacity"] == 2
-    assert capacity["sandbox_units"]["capacity"] == 4
+    assert capacity["match_slots"]["capacity"] == 6
+    assert capacity["sandbox_units"]["capacity"] == 12
+
+
+def test_six_slot_hard_cap_is_stable_on_large_hosts():
+    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=24):
+        assert concurrent_ceiling() == 6
+        assert clamp_concurrent(99) == 6
+        assert default_max_concurrent() == 6
+    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=64):
+        assert concurrent_ceiling() == 6
 
 
 def _admin_client(tmp_path, *, max_concurrent: int | None = None):
@@ -86,10 +93,16 @@ def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
     assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == expected
     assert data["bot_cpus"] == 1
     assert data["bot_memory_mb"] == 512
+    assert data["full_rr_max_n"] is None
+    assert "full_rr_max_n" in data["readonly"]
     assert data["auto_match"]["enabled"] is True
     assert data["auto_match"]["mutable"] is True
     assert data["queue"]["capacity"]["match_slots"]["capacity"] == expected
     assert data["queue"]["capacity"]["sandbox_units"]["capacity"] == expected * 2
+    assert data["queue"]["fairness"] == {
+        "contest": "round_robin_v1",
+        "bot_exclusivity": "active_execution_v1",
+    }
     assert "interval_sec" not in data["auto_match"]
     assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
     assert "auto_match" not in data["readonly"]
@@ -182,7 +195,7 @@ def test_code_configuration_is_immutable():
     import bzplat.backend.runtime.config as config
 
     assert AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES == 10
-    assert MAX_CONCURRENT_MATCHES == 2
+    assert MAX_CONCURRENT_MATCHES == 6
     assert RANKING_MIN_RATED_MATCHES == 10
     assert not hasattr(config, "AUTO_MATCH_CONFIG")
     assert not hasattr(config, "QA_AUTO_MATCH_CONFIG")

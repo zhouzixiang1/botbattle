@@ -196,7 +196,7 @@ def test_player_wiki_explains_contest_formats_as_player_flows() -> None:
         assert required in guide, f"平台指南缺少赛制过程: {required}"
 
     game_docs = {
-        "wiki/TEXAS.md": ("瑞士 → 单败", "复式单循环", "Top 8 双循环决赛"),
+        "wiki/TEXAS.md": ("瑞士 → 单败", "复式单循环", "瑞士 → Top 8 排位循环"),
         "wiki/GOMOKU.md": ("分组双循环 → 单败", "瑞士 → 单败", "五子棋双循环"),
         "wiki/PENCIL.md": ("分组双循环 → 单败", "瑞士 → 单败", "900 秒累计棋钟"),
     }

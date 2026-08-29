@@ -398,9 +398,11 @@ test('two online local Bots create one unrated practice request without horizont
   })
 
   let posted: Record<string, unknown> | null = null
+  let postedPublicId = ''
   await page.route('**/api/matches/challenge', async (route) => {
     posted = route.request().postDataJSON() as Record<string, unknown>
     const publicId = String(posted.request_id)
+    postedPublicId = publicId
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
@@ -444,6 +446,8 @@ test('two online local Bots create one unrated practice request without horizont
   await expect(page.getByText('本地 Bot 练习局，不计平台排行榜。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
   await expect(page.getByTestId('execution-request-card')).toContainText('本地 Bot 练习，不计平台排行榜')
+  await expect(page.getByRole('heading', { name: '执行请求已受理' })).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('已取消')
   expect(posted).toMatchObject({
     my_bot_id: 701,
     opponent_bot_id: 702,
@@ -457,7 +461,7 @@ test('two online local Bots create one unrated practice request without horizont
   expect(overflow).toBeLessThanOrEqual(1)
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])
-  await monitor.expectClean()
+  await monitor.expectClean(optionalGetAborts(`/api/execution-requests/${postedPublicId}`))
 })
 
 test('local Bot token is shown once and the saved agent list never exposes it', async ({ page }) => {
@@ -764,9 +768,11 @@ test('ordinary user can move the owned Bot to either game position without losin
     })
   })
   let posted: Record<string, unknown> | null = null
+  let postedPublicId = ''
   await page.route('**/api/matches/challenge', async (route) => {
     posted = route.request().postDataJSON() as Record<string, unknown>
     const publicId = String(posted.request_id)
+    postedPublicId = publicId
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
@@ -862,11 +868,13 @@ test('ordinary user can move the owned Bot to either game position without losin
     my_local_agent_id: ownAgent.public_id,
     opponent_local_agent_id: null,
   })
+  await expect(page.getByRole('heading', { name: '执行请求已受理' })).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('已取消')
   expect(pickerRequests.some((url) => url.searchParams.get('owner_id') === String(USER.id))).toBe(true)
   expect(pickerRequests.some((url) => !url.searchParams.has('owner_id'))).toBe(true)
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])
-  await monitor.expectClean()
+  await monitor.expectClean(optionalGetAborts(`/api/execution-requests/${postedPublicId}`))
 })
 
 test('admin queue shows compact host capacity while remaining mobile-safe', async ({ page }) => {

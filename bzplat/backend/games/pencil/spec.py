@@ -59,8 +59,9 @@ def _progress_from_events(events: list[dict[str, Any]]) -> int:
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
     _validate_match_params(match_config)
-    # pencil ETA 固定（N=6 钉死 → 25 格 标定 60s）
-    return 60
+    # 点格棋使用每方 900 秒累计棋钟。赛事 ETA 采用两方棋钟总和作为
+    # 保守上界，避免把长考 Bot 的大型赛程错误展示成几分钟即可完成。
+    return 1800
 
 
 async def _preflight_check(

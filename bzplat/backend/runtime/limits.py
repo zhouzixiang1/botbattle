@@ -1,4 +1,4 @@
-"""运行时资源硬顶：全局双场执行与 Bot 上传容量。"""
+"""运行时资源硬顶：全局动态执行与 Bot 上传容量。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
+from bzplat.backend.runtime.config import MAX_CONCURRENT_MATCHES
 from bzplat.backend.store.schema import (
     EXECUTION_ENV_HUMAN,
     EXECUTION_ENV_REMOTE_LOCAL,
@@ -397,8 +397,16 @@ def cpu_count() -> int:
 
 
 def concurrent_ceiling() -> int:
-    """全站执行硬顶：每 4 个可见逻辑核一场，且合计最多两场。"""
-    return min(MAX_CONCURRENT_MATCHES, max(1, cpu_count() // 4))
+    """Return the code-owned slot ceiling; resources are admitted per job.
+
+    A slot is deliberately not equivalent to one heavyweight contest match:
+    human, remote-local, low-profile and official jobs freeze different CPU,
+    memory and sandbox vectors.  Pre-dividing visible CPUs by the heaviest
+    profile would cap every light workload at two or four slots and defeat the
+    1–6 vector admission policy.  ``claim_next`` remains the authoritative
+    CPU/memory/sandbox gate and can therefore leave any number of slots idle.
+    """
+    return MAX_CONCURRENT_MATCHES
 
 
 def clamp_concurrent(requested: int) -> int:

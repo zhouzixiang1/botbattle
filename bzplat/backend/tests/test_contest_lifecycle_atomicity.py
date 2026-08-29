@@ -12,6 +12,7 @@ from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.contests.validation import contest_current_stage_index
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
+from bzplat.backend.store.schema import EXECUTION_SOURCE_CONTEST, TYPE_CONTEST
 from bzplat.backend.tests.execution_helpers import (
     claim_request,
     enable_execution_queue,
@@ -317,7 +318,14 @@ def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryabl
             binary_path=_fixture_file(tmp_path, "atomic-3"),
             format="elf", game_id="holdem",
         )
+        u4 = store.create_user("atomic4", "atomic4@example.com", "hash")
+        b4 = store.create_bot(
+            u4["id"], "atomic-bot-4",
+            binary_path=_fixture_file(tmp_path, "atomic-4"),
+            format="elf", game_id="holdem",
+        )
         store.add_contest_entry(contest_id, u3["id"], b3["id"])
+        store.add_contest_entry(contest_id, u4["id"], b4["id"])
         orch = MatchOrchestrator(store)
         manager = ContestManager(store, orch)
         enable_execution_queue(store)
@@ -325,10 +333,18 @@ def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryabl
         assert result["status"] == "published"
 
         queued = queued_execution_jobs(orch)
-        assert len(queued) == 3
+        assert len(queued) == 6
         first = claim_request(orch, queued[0]["public_id"], start=False)
         assert store.get_contest(contest_id)["status"] == "running"
-        failed_pairing_id = int(queued[1]["contest_pairing_id"])
+        active_bot_ids = {int(first["bot_a_id"]), int(first["bot_b_id"])}
+        failed_request = next(
+            request
+            for request in queued[1:]
+            if active_bot_ids.isdisjoint(
+                {int(request["bot_a_id"]), int(request["bot_b_id"])}
+            )
+        )
+        failed_pairing_id = int(failed_request["contest_pairing_id"])
         with store._tx() as conn:
             conn.execute(
                 "CREATE TRIGGER fail_second_pairing_claim "
@@ -339,20 +355,22 @@ def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryabl
         with pytest.raises(
             sqlite3.IntegrityError, match="second pairing commit exploded"
         ):
-            claim_request(orch, queued[1]["public_id"], start=False)
+            claim_request(orch, failed_request["public_id"], start=False)
 
         pairings = store.list_contest_pairings(contest_id)
-        assert len(pairings) == 3
+        assert len(pairings) == 6
         bound = [pairing for pairing in pairings if pairing.get("match_id")]
         retryable = [pairing for pairing in pairings if not pairing.get("match_id")]
         assert len(bound) == 1
         assert bound[0]["match_id"] == first["current_match_id"]
-        assert len(retryable) == 2
+        assert len(retryable) == 5
         assert all(pairing["status"] == "pending" for pairing in retryable)
         matches = store.list_matches(contest_id=contest_id)
         assert {match["id"] for match in matches} == {first["current_match_id"]}
-        assert store.executions.get(queued[1]["public_id"])["status"] == "queued"
-        assert store.executions.get(queued[2]["public_id"])["status"] == "queued"
+        assert all(
+            store.executions.get(request["public_id"])["status"] == "queued"
+            for request in queued[1:]
+        )
         await orch.shutdown()
 
     asyncio.run(exercise())
@@ -559,6 +577,73 @@ def test_published_rebuild_does_not_overwrite_deleted_real_opponent(tmp_path):
     assert [row["id"] for row in persisted] == [damaged["id"]]
     assert persisted[0]["entry_b_id"] == entries[1]["id"]
     assert persisted[0]["bot_b_id"] is None
+    store.close()
+
+
+def test_published_rebuild_rejects_queued_execution_before_delete(tmp_path):
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": False,
+        "games_per_pair": 1,
+        "series_scoring": "independent_scoring_game_points_v1",
+    }
+    store.update_contest(
+        contest_id,
+        status="published",
+        current_stage_idx=0,
+        stages_json=json.dumps([stage]),
+    )
+    versions = []
+    for entry in entries:
+        bot = store.get_bot(entry["bot_id"])
+        versions.append(
+            store.add_bot_version(
+                entry["bot_id"], binary_path=bot["binary_path"]
+            )
+        )
+    pairing = store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        bot_a_version_id=versions[0]["id"],
+        bot_b_version_id=versions[1]["id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        stage_idx=0,
+        stage_key="rr",
+        pairing_seed=12_345,
+    )
+    enable_execution_queue(store)
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=entries[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=entries[0]["bot_id"],
+        bot_b_id=entries[1]["bot_id"],
+        bot_a_version_id=versions[0]["id"],
+        bot_b_version_id=versions[1]["id"],
+        contest_id=contest_id,
+        contest_pairing_id=pairing["id"],
+        match_config={"duplicate": False},
+    )
+
+    with pytest.raises(ValueError, match="active 执行请求"):
+        store.replace_unstarted_contest_stage_pairings(
+            contest_id,
+            0,
+            [dict(pairing)],
+            expected_existing_ids=[pairing["id"]],
+        )
+
+    assert [row["id"] for row in store.list_contest_pairings(contest_id)] == [
+        pairing["id"]
+    ]
+    assert store.executions.get(job["public_id"])["status"] == "queued"
     store.close()
 
 

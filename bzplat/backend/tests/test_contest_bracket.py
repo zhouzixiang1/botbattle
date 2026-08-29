@@ -188,7 +188,8 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
         "id", "round_num", "bot_a_id", "bot_b_id", "scheduled_at",
         "started_at", "ended_at", "match_id", "status", "display_status",
         "stage_idx", "stage_key", "group_id", "bracket_slot",
-        "series_index", "series_size", "bot_a_name", "bot_a_display", "bot_b_name",
+        "series_index", "series_size", "tiebreak_group", "tiebreak_game",
+        "bot_a_name", "bot_a_display", "bot_b_name",
         "bot_b_display", "owner_a_name", "owner_a_display",
         "owner_b_name", "owner_b_display", "match_winner", "outcome", "is_bye",
     }

@@ -101,6 +101,7 @@ function contestDetail(status: 'open' | 'published', final8Games: number) {
     is_organizer: true,
     estimate: {
       estimated_matches: 90 + finalMatches,
+      max_concurrent: 6,
       eta_seconds: (90 + finalMatches) * 140,
       stages: [
         {
@@ -145,7 +146,16 @@ async function installFinalContestApi(page: Page, options: { patchFails?: boolea
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ templates: [{ id: 'holdem_final_ranked', stages: finalTemplateStages, stage_series_configs: finalConfigs }] }),
+        body: JSON.stringify({ templates: [{
+          id: 'holdem_final_ranked',
+          name: '德州：历史决赛（循环 → Top 8）',
+          recommended_min: 8,
+          recommended_max: 8,
+          purpose: 'championship',
+          time_class: 'long',
+          stages: finalTemplateStages,
+          stage_series_configs: finalConfigs,
+        }] }),
       })
     }
     if (url.pathname === '/api/bots/mine') {
@@ -255,6 +265,10 @@ test('final stage settings project scale and are saved before publishing', async
 
   const fairness = page.locator('[data-slot="data-region"]').filter({ has: page.getByRole('heading', { name: '赛制公平性与规模' }) })
   await expect(fairness).toBeVisible()
+  await expect(fairness.getByText('当前 10 人超过建议范围；仍可发布，请结合基础场数和耗时选择。', { exact: true })).toBeVisible()
+  await expect(fairness.getByText('基础对局记录', { exact: true }).locator('..')).toContainText('202 场')
+  await expect(fairness.getByText('基础计分场', { exact: true }).locator('..')).toContainText('202 场')
+  await expect(fairness.getByText('并发上限', { exact: true }).locator('..')).toContainText('6 场')
   const final8 = fairness.getByRole('group', { name: 'Top 8 决胜' })
   await expect(final8).toContainText('28 组')
   await expect(final8).toContainText('112 场')
@@ -268,7 +282,7 @@ test('final stage settings project scale and are saved before publishing', async
   const dialog = page.getByRole('dialog')
   await expect(dialog).toContainText('决赛全员循环排位每对选手 2 场计分')
   await expect(dialog).toContainText('Top 8 决胜每对选手 8 场计分')
-  await expect(dialog).toContainText('预计共 314 场计分')
+  await expect(dialog).toContainText('基础赛程共 314 场计分')
   await dialog.getByRole('button', { name: '确认发布' }).click()
 
   await expect(page.getByText('排期已发布', { exact: true }).first()).toBeVisible()
@@ -381,7 +395,8 @@ test('built-in id with a custom stage graph publishes without injecting template
   })
 
   await page.goto('/#/contests/7003')
-  await expect(page.getByRole('heading', { name: '赛制公平性与规模' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: '赛制公平性与规模' })).toBeVisible()
+  await expect(page.getByText('基础对局').locator('..')).toContainText('202 场')
   await expect(page.getByText('冻结阶段拓扑与内置模板不一致，已停用公平性设置编辑；发布时将保留当前冻结阶段。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '截止报名·出排期' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '确认发布' }).click()
@@ -389,9 +404,106 @@ test('built-in id with a custom stage graph publishes without injecting template
   await monitor.expectClean()
 })
 
+for (const malformed of [
+  {
+    label: 'published Swiss bands without frozen effective rounds',
+    id: 7010,
+    stage: {
+      key: 'swiss',
+      type: 'swiss',
+      rounds: 0,
+      scoring: 'ccgc_2_1_0',
+      swiss_round_bands: [
+        { min_participants: 13, max_participants: 15, rounds: 7 },
+        { min_participants: 16, max_participants: 20, rounds: 9 },
+        { min_participants: 21, max_participants: null, rounds: 11 },
+      ],
+    },
+  },
+  {
+    label: 'invalid frozen effective Swiss rounds',
+    id: 7011,
+    stage: {
+      key: 'swiss',
+      type: 'swiss',
+      rounds: 0,
+      effective_rounds: 0,
+      scoring: 'ccgc_2_1_0',
+    },
+  },
+] as const) {
+  test(`${malformed.label} disables irreversible lifecycle actions`, async ({ page }) => {
+    const monitor = monitorBrowser(page)
+    await page.route('**/api/**', async (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      if (url.pathname === '/api/auth/me') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: ORGANIZER }) })
+      }
+      if (url.pathname === '/api/notifications/unread-count') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: '{"count":0}' })
+      }
+      if (url.pathname === '/api/contests/templates') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ templates: [{
+            id: 'gomoku_swiss_ranked',
+            name: '五子棋：瑞士制最终排名',
+            recommended_min: 13,
+            recommended_max: null,
+            purpose: 'ranking',
+            time_class: 'medium',
+            stages: [malformed.stage],
+          }] }),
+        })
+      }
+      if (url.pathname === '/api/bots/mine') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: '{"bots":[]}' })
+      }
+      if (url.pathname === `/api/contests/${malformed.id}` && request.method() === 'GET') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            contest: {
+              id: malformed.id,
+              title: '损坏的瑞士轮冻结快照',
+              status: 'published',
+              organizer_id: ORGANIZER.id,
+              template_id: 'gomoku_swiss_ranked',
+              game_id: 'gomoku',
+              current_stage_idx: 0,
+              stages_json: JSON.stringify([malformed.stage]),
+              official_results_ready: 0,
+            },
+            entries: [],
+            entries_total: 17,
+            pairings: [],
+            standings: [],
+            stage_standings: [],
+            estimate: null,
+            my_entry: null,
+            is_organizer: true,
+          }),
+        })
+      }
+      return route.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"unexpected mock request"}' })
+    })
+
+    await page.goto(`/#/contests/${malformed.id}`)
+    await expect(
+      page.getByTestId('contest-overview').locator('[data-slot="badge"][data-variant="destructive"]'),
+    ).toHaveText('赛制配置暂不可用')
+    await expect(page.getByRole('button', { name: '立即开赛' })).toBeDisabled()
+    await monitor.expectClean()
+  })
+}
+
 test('template capability failure keeps an open contest from silent default publication', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const writes: string[] = []
+  let templateReads = 0
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -402,6 +514,7 @@ test('template capability failure keeps an open contest from silent default publ
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{"count":0}' })
     }
     if (url.pathname === '/api/contests/templates') {
+      templateReads += 1
       return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"temporary unavailable"}' })
     }
     if (url.pathname === '/api/bots/mine') {
@@ -419,23 +532,13 @@ test('template capability failure keeps an open contest from silent default publ
   await page.goto('/#/contests/7001')
   await expect(page.getByText(/公平性配置加载失败/)).toBeVisible()
   await expect(page.getByRole('button', { name: '截止报名·出排期' })).toBeDisabled()
+  expect(templateReads).toBeGreaterThanOrEqual(1)
   expect(writes).toEqual([])
-  await monitor.expectClean([
-    {
+  await monitor.expectClean(Array.from({ length: templateReads }, () => ({
       kind: 'http',
       method: 'GET',
       status: 503,
       pathname: '/api/contests/templates',
       search: '?game=holdem',
-    },
-    {
-      // React development StrictMode intentionally remounts effects once.
-      // Both failed reads are expected; neither may enable publication.
-      kind: 'http',
-      method: 'GET',
-      status: 503,
-      pathname: '/api/contests/templates',
-      search: '?game=holdem',
-    },
-  ])
+  })))
 })

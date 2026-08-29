@@ -58,16 +58,29 @@ def _insert_legacy_template(
 def test_builtin_templates_come_from_code_registry(store: Store):
     tpls = list_templates()
     ids = {t["id"] for t in tpls}
-    assert {"holdem_swiss_ko", "board_rr", "pencil_swiss_ko"}.issubset(ids)
-    assert "gomoku_group_drr_ko" not in ids
-    assert get_template("gomoku_group_drr_ko")["creation_enabled"] is False
+    assert {
+        "holdem_swiss_ko",
+        "board_rr",
+        "gomoku_group_drr_ko",
+        "gomoku_swiss_ko",
+        "pencil_swiss_ko",
+    }.issubset(ids)
+    assert "holdem_final_ranked" not in ids
+    assert get_template("holdem_final_ranked")["creation_enabled"] is False
     assert store.list_contest_templates() == []
 
 
 def test_code_template_list_filters_by_game():
     gomoku = list_templates(game_id="gomoku")
     assert all(t["game_id"] == "gomoku" for t in gomoku)
-    assert {t["id"] for t in gomoku} == {"board_rr"}
+    assert {t["id"] for t in gomoku} == {
+        "board_rr",
+        "gomoku_rr",
+        "gomoku_swiss_ranked",
+        "gomoku_swiss_top8_ranked",
+        "gomoku_group_drr_ko",
+        "gomoku_swiss_ko",
+    }
 
 
 # ── 校验 ───────────────────────────────────────────────────────
@@ -276,19 +289,19 @@ def test_create_rejects_template_game_mismatch(store: Store):
     assert store.list_contests() == []
 
 
-def test_disabled_gomoku_template_cannot_be_used_for_new_contest(store: Store):
+def test_historical_holdem_template_cannot_be_used_for_new_contest(store: Store):
     with pytest.raises(ValueError, match="已停用新建"):
-        resolve_stages("gomoku_swiss_ko")
+        resolve_stages("holdem_final_ranked")
 
     manager = ContestManager(store, object())  # create 不消费 orchestrator
     with pytest.raises(ValueError, match="已停用新建"):
-        manager.create(1, "停用模板", template_id="gomoku_swiss_ko")
+        manager.create(1, "停用模板", template_id="holdem_final_ranked")
     with pytest.raises(ValueError, match="已停用新建"):
         manager.create(
             1,
             "自定义阶段也不能伪装停用模板",
-            template_id="gomoku_swiss_ko",
-            game_id="gomoku",
+            template_id="holdem_final_ranked",
+            game_id="holdem",
             stages=[{"key": "rr", "type": "round_robin"}],
         )
 

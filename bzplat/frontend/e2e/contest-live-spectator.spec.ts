@@ -61,6 +61,8 @@ function pairing({
   isBye = false,
   seriesSummary,
   outcome,
+  tiebreakGroup,
+  tiebreakGame,
 }: {
   id: number
   status: 'pending' | 'running' | 'completed'
@@ -84,6 +86,8 @@ function pairing({
     standings_points_b: number | null
   }
   outcome?: ReturnType<typeof singleOutcome> | ReturnType<typeof duplicateSplitOutcome> | ReturnType<typeof duplicateSweepOutcome> | null
+  tiebreakGroup?: number
+  tiebreakGame?: number
 }) {
   const labelIndex = identityIndex ?? id
   return {
@@ -118,6 +122,8 @@ function pairing({
     is_bye: isBye,
     bye: isBye,
     series_summary: seriesSummary,
+    tiebreak_group: tiebreakGroup ?? 0,
+    tiebreak_game: tiebreakGame ?? 0,
   }
 }
 
@@ -129,6 +135,8 @@ function liveSnapshot(overrides: {
   immutable?: boolean
   officialResultsReady?: boolean
   seriesAvailable?: boolean
+  unboundedTiebreak?: boolean
+  legacyDrawBlocked?: boolean
 } = {}) {
   const status = overrides.status ?? 'running'
   return {
@@ -144,7 +152,17 @@ function liveSnapshot(overrides: {
       ends_at: status === 'finished' ? '2026-08-27T14:00:00+08:00' : null,
       rest_ends_at: status === 'rest' ? '2026-08-27T13:00:00+08:00' : null,
     },
-    stage: { index: 0, key: 'rr', label: '单循环阶段', type: 'round_robin' },
+    stage: overrides.unboundedTiebreak
+      ? {
+          index: 0,
+          key: 'ko',
+          label: '单败淘汰',
+          type: 'single_elimination',
+          tiebreak: 'paired_swap_until_decided',
+        }
+      : overrides.legacyDrawBlocked
+        ? { index: 0, key: 'ko', label: '单败淘汰', type: 'single_elimination' }
+      : { index: 0, key: 'rr', label: '单循环阶段', type: 'round_robin' },
     series: overrides.seriesAvailable === false
       ? null
       : {
@@ -164,8 +182,58 @@ function liveSnapshot(overrides: {
       match_jobs: { completed: status === 'finished' ? 12 : 2, total: 12 },
       scoring_games: { completed: status === 'finished' ? 24 : 4, planned: 24, terminal_unplayed: 0 },
     },
+    elimination_tiebreak: overrides.unboundedTiebreak
+      ? {
+          mode: 'paired_swap_until_decided' as const,
+          unbounded: true as const,
+          state: 'active' as const,
+          encounters: [{
+            round_num: 2,
+            bracket_slot: 1,
+            state: 'awaiting_results' as const,
+            entry_a_id: 1001,
+            entry_b_id: 1002,
+            entry_a_label: 'Alpha 1',
+            entry_b_label: 'Beta 1',
+            winner_entry_id: null,
+            next_tiebreak_group: null,
+            current_tiebreak_group: 1,
+            completed_tiebreak_games: 1,
+            tiebreak_games_in_group: 2,
+            groups: [{
+              group: 1,
+              state: 'awaiting_results' as const,
+              completed_games: 1,
+              planned_games: 2,
+              points_a: 3,
+              points_b: 0,
+            }],
+          }],
+        }
+      : overrides.legacyDrawBlocked
+        ? {
+            mode: 'legacy_draw_blocked' as const,
+            unbounded: false as const,
+            state: 'legacy_draw_blocked' as const,
+            encounters: [{
+              round_num: 1,
+              bracket_slot: 0,
+              state: 'legacy_draw_blocked' as const,
+              entry_a_label: 'Alpha 1',
+              entry_b_label: 'Beta 1',
+            }],
+          }
+      : null,
     active: status === 'running'
-      ? [pairing({ id: 1, status: 'running', displayStatus: 'running', matchId: 'live-table-1', seriesIndex: 2 })]
+      ? [pairing({
+          id: 1,
+          status: 'running',
+          displayStatus: 'running',
+          matchId: 'live-table-1',
+          seriesIndex: 2,
+          tiebreakGroup: overrides.unboundedTiebreak ? 1 : undefined,
+          tiebreakGame: overrides.unboundedTiebreak ? 1 : undefined,
+        })]
       : [],
     upcoming: status === 'finished'
       ? []
@@ -320,6 +388,34 @@ test('malformed frozen stage stays readable when the live series contract is una
   await expect(page.getByRole('heading', { name: '秋季德州扑克联赛' })).toBeVisible()
   await expect(page.getByText('赛制配置暂不可用', { exact: true })).toBeVisible()
   await expect(page.getByText('赛果暂不可用', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('elimination live view discloses the unbounded paired-swap tiebreak on mobile', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await installLiveApi(page, liveSnapshot({ unboundedTiebreak: true }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/contests/42/live')
+
+  await expect(page.getByText('淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶', { exact: true })).toBeVisible()
+  await expect(page.getByText(/决胜组 1 · 第 1\/2 场/)).toBeVisible()
+  await expect(page.getByRole('region', { name: '淘汰赛决胜状态' })).toContainText('决胜组 1 · 1/2 场 · Alpha 1 3–0 Beta 1')
+  await expect(page.getByRole('region', { name: '淘汰赛决胜状态' })).toContainText('等待本组剩余结果')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('legacy elimination draw exposes the authoritative blocked state on mobile', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await installLiveApi(page, liveSnapshot({ legacyDrawBlocked: true }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/contests/42/live')
+
+  const blocked = page.getByRole('alert', { name: '淘汰赛阻断状态' })
+  await expect(blocked).toBeVisible()
+  await expect(blocked).toContainText('历史赛制无决胜策略，赛事已阻断')
+  await expect(blocked).not.toContainText('不封顶')
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean()
 })
@@ -743,5 +839,6 @@ test('contest match viewer exposes a stable return link to the spectator page', 
     method: 'GET',
     pathname: `/api/matches/${matchId}`,
     errorText: browserName === 'webkit' ? 'Load request cancelled' : 'net::ERR_ABORTED',
+    optional: true,
   }])
 })

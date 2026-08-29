@@ -5,6 +5,10 @@ import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/l
 import { MatchParticipants } from '@/components/MatchParticipants'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
 import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
+import {
+  EliminationTiebreakStatus,
+  type EliminationTiebreakProjection,
+} from '@/components/contest/elimination-tiebreak-status'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -46,6 +50,13 @@ import {
   type StageSeriesConfig,
   type StageSeriesSettings,
 } from '@/components/contest/stage-series-settings'
+import { TemplateGuidancePanel } from '@/components/contest/template-guidance-panel'
+import {
+  PAIRED_SWAP_TIEBREAK,
+  estimatedScoringGames,
+  templateHasUnboundedTiebreak,
+  type ContestTemplateGuidance,
+} from '@/components/contest/template-guidance'
 
 const STAGE_TYPE_LABEL: Record<string, string> = {
   swiss: '瑞士轮',
@@ -102,10 +113,16 @@ interface Stage {
   games_per_pair?: number
   swiss_extra_rounds?: number
   effective_rounds?: number
+  swiss_round_bands?: Array<{
+    min_participants: number
+    max_participants: number | null
+    rounds: number
+  }>
   ranking_mode?: string
   ranking_scope?: number
   round_stagger_minutes?: number
   allow_large_round_robin?: boolean
+  tiebreak?: string
 }
 
 type StageDisplayContract = 'plain' | 'independent' | 'aggregate' | 'invalid'
@@ -128,8 +145,8 @@ const STAGE_TYPE_FIELDS: Record<string, Set<string>> = {
   double_round_robin: new Set(['duplicate', 'allow_large_round_robin', 'ranking_mode', 'ranking_scope', 'games_per_pair', 'series_scoring']),
   group_round_robin: new Set(['group_count', 'advance_per_group']),
   group_double_round_robin: new Set(['group_count', 'advance_per_group']),
-  swiss: new Set(['rounds', 'duplicate', 'games_per_pair', 'series_scoring', 'swiss_extra_rounds', 'effective_rounds']),
-  single_elimination: new Set(),
+  swiss: new Set(['rounds', 'duplicate', 'games_per_pair', 'series_scoring', 'swiss_extra_rounds', 'effective_rounds', 'swiss_round_bands']),
+  single_elimination: new Set(['tiebreak']),
 }
 const DEFAULT_SCORING_BY_GAME: Record<string, string> = {
   holdem: 'poker_3_1_0',
@@ -145,8 +162,33 @@ function exactIntegerAtLeast(value: unknown, minimum: number): boolean {
   return typeof value === 'number' && Number.isInteger(value) && value >= minimum
 }
 
+function swissRoundBandsValid(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false
+  let previousMaximum: number | null = null
+  for (const [index, band] of value.entries()) {
+    if (!band || typeof band !== 'object' || Array.isArray(band)) return false
+    const row = band as Record<string, unknown>
+    if (
+      Object.keys(row).length !== 3
+      || !hasOwn(row, 'min_participants')
+      || !hasOwn(row, 'max_participants')
+      || !hasOwn(row, 'rounds')
+      || !exactIntegerAtLeast(row.min_participants, 1)
+      || !exactIntegerAtLeast(row.rounds, 1)
+      || (row.max_participants !== null && !exactIntegerAtLeast(row.max_participants, Number(row.min_participants)))
+    ) return false
+    if (index > 0 && (previousMaximum === null || Number(row.min_participants) <= previousMaximum)) return false
+    previousMaximum = row.max_participants as number | null
+  }
+  return true
+}
+
 /** Mirror the backend's frozen read contract before enabling irreversible UI actions. */
-function stageDisplayContract(stage: Stage | undefined, gameId?: string): StageDisplayContract {
+function stageDisplayContract(
+  stage: Stage | undefined,
+  gameId?: string,
+  contestStatus?: string,
+): StageDisplayContract {
   if (!stage || stage._display_invalid) return 'invalid'
   if (hasOwn(stage, 'duplicate') && typeof stage.duplicate !== 'boolean') return 'invalid'
   if (stage.duplicate === true && gameId !== 'holdem') return 'invalid'
@@ -178,9 +220,26 @@ function stageDisplayContract(stage: Stage | undefined, gameId?: string): StageD
   if (hasOwn(stage, 'ranking_scope') && stage.ranking_mode !== 'replace_top') return 'invalid'
   if (hasOwn(stage, 'allow_bot_swap_in_rest') && typeof stage.allow_bot_swap_in_rest !== 'boolean') return 'invalid'
   if (hasOwn(stage, 'allow_large_round_robin') && typeof stage.allow_large_round_robin !== 'boolean') return 'invalid'
-  if (type !== 'swiss' && ['rounds', 'effective_rounds', 'swiss_extra_rounds'].some((key) => hasOwn(stage, key))) {
+  if (hasOwn(stage, 'tiebreak') && (
+    type !== 'single_elimination' || stage.tiebreak !== PAIRED_SWAP_TIEBREAK
+  )) return 'invalid'
+  if (hasOwn(stage, 'swiss_round_bands') && (
+    type !== 'swiss'
+    || !hasOwn(stage, 'rounds')
+    || !exactIntegerAtLeast(stage.rounds, 0)
+    || !swissRoundBandsValid(stage.swiss_round_bands)
+  )) return 'invalid'
+  if (type !== 'swiss' && ['rounds', 'effective_rounds', 'swiss_extra_rounds', 'swiss_round_bands'].some((key) => hasOwn(stage, key))) {
     return 'invalid'
   }
+  const hasEffectiveRounds = hasOwn(stage, 'effective_rounds')
+  const hasDynamicRoundStrategy = hasOwn(stage, 'swiss_round_bands') || hasOwn(stage, 'swiss_extra_rounds')
+  if (
+    contestStatus !== 'draft'
+    && contestStatus !== 'open'
+    && hasDynamicRoundStrategy
+    && !hasEffectiveRounds
+  ) return 'invalid'
 
   const hasGames = hasOwn(stage, 'games_per_pair')
   if (hasGames && !exactIntegerAtLeast(stage.games_per_pair, 1)) return 'invalid'
@@ -258,6 +317,8 @@ interface Pairing extends MatchParticipantSource {
   scheduled_at?: string | null
   series_index?: number | null
   series_size?: number | null
+  tiebreak_group?: number | null
+  tiebreak_game?: number | null
 }
 interface Standing {
   bot_id: number | null
@@ -308,6 +369,7 @@ interface StageStandingSummary {
   total_pairings: number
   advancement_final: boolean
   counts?: StageContestCounts
+  elimination_tiebreak?: EliminationTiebreakProjection | null
   rows: StageStandingRow[]
 }
 interface OfficialResult {
@@ -580,6 +642,7 @@ export default function ContestDetail() {
   const [serverIsOrganizer, setServerIsOrganizer] = useState(false)
   const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<ContestEstimate | null>(null)
+  const [templateCatalog, setTemplateCatalog] = useState<ContestTemplateGuidance[]>([])
   const [stageSeriesConfigs, setStageSeriesConfigs] = useState<StageSeriesConfig[]>([])
   const [savedStageSeriesSettings, setSavedStageSeriesSettings] = useState<StageSeriesSettings>({})
   const [draftStageSeriesSettings, setDraftStageSeriesSettings] = useState<StageSeriesSettings>({})
@@ -648,15 +711,31 @@ export default function ContestDetail() {
   const projectedEstimatedMatches = projectedStageEstimates.length > 0
     ? projectedStageEstimates.reduce((sum, stage) => sum + stage.estimated_matches, 0)
     : estimate?.estimated_matches
+  const projectedEstimatedScoringGames = projectedStageEstimates.length > 0
+    ? projectedStageEstimates.reduce((sum, stage) => sum + stage.estimated_execution_legs, 0)
+    : estimatedScoringGames(estimate)
   const projectedEtaSeconds = projectedStageEstimates.length > 0
     ? projectedStageEstimates.reduce((sum, stage) => sum + stage.eta_seconds, 0)
     : estimate?.eta_seconds
+  const selectedTemplateGuidance = templateCatalog.find((template) => (
+    template.id === contest?.template_id
+  ))
+  const hasUnboundedTiebreak = templateHasUnboundedTiebreak({ stages })
+  const projectedEstimate: ContestEstimate | null = estimate
+    ? {
+        ...estimate,
+        estimated_matches: projectedEstimatedMatches,
+        estimated_scoring_games: projectedEstimatedScoringGames,
+        eta_seconds: projectedEtaSeconds,
+        stages: projectedStageEstimates,
+      }
+    : null
 
   // 赛制提示只读取赛事已冻结的阶段配置。不从模板 id 或数量反推新口径。
   // 单条对阵的赛果必须另外读取后端 outcome，不得根据 match_winner=null 推断。
   const stageContracts = useMemo(
-    () => stages.map((stage) => stageDisplayContract(stage, contest?.game_id)),
-    [contest?.game_id, stages],
+    () => stages.map((stage) => stageDisplayContract(stage, contest?.game_id, contest?.status)),
+    [contest?.game_id, contest?.status, stages],
   )
   const hasInvalidStageContract = stageContracts.includes('invalid')
   const isDuplicate = useMemo(
@@ -723,6 +802,7 @@ export default function ContestDetail() {
         is_organizer?: boolean
       }>(`/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`)
       let nextStageSeriesConfigs: StageSeriesConfig[] = []
+      let nextTemplateCatalog: ContestTemplateGuidance[] = []
       let nextSeriesSettingsError = ''
       let nextSeriesSettingsNotice = ''
       if (
@@ -731,11 +811,11 @@ export default function ContestDetail() {
         d.contest.game_id && d.contest.template_id
       ) {
         try {
-          const templateResponse = await apiGet<{ templates: Array<{
-            id: string
+          const templateResponse = await apiGet<{ templates: Array<ContestTemplateGuidance & {
             stages?: Stage[]
             stage_series_configs?: StageSeriesConfig[]
           }> }>(`/api/contests/templates?game=${encodeURIComponent(d.contest.game_id)}`)
+          nextTemplateCatalog = templateResponse.templates || []
           const matchedTemplate = templateResponse.templates
             .find((template) => template.id === d.contest.template_id)
           const topologyMatches = matchesTemplateStageTopology(
@@ -775,6 +855,7 @@ export default function ContestDetail() {
       setStageStandings(d.stage_standings || [])
       setOfficialResults(nextOfficialResults)
       setEstimate(d.estimate || null)
+      setTemplateCatalog(nextTemplateCatalog)
       const persistedSettings = persistedSeriesSettings(d.contest)
       setStageSeriesConfigs(nextStageSeriesConfigs)
       setSavedStageSeriesSettings(persistedSettings)
@@ -826,6 +907,7 @@ export default function ContestDetail() {
     setServerIsOrganizer(false)
     setMyEntry(null)
     setEstimate(null)
+    setTemplateCatalog([])
     setStageSeriesConfigs([])
     setSavedStageSeriesSettings({})
     setDraftStageSeriesSettings({})
@@ -933,6 +1015,7 @@ export default function ContestDetail() {
     const targetId = id
     if (!targetId || !contest || hasInvalidStageContract || !seriesSettingsReady || seriesSettingsError) return
     const totalMatches = projectedEstimatedMatches
+    const totalScoringGames = projectedEstimatedScoringGames
     const totalSeconds = projectedEtaSeconds
     const frozenStageScopes = displayStageSeriesConfigs.length > 0
       ? displayStageSeriesConfigs.map((config) => {
@@ -963,11 +1046,18 @@ export default function ContestDetail() {
       return `${label}每对选手 ${scoringScope}${extra != null ? `、额外 ${extra} 轮` : ''}`
     }).join('；')
     const scale = totalMatches != null
-      ? `预计共 ${totalMatches} ${overviewScheduleMeasure}，${formatContestDuration(totalSeconds)}`
+      ? `基础赛程共 ${totalMatches} ${overviewScheduleMeasure}${
+          totalScoringGames != null && (totalScoringGames !== totalMatches || overviewScheduleMeasure !== '场计分')
+            ? `、${totalScoringGames} 场计分`
+            : ''
+        }，${formatContestDuration(totalSeconds)}`
       : `${overviewScheduleLabel}数量将在排期生成时按报名人数核定`
+    const tiebreakNotice = hasUnboundedTiebreak
+      ? '淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶，不计入基础场数与 ETA。'
+      : ''
     if (!await confirm({
       title: '截止报名并发布排期？',
-      desc: `${frozenStages ? `${frozenStages}。` : ''}${scale}。发布后公平性设置与参赛名单冻结。`,
+      desc: `${frozenStages ? `${frozenStages}。` : ''}${scale}。${tiebreakNotice}发布后公平性设置与参赛名单冻结。`,
       confirmText: '确认发布',
       dismissOnOutside: false,
       buttonClassName: 'min-h-11',
@@ -1309,12 +1399,14 @@ export default function ContestDetail() {
         </div>
       )}
 
-      {displayStageSeriesConfigs.length > 0 && (
+      {(selectedTemplateGuidance || projectedEstimate || displayStageSeriesConfigs.length > 0) && (
         <DataRegion
           title="赛制公平性与规模"
-          description={contest.status === 'draft' || contest.status === 'open'
-            ? '组织者可在发布排期前调整；页面会立即投影计分场数与耗时。'
-            : '排期发布时已冻结；后续阶段沿用这组设置。'}
+          description={displayStageSeriesConfigs.length > 0
+            ? contest.status === 'draft' || contest.status === 'open'
+              ? '人数只影响推荐；组织者可在发布前调整系列强度，页面会立即投影基础计分场数与耗时。'
+              : '人数只影响推荐；排期发布时系列设置已冻结，后续阶段沿用这组设置。'
+            : '人数区间仅用于推荐，不限制创建或发布；基础场数按当前报名名单估算。'}
           actions={isOrg && (contest.status === 'draft' || contest.status === 'open') && stageSeriesConfigs.length > 0 ? (
             <Button
               type="button"
@@ -1329,14 +1421,27 @@ export default function ContestDetail() {
           ) : undefined}
           contentClassName="min-w-0"
         >
-          <StageSeriesSettingsEditor
-            configs={displayStageSeriesConfigs}
-            value={draftStageSeriesSettings}
-            onChange={isOrg && stageSeriesConfigs.length > 0 && (contest.status === 'draft' || contest.status === 'open') ? setDraftStageSeriesSettings : undefined}
-            estimates={estimate?.stages}
-            disabled={busyAction || stageSeriesConfigs.length === 0 && (contest.status === 'draft' || contest.status === 'open')}
+          <TemplateGuidancePanel
+            template={selectedTemplateGuidance}
+            templates={templateCatalog}
+            participantCount={entriesTotal}
+            estimate={projectedEstimate}
+            unboundedTiebreak={hasUnboundedTiebreak}
             frozen={!['draft', 'open'].includes(contest.status)}
+            className="p-3"
           />
+          {displayStageSeriesConfigs.length > 0 && (
+            <div className="border-t">
+              <StageSeriesSettingsEditor
+                configs={displayStageSeriesConfigs}
+                value={draftStageSeriesSettings}
+                onChange={isOrg && stageSeriesConfigs.length > 0 && (contest.status === 'draft' || contest.status === 'open') ? setDraftStageSeriesSettings : undefined}
+                estimates={estimate?.stages}
+                disabled={busyAction || stageSeriesConfigs.length === 0 && (contest.status === 'draft' || contest.status === 'open')}
+                frozen={!['draft', 'open'].includes(contest.status)}
+              />
+            </div>
+          )}
         </DataRegion>
       )}
 
@@ -1542,6 +1647,11 @@ export default function ContestDetail() {
               )}
             </div>
           )}
+
+          <EliminationTiebreakStatus
+            value={selectedStageStanding?.elimination_tiebreak}
+            className="rounded-xl border"
+          />
 
           {/* 宽屏把对阵与阶段榜并排，窄屏自然上下排列。 */}
           <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_22rem]">

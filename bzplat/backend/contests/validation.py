@@ -10,7 +10,10 @@ from typing import Any
 
 from bzplat.backend.games import registry as _reg
 from bzplat.backend.contests.stages import PAIR_SERIES_STAGE_TYPES
-from bzplat.backend.store.schema import VALID_GAME_IDS
+from bzplat.backend.store.schema import (
+    ELIMINATION_TIEBREAK_PAIRED_SWAP,
+    VALID_GAME_IDS,
+)
 from bzplat.backend.store.validation import exact_nonnegative_int
 
 # 阶段类型（与 stages.generate_stage_pairings 对齐）
@@ -58,8 +61,9 @@ _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
         "series_scoring",
         "swiss_extra_rounds",
         "effective_rounds",
+        "swiss_round_bands",
     }),
-    "single_elimination": frozenset(),
+    "single_elimination": frozenset({"tiebreak"}),
 }
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
@@ -159,6 +163,59 @@ def stage_series_scoring_is_valid(stage: Any) -> bool:
     }
 
 
+def normalize_swiss_round_bands(
+    raw: Any,
+    *,
+    label: str = "swiss_round_bands",
+) -> list[dict[str, int | None]]:
+    """Validate an ordered, non-overlapping participant-to-round mapping."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{label} 须为非空数组")
+    normalized: list[dict[str, int | None]] = []
+    previous_max: int | None = 0
+    for index, band in enumerate(raw):
+        if not isinstance(band, dict) or set(band) != {
+            "min_participants",
+            "max_participants",
+            "rounds",
+        }:
+            raise ValueError(
+                f"{label}[{index}] 必须且只能包含 "
+                "min_participants/max_participants/rounds"
+            )
+        minimum = band["min_participants"]
+        maximum = band["max_participants"]
+        rounds = band["rounds"]
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or minimum < 1
+            or isinstance(rounds, bool)
+            or not isinstance(rounds, int)
+            or rounds < 1
+            or (
+                maximum is not None
+                and (
+                    isinstance(maximum, bool)
+                    or not isinstance(maximum, int)
+                    or maximum < minimum
+                )
+            )
+        ):
+            raise ValueError(f"{label}[{index}] 人数与轮数必须为合法正整数")
+        if previous_max is None or minimum <= previous_max:
+            raise ValueError(f"{label} 必须按人数升序且区间不得重叠")
+        normalized.append(
+            {
+                "min_participants": minimum,
+                "max_participants": maximum,
+                "rounds": rounds,
+            }
+        )
+        previous_max = maximum
+    return normalized
+
+
 def stage_scoring_contract_is_valid(
     stage: Any, *, game_id: str | None = None
 ) -> bool:
@@ -175,6 +232,21 @@ def stage_scoring_contract_is_valid(
         or not stage_series_scoring_is_valid(stage)
     ):
         return False
+
+    tiebreak = stage.get("tiebreak")
+    if "tiebreak" in stage and (
+        stage.get("type") != "single_elimination"
+        or tiebreak != ELIMINATION_TIEBREAK_PAIRED_SWAP
+        or stage_duplicate_mode(stage) is True
+    ):
+        return False
+    if "swiss_round_bands" in stage:
+        if stage.get("type") != "swiss":
+            return False
+        try:
+            normalize_swiss_round_bands(stage.get("swiss_round_bands"))
+        except ValueError:
+            return False
 
     mode = stage.get("series_scoring")
     if "type" in stage and stage.get("type") not in STAGE_TYPES:
@@ -416,6 +488,25 @@ def validate_stage(
         )
         if effective_rounds is not None:
             out["effective_rounds"] = effective_rounds
+        if "swiss_round_bands" in stage:
+            out["swiss_round_bands"] = normalize_swiss_round_bands(
+                stage["swiss_round_bands"],
+                label=f"阶段 {idx + 1} swiss_round_bands",
+            )
+
+    # 淘汰决胜策略只对新冻结的 single_elimination 显式生效。缺失字段是
+    # 历史赛事的权威 legacy 语义（和棋阻塞），绝不按当前默认静默补写。
+    if "tiebreak" in stage:
+        tiebreak = stage["tiebreak"]
+        if (
+            stype != "single_elimination"
+            or tiebreak != ELIMINATION_TIEBREAK_PAIRED_SWAP
+        ):
+            raise ValueError(
+                f"阶段 {idx + 1} tiebreak 仅允许 "
+                f"{ELIMINATION_TIEBREAK_PAIRED_SWAP!r} 且仅用于 single_elimination"
+            )
+        out["tiebreak"] = tiebreak
 
     # 通用可选
     ac = _int_field(
@@ -526,16 +617,13 @@ def validate_stage(
         and not _valid_swiss_games_per_pair(out["games_per_pair"])
     ):
         raise ValueError("Swiss games_per_pair 仅允许 1 或偶数，保证轮空等值计分")
-    if (
-        "swiss_extra_rounds" in out or "effective_rounds" in out
-    ) and out.get("series_scoring") not in {
+    if "swiss_extra_rounds" in out and out.get("series_scoring") not in {
         SERIES_SCORING_AGGREGATE,
         SERIES_SCORING_INDEPENDENT,
     }:
         raise ValueError(
             f"阶段 {idx + 1} 瑞士附加轮数必须使用多场独立计分"
         )
-
     if "ranking_mode" in stage:
         if stage["ranking_mode"] != "replace_top":
             raise ValueError(

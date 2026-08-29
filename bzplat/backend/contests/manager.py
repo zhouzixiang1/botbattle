@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Callable, Literal
@@ -28,11 +29,13 @@ from bzplat.backend.contests.series import (
     is_aggregate_series_stage,
     match_scoring_result_is_valid,
     series_rows_settled,
+    summarize_elimination_encounter,
     swiss_bye_points,
     summarize_conceptual_series,
 )
 from bzplat.backend.contests.showcase import is_showcase, require_mutable
 from bzplat.backend.contests.validation import (
+    ELIMINATION_TIEBREAK_PAIRED_SWAP,
     SERIES_SCORING_AGGREGATE,
     SERIES_SCORING_INDEPENDENT,
     active_contest_entries,
@@ -50,7 +53,7 @@ from bzplat.backend.matches.public_outcome import (
     scoring_games_for_match,
 )
 from bzplat.backend.games import normalize_game_id, registry as game_registry
-from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
+from bzplat.backend.runtime.config import MAX_CONCURRENT_MATCHES
 from bzplat.backend.store import (
     ContestRealNameRosterForbidden,
     ExecutionQueueClosed,
@@ -506,9 +509,14 @@ class ContestManager:
         for index, stage in enumerate(stages):
             mode = stage.get("series_scoring")
             if (
-                mode == SERIES_SCORING_INDEPENDENT
-                and stage.get("type") == "swiss"
-                and "swiss_extra_rounds" in stage
+                stage.get("type") == "swiss"
+                and (
+                    "swiss_round_bands" in stage
+                    or (
+                        mode == SERIES_SCORING_INDEPENDENT
+                        and "swiss_extra_rounds" in stage
+                    )
+                )
                 and "effective_rounds" not in stage
             ):
                 raise ValueError(
@@ -526,13 +534,37 @@ class ContestManager:
     def _freeze_effective_stage_values(
         stages: list[dict[str, Any]], participant_count: int
     ) -> list[dict[str, Any]]:
-        """Freeze participant-dependent effective Swiss rounds at publication."""
+        """Freeze participant-dependent Swiss rounds for each planned cohort.
+
+        Later stages do not necessarily receive the initial registration
+        roster.  Propagate the same bounded advancement contract used by the
+        public estimator so a final Swiss stage freezes against its planned
+        finalists rather than every entrant.
+        """
         frozen = [dict(stage) for stage in stages]
+        current_participants = participant_count
         for stage in frozen:
-            if stage.get("type") == "swiss" and "swiss_extra_rounds" in stage:
+            if stage.get("type") == "swiss":
                 stage["effective_rounds"] = effective_swiss_rounds(
                     {key: value for key, value in stage.items() if key != "effective_rounds"},
-                    participant_count,
+                    current_participants,
+                )
+            advance_per_group = stage.get("advance_per_group")
+            if advance_per_group and int(advance_per_group) > 0:
+                group_count = effective_group_count(
+                    current_participants,
+                    int(stage.get("group_count") or 4),
+                )
+                current_participants = min(
+                    current_participants,
+                    group_count * int(advance_per_group),
+                )
+                continue
+            advance_count = stage.get("advance_count")
+            if advance_count and int(advance_count) > 0:
+                current_participants = min(
+                    current_participants,
+                    int(advance_count),
                 )
         return frozen
 
@@ -988,42 +1020,26 @@ class ContestManager:
                 self.store.update_contest_pairing(p["id"], **fields)
         return updated
 
-    def _full_rr_max_n(self) -> int:
-        return FULL_RR_MAX_N
+    def _guard_round_robin_size(self, stages: list[dict], n: int) -> None:
+        """循环赛不限人数，只保留分组坐标的严格类型校验。
 
-    def _guard_full_rr(self, stages: list[dict], n: int) -> None:
-        """人数护栏：防止超大规模循环赛静默生成海量对局（@500 全员单循环=124750 场）。
+        物理执行仍受全局 match slots / sandbox capacity 硬顶约束，因此取消
+        排期人数限制只会增加持久队列长度，不会放大同时运行的对局数。
 
-        - round_robin / double_round_robin：全员互打，校验总人数 n ≤ limit。
-          stage.allow_large_round_robin=True 时旁路（仅白名单 builtin 模板，如决赛）。
-        - group_round_robin / group_double_round_robin：组内循环，校验**每组**人数
-          （蛇形分组后每组 ≈ ceil(n/group_count)）≤ limit。
+        - round_robin / double_round_robin：全员互打，不设人数上限。
+          stage.allow_large_round_robin 是历史旁路标记，现为兼容 no-op。
+        - group_round_robin / group_double_round_robin：组内循环同样不限人数；
+          ``group_count`` 仍须是正整数，不能让损坏快照改变分组拓扑。
         """
-        import math
-
-        limit = self._full_rr_max_n()
+        del n
         for st in stages:
             t = st.get("type") or ""
             if t in ("round_robin", "double_round_robin"):
-                allow_large = st.get("allow_large_round_robin", False)
-                if not isinstance(allow_large, bool):
-                    raise ValueError("allow_large_round_robin 必须是布尔值")
-                if allow_large:
-                    continue  # 决赛等白名单模板旁路护栏（组织者自负规模）
-                if n > limit:
-                    raise ValueError(
-                        f"全员{t} 人数 {n} 超过上限 {limit}，请改用 Swiss/分组模板"
-                    )
+                continue
             elif t in ("group_round_robin", "group_double_round_robin"):
                 gc = st.get("group_count", 4)
                 if isinstance(gc, bool) or not isinstance(gc, int) or gc < 1:
                     raise ValueError("group_count 须为 ≥1 的整数")
-                per_group = math.ceil(n / gc)
-                if per_group > limit:
-                    raise ValueError(
-                        f"{t} 每组人数 {per_group}（{n}人÷{gc}组）超过上限 {limit}，"
-                        f"请增加 group_count 或改用 Swiss 模板"
-                    )
 
     def _assert_engine(self, game_id: str) -> None:
         if game_id not in REGISTERED_ENGINES:
@@ -1211,7 +1227,7 @@ class ContestManager:
         stages = self._freeze_effective_stage_values(stages, len(entries))
         stages = self._validated_lifecycle_stages(c, stages)
 
-        self._guard_full_rr(stages, len(entries))
+        self._guard_round_robin_size(stages, len(entries))
 
         snapshot = self._initial_lifecycle_snapshot(c, entries)
         try:
@@ -1284,7 +1300,7 @@ class ContestManager:
         stages = self._freeze_effective_stage_values(stages, len(entries))
         stages = self._validated_lifecycle_stages(c, stages)
 
-        self._guard_full_rr(stages, len(entries))
+        self._guard_round_robin_size(stages, len(entries))
 
         snapshot = self._initial_lifecycle_snapshot(c, entries)
         try:
@@ -1441,34 +1457,35 @@ class ContestManager:
         return bot_a_id, bot_b_id
 
     @staticmethod
-    def _frozen_pairing_seed(
+    def _private_pairing_seed(
         contest_id: int, stage_idx: int, ordinal: int
     ) -> int:
-        """Allocate a deterministic, non-overlapping seed block per contest.
+        """Allocate one private CSPRNG seed for a newly frozen pairing.
 
-        Decimal coordinate blocks reserve room for 100 stages and 9,999,999
-        rows per stage.  The ordinal comes from the frozen entry/seed
-        cohort pairing plan; no DB pairing id, Bot id or process-random hash
-        participates.
+        The coordinates are validated but deliberately do not participate in
+        the value: contest/stage/pairing coordinates are public, while Holdem
+        consumes this seed as the actual deal sequence.
         """
-        if (
-            contest_id < 1
-            or not 0 <= stage_idx < 100
-            or not 1 <= ordinal < 10_000_000
-        ):
+        coordinates = (contest_id, stage_idx, ordinal)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in coordinates
+        ) or contest_id < 1 or stage_idx < 0 or ordinal < 1:
             raise ValueError("赛事对阵 seed 坐标超出范围")
-        seed = contest_id * 1_000_000_000 + stage_idx * 10_000_000 + ordinal
-        if seed > 9_223_372_036_854_775_807:
-            raise ValueError("赛事对阵 seed 超出 SQLite INTEGER 范围")
-        return seed
+        return secrets.randbelow(9_223_372_036_854_775_807) + 1
 
     @staticmethod
     def _duplicate_seed(pairing: dict[str, Any]) -> int:
-        """Use the publication-frozen seed, with a legacy-row compatibility fallback."""
+        """Return the publication-frozen private seed, or fail closed."""
         frozen = pairing.get("pairing_seed")
-        if frozen is not None:
-            return int(frozen)
-        return int(pairing["id"]) * 7919 + 1
+        if (
+            isinstance(frozen, bool)
+            or not isinstance(frozen, int)
+            or frozen < 1
+            or frozen > 9_223_372_036_854_775_807
+        ):
+            raise ValueError("多场赛事对阵缺少有效的私密冻结 seed")
+        return frozen
 
     def _stage_pairing_plan(
         self, contest: dict, stage_idx: int
@@ -1592,6 +1609,8 @@ class ContestManager:
                         "color_first": 0,
                         "series_index": sp.series_index,
                         "series_size": sp.series_size,
+                        "tiebreak_group": 0,
+                        "tiebreak_game": 0,
                         "entry_a_id": bot_to_entry.get(bot_a_id),
                         "entry_b_id": None,
                         "published_at": published_at,
@@ -1611,8 +1630,10 @@ class ContestManager:
                     "color_first": 0,
                     "series_index": sp.series_index,
                     "series_size": sp.series_size,
+                    "tiebreak_group": 0,
+                    "tiebreak_game": 0,
                     "pairing_seed": (
-                        self._frozen_pairing_seed(contest_id, stage_idx, ordinal)
+                        self._private_pairing_seed(contest_id, stage_idx, ordinal)
                         if series_stage
                         else None
                     ),
@@ -1650,7 +1671,9 @@ class ContestManager:
                 self._ensure_published_pairings_locked(contest_id, stage_idx)
 
     @staticmethod
-    def _pairing_batch_signature(rows: list[dict]) -> Counter | None:
+    def _pairing_batch_signature(
+        rows: list[dict], *, include_pairing_seed: bool = True
+    ) -> Counter | None:
         """对阵批次的业务签名（忽略 DB id/时间/版本快照）。
 
         持久坐标只接受精确整数。损坏批次返回 ``None``，让 published
@@ -1663,6 +1686,12 @@ class ContestManager:
             raw_color = row["color_first"] if "color_first" in row else 0
             raw_index = row["series_index"] if "series_index" in row else 1
             raw_size = row["series_size"] if "series_size" in row else 1
+            raw_tiebreak_group = (
+                row["tiebreak_group"] if "tiebreak_group" in row else 0
+            )
+            raw_tiebreak_game = (
+                row["tiebreak_game"] if "tiebreak_game" in row else 0
+            )
             if (
                 isinstance(raw_round, bool)
                 or not isinstance(raw_round, int)
@@ -1676,6 +1705,17 @@ class ContestManager:
                 or isinstance(raw_size, bool)
                 or not isinstance(raw_size, int)
                 or raw_size < 1
+                or isinstance(raw_tiebreak_group, bool)
+                or not isinstance(raw_tiebreak_group, int)
+                or isinstance(raw_tiebreak_game, bool)
+                or not isinstance(raw_tiebreak_game, int)
+                or not (
+                    (raw_tiebreak_group == 0 and raw_tiebreak_game == 0)
+                    or (
+                        raw_tiebreak_group >= 1
+                        and raw_tiebreak_game in (1, 2)
+                    )
+                )
             ):
                 return None
             signature[
@@ -1689,13 +1729,35 @@ class ContestManager:
                     row.get("group_id") or "",
                     row.get("bracket_slot"),
                     raw_color,
-                    row.get("pairing_seed"),
+                    row.get("pairing_seed") if include_pairing_seed else None,
                     raw_index,
                     raw_size,
+                    raw_tiebreak_group,
+                    raw_tiebreak_game,
                     row.get("status") or "pending",
                 )
             ] += 1
         return signature
+
+    @staticmethod
+    def _published_series_seeds_are_valid(rows: list[dict]) -> bool:
+        """Validate private seeds without deriving them from public coordinates."""
+        seeds: list[int] = []
+        playable_rows = 0
+        for row in rows:
+            if row.get("bot_b_id") is None:
+                continue
+            playable_rows += 1
+            seed = row.get("pairing_seed")
+            if (
+                isinstance(seed, bool)
+                or not isinstance(seed, int)
+                or seed < 1
+                or seed > 9_223_372_036_854_775_807
+            ):
+                return False
+            seeds.append(seed)
+        return playable_rows == 0 or len(seeds) == len(set(seeds))
 
     def _ensure_published_pairings_locked(
         self, contest_id: int, stage_idx: int
@@ -1723,7 +1785,7 @@ class ContestManager:
         key = stage.get("key") or f"stage{stage_idx}"
         expected_shape: list[dict] = []
         series_stage = "games_per_pair" in stage
-        for ordinal, spec in enumerate(specs, start=1):
+        for spec in specs:
             bot_a_id, bot_b_id = self._materialize_pairing_seats(spec)
             expected_shape.append(
                 {
@@ -1738,17 +1800,23 @@ class ContestManager:
                     "color_first": 0,
                     "series_index": spec.series_index,
                     "series_size": spec.series_size,
-                    "pairing_seed": (
-                        self._frozen_pairing_seed(contest_id, stage_idx, ordinal)
-                        if series_stage
-                        else None
-                    ),
+                    "tiebreak_group": 0,
+                    "tiebreak_game": 0,
                     "status": spec.status,
                 }
             )
 
-        complete = self._pairing_batch_signature(existing) == self._pairing_batch_signature(
-            expected_shape
+        complete = (
+            self._pairing_batch_signature(
+                existing, include_pairing_seed=False
+            )
+            == self._pairing_batch_signature(
+                expected_shape, include_pairing_seed=False
+            )
+            and (
+                not series_stage
+                or self._published_series_seeds_are_valid(existing)
+            )
         )
         if complete:
             # published 态不应存在任何 active match；即使 pairing 外形完整，
@@ -1768,7 +1836,9 @@ class ContestManager:
             None,
         ) or _now()
         replacement: list[dict] = []
-        for spec, shape in zip(specs, expected_shape):
+        for ordinal, (spec, shape) in enumerate(
+            zip(specs, expected_shape), start=1
+        ):
             versions = self._version_snapshot(
                 shape.get("bot_a_id"), shape.get("bot_b_id")
             )
@@ -1776,6 +1846,13 @@ class ContestManager:
                 {
                     **shape,
                     **versions,
+                    "pairing_seed": (
+                        self._private_pairing_seed(
+                            contest_id, stage_idx, ordinal
+                        )
+                        if series_stage and shape.get("bot_b_id") is not None
+                        else None
+                    ),
                     "published_at": published_at,
                     "scheduled_at": (
                         None
@@ -2085,8 +2162,8 @@ class ContestManager:
             if slot_budget is not None and slot_budget <= 0:
                 break
             # 冻结快照已在 pairing 行；直接开打
-            # duplicate=True 时使用发布批次冻结的 pairing_seed；恢复重建仍得到
-            # 同一 seed 保证两个换座计分场同牌可复现，且不依赖数据库行 id。
+            # duplicate=True 时使用发布批次私密冻结的 pairing_seed；正常重启
+            # 继续读取同一持久值，保证两个换座计分场同牌可复现。
             try:
                 await self._prepare_bind_start_pairing(
                     c,
@@ -2129,6 +2206,18 @@ class ContestManager:
         MatchOrchestrator 的真实实现支持 defer/start/discard。少量只用于单元测试的
         legacy fake 没有显式 start/discard 方法时，仍沿用其 challenge 即启动契约。
         """
+        tiebreak_group = pairing.get("tiebreak_group", 0)
+        if (
+            isinstance(tiebreak_group, bool)
+            or not isinstance(tiebreak_group, int)
+            or tiebreak_group < 0
+        ):
+            raise ValueError("赛事对阵淘汰决胜坐标损坏")
+        pairing = self.store.ensure_contest_pairing_seed_for_enqueue(
+            int(contest["id"]),
+            pairing,
+            expected_stages_json=contest.get("stages_json"),
+        )
         if callable(getattr(self.orch, "start_execution_job", None)):
             common = {
                 "owner_user_id": contest["organizer_id"],
@@ -2139,6 +2228,8 @@ class ContestManager:
                 "bot_a_version_id": pairing.get("bot_a_version_id"),
                 "bot_b_version_id": pairing.get("bot_b_version_id"),
             }
+            if tiebreak_group > 0:
+                common["match_seed"] = self._duplicate_seed(pairing)
             if want_duplicate:
                 return await self.orch.challenge_duplicate(
                     pairing["bot_a_id"],
@@ -2159,6 +2250,8 @@ class ContestManager:
             "bot_b_version_id": pairing.get("bot_b_version_id"),
             "defer_start": True,
         }
+        if tiebreak_group > 0:
+            common["match_seed"] = self._duplicate_seed(pairing)
         mid: str | None = None
         bound = False
         try:
@@ -2319,6 +2412,19 @@ class ContestManager:
             if pairings is not None
             else self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         )
+        if (
+            stage.get("type") == "single_elimination"
+            and stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+        ):
+            # 决胜组只决定晋级，不回写原阶段积分、胜负、分差或破同分。
+            # 缺失坐标按历史主赛 0/0 解释；显式损坏坐标会在生命周期
+            # validator/淘汰 resolver 处 fail closed，不能被当作加赛吞掉。
+            pairing_rows = [
+                row
+                for row in pairing_rows
+                if row.get("tiebreak_group", 0) == 0
+                and row.get("tiebreak_game", 0) == 0
+            ]
         expected_entry_bots = {
             int(entry["id"]): entry.get("bot_id") for entry in entry_rows
         }
@@ -2991,10 +3097,26 @@ class ContestManager:
         )
         if current_stage_idx is None:
             return []
-        return _ranking.compute_official_ranking(
+        scoring_pairings = pairings
+        if (
+            stage.get("type") == "single_elimination"
+            and stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+        ):
+            scoring_pairings = [
+                row
+                for row in pairings
+                if row.get("tiebreak_group", 0) == 0
+                and row.get("tiebreak_game", 0) == 0
+            ]
+        ranked = _ranking.compute_official_ranking(
             standings,
-            pairings,
-            {key: value for key, value in matches.items() if value},
+            scoring_pairings,
+            {
+                str(row["match_id"]): matches[str(row["match_id"])]
+                for row in scoring_pairings
+                if row.get("match_id")
+                and matches.get(str(row["match_id"]))
+            },
             normalize_delta=game_spec.normalize_delta,
             stage=stage,
             planned_games_per_match=planned_match_games(
@@ -3017,6 +3139,85 @@ class ContestManager:
                 )
             ),
         )
+        if stage.get("tiebreak") != ELIMINATION_TIEBREAK_PAIRED_SWAP:
+            return ranked
+
+        expected_entry_bots = {
+            int(entry["id"]): entry.get("bot_id") for entry in entries
+        }
+        expected_entry_users = {
+            int(entry["id"]): int(entry["user_id"]) for entry in entries
+        }
+        progress = {int(row["entry_id"]): 0 for row in ranked}
+        by_encounter: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for pairing in pairings:
+            round_num = pairing.get("round_num")
+            slot = pairing.get("bracket_slot")
+            if (
+                isinstance(round_num, bool)
+                or not isinstance(round_num, int)
+                or round_num < 1
+                or isinstance(slot, bool)
+                or not isinstance(slot, int)
+                or slot < 0
+            ):
+                return []
+            by_encounter.setdefault((round_num, slot), []).append(pairing)
+        for (round_num, _slot), rows in by_encounter.items():
+            if len(rows) == 1 and is_authoritative_no_opponent_pairing(
+                stage.get("type"), rows[0]
+            ):
+                entry_id = rows[0].get("entry_a_id")
+                if entry_id not in progress:
+                    return []
+                progress[int(entry_id)] = max(
+                    progress[int(entry_id)], round_num + 1
+                )
+                continue
+            summary = summarize_elimination_encounter(
+                stage,
+                rows,
+                self.store.get_match,
+                game_spec=game_spec,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=bool(
+                    stage_idx == current_stage_idx
+                    and contest.get("status") in (
+                        CONTEST_PUBLISHED,
+                        CONTEST_RUNNING,
+                    )
+                ),
+            )
+            winner_entry = summary.get("winner_entry")
+            primary = next(
+                (
+                    row
+                    for row in rows
+                    if row.get("tiebreak_group", 0) == 0
+                    and row.get("tiebreak_game", 0) == 0
+                ),
+                None,
+            )
+            if summary.get("state") != "decided" or primary is None:
+                return []
+            entrants = {primary.get("entry_a_id"), primary.get("entry_b_id")}
+            if winner_entry not in entrants or None in entrants:
+                return []
+            loser_entry = next(entry for entry in entrants if entry != winner_entry)
+            if winner_entry not in progress or loser_entry not in progress:
+                return []
+            progress[int(loser_entry)] = max(
+                progress[int(loser_entry)], round_num
+            )
+            progress[int(winner_entry)] = max(
+                progress[int(winner_entry)], round_num + 1
+            )
+        ranked.sort(key=lambda row: (-progress[int(row["entry_id"])], row["rank"]))
+        for rank, row in enumerate(ranked, start=1):
+            row["rank"] = rank
+        return ranked
 
     async def handle_match_done(
         self,
@@ -3874,7 +4075,7 @@ class ContestManager:
                     "series_index": sp.series_index,
                     "series_size": sp.series_size,
                     "pairing_seed": (
-                        self._frozen_pairing_seed(
+                        self._private_pairing_seed(
                             contest_id, stage_idx, prior_row_count + ordinal
                         )
                         if series_stage
@@ -3899,16 +4100,7 @@ class ContestManager:
     async def _maybe_next_elim_round(
         self, contest_id: int, stage_idx: int, stage: dict
     ) -> EliminationAdvanceState:
-        """单败淘汰进程的显式三态判定。
-
-        ``created`` 表示已原子生成下一轮；``champion`` 表示已有唯一
-        胜者；``blocked`` 表示当前轮无权威晋级者（含和棋）。调用方对
-        blocked 必须保持赛事 running，不得把它与“冠军已产生”共用一个
-        false 值。
-
-        复现修复：500 人压测发现 KO 只跑四分之一就 finished——_stage_done 只看现有 pairing，
-        但 single_elimination 只生成首轮，后续轮需根据胜者推进。
-        """
+        """Resolve one elimination round, appending swapped tiebreaks as needed."""
         contest = self.store.get_contest(contest_id)
         if not contest:
             return "blocked"
@@ -3949,12 +4141,30 @@ class ContestManager:
             for p, round_num in zip(pairings, round_numbers)
             if round_num == max_round
         ]
-        # 当前轮全部完成
-        winners: list[tuple[int, int | None]] = []  # (bot_id, entry_id)
-        for p in cur:
-            # 权威 no-opponent pairing 视为已完成，胜者为轮空者 bot_a。
-            # entry_b_id 仍存在的 deleted-opponent 行绝不能晋级座位 A。
-            if is_authoritative_no_opponent_pairing(stage.get("type"), p):
+        by_slot: dict[int, list[dict[str, Any]]] = {}
+        for pairing in cur:
+            slot = pairing.get("bracket_slot")
+            if (
+                isinstance(slot, bool)
+                or not isinstance(slot, int)
+                or slot < 0
+            ):
+                return "blocked"
+            by_slot.setdefault(slot, []).append(pairing)
+
+        winners: list[tuple[int, int]] = []  # (bot_id, entry_id)
+        appended_tiebreak = False
+        for slot in sorted(by_slot):
+            slot_rows = by_slot[slot]
+            byes = [
+                row
+                for row in slot_rows
+                if is_authoritative_no_opponent_pairing(stage.get("type"), row)
+            ]
+            if byes:
+                if len(slot_rows) != 1 or len(byes) != 1:
+                    return "blocked"
+                p = byes[0]
                 if not contest_pairing_roster_binding_is_valid(
                     p,
                     expected_contest_id=contest_id,
@@ -3964,39 +4174,144 @@ class ContestManager:
                     require_opponent=False,
                 ):
                     return "blocked"
-                winners.append((p["bot_a_id"], p.get("entry_a_id")))
+                if (
+                    isinstance(p.get("bot_a_id"), bool)
+                    or not isinstance(p.get("bot_a_id"), int)
+                    or isinstance(p.get("entry_a_id"), bool)
+                    or not isinstance(p.get("entry_a_id"), int)
+                ):
+                    return "blocked"
+                winners.append((int(p["bot_a_id"]), int(p["entry_a_id"])))
                 continue
-            mid = p.get("match_id")
-            if not mid:
-                return "blocked"
-            m = self.store.get_match(mid)
-            if not match_scoring_result_is_valid(
+
+            summary = summarize_elimination_encounter(
                 stage,
-                m,
+                slot_rows,
+                self.store.get_match,
                 game_spec=game_spec,
-                pairing=p,
                 expected_contest_id=contest_id,
                 expected_entry_bots=expected_entry_bots,
                 expected_entry_users=expected_entry_users,
                 require_current_entry_bots=require_current_entry_bots,
-            ):
-                return "blocked"
-            w = m.get("winner")
-            if w not in (0, 1):
-                # 淘汰赛没有权威 winner 时不得以座位 0 兜底晋级。
-                # 显式阻塞，不得擅定晋级者或重赛规则。
-                logger.error(
-                    "elimination pairing has no adjudicated winner: "
-                    "contest=%s pairing=%s match=%s",
+            )
+            if summary["state"] == "decided":
+                winner_entry = summary.get("winner_entry")
+                if (
+                    isinstance(winner_entry, bool)
+                    or not isinstance(winner_entry, int)
+                    or winner_entry not in expected_entry_bots
+                    or not isinstance(expected_entry_bots[winner_entry], int)
+                ):
+                    return "blocked"
+                winners.append(
+                    (int(expected_entry_bots[winner_entry]), winner_entry)
+                )
+                continue
+            if summary["state"] == "append_tiebreak":
+                next_group = summary.get("next_tiebreak_group")
+                if (
+                    isinstance(next_group, bool)
+                    or not isinstance(next_group, int)
+                    or next_group < 1
+                ):
+                    return "blocked"
+                primary = next(
+                    (
+                        row
+                        for row in slot_rows
+                        if row.get("tiebreak_group", 0) == 0
+                        and row.get("tiebreak_game", 0) == 0
+                    ),
+                    None,
+                )
+                if primary is None:
+                    return "blocked"
+                published_at = _now()
+                bot_a = int(primary["bot_a_id"])
+                bot_b = int(primary["bot_b_id"])
+                entry_a = int(primary["entry_a_id"])
+                entry_b = int(primary["entry_b_id"])
+                # A tiebreak is part of the already-published encounter.  Its
+                # programs must therefore be the primary pairing's frozen
+                # versions, even if an entrant activates a newer Bot version
+                # between the draw and this callback.
+                first_versions = {
+                    "bot_a_version_id": primary.get("bot_a_version_id"),
+                    "bot_b_version_id": primary.get("bot_b_version_id"),
+                }
+                second_versions = {
+                    "bot_a_version_id": primary.get("bot_b_version_id"),
+                    "bot_b_version_id": primary.get("bot_a_version_id"),
+                }
+                rows = [
+                    {
+                        "bot_a_id": bot_a,
+                        "bot_b_id": bot_b,
+                        "entry_a_id": entry_a,
+                        "entry_b_id": entry_b,
+                        "round_num": max_round,
+                        "status": STATUS_PENDING,
+                        "stage_key": stage.get("key") or f"stage{stage_idx}",
+                        "bracket_slot": slot,
+                        "color_first": 0,
+                        "series_index": 1,
+                        "series_size": 1,
+                        "published_at": published_at,
+                        "scheduled_at": published_at,
+                        "tiebreak_group": next_group,
+                        "tiebreak_game": 1,
+                        **first_versions,
+                    },
+                    {
+                        "bot_a_id": bot_b,
+                        "bot_b_id": bot_a,
+                        "entry_a_id": entry_b,
+                        "entry_b_id": entry_a,
+                        "round_num": max_round,
+                        "status": STATUS_PENDING,
+                        "stage_key": stage.get("key") or f"stage{stage_idx}",
+                        "bracket_slot": slot,
+                        "color_first": 0,
+                        "series_index": 1,
+                        "series_size": 1,
+                        "published_at": published_at,
+                        "scheduled_at": published_at,
+                        "tiebreak_group": next_group,
+                        "tiebreak_game": 2,
+                        **second_versions,
+                    },
+                ]
+                self.store.append_contest_elimination_tiebreak_pairings(
                     contest_id,
-                    p["id"],
-                    mid,
+                    stage_idx,
+                    max_round,
+                    slot,
+                    rows,
+                    expected_current_stage_idx=stage_idx,
+                    expected_previous_tiebreak_group=next_group - 1,
+                )
+                appended_tiebreak = True
+                continue
+
+            if summary["state"] in {
+                "awaiting_results",
+                "legacy_draw",
+                "invalid",
+            }:
+                logger.error(
+                    "elimination encounter cannot advance: contest=%s stage=%s "
+                    "round=%s slot=%s state=%s",
+                    contest_id,
+                    stage_idx,
+                    max_round,
+                    slot,
+                    summary["state"],
                 )
                 return "blocked"
-            if w == 0:
-                winners.append((p["bot_a_id"], p.get("entry_a_id")))
-            else:
-                winners.append((p["bot_b_id"], p.get("entry_b_id")))
+
+        if appended_tiebreak:
+            await self._dispatch_pending_locked(contest_id, stage_idx)
+            return "created"
         # 胜者 ≤1 → 已决出冠军，阶段真正完成
         if len(winners) <= 1:
             return "champion"
@@ -4023,6 +4338,8 @@ class ContestManager:
                         "entry_a_id": a_entry,
                         "entry_b_id": b_entry,
                         "published_at": published_at,
+                        "tiebreak_group": 0,
+                        "tiebreak_game": 0,
                         **self._version_snapshot(a_bot, b_bot),
                     }
                 )
@@ -4045,6 +4362,8 @@ class ContestManager:
                         "entry_a_id": a_entry,
                         "entry_b_id": None,
                         "published_at": published_at,
+                        "tiebreak_group": 0,
+                        "tiebreak_game": 0,
                     }
                 )
                 slot += 1
@@ -4485,6 +4804,11 @@ class ContestManager:
                     "estimated_matches": stage_matches,
                     "estimated_execution_legs": stage_execution_legs,
                     "eta_seconds": int((stage_execution_legs / conc) * sec_per),
+                    "unbounded_tiebreak": bool(
+                        stage_type == "single_elimination"
+                        and st.get("tiebreak")
+                        == ELIMINATION_TIEBREAK_PAIRED_SWAP
+                    ),
                 }
             )
             advance_per_group = st.get("advance_per_group")
@@ -4508,7 +4832,12 @@ class ContestManager:
         return {
             "entries": n,
             "estimated_matches": total,
+            "estimated_scoring_games": execution_legs,
             "max_concurrent": conc,
             "eta_seconds": int(eta_sec),
             "stages": stage_estimates,
+            "unbounded_tiebreak": any(
+                bool(stage.get("unbounded_tiebreak"))
+                for stage in stage_estimates
+            ),
         }

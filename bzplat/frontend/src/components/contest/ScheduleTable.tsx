@@ -42,6 +42,8 @@ export interface SchedulePairing extends MatchParticipantSource {
   group_id?: string | null
   series_index?: number | null
   series_size?: number | null
+  tiebreak_group?: number | null
+  tiebreak_game?: number | null
 }
 
 function pairingSeriesKey(pairing: SchedulePairing, stageType?: string): string {
@@ -149,6 +151,9 @@ export default function ScheduleTable({
               <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
                 <span className="font-mono font-semibold text-foreground">
                   {p.group_id ? `${p.group_id} · ` : ''}R{round}
+                  {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0
+                    ? ` · 决胜组 ${p.tiebreak_group} · 第 ${p.tiebreak_game}/2 场`
+                    : ''}
                   {p.series_size && p.series_size > 1
                     ? duplicate
                       ? ` · 本对 ${p.series_size} 组复式 · 第 ${p.series_index ?? 1}/${p.series_size} 组`
@@ -207,6 +212,11 @@ export default function ScheduleTable({
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {isRoundStart ? `R${round}` : ''}
+                  {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
+                    <span className="block whitespace-nowrap text-xs font-medium text-foreground">
+                      决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
+                    </span>
+                  )}
                   {p.series_size && p.series_size > 1 && (
                     <span className="block whitespace-nowrap text-xs">
                       {isSeriesStart

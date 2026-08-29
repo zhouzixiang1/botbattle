@@ -424,6 +424,46 @@ def effective_swiss_rounds(stage: dict[str, Any], n: int) -> int:
     frozen = stage.get("effective_rounds")
     if isinstance(frozen, int) and not isinstance(frozen, bool) and frozen >= 1:
         return frozen
+    if "swiss_round_bands" in stage:
+        raw_bands = stage.get("swiss_round_bands")
+        if not isinstance(raw_bands, list) or not raw_bands:
+            raise ValueError("swiss_round_bands 须为非空数组")
+        previous_max: int | None = 0
+        selected: int | None = None
+        for band in raw_bands:
+            if not isinstance(band, dict) or set(band) != {
+                "min_participants",
+                "max_participants",
+                "rounds",
+            }:
+                raise ValueError("swiss_round_bands 结构非法")
+            minimum = band["min_participants"]
+            maximum = band["max_participants"]
+            rounds = band["rounds"]
+            if (
+                isinstance(minimum, bool)
+                or not isinstance(minimum, int)
+                or minimum < 1
+                or isinstance(rounds, bool)
+                or not isinstance(rounds, int)
+                or rounds < 1
+                or (
+                    maximum is not None
+                    and (
+                        isinstance(maximum, bool)
+                        or not isinstance(maximum, int)
+                        or maximum < minimum
+                    )
+                )
+                or previous_max is None
+                or minimum <= previous_max
+            ):
+                raise ValueError("swiss_round_bands 人数区间非法")
+            if minimum <= n and (maximum is None or n <= maximum):
+                selected = rounds
+            previous_max = maximum
+        if selected is not None:
+            return selected
     configured = stage.get("rounds")
     if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
         base = configured

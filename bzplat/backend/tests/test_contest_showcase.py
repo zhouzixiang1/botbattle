@@ -58,6 +58,29 @@ def _showcase_app(tmp_path):
     return app, store, org, admin, user, other_org
 
 
+def test_fresh_showcase_shell_preserves_legacy_stages_after_template_reenabled(tmp_path):
+    from bzplat.backend.contests.templates import get_template
+
+    app, store, org, _admin, _user, _other_org = _showcase_app(tmp_path)
+    template = get_template(showcase_seed_module.HISTORICAL_SHOWCASE_TEMPLATE_ID)
+    assert template is not None
+    assert template.get("creation_enabled", True) is True
+    assert template["stages"][1]["tiebreak"] == "paired_swap_until_decided"
+
+    contest = showcase_seed_module._create_historical_showcase_contest(
+        app.state.contest_manager,
+        "contest_lifecycle_draft",
+        org["id"],
+        starts_at=None,
+    )
+    stages = json.loads(contest["stages_json"])
+    assert stages[0]["type"] == "group_double_round_robin"
+    assert "round_stagger_minutes" not in stages[0]
+    assert stages[1]["type"] == "single_elimination"
+    assert "tiebreak" not in stages[1]
+    store.close()
+
+
 def _rollback_seed_fixture(tmp_path, *, with_match: bool = False):
     app = create_app(db_path=str(tmp_path / "rollback-fixture.db"), max_concurrent=1)
     store = app.state.store

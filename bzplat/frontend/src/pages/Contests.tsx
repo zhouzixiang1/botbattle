@@ -23,6 +23,12 @@ import {
   type StageSeriesConfig,
   type StageSeriesSettings,
 } from '@/components/contest/stage-series-settings'
+import { TemplateGuidancePanel } from '@/components/contest/template-guidance-panel'
+import type {
+  ContestTemplateGuidance,
+  ContestTemplatePurpose,
+  ContestTemplateTimeClass,
+} from '@/components/contest/template-guidance'
 
 interface Contest {
   id: number
@@ -58,13 +64,17 @@ function matchConfigSummary(c: Contest): string {
   return findGame(c.game_id)?.matchFormatLabel ?? '规则不可用'
 }
 
-interface Template {
+interface Template extends ContestTemplateGuidance {
   id: string
   name: string
   game_id: string
   summary?: string
   recommended?: boolean
-  stages?: Array<{ duplicate?: boolean }>
+  recommended_min?: number | null
+  recommended_max?: number | null
+  purpose?: ContestTemplatePurpose | null
+  time_class?: ContestTemplateTimeClass | null
+  stages?: Array<{ duplicate?: boolean; type?: string; tiebreak?: string | null }>
   games_per_pair_config?: {
     default: number
     min: number
@@ -359,6 +369,10 @@ export default function Contests() {
                 <p id="contest-template-summary" className="text-sm leading-relaxed text-muted-foreground">
                   {selectedTemplate?.summary || '模板决定对阵覆盖、计分场数与预计耗时。'}
                 </p>
+                <TemplateGuidancePanel
+                  template={selectedTemplate}
+                  templates={templates}
+                />
                 {templateError && <ErrorMsg msg={templateError} className="text-xs" />}
               </div>
               <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" className="min-h-11 sm:min-h-[var(--control-height)]" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>

@@ -14,6 +14,7 @@ from bzplat.backend.matches.public_outcome import (
 from bzplat.backend.contests.templates import points_for_result
 from bzplat.backend.contests.validation import SERIES_SCORING_AGGREGATE
 from bzplat.backend.contests.validation import SERIES_SCORING_INDEPENDENT
+from bzplat.backend.contests.validation import ELIMINATION_TIEBREAK_PAIRED_SWAP
 from bzplat.backend.contests.validation import stage_duplicate_mode
 from bzplat.backend.contests.validation import stage_scoring_contract_is_valid
 from bzplat.backend.store.schema import TYPE_CONTEST
@@ -192,6 +193,280 @@ def contest_match_binding_is_valid(
         ):
             return False
     return True
+
+
+def summarize_elimination_encounter(
+    stage: dict[str, Any],
+    rows: list[dict[str, Any]],
+    match_lookup: Callable[[str], dict[str, Any] | None],
+    *,
+    game_spec: GameSpec,
+    expected_contest_id: int,
+    expected_entry_bots: Mapping[int, int | None],
+    expected_entry_users: Mapping[int, int],
+    require_current_entry_bots: bool,
+) -> dict[str, Any]:
+    """Resolve one bracket slot without ever using margin or seed order.
+
+    ``state`` is one of ``decided``, ``append_tiebreak``, ``awaiting_results``,
+    ``legacy_draw`` or ``invalid``.  Both lifecycle and presentation consume
+    this helper so public state cannot disagree with who the manager advances.
+    """
+    base = {
+        "state": "invalid",
+        "winner_entry": None,
+        "next_tiebreak_group": None,
+        "current_tiebreak_group": 0,
+        "completed_tiebreak_games": 0,
+        "tiebreak_games_in_group": 0,
+        "entry_a_id": None,
+        "entry_b_id": None,
+        "groups": [],
+    }
+    if (
+        stage.get("type") != "single_elimination"
+        or not stage_scoring_contract_is_valid(
+            stage, game_id=game_spec.game_id
+        )
+        or not rows
+    ):
+        return base
+
+    coordinates: list[tuple[dict[str, Any], int, int]] = []
+    round_slot: tuple[int, int] | None = None
+    for row in rows:
+        round_num = row.get("round_num")
+        bracket_slot = row.get("bracket_slot")
+        group = row.get("tiebreak_group", 0)
+        game = row.get("tiebreak_game", 0)
+        if (
+            isinstance(round_num, bool)
+            or not isinstance(round_num, int)
+            or round_num < 1
+            or isinstance(bracket_slot, bool)
+            or not isinstance(bracket_slot, int)
+            or bracket_slot < 0
+            or isinstance(group, bool)
+            or not isinstance(group, int)
+            or isinstance(game, bool)
+            or not isinstance(game, int)
+            or not (
+                (group == 0 and game == 0)
+                or (group >= 1 and game in (1, 2))
+            )
+        ):
+            return base
+        coordinate = (round_num, bracket_slot)
+        if round_slot is None:
+            round_slot = coordinate
+        elif coordinate != round_slot:
+            return base
+        coordinates.append((row, group, game))
+
+    if len({(group, game) for _row, group, game in coordinates}) != len(
+        coordinates
+    ):
+        return base
+    primary_rows = [row for row, group, game in coordinates if (group, game) == (0, 0)]
+    if len(primary_rows) != 1:
+        return base
+    primary = primary_rows[0]
+    if not contest_pairing_roster_binding_is_valid(
+        primary,
+        expected_contest_id=expected_contest_id,
+        expected_entry_bots=expected_entry_bots,
+        expected_entry_users=expected_entry_users,
+        require_current_entry_bots=require_current_entry_bots,
+    ):
+        return base
+    base["entry_a_id"] = primary.get("entry_a_id")
+    base["entry_b_id"] = primary.get("entry_b_id")
+
+    def parsed_match(row: dict[str, Any]) -> dict[str, Any] | None:
+        match_id = row.get("match_id")
+        if not isinstance(match_id, str) or not match_id:
+            return None
+        match = match_lookup(match_id)
+        if not match_scoring_result_is_valid(
+            stage,
+            match,
+            game_spec=game_spec,
+            pairing=row,
+            expected_contest_id=expected_contest_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=require_current_entry_bots,
+        ):
+            return None
+        return match
+
+    def row_is_waiting(row: dict[str, Any]) -> bool:
+        match_id = row.get("match_id")
+        if not isinstance(match_id, str) or not match_id:
+            return row.get("status") in ("pending", "queued")
+        match = match_lookup(match_id)
+        return bool(
+            row.get("status") == "running"
+            and isinstance(match, dict)
+            and match.get("status") in ("pending", "running")
+        )
+
+    primary_match = parsed_match(primary)
+    if primary_match is None:
+        return {
+            **base,
+            "state": (
+                "awaiting_results"
+                if row_is_waiting(primary)
+                else "invalid"
+            ),
+        }
+    primary_winner = primary_match.get("winner")
+    if primary_winner in (0, 1):
+        if len(coordinates) != 1:
+            return base
+        return {
+            **base,
+            "state": "decided",
+            "winner_entry": primary.get(
+                "entry_a_id" if primary_winner == 0 else "entry_b_id"
+            ),
+        }
+    if primary_winner is not None:
+        return base
+    if stage.get("tiebreak") != ELIMINATION_TIEBREAK_PAIRED_SWAP:
+        return {**base, "state": "legacy_draw"}
+
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row, group, _game in coordinates:
+        if group:
+            grouped[group].append(row)
+    if not grouped:
+        return {
+            **base,
+            "state": "append_tiebreak",
+            "next_tiebreak_group": 1,
+        }
+    max_group = max(grouped)
+    if set(grouped) != set(range(1, max_group + 1)):
+        return base
+
+    scoring = stage.get("scoring")
+    entry_a_id = int(primary["entry_a_id"])
+    entry_b_id = int(primary["entry_b_id"])
+    group_summaries: list[dict[str, Any]] = []
+    for group in range(1, max_group + 1):
+        group_rows = grouped[group]
+        by_game = {row.get("tiebreak_game"): row for row in group_rows}
+        if len(group_rows) != 2 or set(by_game) != {1, 2}:
+            return base
+        first, second = by_game[1], by_game[2]
+        seed = first.get("pairing_seed")
+        if (
+            isinstance(seed, bool)
+            or not isinstance(seed, int)
+            or seed < 1
+            or second.get("pairing_seed") != seed
+            or first.get("entry_a_id") != second.get("entry_b_id")
+            or first.get("entry_b_id") != second.get("entry_a_id")
+            or first.get("bot_a_id") != second.get("bot_b_id")
+            or first.get("bot_b_id") != second.get("bot_a_id")
+            or first.get("bot_a_version_id") != second.get("bot_b_version_id")
+            or first.get("bot_b_version_id") != second.get("bot_a_version_id")
+            or first.get("bot_a_version_id") != primary.get("bot_a_version_id")
+            or first.get("bot_b_version_id") != primary.get("bot_b_version_id")
+            or second.get("bot_a_version_id") != primary.get("bot_b_version_id")
+            or second.get("bot_b_version_id") != primary.get("bot_a_version_id")
+        ):
+            return base
+        matches = [parsed_match(first), parsed_match(second)]
+        completed = sum(match is not None for match in matches)
+        points: dict[int, float] = {
+            entry_a_id: 0.0,
+            entry_b_id: 0.0,
+        }
+        for row, match in zip((first, second), matches):
+            if match is None:
+                continue
+            winner = match.get("winner")
+            if winner not in (0, 1, None):
+                return base
+            points[int(row["entry_a_id"])] += points_for_result(
+                scoring, winner, 0
+            )
+            points[int(row["entry_b_id"])] += points_for_result(
+                scoring, winner, 1
+            )
+        if completed != 2:
+            group_state = (
+                "awaiting_results"
+                if all(
+                    match is not None or row_is_waiting(row)
+                    for row, match in zip((first, second), matches)
+                )
+                else "invalid"
+            )
+            group_summaries.append(
+                {
+                    "group": group,
+                    "state": group_state,
+                    "completed_games": completed,
+                    "planned_games": 2,
+                    "points_a": points[entry_a_id],
+                    "points_b": points[entry_b_id],
+                }
+            )
+            return {
+                **base,
+                "state": group_state,
+                "current_tiebreak_group": group,
+                "completed_tiebreak_games": completed,
+                "tiebreak_games_in_group": 2,
+                "groups": group_summaries,
+            }
+        ordered = sorted(points.items(), key=lambda item: item[1], reverse=True)
+        if ordered[0][1] != ordered[1][1]:
+            if group != max_group:
+                return base
+            group_summaries.append(
+                {
+                    "group": group,
+                    "state": "decided",
+                    "completed_games": 2,
+                    "planned_games": 2,
+                    "points_a": points[entry_a_id],
+                    "points_b": points[entry_b_id],
+                }
+            )
+            return {
+                **base,
+                "state": "decided",
+                "winner_entry": ordered[0][0],
+                "current_tiebreak_group": group,
+                "completed_tiebreak_games": 2,
+                "tiebreak_games_in_group": 2,
+                "groups": group_summaries,
+            }
+        group_summaries.append(
+            {
+                "group": group,
+                "state": "tied",
+                "completed_games": 2,
+                "planned_games": 2,
+                "points_a": points[entry_a_id],
+                "points_b": points[entry_b_id],
+            }
+        )
+
+    return {
+        **base,
+        "state": "append_tiebreak",
+        "next_tiebreak_group": max_group + 1,
+        "current_tiebreak_group": max_group,
+        "completed_tiebreak_games": 2,
+        "tiebreak_games_in_group": 2,
+        "groups": group_summaries,
+    }
 
 
 def is_aggregate_series_stage(stage: dict[str, Any]) -> bool:

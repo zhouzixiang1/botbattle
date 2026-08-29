@@ -963,6 +963,7 @@ def test_completed_match_log_uses_frozen_rating_policy(store: Store, caplog):
             orch, bot["id"], bot["id"], owner["id"], game_id="gomoku"
         )
         await asyncio.wait_for(orch._tasks[mid], timeout=1)
+        assert store.executions.finalize_ready() == 1
         return mid
 
     mid = asyncio.run(run())
@@ -990,6 +991,7 @@ def test_completed_match_log_uses_frozen_rating_policy(store: Store, caplog):
             game_id="gomoku",
         )
         await asyncio.wait_for(orch._tasks[rated_mid], timeout=1)
+        assert store.executions.finalize_ready() == 1
         return rated_mid
 
     rated_mid = asyncio.run(run_rated())
