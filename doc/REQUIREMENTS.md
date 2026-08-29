@@ -67,9 +67,12 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 ### 3.5 赛事系统
 | 需求 | 验收标准 |
 |------|---------|
-| 赛制模板 | 6 种阶段（单/双循环、分组单/双循环、瑞士、单败淘汰）+ 2 种计分 + **10 个内置模板**（含 `holdem_prelim_swiss` 预赛 / `holdem_final_ranked` 决赛等）；德州普通模板配置每对计分场数，复式模板配置每对交锋组数（每组两场同牌换座计分场），预赛另可增加瑞士轮，草稿/报名阶段可改、发布排期后冻结 |
+| 赛制模板 | 6 种阶段 + 2 种计分 + **19 个代码注册模板 / 18 个可新建**。Holdem：`holdem_dup_rr`、`holdem_rr`、`holdem_swiss_ranked`、`holdem_swiss_top8_ranked`、`holdem_swiss_ko`、`holdem_top8_ranked`、`holdem_prelim_swiss`，以及只读历史 `holdem_final_ranked`；Gomoku：`board_rr`、`gomoku_rr`、`gomoku_swiss_ranked`、`gomoku_swiss_top8_ranked`、`gomoku_group_drr_ko`、`gomoku_swiss_ko`；Pencil：`pencil_drr`、`pencil_group_drr_ko`、`pencil_swiss_ranked`、`pencil_swiss_ko`、`pencil_ko`。公开 `recommended_min/max`、`purpose`、`time_class` 仅供推荐，不阻断自由选择；创建/发布确认须显示基础对局、基础计分场、基础 ETA 与风险 |
 | 赛事生命周期 | draft→open→published→running⇄rest→finished；`finished/cancelled` 为不可回退终态；`published` 只发布当前阶段/当前轮可确定的排期，不承诺一次生成完整赛事对阵；已填写时间必须满足 registration_opens_at≤registration_closes_at≤starts_at（等时刻合法），`starts_at` 留空表示等待组织者手动开始；ContestScheduler 只推进已到开赛时间的赛事 |
-| 赛事并发与状态 | Bot 对局与其他来源共享全站 2 个代码硬顶槽，每场占 1 slot；赛事共享份额 1 只在存在可运行的非赛事请求时限制赛事优先占用，不是额外槽。CPU/内存准入和显式启动值只能收紧，不能放大；一轮按剩余全局容量创建并绑定 Match，其余 Pairing 保持待开始，每场完成后立即回写并按空槽补派 |
+| 赛事并发与状态 | Bot 对局与其他来源共享全站 6 match slots / 12 sandbox units 代码硬顶，每场占 1 slot；job 按冻结 CPU/内存/sandbox 向量和主机预算准入，实际并发为 1–6，显式值只能收紧。赛事共享份额 1 不是额外槽；同一非 human Bot 全局至多一个 `starting/running/settling` job。contest 只在不跨 manual/human 排序边界的连续队列段内按持久 claim 历史轮转；一轮其余 Pairing 保持待开始，每场完成后立即回写并补派 |
+| 循环赛规模 | 全员与分组单/双循环均不设参赛人数硬上限，完整 O(n²) pairing/job 进入持久队列，不放大物理并发。`allow_large_round_robin` 仅为历史快照的严格布尔兼容 no-op；页面必须以精确基础场数/计分场/ETA 和超过 8/24 小时风险提示帮助选择 Swiss 或更短模板，不得把建议范围变成发布门禁 |
+| Swiss 轮数 | `swiss_round_bands` 是通用阶段字段；Gomoku 三个 Swiss 模板按 13–15 人 7 轮、16–20 人 9 轮、21 人以上 11 轮解析，publish 将结果冻结为 `effective_rounds`。人数低于建议范围仍可自由选择并沿通用轮数规则；运行中/历史快照不得被新 band 改写 |
+| 淘汰决胜 | 新 Holdem/Gomoku 单败须显式冻结 `tiebreak=paired_swap_until_decided`：原局平后追加两场换座组，按原 stage scoring 汇总组分；仍平继续下一组，无次数上限，不使用 margin/delta/seed/报名序兜底。Holdem 同组使用相同实际 seed 保证同牌；Gomoku 只交换开局提案方/交换决策方，开局由 Bot 决定，不承诺相同。历史无 marker 阶段仍阻断，只有 draft/open 且零进度赛事可经 CAS 更新 |
 | 管理员名册纠错 | draft/open 赛事中，管理员以精确“活跃用户 → 该用户当前可运行、同游戏 Bot”映射为主路径，可核对、换 Bot、移除暂存项后一次提交；后端在写事务内重验用户、归属、游戏、版本/协议/二进制与实名资格，部分失败逐项反馈。“全员指派”只保留为再次确认的次要快捷操作；普通组织者的实名赛代报名权限不因此放宽 |
 | 积分榜与对阵图 | 实时积分榜 + 单败淘汰 bracket 树 + 瑞士/循环轮次分组，显示 Bot 名（非裸 ID）；德州每个 70 手计分场完成后立即按 3/1/0 入榜，胜+平+负恒等实际计分场数，阶段进度另列对手系列、对局记录和计分场；复式顶层空 winner 不得显示为平局；阶段结束可落**正式名次**（破同分，`contests/ranking.py`） |
 | 版本冻结与换 Bot | 已发布 pairing 冻结 Bot 与版本；published/rest 换 Bot 只影响尚未发布的后续轮次/阶段，不回写已有排期 |
@@ -112,14 +115,14 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
-| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类共享代码硬顶 `2 match slots + 4 sandbox units`；8 vCPU / 16 GiB 基准下最重两场赛事共需 8 CPU / 8 GiB，并保留约 8 GiB 系统内存，实际并发仍受 affinity/cgroup/物理资源共同收紧。节能/赛事 Docker 座位各占 1 sandbox unit，本地 Bot/真人座位占 0，因此双节能、双赛事为 `1 match slot + 2 units`，节能与本地 Bot、人机为 `1+1`，双本地 Bot 为 `1+0`；赛事份额 1 不是额外容量；`starting/running/settling` 均占容量；job 冻结环境、资源档位版本及 CPU/内存向量，赛事不得降档；manual/human/contest 在前台类内带无上限 aging，auto 不参与跨来源 aging；Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
-| 闲时公平自动排位 | 默认允许，但启用不等于立即运行；只作为全局队列的 `source=auto` 后台 producer。manual/human/contest 的 queued/active、真实赛事 `running/rest` 全程 guard、已有待开 pairing 且 `starts_at` 进入未来 5 分钟的 `published` 保护窗，或未满 5 分钟的空闲/冷却均阻止 auto 生成与 claim；showcase 明确排除，远期或手动开赛的 published 不会无期占用 guard。两槽全空后每次至多生成 1 个候选并运行 1 场，结束后重新冷却；auto claim 还必须预留最高档一场赛事的 1 match slot + 2 sandbox units + 4000 毫核 + 4096 MiB。任一前台成功入队/重试或真实赛事 guard 取消 queued auto，在途 auto 以 `auto_yield_foreground` 安全收口且精确清理后才释放容量。每个 owner/game 只消费当前唯一排行榜 Bot，按游戏/lane/所有者/pair 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；管理员单纯关闭开关不取消在途局，关闭后在途局自然结束 |
+| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类共享代码硬顶 `6 match slots + 12 sandbox units`。节能/赛事 Docker 座位各占 1 unit，本地 Bot/真人座位占 0；每个 job 仍占 1 slot。job 冻结环境、档位版本及 sandbox/CPU/内存向量，claim 取 affinity、逻辑 CPU、各级 cgroup 与物理内存的有效预算，因而低配、人机、本地与赛事组合的实际并发为 1–6，赛事不得降档，显式配置只能收紧。`starting/running/settling` 均占容量；同一非 human Bot 不得跨 active job 重叠；Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
+| 闲时公平自动排位 | 默认允许，但启用不等于立即运行；只作为全局队列的 `source=auto` 后台 producer。manual/human/contest 的 queued/active、真实赛事 `running/rest` 全程 guard、已有待开 pairing 且 `starts_at` 进入未来 5 分钟的 `published` 保护窗，或未满 5 分钟的空闲/冷却均阻止 auto 生成与 claim；showcase 明确排除，远期或手动开赛的 published 不会无期占用 guard。全部 active 槽清空后每次至多生成 1 个候选并运行 1 场，结束后重新冷却；auto claim 还必须预留最高档一场赛事的 1 match slot + 2 sandbox units + 4000 毫核 + 4096 MiB。任一前台成功入队/重试或真实赛事 guard 取消 queued auto，在途 auto 以 `auto_yield_foreground` 安全收口且精确清理后才释放容量。每个 owner/game 只消费当前唯一排行榜 Bot，按游戏/lane/所有者/pair 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；管理员单纯关闭开关不取消在途局，关闭后在途局自然结束 |
 
 ## 4. 非功能需求
 
 | 类别 | 需求 | 指标 / 实现 |
 |------|------|------------|
-| **性能** | 单场对局低延迟 | holdem Bot 单步决策固定超时 60s；Gomoku/Pencil 每方累计 900s（固定，含人类局）；沙箱镜像准备不计入 Bot 决策时间；全来源共享最多 2 个对局槽，主机资源门禁可进一步收紧 |
+| **性能** | 单场对局低延迟 | holdem Bot 单步决策固定超时 60s；Gomoku/Pencil 每方累计 900s（固定，含人类局），Pencil 赛事 ETA 每局按双方合计 1800s 保守估算；沙箱镜像准备不计入 Bot 决策时间；全来源代码上限 6 槽，主机资源向量门禁可把实际并发收紧到 1–6 |
 | **性能** | 前端首屏快 | React.lazy 代码分割，主包 gzip ~115KB；recharts 等重依赖隔离到 BotDetail chunk |
 | **安全** | Bot 沙箱隔离 | Docker 共用 `--network=none --read-only --cap-drop=ALL --user 65534` 等硬化；日常节能与上传预检每 Bot 1 CPU/512 MiB，锦标赛每 Bot 2 CPU/2 GiB；本地 Bot 由用户电脑主动连接且不占平台沙箱，所有持久任务按冻结版本解析，不允许任意资源组合或降档 |
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |

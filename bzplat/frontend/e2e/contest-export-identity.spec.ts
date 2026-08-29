@@ -250,6 +250,74 @@ async function loggedInChild(
   return { context, page }
 }
 
+async function createFinishedPublicResultsFixture(
+  adminPage: Page,
+  browserName: string,
+): Promise<number> {
+  const entrants: Array<{ userId: number; botId: number }> = []
+  for (const username of [PLAYER, process.env.BZ_E2E_OTHER_USER || 'tester2']) {
+    const usersResponse = await adminPage.request.get(
+      `/api/admin/users?q=${encodeURIComponent(username)}&page=1&per_page=20`,
+    )
+    await expectStatus(usersResponse)
+    const user = (await usersResponse.json() as {
+      users: Array<{ id: number; username: string }>
+    }).users.find((candidate) => candidate.username === username)
+    expect(user, `isolated QA DB needs seeded user ${username}`).toBeTruthy()
+
+    const botsResponse = await adminPage.request.get(
+      `/api/admin/bots?owner_id=${user!.id}&game_id=holdem&runnable=true&page=1&per_page=20`,
+    )
+    await expectStatus(botsResponse)
+    const bot = (await botsResponse.json() as {
+      bots: Array<{ id: number; name: string }>
+    }).bots.find((candidate) => candidate.name === `${username}_holdem`)
+    expect(bot, `isolated QA DB needs runnable Bot ${username}_holdem`).toBeTruthy()
+    entrants.push({ userId: user!.id, botId: bot!.id })
+  }
+
+  const create = await adminPage.request.post('/api/contests', {
+    data: {
+      title: `PW 公开成绩下载 ${browserName} ${Date.now()}`,
+      game_id: 'holdem',
+      template_id: 'holdem_rr',
+    },
+  })
+  await expectStatus(create)
+  const contestId = (await create.json() as { contest: { id: number } }).contest.id
+
+  for (const entrant of entrants) {
+    const entry = await adminPage.request.post(`/api/contests/${contestId}/entries`, {
+      data: { user_id: entrant.userId, bot_id: entrant.botId },
+    })
+    await expectStatus(entry)
+  }
+  for (const action of ['open', 'publish', 'start']) {
+    const response = await adminPage.request.post(`/api/contests/${contestId}/${action}`)
+    await expectStatus(response)
+  }
+
+  await expect.poll(async () => {
+    const detail = await adminPage.request.get(`/api/contests/${contestId}`)
+    await expectStatus(detail)
+    const body = await detail.json() as {
+      contest: { status: string; official_results_ready: number }
+    }
+    return {
+      status: body.contest.status,
+      officialResultsReady: body.contest.official_results_ready,
+    }
+  }, {
+    timeout: 60_000,
+    intervals: [250, 500, 1_000],
+  }).toEqual({ status: 'finished', officialResultsReady: 1 })
+
+  // A finished contest is an immutable audit record by product contract.  The
+  // whole QA database is disposable, so retain this deterministic real result
+  // instead of making this test depend on another spec having run first.
+  return contestId
+}
+
 async function selfRegisterContestBot(
   page: Page,
   contestId: number,
@@ -813,13 +881,7 @@ test('public official results download stays public-only and works in the real b
   const admin = await loggedInChild(browser, baseURL!, ADMIN)
   let contestId: number | null = null
   try {
-    const response = await admin.page.request.get('/api/admin/contests?status=finished&page=1&per_page=200')
-    await expectStatus(response)
-    const finished = (await response.json() as {
-      contests: Array<{ id: number; official_results_ready?: number }>
-    }).contests.find((contest) => contest.official_results_ready === 1)
-    expect(finished, 'isolated fresh QA DB needs one finished contest with official results').toBeTruthy()
-    contestId = finished!.id
+    contestId = await createFinishedPublicResultsFixture(admin.page, browserName)
   } finally {
     await admin.context.close()
   }
@@ -848,6 +910,8 @@ test('public official results download stays public-only and works in the real b
   expect(publicFetch.headers['x-content-type-options']).toBe('nosniff')
   const publicCsv = parseCsv(publicFetch.body)
   expect(publicCsv.headers).toEqual(PUBLIC_HEADERS)
+  expect(publicCsv.rows).toHaveLength(2)
+  expect(publicCsv.rows.map((row) => row.rank)).toEqual(['1', '2'])
   for (const pii of [
     'real_name',
     'phone',

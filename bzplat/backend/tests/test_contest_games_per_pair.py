@@ -19,7 +19,7 @@ from bzplat.backend.contests.validation import validate_stage
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import SCHEMA
+from bzplat.backend.store.schema import EXECUTION_SOURCE_CONTEST, SCHEMA, TYPE_CONTEST
 
 
 class _NoopOrchestrator:
@@ -314,15 +314,18 @@ def test_all_supported_sizes_have_pair_and_global_seat_balance():
 
 
 def test_legacy_schema_migrates_series_columns_with_safe_defaults(tmp_path):
-    legacy_fragment = (
+    legacy_columns = (
         "    series_index    INTEGER NOT NULL DEFAULT 1 CHECK(series_index>=1),\n"
         "    series_size     INTEGER NOT NULL DEFAULT 1 CHECK(series_size>=1),\n"
-        "    CONSTRAINT chk_contest_pairing_series CHECK(series_index<=series_size)\n"
     )
-    assert legacy_fragment in SCHEMA
-    legacy_schema = SCHEMA.replace(
-        "    color_first     INTEGER NOT NULL DEFAULT 0,\n" + legacy_fragment,
-        "    color_first     INTEGER NOT NULL DEFAULT 0\n",
+    legacy_constraint = (
+        "    CONSTRAINT chk_contest_pairing_series "
+        "CHECK(series_index<=series_size),\n"
+    )
+    assert legacy_columns in SCHEMA
+    assert legacy_constraint in SCHEMA
+    legacy_schema = SCHEMA.replace(legacy_columns, "").replace(
+        legacy_constraint, ""
     )
     db_path = tmp_path / "legacy-series.db"
     conn = sqlite3.connect(db_path)
@@ -403,7 +406,7 @@ def test_store_rejects_partial_series_bad_seeds_and_identity_mutation(tmp_path):
         )
     duplicate_seed = [dict(row) for row in valid]
     duplicate_seed[1]["pairing_seed"] = duplicate_seed[0]["pairing_seed"]
-    with pytest.raises(ValueError, match="互不重复"):
+    with pytest.raises(ValueError, match="pairing_seed"):
         store.create_contest_stage_pairings(
             contest["id"], 0, duplicate_seed, expected_current_stage_idx=0
         )
@@ -497,29 +500,24 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
     asyncio.run(manager.ensure_published_pairings(contest_id, 0))
     assert [row["id"] for row in store.list_contest_pairings(contest_id)] == first_ids
 
-    expected_signature = manager._pairing_batch_signature(first)
-    same_pair = sorted(next(iter(grouped.values())), key=lambda row: row["series_index"])
-    first_seed, second_seed = (
-        same_pair[0]["pairing_seed"],
-        same_pair[1]["pairing_seed"],
+    expected_topology = manager._pairing_batch_signature(
+        first, include_pairing_seed=False
     )
+    same_pair = sorted(next(iter(grouped.values())), key=lambda row: row["series_index"])
     with store._tx() as conn:
         conn.execute(
-            "UPDATE contest_pairings SET pairing_seed=CASE id "
-            "WHEN ? THEN ? WHEN ? THEN ? ELSE pairing_seed END "
-            "WHERE id IN (?,?)",
+            "UPDATE contest_pairings SET pairing_seed=? WHERE id=?",
             (
-                same_pair[0]["id"],
-                second_seed,
-                same_pair[1]["id"],
-                first_seed,
-                same_pair[0]["id"],
+                same_pair[0]["pairing_seed"],
                 same_pair[1]["id"],
             ),
         )
     asyncio.run(manager.ensure_published_pairings(contest_id, 0))
     seed_recovered = store.list_contest_pairings(contest_id, stage_idx=0)
-    assert manager._pairing_batch_signature(seed_recovered) == expected_signature
+    assert manager._pairing_batch_signature(
+        seed_recovered, include_pairing_seed=False
+    ) == expected_topology
+    assert manager._published_series_seeds_are_valid(seed_recovered)
     assert {row["id"] for row in seed_recovered}.isdisjoint(first_ids)
 
     # A coordinate swap retains the same aggregate 1..K index set, so this
@@ -545,12 +543,14 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
         )
     asyncio.run(manager.ensure_published_pairings(contest_id, 0))
     coordinate_recovered = store.list_contest_pairings(contest_id, stage_idx=0)
-    assert manager._pairing_batch_signature(coordinate_recovered) == expected_signature
+    assert manager._pairing_batch_signature(
+        coordinate_recovered, include_pairing_seed=False
+    ) == expected_topology
+    assert manager._published_series_seeds_are_valid(coordinate_recovered)
     assert {row["id"] for row in coordinate_recovered}.isdisjoint(
         {row["id"] for row in seed_recovered}
     )
 
-    expected_seeds = {row["pairing_seed"] for row in first}
     with store._tx() as conn:
         conn.execute(
             "DELETE FROM contest_pairings WHERE id=?",
@@ -559,8 +559,259 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
     asyncio.run(manager.ensure_published_pairings(contest_id, 0))
     recovered = store.list_contest_pairings(contest_id, stage_idx=0)
     assert len(recovered) == 9
-    assert {row["pairing_seed"] for row in recovered} == expected_seeds
+    assert manager._pairing_batch_signature(
+        recovered, include_pairing_seed=False
+    ) == expected_topology
+    assert manager._published_series_seeds_are_valid(recovered)
     assert manager.estimate(contest_id)["estimated_matches"] == 9
+    store.close()
+
+
+def test_new_series_pairing_seeds_use_private_csprng(tmp_path, monkeypatch):
+    store, manager, contest_id, _bots = _published_series_fixture(
+        tmp_path, "private-series-seeds"
+    )
+    values = iter(range(10_000, 10_009))
+    monkeypatch.setattr(
+        "bzplat.backend.contests.manager.secrets.randbelow",
+        lambda _upper: next(values),
+    )
+
+    asyncio.run(manager.publish(contest_id))
+    pairings = store.list_contest_pairings(contest_id, stage_idx=0)
+
+    assert {row["pairing_seed"] for row in pairings} == set(
+        range(10_001, 10_010)
+    )
+    store.close()
+
+
+def test_private_series_seed_has_no_public_coordinate_size_cap(monkeypatch):
+    monkeypatch.setattr(
+        "bzplat.backend.contests.manager.secrets.randbelow",
+        lambda upper: upper - 1,
+    )
+
+    assert ContestManager._private_pairing_seed(1, 100, 10_000_000) == (
+        9_223_372_036_854_775_807
+    )
+    for invalid in (
+        (True, 0, 1),
+        (1, False, 1),
+        (1, 0, True),
+        (1.0, 0, 1),
+        (1, -1, 1),
+        (1, 0, 0),
+    ):
+        with pytest.raises(ValueError, match="seed 坐标超出范围"):
+            ContestManager._private_pairing_seed(*invalid)
+
+
+@pytest.mark.parametrize("invalid", [None, False, 0, -1, 1.0, "1"])
+def test_duplicate_dispatch_never_derives_seed_from_public_pairing_id(invalid):
+    with pytest.raises(ValueError, match="私密冻结 seed"):
+        ContestManager._duplicate_seed({"id": 123, "pairing_seed": invalid})
+
+    assert ContestManager._duplicate_seed({"id": 123, "pairing_seed": 456}) == 456
+
+
+def _legacy_seed_cas_fixture(
+    tmp_path: Path,
+    prefix: str,
+    *,
+    marker: str | None,
+    pairing_seed: int | None = None,
+) -> tuple[Store, dict, dict, list[dict], list[dict], list[dict]]:
+    store = Store(str(tmp_path / f"{prefix}.db"))
+    users, bots = _fixture_people(store, tmp_path, 2, prefix=prefix)
+    versions = [
+        store.add_bot_version(bot["id"], binary_path=bot["binary_path"])
+        for bot in bots
+    ]
+    stage = {
+        "key": "legacy",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": True,
+        "games_per_pair": 1,
+    }
+    if marker is not None:
+        stage["series_scoring"] = marker
+    stages_json = json.dumps([stage])
+    contest = store.create_contest(
+        f"{prefix} contest",
+        users[0]["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=stages_json,
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    store.add_pairing(
+        contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        bot_a_version_id=versions[0]["id"],
+        bot_b_version_id=versions[1]["id"],
+        stage_key="legacy",
+        pairing_seed=pairing_seed,
+    )
+    pairing = store.list_contest_pairings(contest["id"], stage_idx=0)[0]
+    return store, contest, pairing, users, bots, versions
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [None, "aggregate_match_points_v1"],
+)
+def test_legacy_missing_seed_is_allocated_once_before_enqueue(
+    tmp_path, monkeypatch, marker
+):
+    store, contest, pairing, _users, _bots, _versions = _legacy_seed_cas_fixture(
+        tmp_path,
+        f"legacy-seed-{marker or 'premarker'}",
+        marker=marker,
+    )
+    monkeypatch.setattr(
+        "bzplat.backend.store.db.secrets.randbelow", lambda _upper: 8_080
+    )
+
+    frozen = store.ensure_contest_pairing_seed_for_enqueue(
+        contest["id"],
+        pairing,
+        expected_stages_json=contest["stages_json"],
+    )
+    retried = store.ensure_contest_pairing_seed_for_enqueue(
+        contest["id"],
+        frozen,
+        expected_stages_json=contest["stages_json"],
+    )
+
+    assert frozen["pairing_seed"] == 8_081
+    assert retried["pairing_seed"] == frozen["pairing_seed"]
+    assert store.list_contest_pairings(contest["id"])[0]["pairing_seed"] == 8_081
+    store.close()
+
+
+@pytest.mark.parametrize("drift", ["identity", "version"])
+def test_legacy_seed_cas_rejects_stale_identity_or_version_snapshot(
+    tmp_path, drift
+):
+    store, contest, pairing, _users, bots, _versions = _legacy_seed_cas_fixture(
+        tmp_path,
+        f"legacy-seed-{drift}-race",
+        marker=None,
+    )
+    replacement = (
+        store.add_bot_version(
+            bots[0]["id"], binary_path=bots[0]["binary_path"]
+        )
+        if drift == "version"
+        else None
+    )
+    with store._tx() as conn:
+        if drift == "identity":
+            conn.execute(
+                "UPDATE contest_pairings SET entry_a_id=entry_b_id WHERE id=?",
+                (pairing["id"],),
+            )
+        else:
+            conn.execute(
+                "UPDATE contest_pairings SET bot_a_version_id=? WHERE id=?",
+                (replacement["id"], pairing["id"]),  # type: ignore[index]
+            )
+
+    with pytest.raises(ValueError, match="身份、版本或坐标已变化"):
+        store.ensure_contest_pairing_seed_for_enqueue(
+            contest["id"],
+            pairing,
+            expected_stages_json=contest["stages_json"],
+        )
+    assert store.list_contest_pairings(contest["id"])[0]["pairing_seed"] is None
+    store.close()
+
+
+def test_legacy_seed_cas_rejects_active_request_and_explicit_independent(
+    tmp_path,
+):
+    store, contest, pairing, users, bots, versions = _legacy_seed_cas_fixture(
+        tmp_path,
+        "legacy-seed-active-job",
+        marker=None,
+    )
+    store.executions.resume()
+    store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=users[0]["id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[0]["id"],
+        bot_b_id=bots[1]["id"],
+        bot_a_version_id=versions[0]["id"],
+        bot_b_version_id=versions[1]["id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+        match_config={"duplicate": True},
+    )
+    with pytest.raises(ValueError, match="active 执行请求"):
+        store.ensure_contest_pairing_seed_for_enqueue(
+            contest["id"],
+            pairing,
+            expected_stages_json=contest["stages_json"],
+        )
+    store.close()
+
+    strict, strict_contest, strict_pairing, *_ = _legacy_seed_cas_fixture(
+        tmp_path,
+        "strict-seed-no-backfill",
+        marker="independent_scoring_game_points_v1",
+    )
+    with pytest.raises(ValueError, match="独立计分对阵缺少"):
+        strict.ensure_contest_pairing_seed_for_enqueue(
+            strict_contest["id"],
+            strict_pairing,
+            expected_stages_json=strict_contest["stages_json"],
+        )
+    assert strict.list_contest_pairings(strict_contest["id"])[0][
+        "pairing_seed"
+    ] is None
+    strict.close()
+
+
+def test_existing_pairing_seed_rejects_cross_coordinate_reuse(tmp_path):
+    seed = 9_191
+    store, contest, pairing, _users, bots, versions = _legacy_seed_cas_fixture(
+        tmp_path,
+        "existing-seed-reuse",
+        marker=None,
+        pairing_seed=seed,
+    )
+    second = store.add_pairing(
+        contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        bot_a_version_id=versions[0]["id"],
+        bot_b_version_id=versions[1]["id"],
+        stage_key="legacy",
+        round_num=2,
+        pairing_seed=seed + 1,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET pairing_seed=? WHERE id=?",
+            (seed, second["id"]),
+        )
+
+    with pytest.raises(ValueError, match="其他坐标复用"):
+        store.ensure_contest_pairing_seed_for_enqueue(
+            contest["id"],
+            pairing,
+            expected_stages_json=contest["stages_json"],
+        )
     store.close()
 
 

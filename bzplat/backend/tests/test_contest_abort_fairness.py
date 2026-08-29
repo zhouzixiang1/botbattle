@@ -69,6 +69,7 @@ def _ko_contest(store: Store, organizer: dict, players: list[tuple[dict, dict]])
         status="pending",
         stage_idx=0,
         stage_key="ko",
+        bracket_slot=0,
         entry_a_id=entries[0]["id"],
         entry_b_id=entries[1]["id"],
     )

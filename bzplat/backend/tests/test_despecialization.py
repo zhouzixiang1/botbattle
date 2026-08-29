@@ -30,10 +30,10 @@ def test_estimate_holdem_fixed(tmp_path):
 
 
 def test_estimate_pencil_fixed(tmp_path):
-    """pencil ETA 固定（N=6 钉死 → 60s），拒绝 n_dots。"""
+    """pencil ETA 使用双方 900 秒棋钟上界，并拒绝 n_dots。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    assert _estimate_sec_per_match("pencil", {}) == 60
+    assert _estimate_sec_per_match("pencil", {}) == 1800
     with pytest.raises(ValueError, match="规则固定"):
         _estimate_sec_per_match("pencil", {"n_dots": 5})
 

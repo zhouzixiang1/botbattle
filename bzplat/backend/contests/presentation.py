@@ -16,6 +16,7 @@ from bzplat.backend.contests.series import (
     is_aggregate_series_stage,
     match_scoring_result_is_valid,
     series_rows_settled,
+    summarize_elimination_encounter,
     summarize_conceptual_series,
 )
 from bzplat.backend.contests.stages import (
@@ -23,6 +24,7 @@ from bzplat.backend.contests.stages import (
     effective_swiss_rounds,
 )
 from bzplat.backend.contests.validation import (
+    ELIMINATION_TIEBREAK_PAIRED_SWAP,
     SERIES_SCORING_AGGREGATE,
     SERIES_SCORING_INDEPENDENT,
     active_contest_entries,
@@ -133,6 +135,174 @@ def _pairing_match(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def build_elimination_tiebreak_projection(
+    stage: dict[str, Any],
+    pairings: list[dict[str, Any]],
+    *,
+    game_id: str,
+    contest_id: int,
+    expected_entry_bots: dict[int, int | None],
+    expected_entry_users: dict[int, int],
+    require_current_entry_bots: bool,
+    project_legacy_draw_blocked: bool = False,
+) -> dict[str, Any] | None:
+    """Build bounded public state for one authoritative elimination policy.
+
+    Current paired-swap stages expose their complete decision-group progress.
+    A running historical stage without that marker exposes only an explicit
+    blocked sentinel when the authoritative encounter summarizer proves that a
+    completed draw is the latest bracket round.  Pending, decisive and already
+    advanced historical encounters remain absent, so readers never infer a
+    block from ``winner=NULL`` or raw result payloads.
+    """
+    if stage.get("type") != "single_elimination":
+        return None
+    paired_swap = stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+    legacy_stage = "tiebreak" not in stage
+    if not paired_swap and not (project_legacy_draw_blocked and legacy_stage):
+        return None
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in pairings:
+        round_num = row.get("round_num")
+        slot = row.get("bracket_slot")
+        if (
+            isinstance(round_num, bool)
+            or not isinstance(round_num, int)
+            or round_num < 1
+            or isinstance(slot, bool)
+            or not isinstance(slot, int)
+            or slot < 0
+        ):
+            if not paired_swap:
+                return None
+            return {
+                "mode": ELIMINATION_TIEBREAK_PAIRED_SWAP,
+                "unbounded": True,
+                "state": "invalid",
+                "encounters": [],
+            }
+        grouped[(round_num, slot)].append(row)
+    spec = game_registry.get(game_id)
+    matches = {
+        str(row["match_id"]): match
+        for row in pairings
+        if row.get("match_id")
+        if (match := _pairing_match(row)) is not None
+    }
+    encounters: list[dict[str, Any]] = []
+    legacy_blocked: list[dict[str, Any]] = []
+    latest_round = max((coordinate[0] for coordinate in grouped), default=0)
+    for (round_num, slot), rows in sorted(grouped.items()):
+        primary = next(
+            (
+                row
+                for row in rows
+                if row.get("tiebreak_group", 0) == 0
+                and row.get("tiebreak_game", 0) == 0
+            ),
+            rows[0],
+        )
+        label_a = primary.get("bot_a_display") or primary.get("bot_a_name")
+        label_b = primary.get("bot_b_display") or primary.get("bot_b_name")
+        if len(rows) == 1 and is_authoritative_no_opponent_pairing(
+            stage.get("type"), rows[0]
+        ):
+            encounters.append(
+                {
+                    "round_num": round_num,
+                    "bracket_slot": slot,
+                    "state": "bye",
+                    "entry_a_id": rows[0].get("entry_a_id"),
+                    "entry_b_id": rows[0].get("entry_b_id"),
+                    "entry_a_label": label_a,
+                    "entry_b_label": label_b,
+                    "winner_entry_id": rows[0].get("entry_a_id"),
+                    "next_tiebreak_group": None,
+                    "current_tiebreak_group": 0,
+                    "completed_tiebreak_games": 0,
+                    "tiebreak_games_in_group": 0,
+                    "groups": [],
+                }
+            )
+            continue
+        summary = summarize_elimination_encounter(
+            stage,
+            rows,
+            matches.get,
+            game_spec=spec,
+            expected_contest_id=contest_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=require_current_entry_bots,
+        )
+        if not paired_swap:
+            if summary["state"] == "legacy_draw" and round_num == latest_round:
+                legacy_blocked.append(
+                    {
+                        "round_num": round_num,
+                        "bracket_slot": slot,
+                        "state": "legacy_draw_blocked",
+                        "entry_a_label": label_a,
+                        "entry_b_label": label_b,
+                    }
+                )
+            continue
+        encounters.append(
+            {
+                "round_num": round_num,
+                "bracket_slot": slot,
+                "state": summary["state"],
+                "entry_a_id": summary.get("entry_a_id"),
+                "entry_b_id": summary.get("entry_b_id"),
+                "entry_a_label": label_a,
+                "entry_b_label": label_b,
+                "winner_entry_id": summary.get("winner_entry"),
+                "next_tiebreak_group": summary.get("next_tiebreak_group"),
+                "current_tiebreak_group": int(
+                    summary.get("current_tiebreak_group") or 0
+                ),
+                "completed_tiebreak_games": int(
+                    summary.get("completed_tiebreak_games") or 0
+                ),
+                "tiebreak_games_in_group": int(
+                    summary.get("tiebreak_games_in_group") or 0
+                ),
+                "groups": [
+                    {
+                        "group": int(group["group"]),
+                        "state": str(group["state"]),
+                        "completed_games": int(group["completed_games"]),
+                        "planned_games": int(group["planned_games"]),
+                        "points_a": float(group["points_a"]),
+                        "points_b": float(group["points_b"]),
+                    }
+                    for group in summary.get("groups", [])
+                    if isinstance(group, dict)
+                ],
+            }
+        )
+    if not paired_swap:
+        if not legacy_blocked:
+            return None
+        return {
+            "mode": "legacy_draw_blocked",
+            "unbounded": False,
+            "state": "legacy_draw_blocked",
+            "encounters": legacy_blocked,
+        }
+    state = "active"
+    if any(item["state"] == "invalid" for item in encounters):
+        state = "invalid"
+    elif encounters and all(item["state"] in {"decided", "bye"} for item in encounters):
+        state = "decided"
+    return {
+        "mode": ELIMINATION_TIEBREAK_PAIRED_SWAP,
+        "unbounded": True,
+        "state": state,
+        "encounters": encounters,
+    }
+
+
 def expected_stage_topology(
     stage: dict[str, Any],
     expected_entry_ids: set[int] | list[int] | tuple[int, ...] | None,
@@ -216,14 +386,32 @@ def build_stage_counts(
 ) -> dict[str, Any]:
     """Count conceptual encounters, physical jobs, and direct scoring games."""
     stage_type = stage.get("type")
-    real = [
+    all_real = [
         row
         for row in pairings
         if not is_authoritative_no_opponent_pairing(stage_type, row)
     ]
+    elimination_tiebreak = bool(
+        stage_type == "single_elimination"
+        and stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+    )
+    # Paired-swap games decide advancement only.  Keep the stage's base
+    # match/scoring counts aligned with individual standings, and expose the
+    # unbounded decision groups through ``elimination_tiebreak`` instead of
+    # pretending they are additional stage scoring games.
+    real = (
+        [
+            row
+            for row in all_real
+            if row.get("tiebreak_group", 0) == 0
+            and row.get("tiebreak_game", 0) == 0
+        ]
+        if elimination_tiebreak
+        else all_real
+    )
     matches = {
         str(row["match_id"]): match
-        for row in real
+        for row in all_real
         if row.get("match_id")
         if (match := _pairing_match(row)) is not None
     }
@@ -270,6 +458,30 @@ def build_stage_counts(
                 for row in rows
             )
         encounter_completed += int(completed)
+
+    if (
+        elimination_tiebreak
+        and expected_contest_id is not None
+        and expected_entry_bots is not None
+        and expected_entry_users is not None
+    ):
+        tiebreak_projection = build_elimination_tiebreak_projection(
+            stage,
+            pairings,
+            game_id=game_id,
+            contest_id=expected_contest_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=require_current_entry_bots,
+        )
+        encounter_completed = (
+            sum(
+                encounter.get("state") in {"decided", "bye"}
+                for encounter in tiebreak_projection["encounters"]
+            )
+            if tiebreak_projection.get("state") != "invalid"
+            else 0
+        )
 
     match_completed = sum(
         match_scoring_result_is_valid(
@@ -966,6 +1178,23 @@ def build_stage_summaries(
                 "total_pairings": expected_pairing_rows,
                 "counts": counts,
                 "advancement_final": advancement_final,
+                "elimination_tiebreak": (
+                    build_elimination_tiebreak_projection(
+                        stage,
+                        stage_pairings,
+                        game_id=game_id,
+                        contest_id=int(contest["id"]),
+                        expected_entry_bots=expected_entry_bots,
+                        expected_entry_users=expected_entry_users,
+                        require_current_entry_bots=require_current_entry_bots,
+                        project_legacy_draw_blocked=bool(
+                            stage_idx == current_idx
+                            and contest.get("status") == "running"
+                        ),
+                    )
+                    if stage_semantics_valid
+                    else None
+                ),
                 "rows": rows,
             }
         )
@@ -973,6 +1202,7 @@ def build_stage_summaries(
 
 
 __all__ = [
+    "build_elimination_tiebreak_projection",
     "build_stage_counts",
     "build_stage_summaries",
     "expected_stage_topology",

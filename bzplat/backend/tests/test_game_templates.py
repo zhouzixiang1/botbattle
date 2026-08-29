@@ -5,7 +5,7 @@
 2. contests/templates.py 的 DEFAULT_TEMPLATES 从注册表派生（聚合各 spec.templates）
 3. 历史模板仍可解析，``creation_enabled=false`` 不进新建列表
 4. get_template/list_templates/resolve_stages/resolve_template 经注册表派生工作
-5. 模板内容与历史一致（game_id/scoring/stages 结构）
+5. 新建目录冻结推荐人数、用途、时长、Swiss 轮数分档与淘汰决胜契约
 """
 from __future__ import annotations
 
@@ -34,36 +34,35 @@ def test_each_game_has_templates_module():
 
 def test_specs_reference_local_templates():
     """各 spec.templates 引用本包 templates.TEMPLATES（不经 contests）。"""
-    import inspect
-
-    # holdem spec 应有 5 个模板（P5 prelim/final + P2 residual holdem_dup_rr）
-    assert len(registry.get("holdem").templates) == 5
-    # gomoku 3 个（含 board_rr）
-    assert len(registry.get("gomoku").templates) == 3
-    # pencil 2 个
-    assert len(registry.get("pencil").templates) == 2
+    assert len(registry.get("holdem").templates) == 8
+    assert len(registry.get("gomoku").templates) == 6
+    assert len(registry.get("pencil").templates) == 5
 
 
 # ── DEFAULT_TEMPLATES 从注册表派生 ────────────────────────────
 def test_default_templates_derived_from_registry():
-    """DEFAULT_TEMPLATES 是各 spec.templates 的聚合（10 个：holdem×5 + 棋类×4[board_rr 共享]）。"""
+    """DEFAULT_TEMPLATES 是三个 GameSpec 共 19 个模板的无损聚合。"""
     # 聚合注册表
     aggregated = {}
     for gid in registry.all_ids():
         for t in registry.get(gid).templates:
             aggregated[t["id"]] = t
     assert set(aggregated.keys()) == set(DEFAULT_TEMPLATES.keys())
-    assert len(DEFAULT_TEMPLATES) == 10
+    assert len(DEFAULT_TEMPLATES) == 19
 
 
 def test_default_templates_has_all():
     ids = set(DEFAULT_TEMPLATES.keys())
     expected = {
-        "holdem_swiss_ko", "holdem_rr",
-        "holdem_prelim_swiss", "holdem_final_ranked",  # P5 预赛/决赛
-        "holdem_dup_rr",  # P2 residual 复式赛制（duplicate）
-        "gomoku_group_drr_ko", "gomoku_swiss_ko", "board_rr",
-        "pencil_group_drr_ko", "pencil_swiss_ko",
+        "holdem_dup_rr", "holdem_rr", "holdem_swiss_ranked",
+        "holdem_swiss_top8_ranked", "holdem_swiss_ko",
+        "holdem_top8_ranked", "holdem_prelim_swiss",
+        "holdem_final_ranked",
+        "board_rr", "gomoku_rr", "gomoku_swiss_ranked",
+        "gomoku_swiss_top8_ranked", "gomoku_group_drr_ko",
+        "gomoku_swiss_ko",
+        "pencil_drr", "pencil_group_drr_ko", "pencil_swiss_ranked",
+        "pencil_swiss_ko", "pencil_ko",
     }
     assert ids == expected
 
@@ -101,19 +100,84 @@ def test_holdem_recommends_duplicate_round_robin_as_fair_default():
     recommended = [template for template in holdem if template.get("recommended")]
     assert [template["id"] for template in recommended] == ["holdem_dup_rr"]
     assert holdem[0]["id"] == "holdem_dup_rr"
-    assert "≤12" in recommended[0]["name"]
+    assert recommended[0]["name"] == "德州：复式单循环（公平优先）"
     assert "同一副牌交换座位" in recommended[0]["summary"]
-    assert "耗时高于瑞士制" in recommended[0]["summary"]
+    assert "场次数随人数平方增长" in recommended[0]["summary"]
     assert default_template_id("holdem") == "holdem_dup_rr"
 
 
 def test_swiss_templates_remain_explicit_large_scale_options():
     holdem = {template["id"]: template for template in list_templates(game_id="holdem")}
-    for template_id in ("holdem_swiss_ko", "holdem_prelim_swiss"):
+    for template_id in (
+        "holdem_swiss_ranked",
+        "holdem_swiss_top8_ranked",
+        "holdem_swiss_ko",
+        "holdem_prelim_swiss",
+    ):
         template = holdem[template_id]
         assert template.get("recommended") is not True
-        assert "大规模" in template["name"]
-        assert "样本" in template["summary"] or "总场次较少" in template["summary"]
+        assert template["recommended_min"] >= 9
+        assert any(stage["type"] == "swiss" for stage in template["stages"])
+
+
+def test_creation_templates_publish_complete_guidance_metadata():
+    allowed_purposes = {"fairness", "speed", "ranking", "championship"}
+    allowed_times = {"short", "medium", "long"}
+    for template in list_templates():
+        minimum = template.get("recommended_min")
+        maximum = template.get("recommended_max")
+        assert isinstance(minimum, int) and not isinstance(minimum, bool)
+        assert minimum >= 2
+        assert maximum is None or (
+            isinstance(maximum, int)
+            and not isinstance(maximum, bool)
+            and maximum >= minimum
+        )
+        assert template.get("purpose") in allowed_purposes
+        assert template.get("time_class") in allowed_times
+
+    for game_id in registry.all_ids():
+        assert sum(
+            template.get("recommended") is True
+            for template in list_templates(game_id=game_id)
+        ) == 1
+
+
+def test_gomoku_swiss_templates_freeze_official_round_bands():
+    expected = [
+        {"min_participants": 13, "max_participants": 15, "rounds": 7},
+        {"min_participants": 16, "max_participants": 20, "rounds": 9},
+        {"min_participants": 21, "max_participants": None, "rounds": 11},
+    ]
+    gomoku = {
+        template["id"]: template
+        for template in list_templates(game_id="gomoku")
+    }
+    for template_id in (
+        "gomoku_swiss_ranked",
+        "gomoku_swiss_top8_ranked",
+        "gomoku_swiss_ko",
+    ):
+        swiss = next(
+            stage
+            for stage in gomoku[template_id]["stages"]
+            if stage["type"] == "swiss"
+        )
+        assert swiss["rounds"] == 0
+        assert swiss["swiss_round_bands"] == expected
+
+
+def test_holdem_and_gomoku_knockouts_freeze_paired_swap_tiebreak():
+    marker = "paired_swap_until_decided"
+    for game_id in ("holdem", "gomoku"):
+        for template in list_templates(game_id=game_id):
+            for stage in template["stages"]:
+                if stage["type"] == "single_elimination":
+                    assert stage["tiebreak"] == marker
+    for template in list_templates(game_id="pencil"):
+        for stage in template["stages"]:
+            if stage["type"] == "single_elimination":
+                assert "tiebreak" not in stage
 
 
 def test_omitted_template_uses_game_scoped_registry_default():
@@ -163,24 +227,24 @@ def test_get_template_unknown_returns_none():
 def test_list_templates_returns_only_creation_enabled_by_default():
     tpls = list_templates()
     ids = {t["id"] for t in tpls}
-    assert len(tpls) == 8
-    assert ids == set(DEFAULT_TEMPLATES) - {
-        "gomoku_group_drr_ko",
-        "gomoku_swiss_ko",
-    }
+    assert len(tpls) == 18
+    assert ids == set(DEFAULT_TEMPLATES) - {"holdem_final_ranked"}
     assert {t["id"] for t in list_templates(include_disabled=True)} == set(
         DEFAULT_TEMPLATES
     )
 
 
-def test_disabled_gomoku_ko_templates_remain_readable_but_cannot_resolve_new():
-    historical = get_template("gomoku_swiss_ko")
+def test_disabled_historical_holdem_final_remains_readable_but_cannot_resolve_new():
+    historical = get_template("holdem_final_ranked")
     assert historical is not None
     assert historical["creation_enabled"] is False
     with pytest.raises(ValueError, match="已停用新建"):
-        resolve_stages("gomoku_swiss_ko")
+        resolve_stages("holdem_final_ranked")
     with pytest.raises(ValueError, match="已停用新建"):
-        resolve_template("gomoku_group_drr_ko")
+        resolve_template("holdem_final_ranked")
+
+    for template_id in ("gomoku_group_drr_ko", "gomoku_swiss_ko"):
+        assert resolve_stages(template_id)[0] == template_id
 
 
 def test_resolve_template_with_match_config():

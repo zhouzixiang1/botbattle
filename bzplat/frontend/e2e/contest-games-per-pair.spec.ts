@@ -14,10 +14,14 @@ const USER = {
 const templates = [
   {
     id: 'holdem_dup_rr',
-    name: '德州：复式单循环（公平优先，≤12 人）',
+    name: '德州：复式单循环（公平优先）',
     summary: '每组使用同一副牌交换座位，两场 70 手分别计分。',
     game_id: 'holdem',
     recommended: true,
+    recommended_min: 2,
+    recommended_max: 8,
+    purpose: 'fairness',
+    time_class: 'long',
     stages: [{ key: 'dup_rr', type: 'round_robin', duplicate: true }],
     games_per_pair_config: { default: 1, min: 1, max: 10 },
   },
@@ -26,6 +30,10 @@ const templates = [
     name: '德州：单循环（小规模）',
     summary: '每对 Bot 进行独立计分场。',
     game_id: 'holdem',
+    recommended_min: 2,
+    recommended_max: 8,
+    purpose: 'speed',
+    time_class: 'medium',
     stages: [{ key: 'rr', type: 'round_robin' }],
     games_per_pair_config: { default: 1, min: 1, max: 10 },
   },
@@ -124,6 +132,10 @@ test('Holdem duplicate templates expose encounter groups and submit games_per_pa
   const form = page.locator('form')
   const seriesField = form.getByRole('group', { name: '每对选手复式交锋组数' })
   await expect(seriesField).toBeVisible()
+  await expect(form.getByText('建议 2–8 人', { exact: true })).toBeVisible()
+  await expect(form.getByText('公平优先', { exact: true })).toBeVisible()
+  await expect(form.getByText('长赛程', { exact: true })).toBeVisible()
+  await expect(form.getByText('人数仅影响推荐，不限制创建或发布。')).toBeVisible()
   await expect(form.getByRole('combobox', { name: '每对选手复式交锋组数' })).toBeVisible()
   await expect(seriesField).toContainText('1 组复式交锋 · 2 场计分')
   await expect(seriesField).toContainText('两场分别计胜、平、负')

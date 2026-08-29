@@ -3,7 +3,7 @@
 验证：
 1. holdem_prelim_swiss / holdem_final_ranked 模板存在且 phase 正确
 2. 组织者名单 API（POST/DELETE entries，权限校验，状态门）
-3. allow_large_round_robin 旁路 FULL_RR_MAX_N
+3. 历史 allow_large_round_robin 标记继续兼容
 4. 决赛 replace_top 合成榜
 """
 from __future__ import annotations
@@ -115,10 +115,8 @@ def test_organizer_bulk_and_delete(tmp_path):
     assert r.status_code == 200
 
 
-def test_allow_large_round_robin_bypasses_guard(tmp_path):
-    """allow_large_round_robin=True 旁路 FULL_RR_MAX_N（仅白名单模板）。
-    建 holdem_final_ranked（stage1 allow_large_rr）+ 20 人报名 → 不被 _guard_full_rr 拒。
-    """
+def test_legacy_allow_large_round_robin_marker_remains_compatible(tmp_path):
+    """旧 allow_large_round_robin=True 快照在取消人数限制后仍可发布。"""
     import asyncio
 
     from bzplat.backend.contests.manager import ContestManager
@@ -130,7 +128,7 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     store = app.state.store
     o = store.create_user("org2", "o2@ex.com", hash_password("pw123456"), role="organizer")
     store.update_user(o["id"], email_verified=1)
-    # 建 13 人（> FULL_RR_MAX_N=12，普通 RR 会被拒）
+    # 建 13 人，覆盖旧标记与大名单同时存在的历史快照。
     users = []
     for i in range(13):
         u = store.create_user(f"lr{i}", f"lr{i}@ex.com", hash_password("pw123456"))["id"]
@@ -154,7 +152,7 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     store.executions.resume()
     cm = ContestManager(store, orch)
     store.update_contest(c, status="open")
-    # start 应不抛 _guard_full_rr 错（allow_large_round_robin 旁路）
+    # start 应成功；标记现在只是兼容 no-op。
     asyncio.run(cm.start(c))
     # 新执行契约在 claim 前不创建 Match，也不伪装成 running；手动 start
     # 只把全部到点 pairing 持久排队，首个原子 claim 才同步推进赛事状态。

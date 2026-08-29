@@ -69,7 +69,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 ## 决策超时
 
 - `GameSpec.time_budget_per_side=None` 的游戏（当前仅 holdem）使用代码常量 **60 秒 / 决策**；Gomoku 与 Pencil 为每座位 **900 秒累计棋钟**。管理端、数据库和环境变量均不能覆盖。
-- Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。
+- Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。赛事 ETA 以两方棋钟合计 **1800 秒/局**作为保守上界，再按基础计分场与代码并发上限计算；它不包含既有队列等待、阶段休息或不封顶淘汰加赛。
 - Bot 单步超时或 Pencil 累计棋钟耗尽在第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`；不会生成代替动作继续对局。Bot-vs-Bot 技术结果进入评分/赛事积分，人机局由人类获胜但不计 Glicko。人类侧逐回合/累计超时仍走人类 inactivity 与游戏裁判逻辑。
 - 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
 - 棋钟成功决策写入 `time_used {seat,used,remaining,budget}`，耗尽写入 `time_out {seat,used,budget}`；事件进入回放/SSE，点格棋对局页据此展示双方剩余时间和「超时」标记。
@@ -98,40 +98,63 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限；本地 Bot 虽不占 Docker，每场仍占 1 个裁判对局槽，不会绕过排队。
 
 ```text
-max_match_slots  = 2
-max_sandbox_units = 4
+max_match_slots  = 6
+max_sandbox_units = 12
 host_cpu_budget  = min(进程 affinity、进程可见逻辑 CPU、各级 cgroup CPU quota)
 host_memory_budget = min(物理内存、各级 cgroup memory limit)
 effective_budget = min(上述探测值、显式的仅收紧启动注入)
 ```
 
-- `max_match_slots=2`，`max_sandbox_units=4`。这是按 8 vCPU / 16 GiB 主机设定的代码硬顶：最重赛事一场为
-  2 个赛事 Bot，共需 4 CPU / 4 GiB；两场合计 8 CPU / 8 GiB，并为系统、应用与 SQLite 保留约 8 GiB 内存。
-  显式启动参数和管理员设置不能把硬顶放大到 2 以上；affinity、逻辑 CPU、cgroup 配额、物理内存和 cgroup
-  内存上限仍可进一步压低实际并发。每次 claim 在一个
+- `max_match_slots=6`，`max_sandbox_units=12` 是代码硬顶；显式启动参数和管理员设置只能收紧，不能放大。
+  六槽不是六场最重赛事的资源承诺：最重赛事一场冻结 4 CPU / 4 GiB，低配双 Bot 冻结 2 CPU / 1 GiB，
+  人机只冻结 1 CPU / 512 MiB，本地 Bot 不消费平台 Docker 预算。affinity、逻辑 CPU、cgroup 配额、物理
+  内存和 cgroup 内存上限共同决定当前主机预算，因此不同 job 组合的实际并发动态落在 1–6；例如仅有
+  8 CPU 可用时最多准入 2 场赛事或 4 场双低配任务，而足够资源的真人/本地组合可以使用全部六槽。
+  每次 claim 在一个
   `BEGIN IMMEDIATE` 中同时要求：活跃 job 的 slot 未满、实际全局 `running` match 数小于
   `max_match_slots`、sandbox units 可容纳当前 job，并且冻结的 CPU/内存需求不超过当前主机预算。赛事主机不足
   4 CPU 或 4 GiB 时该任务保持排队并给出资源不足原因，绝不静默降为节能档。任何来源都不能绕过其中任一维度。
-- 上传预检不属于 execution job，仍由独立单槽 admission 控制；它可在双赛事运行时短暂再占 1 CPU / 512 MiB。
-  因此 8 vCPU 规划下双槽表示饱和吞吐上限，容器 CPU quota 短时合计可达 9 vCPU，并不承诺零超售或低延迟；
-  需要严格 CPU 预留的部署必须再让预检参与统一资源门，不能仅靠调高/调低管理员设置（该设置本来也不存在）。
+- 上传预检不属于 execution job，仍由独立单槽 admission 控制，可短暂再占 1 CPU / 512 MiB；六槽因此是
+  对局调度硬顶而非全进程零超售或低延迟承诺。需要严格 CPU 预留的部署必须再让预检参与统一资源门，
+  不能仅靠管理员设置（该设置本来也不存在）。
 - `starting/running/settling` 都占容量；match/replay/rating policy 只在 claim 时同事务创建和绑定，
   单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot，并从追加式资源档位
-  registry 推导双 Bot 最大向量计入；当前即保守计作 2 units / 4000 毫核 / 4096 MiB，不能低估后再放入第二场。
+  registry 推导双 Bot 最大向量计入；当前即保守计作 2 units / 4000 毫核 / 4096 MiB，不能低估后再放入不符合预算的任务。
 - job 入队时冻结两个座位的环境、`profile_version`、sandbox/CPU/内存向量；claim 重新用不可变历史 registry
   校验并复制版本到 Match，runner 的 Traditional 每回合、LongRunning、复式与人机 Bot 侧都只解析该冻结版本。
   未知版本、环境不兼容或快照漂移均在启动进程前 fail closed，不能回退到部署时的当前档位。
+- 同一个非 human Bot ID 在全局最多参与一个 `starting/running/settling` job；门禁覆盖 manual、human 的 Bot 侧、
+  contest、auto、平台 Docker 与本地 Bot。一个自博弈 job 内两座位可指向同一 Bot，但该 Bot 仍不能同时进入第二个
+  active job。该规则与 rated-overlap 分开执行，非计分赛事和本地练习也不能并发复用同一 Bot。
 - 人工/人机按用户未终态请求（queued/starting/running/settling）合计最多 4 条，其中同时活跃最多 1 条；
   因而没有活跃局时最多 4 条排队，有 1 条活跃时最多另排 3 条，人机来源另限同一时刻仅 1 条未终态请求。
-  四类来源合计共享 2 个全局 slot。
+  四类来源合计共享 6 个全局 slot。
   `contest_share_slots=1` 只在存在可运行的 manual/human 前台请求时限制赛事优先占用；auto 不属于该份额，
-  不会让第二场赛事给自动排位让槽。若 manual/human 因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额
+  不会让前台赛事给自动排位让槽。若 manual/human 因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额
   以免物理容量空转。manual/human 与 contest 在前台类内保持基础优先级并每 60 秒增加一次无上限 aging；
   auto 是严格后台类，不参与跨来源 aging，也不会出现在前台请求的 `ahead_jobs`、`ahead_sandbox_units` 或 ETA 中。
+- 已按 priority/aging/created/id 排好的前台队列中，dispatcher 只对每一段连续 contest 行做跨赛事轮转；
+  manual/human 行是不可跨越的排序边界。轮转以 SQLite AUTOINCREMENT attempt 序号作为持久单调服务历史，
+  `claimed_at` 只为没有 attempt 的旧行兜底，主机校时或时钟回拨不会改变赛事服务先后；
+  同一赛事内部保持原顺序；某赛事资源、身份、赛程或 Bot 暂时受阻时，扫描可先尝试同段另一赛事，重启也不会
+  恢复成长期 FIFO 独占。
 - rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。真正新建且没有任何旧业务表的库
   会在初始化事务内认证其规范空投影；任何已存在的 schema 仍必须走离线 rebuild，即使当时没有对局也不会被启动自动信任。
   容量可在容器清零后释放，
   但同一 Bot 的 completed 未结算局仍阻止下一条 rated job，避免 Glicko 顺序重叠。
+
+## 赛事赛制发布边界
+
+- 全员及分组单/双循环均不设人数硬上限；发布会把完整 pairing/job 图写入持久队列，但不会改变 6 slots /
+  12 units 或主机预算。历史 `allow_large_round_robin` 仍须是布尔值，只作读取兼容 no-op。
+- Gomoku 三个 Swiss 模板按 `swiss_round_bands` 解析 13–15 人 7 轮、16–20 人 9 轮、21 人以上 11 轮，
+  publish 在阶段快照写入 `effective_rounds`。后续重启只读该冻结值，不按新代码重新解释。
+- 新 Holdem/Gomoku KO 只有冻结 `tiebreak=paired_swap_until_decided` 时，原局平后才追加两场换座决胜组；
+  每组按原阶段计分决胜，仍平继续追加且无上限。追加事务用 CSPRNG 私密生成同组 seed，不能由公开坐标推导；Holdem 同组共享该实际 seed；Gomoku 的 Bot 自主选择开局，
+  因而只保证交换开局提案方/交换决策方，不保证同开局。基础场数、基础计分场与基础 ETA 不含这些加赛。
+- migration 只追加 schema/索引，不改写运行中或历史 `stages_json`。需要采用新决胜或轮数策略的旧赛事，必须
+  仍为 draft/open，且没有 pairing、execution job、Match、阶段结果或正式结果，再通过既有完整快照 CAS；
+  其他生命周期继续按其历史 marker（或无 marker 的平局阻断）运行。
 
 ## 部署排空状态机
 
@@ -503,7 +526,7 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
 1. manual/human/contest 没有 queued/starting/running/settling 请求；非 showcase 真实赛事不处于 `running/rest`，
    且不处于已有待开 pairing、`starts_at` 进入未来 5 分钟保护窗的 `published`；远期或
    `starts_at=NULL` 的 published 不会无期阻塞 auto；
-2. 全站两个 match slot 均为空，且上述前台空闲已经连续保持 **300 秒**；`next_eligible_at`
+2. 全站所有 active match slot 均为空，且上述前台空闲已经连续保持 **300 秒**；`next_eligible_at`
    持久到数据库。进入真实前台/赛事 guard 时仅把 `gate_reason=busy` 写入一次，持续繁忙不产生每秒写放大；
    guard 首次解除才开始完整 300 秒空闲窗，该边界跨 Store reopen/进程重启保持。有 auto 的恢复则推进 cooldown，
    不把每次重启一概当作重置；

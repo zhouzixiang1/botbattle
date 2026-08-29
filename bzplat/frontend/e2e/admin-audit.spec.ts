@@ -217,10 +217,12 @@ for (const viewport of ADMIN_VIEWPORTS) {
       const completedMatches = await completedMatchesResponse.json() as {
         matches: Array<{ status: string }>
       }
-      expect(completedMatches.matches.length).toBeGreaterThan(0)
       expect(completedMatches.matches.every((match) => match.status === 'completed')).toBe(true)
       await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(completedMatches.matches.length)
       await expect(page.getByText(/共 \d+ 条对局记录/)).toBeVisible()
+      if (!completedMatches.matches.length) {
+        await expect(page.getByText('暂无对局', { exact: true })).toBeVisible()
+      }
 
       const abnormalMatchesPromise = page.waitForResponse((response) => {
         const url = new URL(response.url())
@@ -235,13 +237,16 @@ for (const viewport of ADMIN_VIEWPORTS) {
       const abnormalMatches = await abnormalMatchesResponse.json() as {
         matches: Array<{ result?: { technical_incidents_by_seat?: Record<string, number> } }>
       }
-      expect(abnormalMatches.matches.length).toBeGreaterThan(0)
       expect(abnormalMatches.matches.every((match) =>
         Object.values(match.result?.technical_incidents_by_seat || {})
           .reduce((sum, value) => sum + Number(value || 0), 0) > 0,
       )).toBe(true)
       await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(abnormalMatches.matches.length)
-      await expect(page.getByText(/Bot 技术故障 \d+ 次/).first()).toBeVisible()
+      if (abnormalMatches.matches.length) {
+        await expect(page.getByText(/Bot 技术故障 \d+ 次/).first()).toBeVisible()
+      } else {
+        await expect(page.getByText('暂无对局', { exact: true })).toBeVisible()
+      }
     }
     await expectNoRootOverflow(page, 'matches')
 

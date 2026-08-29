@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock3, Scale, Swords } from 'lucide-react'
+import { Clock3, Scale, Swords } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -150,12 +150,6 @@ export function StageSeriesSettingsEditor({
           )
         })}
       </div>
-      {totalSeconds > 8 * 60 * 60 && (
-        <div role="alert" className="flex min-w-0 items-start gap-2 border-t border-warning/25 bg-warning/10 px-3 py-2.5 text-xs leading-relaxed text-warning-foreground">
-          <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
-          当前计划预计超过 8 小时。发布前请确认开赛时间、机器容量与阶段衔接安排。
-        </div>
-      )}
       {!frozen && (
         <p className="flex items-center gap-1.5 border-t px-3 py-2 text-xs text-muted-foreground">
           <Swords aria-hidden="true" className="size-3.5 shrink-0" />

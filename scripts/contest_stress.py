@@ -143,7 +143,7 @@ def estimate(template: str, n: int) -> dict[str, Any]:
                 "note": f"swiss {swiss_m}场 + 淘汰 {ko_m}场（advance={adv}）"}
     if t == "holdem_rr":
         return {"format": "单循环", "rounds": f"{n-1}轮", "matches": n * (n - 1) // 2,
-                "note": "FULL_RR_MAX_N=12 护栏会拒 n>12；500 人不可行"}
+                "note": "无参赛人数硬上限；场次数按 O(n²) 增长，大名单宜改用 Swiss/分组"}
     if t == "holdem_swiss_only":
         swiss_r = max(1, math.ceil(math.log2(max(2, n))))
         return {"format": "纯瑞士", "rounds": f"{swiss_r}轮", "matches": swiss_r * (n // 2), "note": ""}

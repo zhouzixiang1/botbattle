@@ -317,8 +317,10 @@ class MatchOrchestrator:
     ) -> None:
         self.store = store
         self.runner = runner or MatchRunner(BinaryRunner())
-        self.max_concurrent = max_concurrent
-        self._sem = asyncio.Semaphore(max_concurrent)
+        self.max_concurrent = max(
+            1, min(int(max_concurrent), MAX_CONCURRENT_MATCHES)
+        )
+        self._sem = asyncio.Semaphore(self.max_concurrent)
         self._tasks: dict[str, asyncio.Task] = {}
         # admin abort 正在接管的 match：被取消任务的 finally 只移除 task，不提前
         # 清 SSE/触发回调；abort_match 落稳 aborted 后统一广播与回调一次。
@@ -370,7 +372,9 @@ class MatchOrchestrator:
 
         只换 Semaphore；新任务使用新上限，旧任务在旧 semaphore 上自然排空。
         """
-        self.max_concurrent = max(1, int(max_concurrent))
+        self.max_concurrent = max(
+            1, min(int(max_concurrent), MAX_CONCURRENT_MATCHES)
+        )
         self._sem = asyncio.Semaphore(self.max_concurrent)
 
     def set_action_timeout(self, timeout_sec: float) -> None:
@@ -734,6 +738,7 @@ class MatchOrchestrator:
         bot_b_local_agent_id: int | None = None,
         duplicate: bool = False,
         duplicate_seed: int | None = None,
+        match_seed: int | None = None,
         contest_pairing_id: int | None = None,
         request_id: str | None = None,
         idempotency_fingerprint: str | None = None,
@@ -805,6 +810,15 @@ class MatchOrchestrator:
         spec = game_registry.get(gid)
         if duplicate and spec.build_match_plan is None:
             raise ValueError(f"游戏 {gid} 不支持 duplicate 对局")
+        if match_seed is not None and (
+            isinstance(match_seed, bool)
+            or not isinstance(match_seed, int)
+            or match_seed < 1
+            or match_seed > 9_223_372_036_854_775_807
+        ):
+            raise ValueError("内部 match_seed 必须是 SQLite 范围内的正整数")
+        if duplicate and match_seed is not None:
+            raise ValueError("duplicate 对局不能同时指定普通单场 match_seed")
         if duplicate and EXECUTION_ENV_REMOTE_LOCAL in set(environments):
             raise ValueError("本地 Bot 仅用于单场练习，不能使用复式赛制")
         mc: dict[str, Any] = {}
@@ -823,6 +837,10 @@ class MatchOrchestrator:
         if duplicate:
             if duplicate_seed is not None:
                 mc["duplicate_seed"] = int(duplicate_seed)
+        elif match_seed is not None:
+            # 仅平台内部赛事 pairing 可传。公开 challenge API 不接收该字段，
+            # 因而它是复现坐标而不是可覆盖游戏规则的 match_config 参数。
+            mc["match_seed"] = int(match_seed)
 
         source = (
             EXECUTION_SOURCE_CONTEST
@@ -1565,8 +1583,34 @@ class MatchOrchestrator:
             self._safe_flush_terminal_replay(match_id, [], terminal_event)
             self._broadcast(match_id, terminal_event)
             return
-        # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
-        dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
+        # duplicate 与普通单场分别使用互斥的内部冻结 seed。普通 seed 只由
+        # 淘汰决胜 pairing 注入；用户不能借 match_config 覆盖游戏规则。
+        raw_dup_seed = stored_mc.get("duplicate_seed")
+        raw_match_seed = stored_mc.get("match_seed")
+        if any(
+            raw is not None
+            and (
+                isinstance(raw, bool)
+                or not isinstance(raw, int)
+                or raw < 1
+                or raw > 9_223_372_036_854_775_807
+            )
+            for raw in (raw_dup_seed, raw_match_seed)
+        ) or (raw_dup_seed is not None and raw_match_seed is not None):
+            logger.error("match %s has invalid frozen match seed", match_id)
+            self._update_match_owned(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
+            return
+        dup_seed = raw_dup_seed
+        single_seed = raw_match_seed
         events: list[dict] = []
         debug_collector = BotDebugCollector()
         debug_persisted = False
@@ -1676,6 +1720,7 @@ class MatchOrchestrator:
                     game_id=gid,
                     on_event=on_event,
                     on_debug=on_debug,
+                    seed=single_seed,
                     runtime_modes=(mode_a, mode_b),
                     execution_environments=environments,
                     execution_profile_version=execution_profile_version,

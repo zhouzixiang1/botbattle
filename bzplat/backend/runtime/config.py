@@ -12,14 +12,18 @@ from typing import Any
 
 CONFIGURATION_SOURCE = "code"
 
-# 对局/赛事通用运行参数。全站所有来源共享两个对局槽；该值是产品硬约束，
-# 以 8 vCPU / 16 GiB 主机为基准：最重赛事对局为 4 vCPU / 4 GiB，
-# 两场合计 8 vCPU / 8 GiB。队列外上传预检可短时再用 1 vCPU / 512 MiB，
-# 因此双槽是饱和上限而非 CPU 低延迟保证。主机资源门可继续收紧，但管理员
-# 与显式参数不能放大。
+# 对局/赛事通用运行参数。全站所有来源共享最多六个对局槽；
+# 实际可同时启动的数量还必须通过进程可见 CPU/内存与每个 job 入队时
+# 冻结的资源向量准入。当前主机上六场最重赛事对局合计为
+# 24 vCPU / 24 GiB，保留了 API、SQLite、Docker 与上传预检余量。主机
+# 资源门可继续收紧，管理员与显式参数不能放大六槽硬顶。
 ACTION_TIMEOUT_SEC = 60.0
-MAX_CONCURRENT_MATCHES = 2
-FULL_RR_MAX_N = 12
+MAX_CONCURRENT_MATCHES = 6
+# 全员单/双循环不再按参赛人数拒绝发布。实际并发仍由 match slots 与
+# sandbox capacity 硬顶控制，超大赛程只会进入持久队列，不会放大物理并发。
+# 保留该公开配置键并以 ``None`` 明确表示“不限人数”，避免旧诊断客户端
+# 把字段缺失误解成接口损坏。
+FULL_RR_MAX_N: int | None = None
 
 # Bot 上传从读取请求文件到隐藏版本预检完成共用一个全局槽。等待超过
 # 一秒即明确返回繁忙，避免不同 Bot 的并发版本上传同时保留大块 raw
@@ -33,7 +37,7 @@ HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
 
 
 # 全来源执行队列：每个 job 固定占 1 个全局 match slot，Bot-vs-Bot
-# 占 2 个 sandbox unit，人机占 1 个。sandbox 容量按双槽 * 2 派生。
+# 占 2 个 sandbox unit，人机占 1 个。sandbox 容量按实际槽数 * 2 派生。
 EXECUTION_AGING_SECONDS = 60
 EXECUTION_USER_ACTIVE_LIMIT = 1
 EXECUTION_USER_QUEUED_LIMIT = 4

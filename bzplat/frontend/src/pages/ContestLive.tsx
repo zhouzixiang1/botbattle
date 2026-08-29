@@ -9,6 +9,7 @@ import {
   type LiveContestPairing,
   type LiveContestStanding,
 } from '@/components/contest/LiveContestSpectator'
+import type { EliminationTiebreakProjection } from '@/components/contest/elimination-tiebreak-status'
 import { PageFrame, PageHeader } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { stageSeriesDisplayLabel } from '@/components/contest/stage-series'
+import { PAIRED_SWAP_TIEBREAK } from '@/components/contest/template-guidance'
 import { fmtTime } from '@/lib/format'
 import { gameLabel } from '@/lib/games'
 
@@ -43,6 +45,7 @@ interface LiveContestResponse {
     swiss_extra_rounds?: number | null
     effective_rounds?: number | null
     scoring_mode?: string | null
+    tiebreak?: string | null
   } | null
   series: {
     games_per_pair: number | null
@@ -60,6 +63,7 @@ interface LiveContestResponse {
     pending: number
   }
   counts?: LiveContestCounts
+  elimination_tiebreak?: EliminationTiebreakProjection | null
   active: LiveContestPairing[]
   upcoming: LiveContestPairing[]
   recent: LiveContestPairing[]
@@ -279,6 +283,7 @@ export default function ContestLive() {
         ? `${fmtTime(live.contest.ends_at)} 结束`
         : null
   const resultsPending = status === 'finished' && !live.contest.official_results_ready
+  const unboundedTiebreak = live.stage?.tiebreak === PAIRED_SWAP_TIEBREAK
   const liveStageLabel = stageSeriesDisplayLabel(
     live.stage?.key,
     live.stage?.label,
@@ -300,6 +305,11 @@ export default function ContestLive() {
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
             {seriesText && <span>{seriesText}</span>}
+            {unboundedTiebreak && (
+              <span className="font-medium text-warning-foreground">
+                淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶
+              </span>
+            )}
             {scheduleText && <span className="inline-flex items-center gap-1"><CalendarClock aria-hidden="true" className="size-3.5" />{scheduleText}</span>}
             {resultsPending && <span className="font-medium text-primary">成绩正在整理，正式名次稍后公布</span>}
           </span>
@@ -320,6 +330,7 @@ export default function ContestLive() {
         snapshot={immutableSnapshot}
         progress={live.progress}
         counts={live.counts}
+        eliminationTiebreak={live.elimination_tiebreak}
         activePairings={live.active}
         upcomingPairings={live.upcoming}
         recentPairings={live.recent}

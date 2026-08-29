@@ -9,6 +9,7 @@ import pytest
 
 from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.contests.ranking import with_official_result_provenance
+from bzplat.backend.contests.scheduler import ContestScheduler
 from bzplat.backend.contests.stages import (
     effective_group_count,
     estimate_match_count,
@@ -26,6 +27,7 @@ from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import CONTEST_REST, STATUS_COMPLETED
+from bzplat.backend.tests.execution_helpers import claim_request
 
 
 def test_round_robin_and_double():
@@ -133,7 +135,7 @@ def test_swiss_odd_pairings_persist_explicit_rotating_bye_specs():
     assert set(bye_order) == {1, 2, 3}
 
 
-def test_full_rr_guard_and_templates():
+def test_round_robin_templates():
     tid, gid, stages = resolve_stages("holdem_swiss_ko")
     assert gid == "holdem"
     assert stages[0]["type"] == "swiss"
@@ -329,29 +331,105 @@ def test_gomoku_engine_registered(store: Store):
     assert "pencil" in REGISTERED_ENGINES
 
 
-def test_full_rr_rejects_code_limit_and_ignores_legacy_setting(store: Store):
-    users, bots = _mk_bots(store, 13)
-    # Historical runtime settings are audit-only and cannot raise the code
-    # policy.  FULL_RR_MAX_N is 12, so 13 entrants must still be rejected.
-    store.set_setting("full_rr_max_n", "999")
-    stages = [{"key": "rr", "type": "round_robin"}]
+def test_full_double_round_robin_has_no_participant_cap(store: Store):
+    """17 人五子棋双循环须生成 272 场并进入受控队列。"""
+    users, bots = _mk_bots(store, 17, game_id="gomoku")
+    template_id, game_id, stages = resolve_stages("board_rr")
+    # 旧 platform_settings 行不得重新形成另一套人数限制。
+    store.set_setting("full_rr_max_n", "1")
     c = store.create_contest(
         "big",
         users[0]["id"],
-        game_id="holdem",
-        template_id="holdem_rr",
+        game_id=game_id,
+        template_id=template_id,
         stages_json=json.dumps(stages),
     )
     for u, b in zip(users, bots):
         store.add_contest_entry(c["id"], u["id"], b["id"])
     store.update_contest(c["id"], status="open")
+    store.executions.resume()
     mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
 
     async def run():
-        with pytest.raises(ValueError, match="上限"):
-            await mgr.start(c["id"])
+        await mgr.start(c["id"])
 
     asyncio.run(run())
+    assert store.get_contest(c["id"])["status"] == "published"
+    pairings = store.list_contest_pairings(c["id"])
+    assert len(pairings) == 17 * 16
+    assert all(
+        row["status"] == "pending" and row["match_id"] is None
+        for row in pairings
+    )
+    queued_jobs = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs "
+        "WHERE contest_id=? AND source='contest' AND status='queued'",
+        (c["id"],),
+    ).fetchone()[0]
+    assert queued_jobs == 17 * 16
+
+
+def test_scheduler_auto_publishes_and_starts_large_double_round_robin(
+    store: Store,
+):
+    """报名截止与开赛两个 scheduler tick 都不得恢复旧人数硬挡。"""
+    users, bots = _mk_bots(store, 17, game_id="gomoku")
+    template_id, game_id, stages = resolve_stages("board_rr")
+    contest = store.create_contest(
+        "scheduled-big",
+        users[0]["id"],
+        game_id=game_id,
+        template_id=template_id,
+        stages_json=json.dumps(stages),
+        registration_opens_at="2019-12-31T00:00:00",
+        registration_closes_at="2020-01-01T00:00:00",
+        starts_at="2020-01-01T00:00:00",
+    )
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+    store.update_contest(contest["id"], status="open")
+    store.executions.resume()
+    orch = MatchOrchestrator(store, max_concurrent=1)
+    manager = ContestManager(store, orch)
+    scheduler = ContestScheduler(manager, store)
+
+    asyncio.run(scheduler._tick())
+    assert store.get_contest(contest["id"])["status"] == "published"
+    assert len(store.list_contest_pairings(contest["id"])) == 17 * 16
+
+    asyncio.run(scheduler._tick())
+    # 到点先把完整排期送入持久队列；赛事只有在 claim 原子创建 Match 并
+    # 绑定首条 pairing 后才进入 running，不能把“已排队”伪装成“已开局”。
+    assert store.get_contest(contest["id"])["status"] == "published"
+    queued_jobs = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs "
+        "WHERE contest_id=? AND source='contest' AND status='queued'",
+        (contest["id"],),
+    ).fetchone()[0]
+    assert queued_jobs == 17 * 16
+    first_request = store._conn.execute(
+        "SELECT public_id FROM execution_jobs WHERE contest_id=? "
+        "AND source='contest' AND status='queued' ORDER BY id LIMIT 1",
+        (contest["id"],),
+    ).fetchone()[0]
+    claim_request(orch, first_request, start=False)
+    assert store.get_contest(contest["id"])["status"] == "running"
+
+
+@pytest.mark.parametrize("stage_type", ["round_robin", "double_round_robin"])
+def test_full_round_robin_guard_has_no_cap(store: Store, stage_type: str):
+    mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+
+    mgr._guard_round_robin_size([{"type": stage_type}], 500)
+
+
+def test_group_round_robin_has_no_participant_cap(store: Store):
+    mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+
+    mgr._guard_round_robin_size(
+        [{"type": "group_double_round_robin", "group_count": 1}],
+        500,
+    )
 
 
 @pytest.mark.parametrize(
@@ -420,7 +498,7 @@ class _FakeOrch:
         (12, 24, 8, 31),
     ],
 )
-def test_pencil_default_group_manager_estimate_matches_full_lifecycle(
+def test_pencil_group_template_manager_estimate_matches_full_lifecycle(
     store: Store,
     participant_count,
     expected_group_matches,
@@ -432,8 +510,9 @@ def test_pencil_default_group_manager_estimate_matches_full_lifecycle(
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
     contest = manager.create(
         users[0]["id"],
-        "pencil-default-small-roster",
+        "pencil-group-small-roster",
         game_id="pencil",
+        template_id="pencil_group_drr_ko",
     )
     assert contest["template_id"] == "pencil_group_drr_ko"
     for user, bot in zip(users, bots):
@@ -491,7 +570,7 @@ def test_pencil_default_group_manager_estimate_matches_full_lifecycle(
     )
     assert actual_match_jobs == expected_total_matches
     assert estimate["estimated_matches"] == actual_match_jobs
-    assert estimate["max_concurrent"] == 2
+    assert estimate["max_concurrent"] == 6
     assert estimate["eta_seconds"] == int(
         actual_match_jobs
         * game_registry.get("pencil").eta_for_match({})

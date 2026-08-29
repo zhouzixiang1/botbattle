@@ -258,6 +258,53 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     _assert_owner_delete_trigger_contract(triggers_after)
 
 
+def test_pairing_seed_lookup_index_is_fresh_migrated_and_planned(tmp_path):
+    db_path = (tmp_path / "pairing-seed-index.db").resolve()
+    fresh = Store(str(db_path))
+    with fresh._tx() as conn:
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(contest_pairings)")
+        }
+        assert "idx_contest_pairings_seed_lookup" in indexes
+        plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND pairing_seed=? LIMIT 1",
+                (1, 0, 123),
+            )
+        )
+        assert "idx_contest_pairings_seed_lookup" in plan
+    fresh.close()
+
+    # Model an upgraded database whose old schema predates the lookup index.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX idx_contest_pairings_seed_lookup")
+
+    migrated = Store(str(db_path))
+    with migrated._tx() as conn:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_contest_pairings_seed_lookup",),
+        ).fetchone()[0]
+        assert "WHERE pairing_seed IS NOT NULL" in _normalize_sql(sql)
+        migrated_plan = " ".join(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND pairing_seed=? LIMIT 1",
+                (1, 0, 456),
+            )
+        )
+        assert "idx_contest_pairings_seed_lookup" in migrated_plan
+    migrated.close()
+
+    reopened = Store(str(db_path))
+    assert reopened._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
+
+
 def test_auto_scheduler_gate_columns_migrate_and_reconcile_idempotently(tmp_path):
     db_path = (tmp_path / "legacy-auto-scheduler-gate.db").resolve()
     legacy = Store(str(db_path))

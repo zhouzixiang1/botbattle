@@ -254,7 +254,8 @@ python scripts/local_ai_client.py \
 | **常量集中** | 所有状态码/对局类型/`REGISTERED_ENGINES`/`VALID_GAME_IDS`/平台 settings 键名集中在 `store/schema.py`，别散落 |
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
-| **资源硬顶** | `runtime/limits.py` 只允许节能档（每 Bot 1 核/512 MiB）与赛事档（每 Bot 2 核/2 GiB），后者仅 contest 来源可取；本地 Bot 不启动 Docker。按 8 vCPU / 16 GiB 基准，全站代码硬顶为 2 match slots / 4 sandbox units（最重两场赛事共 8 CPU / 8 GiB）；affinity/cgroup/物理资源和显式启动值只能收紧，admin 不能抬高。每个 job 仍占 1 slot，赛事份额 1 不是额外槽；Bot 文件上限 100 MiB，全员循环 `FULL_RR_MAX_N=12` |
+| **资源硬顶** | `runtime/config.py` 固定 6 match slots / 12 sandbox units；`runtime/limits.py` 只允许节能档（每 Bot 1 核/512 MiB）与赛事档（每 Bot 2 核/2 GiB），后者仅 contest 来源可取，本地 Bot/真人不启动 Docker。job 入队冻结 sandbox/CPU/内存向量，claim 再按 affinity/cgroup/物理预算逐维准入，实际并发依组合为 1–6；显式启动值只能收紧，admin 不能抬高。每个 job 占 1 slot，赛事份额 1 不是额外槽；同一非 human Bot 全局至多一个 active job。全员及分组单/双循环均无人数硬上限，完整 O(n²) 排期只增加持久 job；历史 `allow_large_round_robin` 仅作 no-op 兼容。Bot 文件上限 100 MiB |
+| **赛事演进边界** | 模板人数范围、用途与时长只是非阻断推荐；新增/修改阶段结构须同步模板元数据、estimate、前端风险提示和测试。新 Holdem/Gomoku KO 只有冻结 `paired_swap_until_decided` 才可无限追加两场换座决胜组；历史无 marker 保持平局阻断。不得原地改写 running/finished 快照；仅 draft/open 且零 pairing/job/Match/正式结果的赛事可走现有 CAS 更新。Gomoku `swiss_round_bands` 在 publish 冻结 `effective_rounds`，不得在通用层加游戏名分支 |
 | **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |

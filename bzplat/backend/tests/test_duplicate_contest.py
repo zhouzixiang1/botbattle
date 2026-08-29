@@ -73,7 +73,12 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
             ]
         ),
     )
-    pairing = s.add_pairing(contest["id"], ba, bb)
+    pairing = s.add_pairing(
+        contest["id"],
+        ba,
+        bb,
+        pairing_seed=42,
+    )
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
     async def _go():
@@ -131,7 +136,11 @@ def test_duplicate_contest_two_scoring_games_are_independent(tmp_path):
     bb = s.create_bot(ub, "dupCall", binary_path=str(CALLBOT), format="elf", game_id="holdem", is_active=1)["id"]
     c = s.create_contest(
         "复式赛", organizer_id=org, game_id="holdem",
-        stages_json='[{"key":"dup","type":"round_robin","duplicate":true,"scoring":"poker_3_1_0"}]',
+        stages_json=(
+            '[{"key":"dup","type":"round_robin","duplicate":true,'
+            '"scoring":"poker_3_1_0","games_per_pair":1,'
+            '"series_scoring":"independent_scoring_game_points_v1"}]'
+        ),
     )["id"]
     s.add_contest_entry(c, ua, ba)
     s.add_contest_entry(c, ub, bb)
@@ -218,7 +227,11 @@ def test_duplicate_standings_accumulate_two_scoring_games(tmp_path):
     bb = s.create_bot(ub, "stdCall", binary_path=str(CALLBOT), format="elf", game_id="holdem", is_active=1)["id"]
     c = s.create_contest(
         "复式排行", organizer_id=org, game_id="holdem",
-        stages_json='[{"key":"dup","type":"round_robin","duplicate":true,"scoring":"poker_3_1_0"}]',
+        stages_json=(
+            '[{"key":"dup","type":"round_robin","duplicate":true,'
+            '"scoring":"poker_3_1_0","games_per_pair":1,'
+            '"series_scoring":"independent_scoring_game_points_v1"}]'
+        ),
     )["id"]
     s.add_contest_entry(c, ua, ba)
     s.add_contest_entry(c, ub, bb)

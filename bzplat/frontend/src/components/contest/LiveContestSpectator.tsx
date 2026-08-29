@@ -2,6 +2,10 @@ import { Eye, Radio, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { MatchParticipantIdentity } from '@/components/MatchParticipants'
+import {
+  EliminationTiebreakStatus,
+  type EliminationTiebreakProjection,
+} from '@/components/contest/elimination-tiebreak-status'
 import { PairingResult } from '@/components/contest/pairing-result'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -31,6 +35,8 @@ export interface LiveContestPairing extends MatchParticipantSource {
   ended_at?: string | null
   series_index: number
   series_size: number
+  tiebreak_group?: number | null
+  tiebreak_game?: number | null
   bye?: boolean
   series_summary?: {
     bye?: boolean
@@ -86,6 +92,7 @@ interface LiveContestSpectatorProps {
     pending: number
   }
   counts?: LiveContestCounts
+  eliminationTiebreak?: EliminationTiebreakProjection | null
   activePairings: LiveContestPairing[]
   upcomingPairings: LiveContestPairing[]
   recentPairings: LiveContestPairing[]
@@ -212,6 +219,11 @@ function PairingIdentityLine({
         <span className="shrink-0 font-mono font-medium tabular-nums text-foreground">
           {pairing.group_id ? `${pairing.group_id} · ` : ''}R{pairing.round_num ?? 1}
         </span>
+        {(pairing.tiebreak_group ?? 0) > 0 && (pairing.tiebreak_game ?? 0) > 0 && (
+          <Badge variant="outline" className="shrink-0">
+            决胜组 {pairing.tiebreak_group} · 第 {pairing.tiebreak_game}/2 场
+          </Badge>
+        )}
         {pairing.series_size && pairing.series_size > 1 && (
           <span className="shrink-0 font-mono tabular-nums">
             第 {pairing.series_index ?? 1}/{pairing.series_size} {duplicate ? '组' : '场'}
@@ -307,6 +319,9 @@ function ActiveTable({
         </Badge>
         <span className="text-xs font-medium text-muted-foreground">
           {pairing.group_id ? `${pairing.group_id} · ` : ''}第 {pairing.round_num ?? 1} 轮
+          {(pairing.tiebreak_group ?? 0) > 0 && (pairing.tiebreak_game ?? 0) > 0
+            ? ` · 决胜组 ${pairing.tiebreak_group} · 第 ${pairing.tiebreak_game}/2 场`
+            : ''}
           {pairing.series_size && pairing.series_size > 1
             ? duplicate
               ? ` · 系列第 ${pairing.series_index ?? 1}/${pairing.series_size} 组复式`
@@ -343,6 +358,7 @@ export function LiveContestSpectator({
   snapshot = false,
   progress: progressValue,
   counts,
+  eliminationTiebreak,
   activePairings,
   upcomingPairings,
   recentPairings,
@@ -501,6 +517,8 @@ export function LiveContestSpectator({
           />
         </div>
       </div>
+
+      <EliminationTiebreakStatus value={eliminationTiebreak} className="border-b" />
 
       <div className="grid min-w-0 xl:grid-cols-[minmax(0,1.55fr)_minmax(17rem,0.75fr)]">
         <section aria-labelledby="active-tables-title" className="min-w-0 px-4 py-4 xl:border-r">

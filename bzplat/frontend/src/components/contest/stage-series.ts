@@ -31,7 +31,10 @@ export interface StageSeriesEstimate {
 }
 
 export interface ContestEstimate {
+  entries?: number
   estimated_matches?: number
+  estimated_scoring_games?: number
+  max_concurrent?: number
   eta_seconds?: number
   stages?: StageSeriesEstimate[]
 }
@@ -39,7 +42,12 @@ export interface ContestEstimate {
 const BUILTIN_STAGE_SERIES_LABELS: Record<string, string> = {
   prelim: '预赛瑞士轮',
   qualify: '决赛全员循环排位',
-  final8: 'Top 8 决胜',
+  swiss: '瑞士轮',
+  rr: '单循环',
+  drr: '双循环',
+  group: '小组循环',
+  ko: '单败淘汰',
+  final8: 'Top 8 排位循环',
 }
 
 export function stageSeriesDisplayLabel(

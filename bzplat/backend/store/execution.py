@@ -26,6 +26,7 @@ from bzplat.backend.runtime.config import (
     AUTO_MATCH_SCHEDULER_POLICY_VERSION,
     EXECUTION_AUTO_ACTIVE_LIMIT,
     EXECUTION_AUTO_LOOKAHEAD,
+    MAX_CONCURRENT_MATCHES,
 )
 from .db import (
     _active_game_contract_tx,
@@ -80,6 +81,11 @@ SOURCE_PRIORITY = {
     EXECUTION_SOURCE_CONTEST: 30,
     EXECUTION_SOURCE_AUTO: 10,
 }
+
+# Stable public policy identifiers.  They describe code-owned behavior only;
+# no mutable cursor, contest id, or active Bot identity is exposed with them.
+CONTEST_FAIRNESS_POLICY = "round_robin_v1"
+BOT_EXCLUSIVITY_POLICY = "active_execution_v1"
 
 _PLATFORM_ENVIRONMENTS = frozenset(
     {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_PLATFORM_HIGH}
@@ -152,6 +158,94 @@ def _parse_time(value: Any) -> datetime:
         return datetime.fromisoformat(str(value or ""))
     except ValueError:
         return datetime.min
+
+
+def _contest_job_seed_binding_is_valid(
+    job: dict[str, Any], pairing: sqlite3.Row, stage: dict[str, Any]
+) -> bool:
+    """Bind a queued contest request to its exact frozen pairing seed.
+
+    This check runs inside the claim transaction.  It deliberately never
+    repairs an old job: a missing or stale seed cancels the request before any
+    Match row is created, so a later manager retry can enqueue from the current
+    pairing snapshot.
+    """
+    from bzplat.backend.contests.validation import (
+        ELIMINATION_TIEBREAK_PAIRED_SWAP,
+        stage_duplicate_mode,
+    )
+
+    try:
+        config = json.loads(str(job.get("match_config") or "{}"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(config, dict):
+        return False
+
+    duplicate_mode = stage_duplicate_mode(stage)
+    if duplicate_mode is None:
+        return False
+    strict_duplicate_marker = bool(
+        stage.get("series_scoring") == "independent_scoring_game_points_v1"
+        or (
+            stage.get("type") == "single_elimination"
+            and stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+        )
+    )
+    if strict_duplicate_marker and "duplicate" not in config:
+        return False
+    if "duplicate" in config and not isinstance(config["duplicate"], bool):
+        return False
+    job_duplicate = config.get("duplicate", False)
+    if job_duplicate is not duplicate_mode:
+        return False
+
+    group = pairing["tiebreak_group"]
+    game = pairing["tiebreak_game"]
+    if (
+        isinstance(group, bool)
+        or not isinstance(group, int)
+        or isinstance(game, bool)
+        or not isinstance(game, int)
+        or not ((group == 0 and game == 0) or (group >= 1 and game in (1, 2)))
+    ):
+        return False
+
+    def exact_seed(value: Any) -> int | None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            or value > 9_223_372_036_854_775_807
+        ):
+            return None
+        return value
+
+    has_duplicate_seed = "duplicate_seed" in config
+    has_match_seed = "match_seed" in config
+    if duplicate_mode:
+        # Duplicate execution is a single seeded physical pairing.  KO paired
+        # swap tiebreaks are ordinary matches and must never enter this branch.
+        return bool(
+            group == 0
+            and has_duplicate_seed
+            and not has_match_seed
+            and exact_seed(config.get("duplicate_seed")) is not None
+            and exact_seed(pairing["pairing_seed"])
+            == exact_seed(config.get("duplicate_seed"))
+        )
+    if group > 0:
+        return bool(
+            stage.get("type") == "single_elimination"
+            and stage.get("tiebreak") == ELIMINATION_TIEBREAK_PAIRED_SWAP
+            and has_match_seed
+            and not has_duplicate_seed
+            and exact_seed(config.get("match_seed")) is not None
+            and exact_seed(pairing["pairing_seed"])
+            == exact_seed(config.get("match_seed"))
+        )
+    # Ordinary single matches carry no reproducibility seed in their request.
+    return not has_duplicate_seed and not has_match_seed
 
 
 class ExecutionRepository:
@@ -1776,7 +1870,151 @@ class ExecutionRepository:
                 int(row["id"]),
             )
         )
-        return rows
+        return self._fair_contest_rows_tx(conn, rows)
+
+    @staticmethod
+    def _fair_contest_rows_tx(
+        conn: sqlite3.Connection,
+        rows: list[dict],
+    ) -> list[dict]:
+        """Interleave queued contests by their last durable successful claim.
+
+        The immutable AUTOINCREMENT attempt id is the restart-safe monotonic
+        service marker.  ``execution_jobs.claimed_at`` remains a fallback for
+        legacy rows which predate attempt history, but never overrides attempt
+        order because host clocks can move backwards or forwards.  No second
+        dispatcher cursor or schema state is introduced.
+
+        Rows inside one contest keep the caller's existing
+        priority/aging/created/id order.  Interleaving one head from every
+        contest also means a volatile resource, identity, schedule, or Bot
+        conflict in one contest lets the claim scan reach another contest
+        before considering the blocked contest's next pairing.
+
+        Rotation is deliberately limited to each *contiguous contest band* in
+        the already sorted queue.  A manual/human row is an ordering barrier:
+        fairness must never pull a lower-priority contest from behind that row
+        to the front merely because that contest was served less recently.
+        """
+
+        def contest_id_of(row: dict) -> int | None:
+            raw = row.get("contest_id")
+            if (
+                row.get("source") != EXECUTION_SOURCE_CONTEST
+                or isinstance(raw, bool)
+                or not isinstance(raw, int)
+                or raw < 1
+            ):
+                return None
+            return raw
+
+        contest_ids = tuple(
+            sorted(
+                {
+                    contest_id
+                    for row in rows
+                    if (contest_id := contest_id_of(row)) is not None
+                }
+            )
+        )
+        if len(contest_ids) <= 1:
+            return rows
+
+        # Attempt ids are SQLite AUTOINCREMENT values and therefore provide the
+        # durable monotonic service order.  Wall-clock timestamps are only a
+        # legacy fallback/tie-break: NTP or administrator clock correction must
+        # not starve a contest whose old claim happened to be stamped in the
+        # future.
+        history: dict[int, tuple[int, datetime]] = {}
+        # Keep well below SQLite builds with the legacy 999-variable limit;
+        # the product deliberately has no hard cap on concurrently queued
+        # contests either.
+        for offset in range(0, len(contest_ids), 400):
+            chunk = contest_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in chunk)
+            history_rows = conn.execute(
+                "SELECT j.contest_id,"
+                "MAX(COALESCE(j.claimed_at,a.created_at)) AS last_claimed_at,"
+                "COALESCE(MAX(a.id),0) AS last_claim_seq "
+                "FROM execution_jobs j "
+                "LEFT JOIN execution_job_attempts a ON a.job_id=j.id "
+                "WHERE j.source=? AND j.contest_id IN ("
+                + marks
+                + ") AND (j.claimed_at IS NOT NULL OR a.id IS NOT NULL) "
+                "GROUP BY j.contest_id",
+                (EXECUTION_SOURCE_CONTEST, *chunk),
+            ).fetchall()
+            history.update(
+                {
+                    int(row["contest_id"]): (
+                        int(row["last_claim_seq"] or 0),
+                        _parse_time(row["last_claimed_at"]),
+                    )
+                    for row in history_rows
+                }
+            )
+        projected = list(rows)
+        start = 0
+        while start < len(rows):
+            if contest_id_of(rows[start]) is None:
+                start += 1
+                continue
+            end = start + 1
+            while end < len(rows) and contest_id_of(rows[end]) is not None:
+                end += 1
+            band = rows[start:end]
+            groups: dict[int, list[dict]] = {}
+            first_position: dict[int, int] = {}
+            for position, row in enumerate(band):
+                contest_id = contest_id_of(row)
+                assert contest_id is not None
+                first_position.setdefault(contest_id, position)
+                groups.setdefault(contest_id, []).append(row)
+            if len(groups) > 1:
+                ordered_contests = sorted(
+                    groups,
+                    key=lambda contest_id: (
+                        *history.get(contest_id, (0, datetime.min)),
+                        first_position[contest_id],
+                        contest_id,
+                    ),
+                )
+                fair_band: list[dict] = []
+                depth = 0
+                while True:
+                    appended = False
+                    for contest_id in ordered_contests:
+                        contest_rows = groups[contest_id]
+                        if depth < len(contest_rows):
+                            fair_band.append(contest_rows[depth])
+                            appended = True
+                    if not appended:
+                        break
+                    depth += 1
+                projected[start:end] = fair_band
+            start = end
+        return projected
+
+    @staticmethod
+    def _non_human_bot_ids(job: dict) -> frozenset[int]:
+        return frozenset(
+            int(job[f"bot_{suffix}_id"])
+            for suffix in ("a", "b")
+            if str(job.get(f"bot_{suffix}_environment") or "")
+            != EXECUTION_ENV_HUMAN
+        )
+
+    @classmethod
+    def _active_non_human_bot_ids_tx(
+        cls, conn: sqlite3.Connection
+    ) -> frozenset[int]:
+        active: set[int] = set()
+        for row in conn.execute(
+            "SELECT bot_a_id,bot_b_id,bot_a_environment,bot_b_environment "
+            "FROM execution_jobs WHERE status IN ('starting','running','settling')"
+        ).fetchall():
+            active.update(cls._non_human_bot_ids(dict(row)))
+        return frozenset(active)
 
     @staticmethod
     def _capacity_tx(
@@ -1834,6 +2072,11 @@ class ExecutionRepository:
             untracked_host_cpu_millis,
             untracked_host_memory_mb,
         ) = untracked_resources
+        bounded_slots = max(1, min(int(max_match_slots), MAX_CONCURRENT_MATCHES))
+        bounded_units = max(
+            1,
+            min(int(max_sandbox_units), MAX_CONCURRENT_MATCHES * 2),
+        )
         return {
             "used_jobs": int(used["jobs"] or 0),
             "used_match_slots": int(used["slots"] or 0),
@@ -1849,8 +2092,8 @@ class ExecutionRepository:
             "running_matches": running_matches,
             "untracked_running_matches": untracked_running,
             "occupied_match_slots": occupied_match_slots,
-            "max_match_slots": max(1, int(max_match_slots)),
-            "max_sandbox_units": max(1, int(max_sandbox_units)),
+            "max_match_slots": bounded_slots,
+            "max_sandbox_units": bounded_units,
             # The production dispatcher always supplies a process-visible
             # ceiling.  None keeps older direct repository callers compatible.
             "max_host_cpu_millis": (
@@ -1925,16 +2168,46 @@ class ExecutionRepository:
                 )
         return "", ""
 
+    @classmethod
+    def _active_bot_capacity_block_tx(
+        cls,
+        conn: sqlite3.Connection,
+        job: dict,
+        *,
+        active_bot_ids: frozenset[int] | None = None,
+    ) -> tuple[str, str]:
+        if str(job.get("status") or "") != EXECUTION_QUEUED:
+            return "", ""
+        active = (
+            active_bot_ids
+            if active_bot_ids is not None
+            else cls._active_non_human_bot_ids_tx(conn)
+        )
+        if cls._non_human_bot_ids(job) & active:
+            return (
+                "bot_busy",
+                "等待参赛 Bot 当前对局完成；队列会自动选择其他可运行对局",
+            )
+        return "", ""
+
     def _project_capacity_block_tx(
         self,
         conn: sqlite3.Connection,
         job: dict,
         capacity: dict,
+        *,
+        active_bot_ids: frozenset[int] | None = None,
     ) -> dict:
         projected = dict(job)
         code, reason = self._permanent_host_block(projected, capacity)
         if not code:
             code, reason = self._local_agent_capacity_block_tx(conn, projected)
+        if not code:
+            code, reason = self._active_bot_capacity_block_tx(
+                conn,
+                projected,
+                active_bot_ids=active_bot_ids,
+            )
         if code:
             projected["capacity_blocked_code"] = code
             projected["capacity_blocked_reason"] = reason
@@ -2010,18 +2283,33 @@ class ExecutionRepository:
                                 break
                             ahead_jobs += 1
                             ahead_units += int(row["sandbox_units"])
+            active_bot_ids = self._active_non_human_bot_ids_tx(conn)
             projected_ordered = [
-                self._project_capacity_block_tx(conn, row, capacity)
+                self._project_capacity_block_tx(
+                    conn,
+                    row,
+                    capacity,
+                    active_bot_ids=active_bot_ids,
+                )
                 for row in ordered
             ]
             projected_target = (
-                self._project_capacity_block_tx(conn, dict(target), capacity)
+                self._project_capacity_block_tx(
+                    conn,
+                    dict(target),
+                    capacity,
+                    active_bot_ids=active_bot_ids,
+                )
                 if target is not None
                 else None
             )
             return {
                 "control": control,
                 "capacity": capacity,
+                "fairness": {
+                    "contest": CONTEST_FAIRNESS_POLICY,
+                    "bot_exclusivity": BOT_EXCLUSIVITY_POLICY,
+                },
                 "active": active,
                 "queued": projected_ordered,
                 "target": projected_target,
@@ -2061,7 +2349,24 @@ class ExecutionRepository:
         # Browser response-loss idempotency is an execution-request concern;
         # it must not leak into the persisted public Match configuration.
         config.pop("_execution_idempotency_fingerprint", None)
-        match_seed = config.get("duplicate_seed")
+        duplicate_seed = config.get("duplicate_seed")
+        single_match_seed = config.get("match_seed")
+        if duplicate_seed is not None and single_match_seed is not None:
+            raise ExecutionInvariantError(
+                "execution request has mutually exclusive frozen match seeds"
+            )
+        match_seed = (
+            duplicate_seed if duplicate_seed is not None else single_match_seed
+        )
+        if match_seed is not None and (
+            isinstance(match_seed, bool)
+            or not isinstance(match_seed, int)
+            or match_seed < 1
+            or match_seed > 9_223_372_036_854_775_807
+        ):
+            raise ExecutionInvariantError(
+                "execution request has invalid frozen match seed"
+            )
         config["_rating_eligible"] = bool(int(job["rated"] or 0))
         config["_rating_reason"] = str(job["rating_reason"])
         config["_execution_request_id"] = str(job["public_id"])
@@ -2128,7 +2433,7 @@ class ExecutionRepository:
                 json.dumps(config, ensure_ascii=False, separators=(",", ":")),
                 job.get("human_user_id"),
                 job.get("human_seat"),
-                int(match_seed) if match_seed is not None else None,
+                match_seed,
                 now,
             ),
         )
@@ -2234,6 +2539,7 @@ class ExecutionRepository:
                     "AND status IN ('starting','running','settling')"
                 ).fetchone()[0]
             )
+            active_bot_ids = self._active_non_human_bot_ids_tx(conn)
             selected: dict | None = None
             invalid_job_ids: set[int] = set()
             projection_ready: bool | None = None
@@ -2470,6 +2776,13 @@ class ExecutionRepository:
                         self._backoff_contest_pairing_tx(conn, job)
                         invalid_job_ids.add(int(job["id"]))
                         continue
+                    # Every real Bot is a host-wide singleton while an
+                    # execution is starting/running/settling.  This applies to
+                    # neutral contest and human matches too; the rated-specific
+                    # barrier below remains stricter because it also covers a
+                    # completed match whose rating settlement is outstanding.
+                    if self._non_human_bot_ids(job) & active_bot_ids:
+                        continue
                     if int(job["rated"] or 0):
                         ranked_rows = conn.execute(
                             "SELECT id FROM bots WHERE is_ranked=1 "
@@ -2549,6 +2862,7 @@ class ExecutionRepository:
                             == job["rating_pool_id"]
                         )
                         stage_contract_valid = False
+                        seed_binding_valid = False
                         if pairing is not None:
                             pairing_stage_idx = exact_nonnegative_int(
                                 pairing["stage_idx"]
@@ -2581,6 +2895,14 @@ class ExecutionRepository:
                                         game_id=str(job["game_id"]),
                                     )
                                 )
+                                if stage_contract_valid:
+                                    seed_binding_valid = (
+                                        _contest_job_seed_binding_is_valid(
+                                            job,
+                                            pairing,
+                                            stages[pairing_stage_idx],
+                                        )
+                                    )
                         if (
                             pairing is None
                             or pairing["status"] != STATUS_PENDING
@@ -2588,6 +2910,7 @@ class ExecutionRepository:
                             or pairing["contest_status"] not in ("published", "running")
                             or not identity_unchanged
                             or not stage_contract_valid
+                            or not seed_binding_valid
                         ):
                             conn.execute(
                                 "UPDATE execution_jobs SET status='cancelled',"
@@ -3668,6 +3991,8 @@ class ExecutionRepository:
 
 
 __all__ = [
+    "BOT_EXCLUSIVITY_POLICY",
+    "CONTEST_FAIRNESS_POLICY",
     "EXECUTION_ENV_HUMAN",
     "EXECUTION_ENV_PLATFORM_HIGH",
     "EXECUTION_ENV_PLATFORM_LOW",

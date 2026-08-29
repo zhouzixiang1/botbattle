@@ -35,6 +35,7 @@ from .public_contract import (
 from .schema import (
     CODE_RESET,
     COMMENT_TARGET_TYPES,
+    CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL,
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
@@ -45,6 +46,7 @@ from .schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    ELIMINATION_TIEBREAK_PAIRED_SWAP,
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
     LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER,
     LOCAL_AI_MAX_ONLINE_GLOBAL,
@@ -1279,6 +1281,32 @@ def _pairing_seed_field(source: dict[str, Any], *, required: bool) -> int | None
     return seed
 
 
+def _pairing_tiebreak_fields(source: dict[str, Any]) -> tuple[int, int]:
+    """Return strict durable coordinates for one elimination tiebreak row."""
+    group = source.get("tiebreak_group", 0)
+    game = source.get("tiebreak_game", 0)
+    if (
+        isinstance(group, bool)
+        or not isinstance(group, int)
+        or isinstance(game, bool)
+        or not isinstance(game, int)
+        or not (
+            (group == 0 and game == 0)
+            or (group >= 1 and game in (1, 2))
+        )
+    ):
+        raise ValueError(
+            "淘汰决胜坐标必须为主赛 0/0 或加赛 group>=1、game=1/2"
+        )
+    if group and (
+        source.get("bracket_slot") is None
+        or source.get("bot_b_id") is None
+        or source.get("entry_b_id") is None
+    ):
+        raise ValueError("淘汰决胜场必须绑定完整对阵与 bracket_slot")
+    return group, game
+
+
 def _pairing_series_participants(source: dict[str, Any]) -> tuple[int, int]:
     """Return a seat-independent participant identity for batch validation."""
     first = source.get("entry_a_id")
@@ -1299,15 +1327,20 @@ def _pairing_series_participants(source: dict[str, Any]) -> tuple[int, int]:
 
 def _pairing_series_batch(
     rows: list[dict[str, Any]],
+    *,
+    allow_elimination_tiebreak: bool = False,
 ) -> list[tuple[int, int]]:
     """Validate complete series coordinates and frozen seeds before a batch write."""
     normalized = [_pairing_series_fields(source) for source in rows]
-    frozen_seeds: list[int] = []
+    seeded_rows: dict[int, list[dict[str, Any]]] = {}
     series: dict[tuple[str, str, int, int], list[tuple[int, int]]] = {}
     for source, (index, size) in zip(rows, normalized):
         seed = _pairing_seed_field(source, required=size > 1)
         if seed is not None:
-            frozen_seeds.append(seed)
+            seeded_rows.setdefault(seed, []).append(source)
+        tiebreak_group, _tiebreak_game = _pairing_tiebreak_fields(source)
+        if tiebreak_group and not allow_elimination_tiebreak:
+            raise ValueError("淘汰决胜组必须通过专用原子追加接口写入")
         if size > 1:
             first, second = _pairing_series_participants(source)
             key = (
@@ -1318,8 +1351,40 @@ def _pairing_series_batch(
             )
             series.setdefault(key, []).append((index, size))
 
-    if len(frozen_seeds) != len(set(frozen_seeds)):
-        raise ValueError("多场赛事对阵必须冻结互不重复的 pairing_seed")
+    for seed, same_seed_rows in seeded_rows.items():
+        if len(same_seed_rows) == 1:
+            continue
+        coordinates = {
+            (
+                row.get("stage_key") or "",
+                row.get("round_num"),
+                row.get("bracket_slot"),
+                row.get("tiebreak_group", 0),
+            )
+            for row in same_seed_rows
+        }
+        games = {row.get("tiebreak_game", 0) for row in same_seed_rows}
+        if (
+            len(same_seed_rows) != 2
+            or len(coordinates) != 1
+            or next(iter(coordinates))[3] < 1
+            or games != {1, 2}
+        ):
+            raise ValueError(
+                "pairing_seed 只能由同一淘汰决胜组的两场换边对局共用"
+            )
+        first, second = same_seed_rows
+        if (
+            first.get("bot_a_id") != second.get("bot_b_id")
+            or first.get("bot_b_id") != second.get("bot_a_id")
+            or first.get("entry_a_id") != second.get("entry_b_id")
+            or first.get("entry_b_id") != second.get("entry_a_id")
+            or first.get("bot_a_version_id")
+            != second.get("bot_b_version_id")
+            or first.get("bot_b_version_id")
+            != second.get("bot_a_version_id")
+        ):
+            raise ValueError("同 seed 淘汰决胜组必须精确交换双方座位")
     for coordinates in series.values():
         sizes = {size for _index, size in coordinates}
         if len(sizes) != 1:
@@ -1351,7 +1416,7 @@ CREATE TABLE matches_{suffix} (
     result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（rounds_played/deltas/normalized_delta）
     human_user_id   INTEGER,
     human_seat      INTEGER,
-    match_seed      INTEGER,  -- P4：对局确定性 seed（duplicate 复现/回放用）
+    match_seed      INTEGER,  -- P4：对局私密冻结 seed（duplicate 复现/回放用）
     technical_loss  INTEGER NOT NULL DEFAULT 0,  -- P4：技术判负标记（崩溃/超时判负但计分）
     started_at      TEXT,
     ended_at        TEXT,
@@ -2597,6 +2662,10 @@ def _ensure_execution_environment_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX idx_execution_jobs_source "
         "ON execution_jobs(source,status,created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_execution_jobs_contest_claim_history "
+        "ON execution_jobs(source,contest_id,claimed_at,id)"
     )
     conn.execute(
         "CREATE UNIQUE INDEX idx_execution_jobs_current_match "
@@ -4073,6 +4142,18 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "series_size",
             "INTEGER NOT NULL DEFAULT 1 CHECK(series_size>=1)",
         )
+        _add_col(
+            conn,
+            "contest_pairings",
+            "tiebreak_group",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(tiebreak_group>=0)",
+        )
+        _add_col(
+            conn,
+            "contest_pairings",
+            "tiebreak_game",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(tiebreak_game>=0)",
+        )
         duplicate_binding = conn.execute(
             "SELECT match_id, COUNT(*) AS n FROM contest_pairings "
             "WHERE match_id IS NOT NULL GROUP BY match_id HAVING COUNT(*)>1 "
@@ -4086,6 +4167,49 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_pairings_match_unique "
             "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
+        )
+        # Seed allocation/validation runs once per physical pairing.  Unlimited
+        # round-robin stages therefore require a covering lookup instead of a
+        # full stage scan per row.  It is intentionally non-unique because the
+        # two games in one KO paired-swap tiebreak share the same private seed.
+        conn.execute(
+            CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL.replace(
+                "CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1
+            )
+        )
+        seed_index = conn.execute(
+            "SELECT type,sql FROM sqlite_master WHERE name=?",
+            ("idx_contest_pairings_seed_lookup",),
+        ).fetchall()
+        if (
+            len(seed_index) != 1
+            or str(seed_index[0]["type"]) != "index"
+            or _normalize_schema_sql(str(seed_index[0]["sql"] or ""))
+            != _normalize_schema_sql(CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL)
+        ):
+            raise RuntimeError(
+                "contest pairing seed lookup index definition mismatch"
+            )
+        duplicate_coordinate = conn.execute(
+            "SELECT contest_id,stage_idx,round_num,bracket_slot,"
+            "tiebreak_group,tiebreak_game,COUNT(*) AS n "
+            "FROM contest_pairings WHERE bracket_slot IS NOT NULL "
+            "GROUP BY contest_id,stage_idx,round_num,bracket_slot,"
+            "tiebreak_group,tiebreak_game HAVING COUNT(*)>1 LIMIT 1"
+        ).fetchone()
+        if duplicate_coordinate:
+            raise RuntimeError(
+                "contest_pairings 存在重复淘汰坐标，必须先修复: "
+                f"contest={duplicate_coordinate['contest_id']} "
+                f"stage={duplicate_coordinate['stage_idx']} "
+                f"round={duplicate_coordinate['round_num']} "
+                f"slot={duplicate_coordinate['bracket_slot']}"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_contest_pairings_elimination_coordinate "
+            "ON contest_pairings(contest_id,stage_idx,round_num,bracket_slot,"
+            "tiebreak_group,tiebreak_game) WHERE bracket_slot IS NOT NULL"
         )
 
     # ── 全来源持久执行队列 v3 ─────────────────────────────────────────
@@ -13035,6 +13159,8 @@ class Store:
         scheduled_at: str | None = None,
         series_index: int = 1,
         series_size: int = 1,
+        tiebreak_group: int = 0,
+        tiebreak_game: int = 0,
     ) -> dict:
         stage_idx = exact_nonnegative_int(stage_idx)
         if stage_idx is None:
@@ -13042,11 +13168,22 @@ class Store:
         series_index, series_size = _pairing_series_fields(
             {"series_index": series_index, "series_size": series_size}
         )
+        tiebreak_group, tiebreak_game = _pairing_tiebreak_fields(
+            {
+                "tiebreak_group": tiebreak_group,
+                "tiebreak_game": tiebreak_game,
+                "bracket_slot": bracket_slot,
+                "bot_b_id": bot_b_id,
+                "entry_b_id": entry_b_id,
+            }
+        )
         pairing_seed = _pairing_seed_field(
             {"pairing_seed": pairing_seed}, required=series_size > 1
         )
         if series_size > 1:
             raise ValueError("多场赛事对阵必须通过原子批次接口写入")
+        if tiebreak_group:
+            raise ValueError("淘汰决胜组必须通过专用原子追加接口写入")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             _require_live_contest_pairing_bots_tx(
@@ -13062,8 +13199,9 @@ class Store:
                 "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
                 "entry_b_id, bot_a_id, bot_b_id, bot_a_version_id, bot_b_version_id, "
                 "pairing_seed, published_at, scheduled_at, match_id, status, stage_idx, "
-                "stage_key, group_id, bracket_slot, color_first,series_index,series_size) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "stage_key, group_id, bracket_slot, color_first,series_index,series_size,"
+                "tiebreak_group,tiebreak_game) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     contest_id,
                     round_num,
@@ -13085,6 +13223,8 @@ class Store:
                     color_first,
                     series_index,
                     series_size,
+                    tiebreak_group,
+                    tiebreak_game,
                 ),
             )
             pid = cur.lastrowid
@@ -13095,6 +13235,285 @@ class Store:
             )
 
     add_contest_pairing = add_pairing
+
+    def ensure_contest_pairing_seed_for_enqueue(
+        self,
+        contest_id: int,
+        pairing: dict[str, Any],
+        *,
+        expected_stages_json: Any,
+    ) -> dict:
+        """Return one frozen contest seed, repairing only safe legacy rows.
+
+        This is the last write boundary before a duplicate execution request is
+        enqueued.  Markerless and aggregate historical stages may predate
+        ``pairing_seed``; their missing seed is allocated under
+        ``BEGIN IMMEDIATE`` after rechecking the complete pairing snapshot.  A
+        current independent-scoring stage or an elimination tiebreak is never
+        repaired here: both were born with an explicit seed contract and must
+        fail closed if that contract is missing or damaged.
+
+        A valid existing seed is an idempotent read.  In particular, a retry
+        may observe the already-enqueued job for that seed.  The active-job
+        exclusion applies to the NULL -> seed CAS itself so an old request can
+        never silently acquire a different seed after enqueue.
+        """
+        if not isinstance(pairing, dict):
+            raise ValueError("赛事对阵快照损坏")
+        pairing_id = exact_nonnegative_int(pairing.get("id"))
+        if pairing_id is None or pairing_id < 1:
+            raise ValueError("赛事对阵快照缺少合法 id")
+
+        # list_contest_pairings() exposes effective legacy entry ids while
+        # retaining the raw durable columns under these private keys.  The CAS
+        # must compare the raw identity, not a derived compatibility view.
+        expected = dict(pairing)
+        for suffix in ("a", "b"):
+            raw_key = f"_raw_entry_{suffix}_id"
+            if raw_key in expected:
+                expected[f"entry_{suffix}_id"] = expected[raw_key]
+        frozen_fields = (
+            "contest_id",
+            "round_num",
+            "entry_a_id",
+            "entry_b_id",
+            "bot_a_id",
+            "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "published_at",
+            "scheduled_at",
+            "status",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+            "series_index",
+            "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
+        )
+
+        def same_frozen_value(actual: Any, wanted: Any) -> bool:
+            if actual is None or wanted is None:
+                return actual is wanted
+            # SQLite integer and real values compare equal in Python (1 ==
+            # 1.0), but coordinates and identities must not drift by type.
+            return type(actual) is type(wanted) and actual == wanted
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
+            contest = c.execute(
+                "SELECT status,current_stage_idx,stages_json FROM contests WHERE id=?",
+                (int(contest_id),),
+            ).fetchone()
+            if not contest or contest["status"] not in (
+                CONTEST_PUBLISHED,
+                CONTEST_RUNNING,
+            ):
+                raise ValueError("仅 active 赛事可冻结执行随机种子")
+            if contest["stages_json"] != expected_stages_json:
+                raise ValueError("赛事冻结阶段已变化，拒绝分配随机种子")
+
+            current = c.execute(
+                "SELECT * FROM contest_pairings WHERE id=? AND contest_id=?",
+                (pairing_id, int(contest_id)),
+            ).fetchone()
+            if current is None:
+                raise ValueError("赛事对阵已不存在")
+            stage_idx = exact_nonnegative_int(current["stage_idx"])
+            current_stage_idx = exact_nonnegative_int(contest["current_stage_idx"])
+            if stage_idx is None or current_stage_idx != stage_idx:
+                raise ValueError("赛事当前阶段已变化，拒绝分配随机种子")
+            if current["status"] != STATUS_PENDING or current["match_id"] is not None:
+                raise ValueError("赛事对阵已开始，拒绝分配随机种子")
+            if any(
+                field not in expected
+                or not same_frozen_value(current[field], expected[field])
+                for field in frozen_fields
+            ):
+                raise ValueError("赛事对阵身份、版本或坐标已变化")
+
+            try:
+                stages = json.loads(contest["stages_json"])
+            except (TypeError, ValueError):
+                stages = None
+            stage = (
+                stages[stage_idx]
+                if isinstance(stages, list)
+                and stage_idx < len(stages)
+                and isinstance(stages[stage_idx], dict)
+                else None
+            )
+            if stage is None:
+                raise ValueError("赛事冻结阶段损坏")
+
+            tiebreak_group, _ = _pairing_tiebreak_fields(_row(current))
+            marker = stage.get("series_scoring")
+            if tiebreak_group > 0 and not (
+                stage.get("type") == "single_elimination"
+                and stage.get("tiebreak")
+                == ELIMINATION_TIEBREAK_PAIRED_SWAP
+                and stage.get("duplicate", False) is False
+            ):
+                raise ValueError("淘汰决胜对阵冻结阶段契约损坏")
+            seed = current["pairing_seed"]
+            if seed is not None:
+                seed = _pairing_seed_field(
+                    {"pairing_seed": seed}, required=True
+                )
+                same_seed = c.execute(
+                    "SELECT id,round_num,bracket_slot,tiebreak_group,tiebreak_game,"
+                    "entry_a_id,entry_b_id,bot_a_id,bot_b_id,"
+                    "bot_a_version_id,bot_b_version_id "
+                    "FROM contest_pairings WHERE contest_id=? AND stage_idx=? "
+                    "AND pairing_seed=? ORDER BY id",
+                    (int(contest_id), stage_idx, seed),
+                ).fetchall()
+                if tiebreak_group == 0:
+                    unique = (
+                        len(same_seed) == 1
+                        and exact_nonnegative_int(same_seed[0]["id"])
+                        == pairing_id
+                    )
+                else:
+                    frozen_round = exact_nonnegative_int(current["round_num"])
+                    frozen_slot = exact_nonnegative_int(current["bracket_slot"])
+                    coordinate_valid = bool(
+                        frozen_round is not None
+                        and frozen_round >= 1
+                        and frozen_slot is not None
+                        and len(same_seed) == 2
+                        and {
+                            exact_nonnegative_int(row["tiebreak_game"])
+                            for row in same_seed
+                        }
+                        == {1, 2}
+                        and all(
+                            exact_nonnegative_int(row["round_num"])
+                            == frozen_round
+                            and exact_nonnegative_int(row["bracket_slot"])
+                            == frozen_slot
+                            and exact_nonnegative_int(row["tiebreak_group"])
+                            == tiebreak_group
+                            for row in same_seed
+                        )
+                    )
+                    by_game = (
+                        {
+                            exact_nonnegative_int(row["tiebreak_game"]): row
+                            for row in same_seed
+                        }
+                        if coordinate_valid
+                        else {}
+                    )
+                    primary = (
+                        c.execute(
+                            "SELECT entry_a_id,entry_b_id,bot_a_id,bot_b_id,"
+                            "bot_a_version_id,bot_b_version_id "
+                            "FROM contest_pairings WHERE contest_id=? AND stage_idx=? "
+                            "AND round_num=? AND bracket_slot=? "
+                            "AND tiebreak_group=0 AND tiebreak_game=0",
+                            (
+                                int(contest_id),
+                                stage_idx,
+                                frozen_round,
+                                frozen_slot,
+                            ),
+                        ).fetchall()
+                        if coordinate_valid
+                        else []
+                    )
+                    identity_fields = (
+                        "entry_a_id",
+                        "entry_b_id",
+                        "bot_a_id",
+                        "bot_b_id",
+                        "bot_a_version_id",
+                        "bot_b_version_id",
+                    )
+                    swapped_fields = (
+                        "entry_b_id",
+                        "entry_a_id",
+                        "bot_b_id",
+                        "bot_a_id",
+                        "bot_b_version_id",
+                        "bot_a_version_id",
+                    )
+                    unique = bool(
+                        coordinate_valid
+                        and len(primary) == 1
+                        and all(
+                            same_frozen_value(by_game[1][field], primary[0][field])
+                            and same_frozen_value(
+                                by_game[2][field], primary[0][swapped]
+                            )
+                            for field, swapped in zip(
+                                identity_fields, swapped_fields
+                            )
+                        )
+                    )
+                if not unique:
+                    raise ValueError("赛事对阵私密冻结 seed 被其他坐标复用")
+                return _row(current)
+
+            if tiebreak_group > 0:
+                raise ValueError("淘汰决胜对阵缺少私密冻结 seed")
+            if marker == "independent_scoring_game_points_v1":
+                raise ValueError("独立计分对阵缺少私密冻结 seed")
+            if marker not in (None, "aggregate_match_points_v1"):
+                raise ValueError("赛事阶段 series_scoring 损坏")
+            legacy_series = bool(
+                marker == "aggregate_match_points_v1"
+                or (marker is None and "games_per_pair" in stage)
+            )
+            if not legacy_series:
+                # A markerless stage without games_per_pair is an ordinary
+                # historical single Match.  It has no seed contract to repair.
+                return _row(current)
+            games_per_pair = exact_nonnegative_int(stage.get("games_per_pair"))
+            if games_per_pair is None or games_per_pair < 1:
+                raise ValueError("历史多场阶段 games_per_pair 损坏")
+            active = c.execute(
+                "SELECT 1 FROM execution_jobs WHERE contest_pairing_id=? "
+                "AND status IN ('queued','starting','running','settling') LIMIT 1",
+                (pairing_id,),
+            ).fetchone()
+            if active:
+                raise ValueError("赛事对阵已有 active 执行请求，拒绝补写 seed")
+
+            allocated: int | None = None
+            for _ in range(16):
+                candidate = secrets.randbelow(9_223_372_036_854_775_807) + 1
+                if not c.execute(
+                    "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx=? AND pairing_seed=? LIMIT 1",
+                    (int(contest_id), stage_idx, candidate),
+                ).fetchone():
+                    allocated = candidate
+                    break
+            if allocated is None:
+                raise RuntimeError("无法分配唯一的赛事随机种子")
+            changed = c.execute(
+                "UPDATE contest_pairings SET pairing_seed=? "
+                "WHERE id=? AND contest_id=? AND status=? "
+                "AND match_id IS NULL AND pairing_seed IS NULL",
+                (
+                    allocated,
+                    pairing_id,
+                    int(contest_id),
+                    STATUS_PENDING,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事对阵 seed CAS 已失效")
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
+                ).fetchone()
+            )
 
     def create_contest_stage_pairings(
         self,
@@ -13147,6 +13566,8 @@ class Store:
             "color_first",
             "series_index",
             "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
         )
         normalized_series = _pairing_series_batch(pairing_rows)
         with self._tx() as c:
@@ -13221,6 +13642,8 @@ class Store:
                     "color_first": int(source.get("color_first") or 0),
                     "series_index": series_index,
                     "series_size": series_size,
+                    "tiebreak_group": source.get("tiebreak_group", 0),
+                    "tiebreak_game": source.get("tiebreak_game", 0),
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -13304,6 +13727,8 @@ class Store:
             "color_first",
             "series_index",
             "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -13371,6 +13796,417 @@ class Store:
                     "color_first": 0,
                     "series_index": series_index,
                     "series_size": series_size,
+                    "tiebreak_group": source.get("tiebreak_group", 0),
+                    "tiebreak_game": source.get("tiebreak_game", 0),
+                }
+                cur = c.execute(
+                    f"INSERT INTO contest_pairings({','.join(columns)}) "
+                    f"VALUES({placeholders})",
+                    tuple(row[column] for column in columns),
+                )
+                inserted.append(
+                    _row(
+                        c.execute(
+                            "SELECT * FROM contest_pairings WHERE id=?",
+                            (cur.lastrowid,),
+                        ).fetchone()
+                    )
+                )
+            return inserted
+
+    def append_contest_elimination_tiebreak_pairings(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        round_num: int,
+        bracket_slot: int,
+        pairing_rows: list[dict[str, Any]],
+        *,
+        expected_current_stage_idx: int,
+        expected_previous_tiebreak_group: int,
+    ) -> list[dict]:
+        """Atomically append one two-game swapped-seat elimination tiebreak.
+
+        The exact ``(stage, round, bracket_slot, group, game)`` coordinate is a
+        durable CAS boundary.  A retry or concurrent completion callback either
+        wins once or observes the already-appended group; it can never create a
+        partial or duplicate deciding group.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_current_stage_idx = exact_nonnegative_int(
+            expected_current_stage_idx
+        )
+        round_num = exact_nonnegative_int(round_num)
+        bracket_slot = exact_nonnegative_int(bracket_slot)
+        previous_group = exact_nonnegative_int(expected_previous_tiebreak_group)
+        if (
+            stage_idx is None
+            or expected_current_stage_idx is None
+            or round_num is None
+            or round_num < 1
+            or bracket_slot is None
+            or previous_group is None
+        ):
+            raise ValueError("淘汰决胜追加坐标必须是合法非负整数")
+        target_group = previous_group + 1
+        if len(pairing_rows) != 2:
+            raise ValueError("淘汰决胜组必须恰好包含两场换边对局")
+        normalized_series = _pairing_series_batch(
+            pairing_rows, allow_elimination_tiebreak=True
+        )
+        if any(
+            source.get("round_num") != round_num
+            or source.get("bracket_slot") != bracket_slot
+            or source.get("tiebreak_group") != target_group
+            for source in pairing_rows
+        ) or {source.get("tiebreak_game") for source in pairing_rows} != {1, 2}:
+            raise ValueError("淘汰决胜批次坐标与 CAS 目标不一致")
+        if any(source.get("pairing_seed") is not None for source in pairing_rows):
+            raise ValueError("淘汰决胜组随机种子只能由存储事务私密分配")
+
+        columns = (
+            "contest_id",
+            "round_num",
+            "entry_a_id",
+            "entry_b_id",
+            "bot_a_id",
+            "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "pairing_seed",
+            "published_at",
+            "scheduled_at",
+            "match_id",
+            "status",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+            "series_index",
+            "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
+            contest = c.execute(
+                "SELECT status,current_stage_idx,stages_json,game_id "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if not contest or contest["status"] != CONTEST_RUNNING:
+                raise ValueError("仅运行中的赛事可追加淘汰决胜组")
+            if (
+                exact_nonnegative_int(contest["current_stage_idx"])
+                != expected_current_stage_idx
+                or stage_idx != expected_current_stage_idx
+            ):
+                raise ValueError("赛事当前阶段已变化，拒绝追加淘汰决胜组")
+            stages = _loads_json(contest["stages_json"], default=[])
+            frozen_stage = (
+                stages[stage_idx]
+                if isinstance(stages, list)
+                and stage_idx < len(stages)
+                and isinstance(stages[stage_idx], dict)
+                else None
+            )
+            if (
+                not frozen_stage
+                or frozen_stage.get("type") != "single_elimination"
+                or frozen_stage.get("tiebreak")
+                != ELIMINATION_TIEBREAK_PAIRED_SWAP
+            ):
+                raise ValueError(
+                    "赛事未冻结 paired_swap_until_decided 决胜策略"
+                )
+
+            coordinate_rows = [
+                _row(row)
+                for row in c.execute(
+                    "SELECT cp.id,cp.contest_id,cp.stage_idx,cp.round_num,"
+                    "cp.bracket_slot,cp.status,cp.match_id,cp.tiebreak_group,"
+                    "cp.tiebreak_game,cp.bot_a_id,cp.bot_b_id,cp.entry_a_id,"
+                    "cp.entry_b_id,cp.bot_a_version_id,cp.bot_b_version_id,"
+                    "cp.pairing_seed,ea.user_id AS _entry_a_user_id,"
+                    "eb.user_id AS _entry_b_user_id,"
+                    "ba.owner_id AS _pairing_bot_a_owner_id,"
+                    "bb.owner_id AS _pairing_bot_b_owner_id "
+                    "FROM contest_pairings cp "
+                    "LEFT JOIN contest_entries ea ON ea.id=cp.entry_a_id "
+                    "LEFT JOIN contest_entries eb ON eb.id=cp.entry_b_id "
+                    "LEFT JOIN bots ba ON ba.id=cp.bot_a_id "
+                    "LEFT JOIN bots bb ON bb.id=cp.bot_b_id "
+                    "WHERE cp.contest_id=? AND cp.stage_idx=? "
+                    "AND cp.round_num=? AND cp.bracket_slot=? "
+                    "ORDER BY cp.tiebreak_group,cp.tiebreak_game",
+                    (contest_id, stage_idx, round_num, bracket_slot),
+                ).fetchall()
+            ]
+            normalized_coordinates: list[tuple[dict[str, Any], int, int]] = []
+            for row in coordinate_rows:
+                frozen_group = exact_nonnegative_int(row["tiebreak_group"])
+                frozen_game = exact_nonnegative_int(row["tiebreak_game"])
+                if frozen_group is None or frozen_game is None:
+                    raise ValueError("淘汰决胜坐标损坏")
+                normalized_coordinates.append((row, frozen_group, frozen_game))
+            primary = [
+                row
+                for row, frozen_group, frozen_game in normalized_coordinates
+                if frozen_group == 0 and frozen_game == 0
+            ]
+            if (
+                len(primary) != 1
+                or primary[0]["status"] != STATUS_COMPLETED
+                or primary[0]["match_id"] is None
+            ):
+                raise ValueError("淘汰主赛尚未权威完成，不能追加决胜组")
+            primary_row = primary[0]
+            by_game = {
+                int(source["tiebreak_game"]): source
+                for source in pairing_rows
+            }
+            first = by_game[1]
+            second = by_game[2]
+            if any(
+                (
+                    first.get(field) != primary_row[field]
+                    or second.get(field) != primary_row[swapped_field]
+                )
+                for field, swapped_field in (
+                    ("bot_a_id", "bot_b_id"),
+                    ("bot_b_id", "bot_a_id"),
+                    ("entry_a_id", "entry_b_id"),
+                    ("entry_b_id", "entry_a_id"),
+                    ("bot_a_version_id", "bot_b_version_id"),
+                    ("bot_b_version_id", "bot_a_version_id"),
+                )
+            ):
+                raise ValueError(
+                    "淘汰决胜组必须沿用主赛冻结身份、版本并精确换边"
+                )
+            actual_previous = max(
+                (
+                    frozen_group
+                    for _row, frozen_group, _game in normalized_coordinates
+                ),
+                default=0,
+            )
+            if actual_previous == target_group:
+                target_rows = [
+                    row
+                    for row, frozen_group, _game in normalized_coordinates
+                    if frozen_group == target_group
+                ]
+                target_by_game = {
+                    frozen_game: row
+                    for row, frozen_group, frozen_game in normalized_coordinates
+                    if frozen_group == target_group
+                }
+                target_seed = (
+                    target_by_game[1]["pairing_seed"]
+                    if 1 in target_by_game
+                    else None
+                )
+                seed_reused_elsewhere = bool(
+                    target_seed is not None
+                    and c.execute(
+                        "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                        "AND stage_idx=? AND pairing_seed=? "
+                        "AND id NOT IN (SELECT id FROM contest_pairings "
+                        "WHERE contest_id=? AND stage_idx=? AND round_num=? "
+                        "AND bracket_slot=? AND tiebreak_group=?) LIMIT 1",
+                        (
+                            contest_id,
+                            stage_idx,
+                            target_seed,
+                            contest_id,
+                            stage_idx,
+                            round_num,
+                            bracket_slot,
+                            target_group,
+                        ),
+                    ).fetchone()
+                )
+                if (
+                    len(target_rows) == 2
+                    and set(target_by_game) == {1, 2}
+                    and exact_nonnegative_int(target_seed) is not None
+                    and target_seed > 0
+                    and target_seed
+                    == target_by_game[2]["pairing_seed"]
+                    and not seed_reused_elsewhere
+                    and all(
+                        target_by_game[game][field] == by_game[game].get(field)
+                        for game in (1, 2)
+                        for field in (
+                            "bot_a_id",
+                            "bot_b_id",
+                            "entry_a_id",
+                            "entry_b_id",
+                            "bot_a_version_id",
+                            "bot_b_version_id",
+                        )
+                    )
+                ):
+                    return []
+                raise ValueError("已存在的淘汰决胜组与重试冻结契约不一致")
+            if actual_previous != previous_group:
+                raise ValueError("淘汰决胜组已变化，拒绝重复追加")
+            if previous_group:
+                previous_rows = [
+                    row
+                    for row, frozen_group, _game in normalized_coordinates
+                    if frozen_group == previous_group
+                ]
+                previous_by_game = {
+                    frozen_game: row
+                    for row, frozen_group, frozen_game in normalized_coordinates
+                    if frozen_group == previous_group
+                }
+                previous_seed = (
+                    previous_by_game[1]["pairing_seed"]
+                    if 1 in previous_by_game
+                    else None
+                )
+                previous_seed_reused_elsewhere = bool(
+                    previous_seed is not None
+                    and c.execute(
+                        "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                        "AND stage_idx=? AND pairing_seed=? "
+                        "AND id NOT IN (SELECT id FROM contest_pairings "
+                        "WHERE contest_id=? AND stage_idx=? AND round_num=? "
+                        "AND bracket_slot=? AND tiebreak_group=?) LIMIT 1",
+                        (
+                            contest_id,
+                            stage_idx,
+                            previous_seed,
+                            contest_id,
+                            stage_idx,
+                            round_num,
+                            bracket_slot,
+                            previous_group,
+                        ),
+                    ).fetchone()
+                )
+                if (
+                    len(previous_rows) != 2
+                    or set(previous_by_game) != {1, 2}
+                    or any(
+                        row["status"] != STATUS_COMPLETED
+                        or row["match_id"] is None
+                        for row in previous_rows
+                    )
+                    or exact_nonnegative_int(previous_seed) is None
+                    or previous_seed <= 0
+                    or previous_seed != previous_by_game[2]["pairing_seed"]
+                    or previous_seed_reused_elsewhere
+                    or any(
+                        previous_by_game[game][field]
+                        != by_game[game].get(field)
+                        for game in (1, 2)
+                        for field in (
+                            "bot_a_id",
+                            "bot_b_id",
+                            "entry_a_id",
+                            "entry_b_id",
+                            "bot_a_version_id",
+                            "bot_b_version_id",
+                        )
+                    )
+                ):
+                    raise ValueError("上一淘汰决胜组冻结契约损坏或尚未权威完成")
+
+            from bzplat.backend.contests.series import (
+                summarize_elimination_encounter,
+            )
+            from bzplat.backend.games import registry as game_registry
+
+            roster_rows = c.execute(
+                "SELECT id,bot_id,user_id FROM contest_entries WHERE contest_id=?",
+                (contest_id,),
+            ).fetchall()
+            expected_entry_bots = {
+                int(row["id"]): row["bot_id"] for row in roster_rows
+            }
+            expected_entry_users = {
+                int(row["id"]): int(row["user_id"]) for row in roster_rows
+            }
+            try:
+                game_spec = game_registry.get(str(contest["game_id"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("赛事游戏契约损坏") from exc
+
+            def match_lookup(match_id: str) -> dict[str, Any] | None:
+                table = self._match_table_of(c, match_id)
+                if table is None:
+                    return None
+                return _parse_match_json_cols(
+                    _row(
+                        c.execute(
+                            f"SELECT * FROM {table} WHERE id=?", (match_id,)
+                        ).fetchone()
+                    )
+                )
+
+            summary = summarize_elimination_encounter(
+                frozen_stage,
+                coordinate_rows,
+                match_lookup,
+                game_spec=game_spec,
+                expected_contest_id=contest_id,
+                expected_entry_bots=expected_entry_bots,
+                expected_entry_users=expected_entry_users,
+                require_current_entry_bots=False,
+            )
+            if (
+                summary.get("state") != "append_tiebreak"
+                or summary.get("next_tiebreak_group") != target_group
+            ):
+                raise ValueError("淘汰遭遇赛果已变化，拒绝追加决胜组")
+
+            pairing_seed: int | None = None
+            for _ in range(16):
+                candidate = secrets.randbelow(9_223_372_036_854_775_807) + 1
+                if not c.execute(
+                    "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx=? AND pairing_seed=? LIMIT 1",
+                    (contest_id, stage_idx, candidate),
+                ).fetchone():
+                    pairing_seed = candidate
+                    break
+            if pairing_seed is None:
+                raise RuntimeError("无法分配唯一的淘汰决胜随机种子")
+
+            placeholders = ",".join("?" for _ in columns)
+            inserted: list[dict] = []
+            for source, (series_index, series_size) in zip(
+                pairing_rows, normalized_series
+            ):
+                row = {
+                    "contest_id": contest_id,
+                    "round_num": round_num,
+                    "entry_a_id": source.get("entry_a_id"),
+                    "entry_b_id": source.get("entry_b_id"),
+                    "bot_a_id": source.get("bot_a_id"),
+                    "bot_b_id": source.get("bot_b_id"),
+                    "bot_a_version_id": source.get("bot_a_version_id"),
+                    "bot_b_version_id": source.get("bot_b_version_id"),
+                    "pairing_seed": pairing_seed,
+                    "published_at": source.get("published_at"),
+                    "scheduled_at": source.get("scheduled_at"),
+                    "match_id": None,
+                    "status": STATUS_PENDING,
+                    "stage_idx": stage_idx,
+                    "stage_key": source.get("stage_key") or "",
+                    "group_id": source.get("group_id") or "",
+                    "bracket_slot": bracket_slot,
+                    "color_first": 0,
+                    "series_index": series_index,
+                    "series_size": series_size,
+                    "tiebreak_group": target_group,
+                    "tiebreak_game": source.get("tiebreak_game"),
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -13553,6 +14389,8 @@ class Store:
             "color_first",
             "series_index",
             "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -13577,6 +14415,16 @@ class Store:
             current_ids = [int(row["id"]) for row in current]
             if current_ids != expected_ids:
                 raise ValueError("published 对阵在恢复期间已变化，拒绝覆盖")
+            active_request = c.execute(
+                "SELECT 1 FROM execution_jobs WHERE "
+                "(contest_id=? OR contest_pairing_id IN ("
+                "SELECT id FROM contest_pairings WHERE contest_id=?"
+                ")) AND status IN ('queued','starting','running','settling') "
+                "LIMIT 1",
+                (contest_id, contest_id),
+            ).fetchone()
+            if active_request:
+                raise ValueError("published 赛事已有 active 执行请求，不能自动重建")
             if any(row["match_id"] is not None for row in current):
                 raise ValueError("published 对阵已绑定对局，不能自动重建")
             if any(
@@ -13631,6 +14479,8 @@ class Store:
                     "color_first": int(source.get("color_first") or 0),
                     "series_index": series_index,
                     "series_size": series_size,
+                    "tiebreak_group": source.get("tiebreak_group", 0),
+                    "tiebreak_game": source.get("tiebreak_game", 0),
                 }
                 cur = c.execute(
                     f"INSERT INTO contest_pairings({','.join(columns)}) "
@@ -14004,9 +14854,13 @@ class Store:
             return [_row(r) for r in rows]
 
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
-        immutable = {"pairing_seed", "series_index", "series_size"}.intersection(
-            fields
-        )
+        immutable = {
+            "pairing_seed",
+            "series_index",
+            "series_size",
+            "tiebreak_group",
+            "tiebreak_game",
+        }.intersection(fields)
         if immutable:
             raise ValueError("赛事对阵发布身份字段不可修改")
         if "stage_idx" in fields:

@@ -58,6 +58,8 @@ from bzplat.backend.runtime.config import (
 )
 from bzplat.backend.store import Store, rating_projection_digests
 from bzplat.backend.store.execution import (
+    BOT_EXCLUSIVITY_POLICY,
+    CONTEST_FAIRNESS_POLICY,
     DockerLaunchInvariantError,
     ExecutionAttemptNotCurrent,
     ExecutionInvariantError,
@@ -210,6 +212,33 @@ def _enqueue_pair(
         bot_b_id=b["bot_id"],
         bot_a_version_id=a["version_id"],
         bot_b_version_id=b["version_id"],
+    )
+
+
+def _enqueue_contest_pair(
+    store: Store,
+    contest: dict,
+    pair: tuple[dict, dict],
+) -> dict:
+    a, b = pair
+    pairing = store.add_pairing(
+        int(contest["id"]),
+        a["bot_id"],
+        b["bot_id"],
+        bot_a_version_id=a["version_id"],
+        bot_b_version_id=b["version_id"],
+    )
+    return store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=a["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=a["bot_id"],
+        bot_b_id=b["bot_id"],
+        bot_a_version_id=a["version_id"],
+        bot_b_version_id=b["version_id"],
+        contest_id=int(contest["id"]),
+        contest_pairing_id=int(pairing["id"]),
     )
 
 
@@ -2911,6 +2940,540 @@ def test_idle_only_real_orchestrator_yield_has_exact_cleanup_and_no_side_effects
         )["status"] == "queued"
 
 
+def test_contest_claims_rotate_durably_and_keep_each_contest_fifo(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"contest-rotation-{index}") for index in range(8)]
+    contests = [
+        store.create_contest(
+            f"Rotation {label}",
+            bots[0]["user_id"],
+            status="running",
+            game_id="holdem",
+            stages_json=_valid_contest_stages_json(),
+        )
+        for label in ("A", "B")
+    ]
+    jobs_by_contest: list[list[dict]] = [[], []]
+    for contest_index, offsets in enumerate(((0, 2), (4, 6))):
+        for offset in offsets:
+            pairing = store.add_pairing(
+                contests[contest_index]["id"],
+                bots[offset]["bot_id"],
+                bots[offset + 1]["bot_id"],
+                bot_a_version_id=bots[offset]["version_id"],
+                bot_b_version_id=bots[offset + 1]["version_id"],
+            )
+            jobs_by_contest[contest_index].append(
+                store.executions.enqueue(
+                    source=EXECUTION_SOURCE_CONTEST,
+                    owner_user_id=bots[0]["user_id"],
+                    game_id="holdem",
+                    match_type=TYPE_CONTEST,
+                    bot_a_id=bots[offset]["bot_id"],
+                    bot_b_id=bots[offset + 1]["bot_id"],
+                    bot_a_version_id=bots[offset]["version_id"],
+                    bot_b_version_id=bots[offset + 1]["version_id"],
+                    contest_id=contests[contest_index]["id"],
+                    contest_pairing_id=pairing["id"],
+                )
+            )
+
+    # Jobs were enqueued A1,A2,B1,B2.  Contest-level service rotates while
+    # preserving A1<A2 and B1<B2, even when all claims share one-second
+    # claimed_at values.
+    claimed = [_claim(store, slots=4, units=8) for _ in range(2)]
+    assert [row["public_id"] for row in claimed] == [
+        jobs_by_contest[0][0]["public_id"],
+        jobs_by_contest[1][0]["public_id"],
+    ]
+
+    # A fresh Store/repository has no process-local cursor.  The next turns
+    # still derive from claimed_at plus immutable attempt ids in SQLite.
+    reopened = Store(store.path)
+    try:
+        claimed.extend(
+            reopened.executions.claim_next(
+                max_match_slots=4,
+                max_sandbox_units=8,
+                aging_seconds=60,
+                user_active_limit=1,
+                contest_share_slots=1,
+            )
+            for _ in range(2)
+        )
+    finally:
+        reopened.close()
+    assert [row["public_id"] for row in claimed] == [
+        jobs_by_contest[0][0]["public_id"],
+        jobs_by_contest[1][0]["public_id"],
+        jobs_by_contest[0][1]["public_id"],
+        jobs_by_contest[1][1]["public_id"],
+    ]
+    repository_snapshot = store.executions.snapshot(
+        max_match_slots=4,
+        max_sandbox_units=8,
+        aging_seconds=60,
+    )
+    assert repository_snapshot["fairness"] == {
+        "contest": CONTEST_FAIRNESS_POLICY,
+        "bot_exclusivity": BOT_EXCLUSIVITY_POLICY,
+    }
+    public = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=4, max_sandbox_units=8
+    ).public_snapshot()
+    assert public["fairness"] == {
+        "contest": "round_robin_v1",
+        "bot_exclusivity": "active_execution_v1",
+    }
+    assert set(public["fairness"]) == {"contest", "bot_exclusivity"}
+    assert "contest_id" not in json.dumps(public["fairness"])
+
+
+def test_contest_rotation_uses_monotonic_attempt_order_across_clock_correction(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"contest-clock-{index}") for index in range(4)]
+    contests = [
+        store.create_contest(
+            f"Clock {label}",
+            bots[0]["user_id"],
+            status="running",
+            game_id="holdem",
+            stages_json=_valid_contest_stages_json(),
+        )
+        for label in ("A", "B")
+    ]
+    jobs = [
+        _enqueue_contest_pair(store, contests[index], (bots[index * 2], bots[index * 2 + 1]))
+        for index in range(2)
+    ]
+    with store._tx() as conn:
+        # A was served first while the host clock was incorrectly in 2030; B
+        # was served second after correction to 2026.  AUTOINCREMENT attempt
+        # ids, not wall time, must make A the next least-recently-served contest.
+        conn.execute(
+            "INSERT INTO execution_job_attempts("
+            "job_id,attempt_no,match_id,status,created_at,terminal_at) "
+            "VALUES(?,1,?,'completed',?,?)",
+            (int(jobs[0]["id"]), "clock-a", "2030-01-01T00:00:00", "2030-01-01T00:00:01"),
+        )
+        conn.execute(
+            "INSERT INTO execution_job_attempts("
+            "job_id,attempt_no,match_id,status,created_at,terminal_at) "
+            "VALUES(?,1,?,'completed',?,?)",
+            (int(jobs[1]["id"]), "clock-b", "2026-01-01T00:00:00", "2026-01-01T00:00:01"),
+        )
+        raw = [
+            dict(conn.execute("SELECT * FROM execution_jobs WHERE id=?", (job["id"],)).fetchone())
+            for job in jobs
+        ]
+        ordered = store.executions._fair_contest_rows_tx(conn, raw)
+
+    assert [row["public_id"] for row in ordered] == [
+        jobs[0]["public_id"],
+        jobs[1]["public_id"],
+    ]
+
+
+def test_contest_rotation_cannot_cross_manual_priority_barrier(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"contest-band-{index}") for index in range(6)]
+    contests = [
+        store.create_contest(
+            f"Contest band {label}",
+            bots[0]["user_id"],
+            status="running",
+            game_id="holdem",
+            stages_json=_valid_contest_stages_json(),
+        )
+        for label in ("A", "B")
+    ]
+    contest_a = _enqueue_contest_pair(store, contests[0], (bots[0], bots[1]))
+    manual = _enqueue_pair(store, (bots[2], bots[3]))
+    contest_b = _enqueue_contest_pair(store, contests[1], (bots[4], bots[5]))
+
+    now = datetime.now()
+    contest_a_created = (now - timedelta(minutes=20)).isoformat(
+        timespec="seconds"
+    )
+    foreground_created = now.isoformat(timespec="seconds")
+    older_b_service = (now - timedelta(hours=2)).isoformat(timespec="seconds")
+    newer_a_service = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET created_at=? WHERE id=?",
+            (contest_a_created, int(contest_a["id"])),
+        )
+        conn.execute(
+            "UPDATE execution_jobs SET created_at=? WHERE id IN (?,?)",
+            (foreground_created, int(manual["id"]), int(contest_b["id"])),
+        )
+        # Persist prior service without a process-local cursor.  B was served
+        # less recently, so an unconstrained contest rotation would put B first.
+        conn.executemany(
+            "INSERT INTO execution_job_attempts("
+            "job_id,attempt_no,match_id,status,created_at,terminal_at) "
+            "VALUES(?,1,?,'completed',?,?)",
+                (
+                    (
+                        int(contest_b["id"]),
+                        "contest-band-history-b",
+                        older_b_service,
+                        older_b_service,
+                    ),
+                    (
+                        int(contest_a["id"]),
+                        "contest-band-history-a",
+                        newer_a_service,
+                        newer_a_service,
+                    ),
+                ),
+            )
+        raw_a = dict(
+            conn.execute(
+                "SELECT * FROM execution_jobs WHERE id=?", (contest_a["id"],)
+            ).fetchone()
+        )
+        raw_b = dict(
+            conn.execute(
+                "SELECT * FROM execution_jobs WHERE id=?", (contest_b["id"],)
+            ).fetchone()
+        )
+        assert [
+            row["public_id"]
+            for row in store.executions._fair_contest_rows_tx(
+                conn, [raw_a, raw_b]
+            )
+        ] == [contest_b["public_id"], contest_a["public_id"]]
+        ordered = store.executions._ordered_queued_tx(
+            conn, aging_seconds=60
+        )
+
+    # A's 20-minute aging bonus beats manual; manual's source priority beats B.
+    # Fairness applies only inside each contiguous contest band and cannot turn
+    # the durable B history into B>A or B>manual.
+    assert [row["public_id"] for row in ordered] == [
+        contest_a["public_id"],
+        manual["public_id"],
+        contest_b["public_id"],
+    ]
+
+
+def test_contest_fairness_history_has_targeted_restart_safe_index(queue_store):
+    store = queue_store
+    with store._tx() as conn:
+        columns = {
+            str(row["name"]): tuple(
+                str(item["name"])
+                for item in conn.execute(
+                    f"PRAGMA index_info('{row['name']}')"
+                ).fetchall()
+            )
+            for row in conn.execute("PRAGMA index_list('execution_jobs')")
+        }
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT j.contest_id,"
+            "MAX(COALESCE(j.claimed_at,a.created_at)),COALESCE(MAX(a.id),0) "
+            "FROM execution_jobs j LEFT JOIN execution_job_attempts a "
+            "ON a.job_id=j.id WHERE j.source=? AND j.contest_id IN (?,?,?) "
+            "AND (j.claimed_at IS NOT NULL OR a.id IS NOT NULL) "
+            "GROUP BY j.contest_id",
+            (EXECUTION_SOURCE_CONTEST, 1, 2, 3),
+        ).fetchall()
+
+    assert columns["idx_execution_jobs_contest_claim_history"] == (
+        "source",
+        "contest_id",
+        "claimed_at",
+        "id",
+    )
+    assert "idx_execution_jobs_contest_claim_history" in " ".join(
+        str(row["detail"]) for row in plan
+    )
+
+
+def test_all_capacity_entrypoints_defensively_clamp_to_six_slots(queue_store):
+    store = queue_store
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(),
+        store,
+        max_match_slots=999,
+        max_sandbox_units=999,
+    )
+    orchestrator = MatchOrchestrator(
+        store,
+        runner=SimpleNamespace(),
+        max_concurrent=999,
+    )
+    capacity = store.executions.snapshot(
+        max_match_slots=999,
+        max_sandbox_units=999,
+        aging_seconds=60,
+    )["capacity"]
+
+    assert (dispatcher.max_match_slots, dispatcher.max_sandbox_units) == (6, 12)
+    assert orchestrator.max_concurrent == 6
+    assert orchestrator._sem._value == 6
+    orchestrator.rebuild_concurrency(999)
+    assert orchestrator.max_concurrent == 6
+    assert orchestrator._sem._value == 6
+    assert (capacity["max_match_slots"], capacity["max_sandbox_units"]) == (
+        6,
+        12,
+    )
+
+
+def test_explicit_zero_sandbox_budget_can_only_tighten_dispatcher(queue_store):
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(),
+        queue_store,
+        max_match_slots=6,
+        max_sandbox_units=0,
+    )
+
+    assert dispatcher.max_match_slots == 6
+    assert dispatcher.max_sandbox_units == 1
+
+
+def test_nonrated_bot_conflict_skips_to_next_contest(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"contest-bot-lock-{index}") for index in range(6)]
+    contests = [
+        store.create_contest(
+            f"Bot lock {label}",
+            bots[0]["user_id"],
+            status="running",
+            game_id="holdem",
+            stages_json=_valid_contest_stages_json(),
+        )
+        for label in ("blocked", "runnable")
+    ]
+
+    contest_jobs: list[dict] = []
+    for contest_index, (left, right) in enumerate(((0, 2), (3, 4))):
+        pairing = store.add_pairing(
+            contests[contest_index]["id"],
+            bots[left]["bot_id"],
+            bots[right]["bot_id"],
+            bot_a_version_id=bots[left]["version_id"],
+            bot_b_version_id=bots[right]["version_id"],
+        )
+        contest_jobs.append(
+            store.executions.enqueue(
+                source=EXECUTION_SOURCE_CONTEST,
+                owner_user_id=bots[0]["user_id"],
+                game_id="holdem",
+                match_type=TYPE_CONTEST,
+                bot_a_id=bots[left]["bot_id"],
+                bot_b_id=bots[right]["bot_id"],
+                bot_a_version_id=bots[left]["version_id"],
+                bot_b_version_id=bots[right]["version_id"],
+                contest_id=contests[contest_index]["id"],
+                contest_pairing_id=pairing["id"],
+            )
+        )
+
+    _verify_projection(store)
+    manual = _enqueue_pair(store, (bots[0], bots[1]))
+    assert _claim(store, slots=3, units=6)["public_id"] == manual["public_id"]
+
+    # The first contest is next in fair order but shares a Bot with the active
+    # manual match.  Contest jobs are neutral, so this specifically exercises
+    # the new all-Bot gate rather than the pre-existing rated-only barrier.
+    claimed = _claim(store, slots=3, units=6)
+    assert claimed and claimed["public_id"] == contest_jobs[1]["public_id"]
+    assert store.executions.get(contest_jobs[0]["public_id"])["status"] == "queued"
+    assert int(claimed["rated"]) == 0
+    blocked = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=3, max_sandbox_units=6
+    ).public_request(contest_jobs[0]["public_id"])
+    assert blocked and blocked["blocked_code"] == "bot_busy"
+    assert "bot_id" not in json.dumps(blocked, ensure_ascii=False)
+
+
+def test_human_active_bot_is_globally_exclusive(queue_store):
+    store = queue_store
+    _, shared_bot, human_job = _enqueue_human(store, "bot-lock-human")
+    active = _claim(store, slots=3, units=6)
+    assert active and active["public_id"] == human_job["public_id"]
+    # Both seat snapshots carry the same Bot id, but the human seat is not a
+    # real Bot execution identity and the remaining platform seat is retained.
+    assert store.executions._non_human_bot_ids(active) == frozenset(
+        {shared_bot["bot_id"]}
+    )
+
+    others = [_bot(store, f"bot-lock-human-{index}") for index in range(3)]
+    contest = store.create_contest(
+        "Human Bot exclusivity",
+        shared_bot["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    blocked = _enqueue_contest_pair(
+        store, contest, (shared_bot, others[0])
+    )
+    runnable = _enqueue_contest_pair(store, contest, (others[1], others[2]))
+
+    claimed = _claim(store, slots=3, units=6)
+    assert claimed and claimed["public_id"] == runnable["public_id"]
+    assert store.executions.get(blocked["public_id"])["status"] == "queued"
+    projected = store.executions.snapshot(
+        max_match_slots=3,
+        max_sandbox_units=6,
+        aging_seconds=60,
+        public_id=blocked["public_id"],
+    )["target"]
+    assert projected["capacity_blocked_code"] == "bot_busy"
+
+
+def test_remote_local_active_bot_is_globally_exclusive(queue_store):
+    store = queue_store
+    owner = _api_user(store, "bot_lock_remote_owner")
+    opponent_owner = _api_user(store, "bot_lock_remote_opponent")
+    remote_bot = _owned_bot(store, owner, "bot_lock_remote")
+    docker_bot = _owned_bot(store, opponent_owner, "bot_lock_remote_docker")
+    agent = _local_agent(store, remote_bot, "bot-lock-remote")
+    store.executions.set_local_agent_available(lambda _agent_id: True)
+    remote_job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=int(owner["id"]),
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=remote_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=remote_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=int(agent["id"]),
+    )
+    active = _claim(store, slots=3, units=6)
+    assert active and active["public_id"] == remote_job["public_id"]
+    assert store.executions._non_human_bot_ids(active) == frozenset(
+        {remote_bot["bot_id"], docker_bot["bot_id"]}
+    )
+
+    others = [_bot(store, f"bot-lock-remote-{index}") for index in range(3)]
+    contest = store.create_contest(
+        "Remote-local Bot exclusivity",
+        owner["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    blocked = _enqueue_contest_pair(store, contest, (remote_bot, others[0]))
+    runnable = _enqueue_contest_pair(store, contest, (others[1], others[2]))
+
+    claimed = _claim(store, slots=3, units=6)
+    assert claimed and claimed["public_id"] == runnable["public_id"]
+    assert store.executions.get(blocked["public_id"])["status"] == "queued"
+
+
+def test_settling_selfplay_bot_is_deduped_and_globally_exclusive(queue_store):
+    store = queue_store
+    shared_bot = _bot(store, "bot-lock-settling-selfplay")
+    selfplay = _enqueue_pair(store, (shared_bot, shared_bot))
+    active = _claim(store, slots=3, units=6)
+    assert active and active["public_id"] == selfplay["public_id"]
+    assert active["rating_reason"] == "self_play"
+    assert store.executions._non_human_bot_ids(active) == frozenset(
+        {shared_bot["bot_id"]}
+    )
+
+    settling_at = datetime.now().isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET status='settling',settling_at=?,"
+            "cleanup_state='pending' WHERE id=?",
+            (settling_at, int(active["id"])),
+        )
+        conn.execute(
+            "UPDATE execution_job_attempts SET status='settling' WHERE job_id=?",
+            (int(active["id"]),),
+        )
+        assert store.executions._active_non_human_bot_ids_tx(conn) == frozenset(
+            {shared_bot["bot_id"]}
+        )
+
+    others = [_bot(store, f"bot-lock-settling-{index}") for index in range(3)]
+    contest = store.create_contest(
+        "Settling selfplay exclusivity",
+        shared_bot["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    blocked = _enqueue_contest_pair(store, contest, (shared_bot, others[0]))
+    runnable = _enqueue_contest_pair(store, contest, (others[1], others[2]))
+
+    claimed = _claim(store, slots=3, units=6)
+    assert claimed and claimed["public_id"] == runnable["public_id"]
+    assert store.executions.get(blocked["public_id"])["status"] == "queued"
+
+
+def test_six_slot_resource_admission_lets_one_contest_fill_host(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"six-slot-{index}") for index in range(14)]
+    contest = store.create_contest(
+        "Six slot capacity",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    jobs: list[dict] = []
+    for offset in range(0, 14, 2):
+        pairing = store.add_pairing(
+            contest["id"],
+            bots[offset]["bot_id"],
+            bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+        )
+        jobs.append(
+            store.executions.enqueue(
+                source=EXECUTION_SOURCE_CONTEST,
+                owner_user_id=bots[0]["user_id"],
+                game_id="holdem",
+                match_type=TYPE_CONTEST,
+                bot_a_id=bots[offset]["bot_id"],
+                bot_b_id=bots[offset + 1]["bot_id"],
+                bot_a_version_id=bots[offset]["version_id"],
+                bot_b_version_id=bots[offset + 1]["version_id"],
+                contest_id=contest["id"],
+                contest_pairing_id=pairing["id"],
+            )
+        )
+
+    claim_kwargs = {
+        "max_match_slots": 6,
+        "max_sandbox_units": 12,
+        "max_host_cpu_millis": 24_000,
+        "max_host_memory_mb": 24 * 1024,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(6)]
+    assert [row["public_id"] for row in claimed] == [
+        row["public_id"] for row in jobs[:6]
+    ]
+    assert store.executions.claim_next(**claim_kwargs) is None
+    assert store.executions.get(jobs[6]["public_id"])["status"] == "queued"
+    capacity = store.executions.snapshot(
+        max_match_slots=6,
+        max_sandbox_units=12,
+        max_host_cpu_millis=24_000,
+        max_host_memory_mb=24 * 1024,
+        aging_seconds=60,
+    )["capacity"]
+    assert capacity["used_match_slots"] == 6
+    assert capacity["used_sandbox_units"] == 12
+    assert capacity["used_host_cpu_millis"] == 24_000
+    assert capacity["used_host_memory_mb"] == 24 * 1024
+
+
 def test_contest_share_never_leaves_capacity_idle(queue_store):
     store = queue_store
     bots = [_bot(store, f"share-{index}") for index in range(8)]
@@ -3155,6 +3718,215 @@ def test_contest_claim_rejects_malformed_persisted_stage_cursor(
         "JOIN matches_holdem m ON m.id=mi.id WHERE m.contest_id=?",
         (contest["id"],),
     ).fetchone()[0] == 0
+
+
+def _seed_bound_contest_job(
+    store: Store,
+    key: str,
+    *,
+    stage: dict,
+    pairing_seed: int,
+    match_config: dict,
+) -> tuple[dict, dict, dict]:
+    bots = [_bot(store, f"{key}-{index}") for index in range(2)]
+    contest = store.create_contest(
+        f"seed-bound-{key}",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        stage_idx=0,
+        stage_key=str(stage.get("key") or ""),
+        pairing_seed=pairing_seed,
+    )
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+        match_config=match_config,
+    )
+    return contest, pairing, job
+
+
+def test_contest_duplicate_claim_binds_exact_pairing_seed(queue_store):
+    store = queue_store
+    seed = 4_242_424
+    stage = {
+        "key": "dup",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": True,
+        "games_per_pair": 1,
+        "series_scoring": "independent_scoring_game_points_v1",
+    }
+    contest, pairing, job = _seed_bound_contest_job(
+        store,
+        "duplicate-seed-happy",
+        stage=stage,
+        pairing_seed=seed,
+        match_config={"duplicate": True, "duplicate_seed": seed},
+    )
+
+    claimed = _claim(store, slots=1, units=4)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match = store.get_match(claimed["current_match_id"])
+    assert match["match_seed"] == seed
+    assert match["match_config"]["duplicate_seed"] == seed
+    assert store.list_contest_pairings(contest["id"])[0]["match_id"] == match["id"]
+
+
+def test_contest_claim_rejects_pairing_seed_drift_without_creating_match(queue_store):
+    store = queue_store
+    seed = 5_151_515
+    stage = {
+        "key": "dup",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": True,
+        "games_per_pair": 1,
+        "series_scoring": "independent_scoring_game_points_v1",
+    }
+    contest, pairing, job = _seed_bound_contest_job(
+        store,
+        "duplicate-seed-drift",
+        stage=stage,
+        pairing_seed=seed,
+        match_config={"duplicate": True, "duplicate_seed": seed},
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET pairing_seed=? WHERE id=?",
+            (seed + 1, pairing["id"]),
+        )
+
+    assert _claim(store, slots=1, units=4) is None
+    terminal = store.executions.get(job["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["terminal_reason"] == "contest_pairing_changed"
+    assert terminal["current_match_id"] is None
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM matches_holdem WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "match_config",
+    [
+        {},
+        {"duplicate": False, "match_seed": 7},
+    ],
+)
+def test_strict_independent_single_claim_requires_false_flag_and_no_seed(
+    queue_store, match_config
+):
+    store = queue_store
+    stage = {
+        "key": "single",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": False,
+        "games_per_pair": 1,
+        "series_scoring": "independent_scoring_game_points_v1",
+    }
+    contest, _pairing, job = _seed_bound_contest_job(
+        store,
+        f"strict-single-{len(match_config)}",
+        stage=stage,
+        pairing_seed=6_262_626,
+        match_config=match_config,
+    )
+
+    assert _claim(store, slots=1, units=4) is None
+    assert store.executions.get(job["public_id"])["terminal_reason"] == (
+        "contest_pairing_changed"
+    )
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM matches_holdem WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 0
+
+
+def test_ko_tiebreak_claim_binds_ordinary_match_seed(queue_store):
+    store = queue_store
+    seed = 7_373_737
+    stage = {
+        "key": "ko",
+        "type": "single_elimination",
+        "scoring": "poker_3_1_0",
+        "duplicate": False,
+        "tiebreak": "paired_swap_until_decided",
+    }
+    contest, pairing, job = _seed_bound_contest_job(
+        store,
+        "ko-ordinary-seed",
+        stage=stage,
+        pairing_seed=seed,
+        match_config={"duplicate": False, "match_seed": seed},
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET bracket_slot=0,tiebreak_group=1,"
+            "tiebreak_game=1 WHERE id=?",
+            (pairing["id"],),
+        )
+
+    claimed = _claim(store, slots=1, units=4)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match = store.get_match(claimed["current_match_id"])
+    assert match["match_seed"] == seed
+    assert match["match_config"]["match_seed"] == seed
+    assert store.list_contest_pairings(contest["id"])[0]["match_id"] == match["id"]
+
+
+def test_ko_tiebreak_claim_rejects_duplicate_frozen_stage(queue_store):
+    store = queue_store
+    seed = 8_484_848
+    stage = {
+        "key": "ko",
+        "type": "single_elimination",
+        "scoring": "poker_3_1_0",
+        "duplicate": True,
+        "tiebreak": "paired_swap_until_decided",
+    }
+    contest, pairing, job = _seed_bound_contest_job(
+        store,
+        "ko-duplicate-invalid",
+        stage=stage,
+        pairing_seed=seed,
+        match_config={"duplicate": True, "duplicate_seed": seed},
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET bracket_slot=0,tiebreak_group=1,"
+            "tiebreak_game=1 WHERE id=?",
+            (pairing["id"],),
+        )
+
+    assert _claim(store, slots=1, units=4) is None
+    assert store.executions.get(job["public_id"])["terminal_reason"] == (
+        "contest_pairing_changed"
+    )
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM matches_holdem WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 0
+
+
 def test_public_pause_reason_is_sanitized_but_admin_keeps_diagnostic(queue_store):
     store = queue_store
     raw_reason = "Docker inspect internal operator diagnostic"
@@ -5054,6 +5826,149 @@ def test_execution_environment_snapshots_are_source_owned(queue_store):
     ) == ("platform_high", "platform_high", 2, 4000, 4096)
 
 
+def test_8vcpu_budget_admits_four_frozen_low_profile_matches(queue_store):
+    store = queue_store
+    pairs = [
+        (
+            _bot(store, f"low-capacity-{index}-a"),
+            _bot(store, f"low-capacity-{index}-b"),
+        )
+        for index in range(5)
+    ]
+    _verify_projection(store)
+    jobs = [_enqueue_pair(store, pair) for pair in pairs]
+    claim_kwargs = {
+        "max_match_slots": 6,
+        "max_sandbox_units": 12,
+        "max_host_cpu_millis": 8000,
+        "max_host_memory_mb": 16 * 1024,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(4)]
+    assert [row["public_id"] for row in claimed] == [
+        row["public_id"] for row in jobs[:4]
+    ]
+    assert store.executions.claim_next(**claim_kwargs) is None
+    assert store.executions.get(jobs[4]["public_id"])["status"] == "queued"
+    capacity = store.executions.snapshot(
+        max_match_slots=6,
+        max_sandbox_units=12,
+        max_host_cpu_millis=8000,
+        max_host_memory_mb=16 * 1024,
+        aging_seconds=60,
+    )["capacity"]
+    assert (capacity["max_match_slots"], capacity["max_sandbox_units"]) == (
+        6,
+        12,
+    )
+    assert (capacity["used_match_slots"], capacity["used_sandbox_units"]) == (
+        4,
+        8,
+    )
+    assert capacity["used_host_cpu_millis"] == 8000
+    assert capacity["used_host_memory_mb"] == 4096
+
+
+def test_8vcpu_budget_admits_six_human_jobs_and_direct_claim_clamps(queue_store):
+    store = queue_store
+    jobs = [_enqueue_human(store, f"human-capacity-{index}")[2] for index in range(7)]
+    claim_kwargs = {
+        # Deliberately bypass the runtime/dispatcher entrypoints: the durable
+        # repository remains the final defense against a caller asking for 99.
+        "max_match_slots": 999,
+        "max_sandbox_units": 999,
+        "max_host_cpu_millis": 8000,
+        "max_host_memory_mb": 16 * 1024,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(6)]
+    assert [row["public_id"] for row in claimed] == [
+        row["public_id"] for row in jobs[:6]
+    ]
+    assert store.executions.claim_next(**claim_kwargs) is None
+    assert store.executions.get(jobs[6]["public_id"])["status"] == "queued"
+    capacity = store.executions.snapshot(
+        max_match_slots=999,
+        max_sandbox_units=999,
+        max_host_cpu_millis=8000,
+        max_host_memory_mb=16 * 1024,
+        aging_seconds=60,
+    )["capacity"]
+    assert (capacity["max_match_slots"], capacity["max_sandbox_units"]) == (
+        6,
+        12,
+    )
+    assert (capacity["used_match_slots"], capacity["used_sandbox_units"]) == (
+        6,
+        6,
+    )
+    assert capacity["used_host_cpu_millis"] == 6000
+    assert capacity["used_host_memory_mb"] == 3072
+
+
+def test_8vcpu_budget_admits_six_remote_local_jobs(queue_store):
+    store = queue_store
+    jobs: list[dict] = []
+    for index in range(7):
+        owner = _api_user(store, f"remote_capacity_{index}_owner")
+        opponent_owner = _api_user(store, f"remote_capacity_{index}_opponent")
+        remote_bot = _owned_bot(store, owner, f"remote_capacity_{index}")
+        docker_bot = _owned_bot(
+            store, opponent_owner, f"remote_capacity_{index}_docker"
+        )
+        agent = _local_agent(store, remote_bot, f"remote-capacity-{index}")
+        jobs.append(
+            store.executions.enqueue(
+                source=EXECUTION_SOURCE_MANUAL,
+                owner_user_id=int(owner["id"]),
+                game_id="holdem",
+                match_type=TYPE_CHALLENGE,
+                bot_a_id=remote_bot["bot_id"],
+                bot_b_id=docker_bot["bot_id"],
+                bot_a_version_id=remote_bot["version_id"],
+                bot_b_version_id=docker_bot["version_id"],
+                bot_a_environment="remote_local",
+                bot_a_local_agent_id=int(agent["id"]),
+            )
+        )
+    store.executions.set_local_agent_available(lambda _agent_id: True)
+    claim_kwargs = {
+        "max_match_slots": 6,
+        "max_sandbox_units": 12,
+        "max_host_cpu_millis": 8000,
+        "max_host_memory_mb": 16 * 1024,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(6)]
+    assert [row["public_id"] for row in claimed] == [
+        row["public_id"] for row in jobs[:6]
+    ]
+    assert store.executions.claim_next(**claim_kwargs) is None
+    assert store.executions.get(jobs[6]["public_id"])["status"] == "queued"
+    capacity = store.executions.snapshot(
+        max_match_slots=6,
+        max_sandbox_units=12,
+        max_host_cpu_millis=8000,
+        max_host_memory_mb=16 * 1024,
+        aging_seconds=60,
+    )["capacity"]
+    assert (capacity["used_match_slots"], capacity["used_sandbox_units"]) == (
+        6,
+        6,
+    )
+    assert capacity["used_host_cpu_millis"] == 6000
+    assert capacity["used_host_memory_mb"] == 3072
+
+
 def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
     queue_store,
     monkeypatch,
@@ -5110,8 +6025,8 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
     dispatcher = ExecutionDispatcher(
         orch,
         store,
-        max_match_slots=2,
-        max_sandbox_units=4,
+        max_match_slots=6,
+        max_sandbox_units=12,
         max_host_cpu_millis=8000,
         max_host_memory_mb=16 * 1024,
         auto_capability_enabled=False,
@@ -5124,12 +6039,14 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
     }
 
     snapshot = store.executions.snapshot(
-        max_match_slots=2,
-        max_sandbox_units=4,
+        max_match_slots=6,
+        max_sandbox_units=12,
         max_host_cpu_millis=8000,
         max_host_memory_mb=16 * 1024,
         aging_seconds=60,
     )
+    assert snapshot["capacity"]["max_match_slots"] == 6
+    assert snapshot["capacity"]["max_sandbox_units"] == 12
     assert snapshot["capacity"]["used_match_slots"] == 2
     assert snapshot["capacity"]["used_sandbox_units"] == 4
     assert snapshot["capacity"]["used_host_cpu_millis"] == 8000
@@ -7446,6 +8363,12 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
             "2026-08-09T12:02:00",
             "legacy_execution_unscoped",
         )
+        assert tuple(
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA index_info('idx_execution_jobs_contest_claim_history')"
+            )
+        ) == ("source", "contest_id", "claimed_at", "id")
         control = conn.execute(
             "SELECT dispatcher_state,accepting,pause_reason FROM execution_control "
             "WHERE singleton=1"

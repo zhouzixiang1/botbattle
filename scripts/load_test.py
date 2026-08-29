@@ -10,7 +10,9 @@
     （`store.add_session(new_session_token(), uid, session_expires())`）—— REST 用 Bearer，
     人机 WebSocket 用 `bz_session` Cookie，服务端均从同一 botzone.db 验证。
   - Bot 执行方式由被测服务决定：生产式 Docker 沙箱，或 QA 服务显式设置 BZ_BOT_LOCAL=1。
-  - 并发硬顶 = cpu//4；三款游戏均使用 GameSpec 固定规则（holdem 固定 70 手）。
+  - 全局并发硬顶为 6；每个 job 的冻结 CPU/内存/sandbox 向量与主机预算
+    决定实际可同时运行 1–6 场。三款游戏均使用 GameSpec 固定规则
+    （holdem 固定 70 手）。
   - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 按样例 ELF 内容幂等，
     样例更新或文件漂移时发布并激活新版本。
 
