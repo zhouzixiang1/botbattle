@@ -449,7 +449,7 @@ def test_force_finish_rejects_while_real_runner_is_blocked(tmp_path):
                 self.entered.set()
                 await self.release.wait()
                 return SimpleNamespace(
-                    rounds_played=1,
+                    rounds_played=70,
                     rounds=[SimpleNamespace(deltas=[1, -1])],
                     winner=0,
                 )
@@ -539,7 +539,13 @@ def test_ordinary_endpoints_never_gain_proxy_rights_from_global_role(tmp_path):
         format="elf", game_id="holdem",
     )
     contest = store.create_contest(
-        "Owned by B", org_b["id"], status="open", game_id="holdem"
+        "Owned by B",
+        org_b["id"],
+        status="open",
+        game_id="holdem",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "scoring": "poker_3_1_0"}]
+        ),
     )
     store.add_contest_entry(contest["id"], victim["id"], victim_bots[0]["id"])
     client = TestClient(app)

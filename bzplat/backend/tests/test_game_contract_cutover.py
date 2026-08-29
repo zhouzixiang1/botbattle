@@ -1163,6 +1163,7 @@ def test_cutover_rejects_symlink_and_non_executable_existing_targets(
     entry = plan["version_manifest"][0]
     dest_dir = Path(entry["binary_path"]).parent
     dest_dir.parent.mkdir(parents=True)
+    manager.upload_root.chmod(0o755)
     external = tmp_path / "external-sentinel"
     external.mkdir()
     sentinel = external / "keep.txt"
@@ -1363,6 +1364,7 @@ def test_cutover_rejects_shared_inode_and_noncanonical_manifest_paths(tmp_path):
     second = Path(plan["version_manifest"][1]["binary_path"])
     first.parent.mkdir(parents=True)
     second.parent.mkdir(parents=True)
+    manager.upload_root.chmod(0o755)
     first.write_bytes(raw)
     os.link(first, second)
     _prepare_cold_cutover(store)

@@ -12,13 +12,13 @@ function formatClock(seconds: number | null): string {
   return `${minutes}:${String(value % 60).padStart(2, '0')}`
 }
 
-/** 累计棋钟是五子棋规则状态，观战、回放与人机页共用同一视图。 */
+/** 全场棋钟是五子棋规则状态，观战、回放与人机页共用同一视图。 */
 export function GomokuReplayHud({ vm, seats }: GameAuxiliaryProps) {
   const state = vm as GomokuViewModel
   return (
     <section
       data-testid="gomoku-clock-hud"
-      aria-label="五子棋累计棋钟"
+      aria-label="五子棋全场棋钟"
       className="grid min-w-0 grid-cols-2 gap-2 rounded-xl border border-border bg-card p-2 shadow-sm 2xl:grid-cols-1"
     >
       {([0, 1] as const).map((seat) => {

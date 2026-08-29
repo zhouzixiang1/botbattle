@@ -77,11 +77,11 @@ def test_tiebreak_fewer_technical_losses_ranks_first():
     matches = {
         "technical": {
             "status": "completed", "winner": 1, "technical_loss": 1,
-            "result": {"deltas": [0, 0]},
+            "result": {"rounds_played": 0, "deltas": [-1, 1]},
         },
         "normal": {
             "status": "completed", "winner": 1, "technical_loss": 0,
-            "result": {"deltas": [0, 0]},
+            "result": {"deltas": [-1, 1]},
         },
     }
 

@@ -10,9 +10,12 @@ import {
   CommandList,
 } from '@/components/ui/command'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { apiGet } from '@/api'
 import { gameLabel } from '@/games'
 import { matchParticipantSearchText, type MatchParticipantSource } from '@/lib/match-participants'
+import type { MatchOutcomeSource } from '@/lib/match-outcome'
+import { outcomeSeatLabels } from '@/lib/match-seats'
 import { cn } from '@/lib/utils'
 
 interface SearchUser {
@@ -26,7 +29,7 @@ interface SearchBot {
   game_id: string
   owner_name?: string
 }
-interface SearchMatch extends MatchParticipantSource {
+interface SearchMatch extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   game_id: string
   match_type?: string
@@ -206,6 +209,12 @@ export function GlobalSearch({
                   <Swords aria-hidden="true" className="mt-1 size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
                     <MatchParticipants source={m} links={false} className="gap-1" />
+                    <MatchOutcome
+                      source={m}
+                      seatLabels={outcomeSeatLabels(m)}
+                      primaryOnly
+                      className="mt-1 text-[10px]"
+                    />
                     <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
                       <span>{gameLabel(m.game_id)}</span>
                       <MatchNatureBadge matchType={m.match_type} source={m} />

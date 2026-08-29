@@ -45,7 +45,7 @@ function describePencilEvent(event: RawEvent, seats?: SeatInfo[]): string {
   }
   if (event.type === 'match_start') return '对局开始'
   if (event.type === 'match_end') {
-    const outcome = event.winner == null ? '平局' : `${actor(event.winner)}获胜`
+    const outcome = event.winner == null ? '赛果已结算' : `${actor(event.winner)}获胜`
     return `结束 · ${outcome} · ${pencilTerminalReason(event.reason, 'completed').label}`
   }
   if (event.type === 'time_out') return `${actor(event.seat)} · 超时 · ${position(event.seat)}`

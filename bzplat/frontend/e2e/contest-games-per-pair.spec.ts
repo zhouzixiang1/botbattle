@@ -15,7 +15,7 @@ const templates = [
   {
     id: 'holdem_dup_rr',
     name: '德州：复式单循环（公平优先，≤12 人）',
-    summary: '每对 Bot 使用同一副牌交换座位。',
+    summary: '每组使用同一副牌交换座位，两场 70 手分别计分。',
     game_id: 'holdem',
     recommended: true,
     stages: [{ key: 'dup_rr', type: 'round_robin', duplicate: true }],
@@ -24,7 +24,7 @@ const templates = [
   {
     id: 'holdem_rr',
     name: '德州：单循环（小规模）',
-    summary: '每对 Bot 进行独立物理对局。',
+    summary: '每对 Bot 进行独立计分场。',
     game_id: 'holdem',
     stages: [{ key: 'rr', type: 'round_robin' }],
     games_per_pair_config: { default: 1, min: 1, max: 10 },
@@ -112,7 +112,7 @@ async function mockOrganizerContestApi(page: Page) {
   return { createdBody: () => createdBody }
 }
 
-test('Holdem compatible templates expose 1–10 physical matches and submit games_per_pair', async ({ page }) => {
+test('Holdem duplicate templates expose encounter groups and submit games_per_pair without leaking leg terminology', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const captured = await mockOrganizerContestApi(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -122,38 +122,40 @@ test('Holdem compatible templates expose 1–10 physical matches and submit game
     .getByRole('button', { name: '创建赛事', exact: true })
     .click()
   const form = page.locator('form')
-  const seriesField = form.getByRole('group').filter({ hasText: '每对选手交手场数' })
+  const seriesField = form.getByRole('group', { name: '每对选手复式交锋组数' })
   await expect(seriesField).toBeVisible()
-  await expect(form.getByRole('combobox', { name: '每对选手交手场数' })).toBeVisible()
-  await expect(seriesField).toContainText('1 场复式对局 · 正常完成时 2 局计分')
-  await expect(seriesField).toContainText('对局数不是 leg 数')
+  await expect(form.getByRole('combobox', { name: '每对选手复式交锋组数' })).toBeVisible()
+  await expect(seriesField).toContainText('1 组复式交锋 · 2 场计分')
+  await expect(seriesField).toContainText('两场分别计胜、平、负')
+  await expect(seriesField).not.toContainText('leg')
+  await expect(seriesField).not.toContainText('局')
 
   const seriesSelect = seriesField.getByRole('combobox')
   expect((await seriesSelect.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await seriesSelect.click()
   await expect(page.getByRole('option')).toHaveCount(10)
-  await expect(page.getByRole('option', { name: '1 场', exact: true })).toBeVisible()
-  await page.getByRole('option', { name: '4 场', exact: true }).click()
-  await expect(seriesField).toContainText('4 场复式对局 · 正常完成时 8 局计分')
+  await expect(page.getByRole('option', { name: '1 组', exact: true })).toBeVisible()
+  await page.getByRole('option', { name: '4 组', exact: true }).click()
+  await expect(seriesField).toContainText('4 组复式交锋 · 8 场计分')
 
   const templateSelect = form.getByRole('combobox').nth(1)
   await templateSelect.click()
   await page.getByRole('option', { name: '德州：单败淘汰', exact: true }).click()
-  await expect(form.getByText('每对选手交手场数', { exact: true })).toHaveCount(0)
+  await expect(form.getByText('每对选手复式交锋组数', { exact: true })).toHaveCount(0)
 
   await templateSelect.click()
   await page.getByRole('option', { name: '德州：单循环（小规模）', exact: true }).click()
-  const plainSeriesField = form.getByRole('group').filter({ hasText: '每对选手交手场数' })
-  await expect(plainSeriesField).toContainText('每对选手进行 1 场独立实际对局')
+  const plainSeriesField = form.getByRole('group', { name: '每对选手计分场数' })
+  await expect(plainSeriesField).toContainText('每对选手进行 1 场计分，每场独立判定胜、平、负')
   await expect(plainSeriesField).not.toContainText('leg')
   await expect(plainSeriesField).not.toContainText('正常完成时')
 
   await templateSelect.click()
   await page.getByRole('option', { name: /德州：复式单循环/ }).click()
-  const restoredSeriesField = form.getByRole('group').filter({ hasText: '每对选手交手场数' })
-  await expect(restoredSeriesField).toContainText('1 场复式对局 · 正常完成时 2 局计分')
+  const restoredSeriesField = form.getByRole('group', { name: '每对选手复式交锋组数' })
+  await expect(restoredSeriesField).toContainText('1 组复式交锋 · 2 场计分')
   await restoredSeriesField.getByRole('combobox').click()
-  await page.getByRole('option', { name: '4 场', exact: true }).click()
+  await page.getByRole('option', { name: '4 组', exact: true }).click()
 
   await page.locator('#contest-title').fill('四场复式邀请赛')
   await form.getByRole('button', { name: '创建赛事', exact: true }).click()
@@ -185,18 +187,18 @@ test('Holdem preliminary and final templates submit independent stage fairness s
   const prelim = form.getByRole('group', { name: '瑞士预赛' })
   await expect(prelim).toContainText('参赛人数待定')
   await expect(prelim).toContainText('报名人数确定后')
-  await expect(prelim.getByRole('combobox', { name: '每组交锋' })).toHaveText('2 场')
+  await expect(prelim.getByRole('combobox', { name: '每对选手计分场数' })).toHaveText('2 场计分')
   await expect(prelim.getByRole('combobox', { name: '额外瑞士轮' })).toHaveText('增加 2 轮')
-  expect((await prelim.getByRole('combobox', { name: '每组交锋' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
+  expect((await prelim.getByRole('combobox', { name: '每对选手计分场数' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
 
   await templateSelect.click()
   await page.getByRole('option', { name: '德州：决赛（循环→Top8）', exact: true }).click()
   const qualify = form.getByRole('group', { name: '决赛资格循环' })
   const final8 = form.getByRole('group', { name: 'Top 8 决胜循环' })
-  await expect(qualify.getByRole('combobox', { name: '每组交锋' })).toHaveText('2 场')
-  await expect(final8.getByRole('combobox', { name: '每组交锋' })).toHaveText('4 场')
-  await final8.getByRole('combobox', { name: '每组交锋' }).click()
-  await page.getByRole('option', { name: '8 场', exact: true }).click()
+  await expect(qualify.getByRole('combobox', { name: '每对选手计分场数' })).toHaveText('2 场计分')
+  await expect(final8.getByRole('combobox', { name: '每对选手计分场数' })).toHaveText('4 场计分')
+  await final8.getByRole('combobox', { name: '每对选手计分场数' }).click()
+  await page.getByRole('option', { name: '8 场计分', exact: true }).click()
 
   await page.locator('#contest-title').fill('公平决赛')
   await form.getByRole('button', { name: '创建赛事', exact: true }).click()

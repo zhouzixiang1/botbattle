@@ -324,6 +324,7 @@ def test_mid_contest_single_unavailable_bot_is_completed_technical_loss(tmp_path
     assert match and match["status"] == "completed"
     assert match["winner"] == 0
     assert int(match["technical_loss"]) == 1
+    assert match["result"]["deltas"] == [1, -1]
     assert match["bot_a_id"] == bot_a["id"]
     assert match["bot_b_id"] == bot_b["id"]
     assert store.get_contest(contest_id)["status"] == "finished"

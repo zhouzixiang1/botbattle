@@ -278,9 +278,9 @@ def test_delayed_dispatcher_resume_runs_full_contest_recovery(store: Store):
         winner=0,
         reason="completed",
         result={
-            "rounds_played": 1,
+            "rounds_played": 70,
             "deltas": [1, -1],
-            "normalized_delta": 1,
+            "normalized_delta": 0.01,
         },
     )
     store.bind_contest_pairing_match(

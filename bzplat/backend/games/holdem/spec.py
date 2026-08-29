@@ -80,11 +80,7 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
 
 
 def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]:
-    """P4 duplicate：返回 2 leg（A-seat0/B-seat1 + B-seat0/A-seat1），同 deal_sequence。
-
-    消除运气：同 seed 生成 deal_sequence，两 leg 用它发牌，净筹码相加判胜负。
-    seed=None 或 params['duplicate']=False 时返回单 leg（普通赛）。
-    """
+    """返回两场同牌换座的 70 手独立计分计划；普通模式返回一场。"""
     unexpected = set(params) - {"duplicate"}
     if unexpected:
         fields = ", ".join(sorted(unexpected))
@@ -155,8 +151,9 @@ SPEC = GameSpec(
     eta_for_match=_eta_for_match,
     templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",
+    fixed_rounds_per_match=DEFAULT_HANDS,
     code_path="bzplat/backend/games/holdem/engine.py",
-    summary="HU NLHE；单局多手；按筹码差判胜。",
+    summary="HU NLHE；每个计分场固定 70 手；按本场筹码差判胜；复式两场独立计分。",
     preflight_check=_preflight_check,
     build_match_plan=_build_match_plan,
     contest_games_per_pair_max=10,

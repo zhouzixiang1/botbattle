@@ -68,6 +68,7 @@ from .schema import (
     TYPE_LADDER,
     VALID_RUNTIME_MODES,
 )
+from .validation import exact_nonnegative_int
 
 if TYPE_CHECKING:
     from .db import Store
@@ -2509,6 +2510,8 @@ class ExecutionRepository:
                     if job["source"] == EXECUTION_SOURCE_CONTEST:
                         pairing = conn.execute(
                             "SELECT p.*,c.status AS contest_status,c.starts_at,"
+                            "c.current_stage_idx AS contest_current_stage_idx,"
+                            "c.stages_json AS contest_stages_json,c.game_id AS contest_game_id,"
                             "c.ruleset_version AS contest_ruleset_version,"
                             "c.protocol_version AS contest_protocol_version,"
                             "c.rating_pool_id AS contest_rating_pool_id "
@@ -2545,12 +2548,46 @@ class ExecutionRepository:
                             and pairing["contest_rating_pool_id"]
                             == job["rating_pool_id"]
                         )
+                        stage_contract_valid = False
+                        if pairing is not None:
+                            pairing_stage_idx = exact_nonnegative_int(
+                                pairing["stage_idx"]
+                            )
+                            current_stage_idx = exact_nonnegative_int(
+                                pairing["contest_current_stage_idx"]
+                            )
+                            try:
+                                stages = json.loads(pairing["contest_stages_json"])
+                            except (TypeError, ValueError):
+                                stages = None
+                            if (
+                                isinstance(stages, list)
+                                and pairing_stage_idx is not None
+                                and current_stage_idx == pairing_stage_idx
+                                and pairing_stage_idx < len(stages)
+                                and isinstance(stages[pairing_stage_idx], dict)
+                            ):
+                                # Local import avoids store package startup
+                                # cycles while preserving the same frozen-stage
+                                # validator used by lifecycle/read models.
+                                from bzplat.backend.contests.validation import (
+                                    stage_scoring_contract_is_valid,
+                                )
+
+                                stage_contract_valid = (
+                                    pairing["contest_game_id"] == job["game_id"]
+                                    and stage_scoring_contract_is_valid(
+                                        stages[pairing_stage_idx],
+                                        game_id=str(job["game_id"]),
+                                    )
+                                )
                         if (
                             pairing is None
                             or pairing["status"] != STATUS_PENDING
                             or pairing["match_id"] is not None
                             or pairing["contest_status"] not in ("published", "running")
                             or not identity_unchanged
+                            or not stage_contract_valid
                         ):
                             conn.execute(
                                 "UPDATE execution_jobs SET status='cancelled',"
@@ -2907,9 +2944,11 @@ class ExecutionRepository:
                 )
             else:
                 delay = min(60, 2 ** min(failure_count - 1, 6))
+                # Flooring to whole seconds can collapse the first retry delay
+                # to almost zero when the transaction crosses a clock boundary.
                 next_attempt_at = (
                     datetime.now() + timedelta(seconds=delay)
-                ).isoformat(timespec="seconds")
+                ).isoformat(timespec="microseconds")
                 conn.execute(
                     "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
                     "claimed_at=NULL,started_at=NULL,settling_at=NULL,terminal_at=NULL,"
@@ -3028,9 +3067,10 @@ class ExecutionRepository:
                         EXECUTION_SOURCE_CONTEST,
                     }:
                         delay = min(60, 2 ** min(next_failure_count - 1, 6))
+                        # Preserve the full backoff across second boundaries.
                         next_attempt_at = (
                             datetime.now() + timedelta(seconds=delay)
-                        ).isoformat(timespec="seconds")
+                        ).isoformat(timespec="microseconds")
                 if match["status"] in (STATUS_COMPLETED, STATUS_ABORTED):
                     # A terminal Match is the durable winner of a crash race.
                     # Reconcile may have attached a scheduler-yield marker to

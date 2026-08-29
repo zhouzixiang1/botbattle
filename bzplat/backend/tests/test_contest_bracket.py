@@ -190,7 +190,7 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
         "stage_idx", "stage_key", "group_id", "bracket_slot",
         "series_index", "series_size", "bot_a_name", "bot_a_display", "bot_b_name",
         "bot_b_display", "owner_a_name", "owner_a_display",
-        "owner_b_name", "owner_b_display", "match_winner", "is_bye",
+        "owner_b_name", "owner_b_display", "match_winner", "outcome", "is_bye",
     }
     assert set(bracket_pairing) <= public_pairing_fields
     assert bracket_pairing["owner_a_name"] == "alice"
@@ -366,7 +366,7 @@ def test_legacy_pairing_recovers_unique_entries_without_guessing_bye(tmp_path):
     )
     store.update_match(
         match_id, status="completed", winner=1, reason="completed",
-        result={"rounds_played": 1, "deltas": [-5, 5], "normalized_delta": -0.05},
+        result={"rounds_played": 70, "deltas": [-5, 5], "normalized_delta": -0.05},
     )
     store.update_contest_pairing(pairing["id"], match_id=match_id, status="completed")
 

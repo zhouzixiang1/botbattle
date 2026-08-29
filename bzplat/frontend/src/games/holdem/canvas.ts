@@ -66,9 +66,9 @@ interface HoldemScene extends Scene {
   handSettleReason: string | null
   matchOver: boolean
   terminalStatus: 'live' | 'match_end' | 'error'
-  /** 整场胜者座位 0/1；平局 null（match_end / final_chips 推导） */
+  /** 普通对局整场胜者；null 也可能表示复式没有单一整场胜者。 */
   matchWinner: number | null
-  /** 累计净筹码（各手 settle.deltas 累加，对应旧 PokerTable「累计」） */
+  /** 当前计分场净筹码；复式进入第二场时归零。 */
   nets: [number, number]
   folded: boolean[]
   allin: boolean[]
@@ -143,6 +143,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
   diff(prev: HoldemScene | null, next: HoldemScene): SceneDelta {
     if (!prev) return { animation: 'deal' }
     if (next.matchOver && !prev.matchOver) return { animation: 'settle' }
+    if (next.leg !== prev.leg) return { animation: 'deal' }
     if (next.hand !== prev.hand) return { animation: 'settle' }
     const newCards = (next.board.length > (prev.board?.length ?? 0)) ||
       next.holes.some((h, i) => (h?.length ?? 0) > ((prev.holes[i]?.length) ?? 0))
@@ -156,7 +157,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     const { L, R, CARD_SIZE, s } = layout(W, H)
     const X = (k: number) => W / 2 + L * k
     // 座位纵向位置：0.55R 偏移（原 0.67R）让座位块整体内移，
-    // 配合 drawSeat 收紧的文字行间距，确保「筹码/累计/下注」落在椭圆底沿内。
+    // 配合 drawSeat 收紧的文字行间距，确保「筹码/本场/下注」落在椭圆底沿内。
     const Y0 = H / 2 - R * 0.55, Y1 = H / 2 + R * 0.55
 
     // 清屏 + 椭圆桌（照搬 drawBackground）
@@ -178,7 +179,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     const streetLabels: Record<string, string> = {
       preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌',
     }
-    const legStatus = next.isDuplicate ? `第 ${next.leg + 1}/${next.totalLegs} 局 · ` : ''
+    const legStatus = next.isDuplicate ? `第 ${next.leg + 1}/${next.totalLegs} 场 · ` : ''
     const tableStatus = `${legStatus}第 ${(next.hand || 0) + 1} 手 · ${streetLabels[next.street] ?? next.street} · 底池 ${pot.toLocaleString('en-US')}`
     const statusY = H / 2 - R + Math.max(17, 24 * s)
     // 极窄屏已由 DOM 局面概览呈现手数/阶段/终局；canvas 再画一行会与
@@ -257,13 +258,14 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
         : !next.hasStarted
           ? '对局结束 · 未完成任何一手'
           : next.isDuplicate
-            ? '对局结束 · 复式赛完成'
-            : '对局结束 · 平局'
+            ? '对局结束 · 复式交锋组结束'
+            : '对局结束 · 赛果已结算'
       if (
         next.terminalStatus !== 'error'
+        && !next.isDuplicate
         && (next.matchWinner === 0 || next.matchWinner === 1)
       ) {
-        // matchWinner 只有 0/1；duplicate 权威终局固定为 null。
+        // 复式技术终局会有单场裁决胜者，但不存在组合整体胜者。
         const winnerText = `胜者：${seatDisplayName(opts.seats?.[next.matchWinner], next.matchWinner)}`
         terminalText = `对局结束 · ${winnerText}`
       }
@@ -297,7 +299,7 @@ function drawSeat(
     ? Math.round(prev.nets[idx] + (next.nets[idx] - prev.nets[idx]) * t)
     : next.nets[idx]
   const isToAct = next.toAct === idx && !next.matchOver
-  const isMatchWinner = next.matchOver && next.matchWinner === idx
+  const isMatchWinner = next.matchOver && !next.isDuplicate && next.matchWinner === idx
   const name = seatDisplayName(info, idx)
   const compact = s < 0.72
   // 座位块横向半宽（用于截断名字/数值，避免长文本越出椭圆桌或与公共牌重叠）
@@ -305,7 +307,7 @@ function drawSeat(
   ctx.textAlign = 'center'
   if (compact) {
     // 小屏不再把桌面版五行文字同比缩到 5px。身份/归属已由上方 DOM
-    // 座位卡完整呈现，牌桌保留名字、筹码和累计三项关键状态。
+    // 座位卡完整呈现，牌桌保留名字、筹码和本场净胜三项关键状态。
     const compactW = 82
     ctx.fillStyle = isMatchWinner ? 'rgba(255,238,88,0.98)' : '#fff'
     ctx.font = 'bold 10px "DM Sans", sans-serif'
@@ -314,7 +316,7 @@ function drawSeat(
     ctx.font = 'bold 9px "DM Sans", sans-serif'
     ctx.fillText(fitText(ctx, `筹码 ${chips.toLocaleString('en-US')}`, compactW), x, y + 4)
     ctx.fillStyle = net > 0 ? '#34d399' : net < 0 ? '#f87171' : 'rgba(255,255,255,0.8)'
-    ctx.fillText(fitText(ctx, `累计 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, compactW), x, y + 17)
+    ctx.fillText(fitText(ctx, `本场 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, compactW), x, y + 17)
     if (isToAct) {
       ctx.fillStyle = 'rgba(255,238,88,0.98)'
       ctx.fillText('行动中', x, y + 30)
@@ -345,14 +347,14 @@ function drawSeat(
     ? `${identity.owner} · ${identity.seat}`
     : `${identity.kind} · ${identity.seat}`
   ctx.fillText(fitText(ctx, ownerLine, seatW), x, y + 30 * s)
-  // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）。
+  // 本轮剩余筹码 + 当前计分场净筹码。
   // fitText 保护：大数字（如 20000）按座位宽度截断，防溢出。
   // 行距收紧（16/30/44/58/72，原 18/34/50/66/82）：配合座位 Y=H/2±0.55R，确保末行（下注 72）落在椭圆内。
   ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(13 * s)}px "DM Sans"`
   ctx.fillText(fitText(ctx, `筹码 ${chips.toLocaleString('en-US')}`, seatW), x, y + 44 * s)
   ctx.fillStyle = net > 0 ? '#34d399' : net < 0 ? '#f87171' : 'rgba(255,255,255,0.75)'
   ctx.font = `${Math.round(12 * s)}px "DM Sans"`
-  ctx.fillText(fitText(ctx, `累计 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, seatW), x, y + 58 * s)
+  ctx.fillText(fitText(ctx, `本场 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, seatW), x, y + 58 * s)
   // 本轮下注 / 弃牌 / 全押
   const bet = next.roundBets[idx] ?? 0
   if (bet > 0 && !next.folded[idx]) {

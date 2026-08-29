@@ -5,6 +5,12 @@ import {
   resolveMatchParticipant,
   type MatchParticipantSource,
 } from '@/lib/match-participants'
+import {
+  describeMatchOutcome,
+  hasPublicMatchOutcomeField,
+  isPublicMatchOutcome,
+  type PublicMatchOutcome,
+} from '@/lib/match-outcome'
 
 export interface MatchSeatRow extends MatchParticipantSource {
   id?: string
@@ -21,6 +27,8 @@ export interface MatchSeatRow extends MatchParticipantSource {
   rating_settled?: boolean
   /** 1 表示 Bot 故障被判负；平台故障的 aborted 对局不设置。 */
   technical_loss?: number
+  /** Public, bounded result projection shared by match lists and details. */
+  outcome?: PublicMatchOutcome | null
   /** 对局结果唯一公共契约。 */
   result?: {
     rounds_played?: number
@@ -59,11 +67,29 @@ export function seatInfos(m: MatchSeatRow | null | undefined): SeatInfo[] | unde
 }
 
 /** 顶栏对阵文案：BOT 名（@用户）或人类 */
-export function seatHeaderLabel(m: MatchSeatRow, side: 0 | 1): string {
+export function seatHeaderLabel(m: MatchParticipantSource, side: 0 | 1): string {
   return participantHeaderLabel(resolveMatchParticipant(m, side))
 }
 
-/** 胜者文案：优先名字，回退座位号 / 平局 / 进行中 */
+/** Dense result lines use the participant entity only; ownership is already shown beside them. */
+export function outcomeSeatLabels(
+  m: MatchParticipantSource,
+): readonly [string, string] {
+  const label = (side: 0 | 1) => {
+    const participant = resolveMatchParticipant(m, side)
+    if (participant.isHuman) {
+      return participant.ownerLabel === '真人用户不可用'
+        ? participant.seatLabel
+        : participant.ownerLabel
+    }
+    return participant.botLabel === 'Bot 名称不可用' || participant.botLabel === 'Bot 已删除'
+      ? participant.seatLabel
+      : participant.botLabel
+  }
+  return [label(0), label(1)]
+}
+
+/** 胜者文案：只有 public outcome 能证明真平局，缺失终局不得从 null 猜测。 */
 export function resolveWinnerLabel(
   m: MatchSeatRow | null,
   eventWinner: number | null | undefined,
@@ -76,32 +102,28 @@ export function resolveWinnerLabel(
     // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
     return `座位 ${seat + 1}`
   }
-  if (m?.winner === 0 || m?.winner === 1) return nameOf(m.winner)
-  if (eventWinner === 0 || eventWinner === 1) return nameOf(eventWinner)
-  // Duplicate 没有单一整场胜者：两个 leg 独立计分，合并
-  // deltas 仅供赛事破同分。不得在此把它误判成 Bot A/B 获胜。
-  if (finished && (m?.result?.legs?.length ?? 0) > 1) return '复式赛按分局计分'
-  if (m && m.winner === null && finished) {
-    const ea = m.result?.deltas?.[0]
-    const eb = m.result?.deltas?.[1]
-    if (typeof ea === 'number' && typeof eb === 'number') {
-      if (ea > eb) return nameOf(0)
-      if (eb > ea) return nameOf(1)
-    }
-    return '平局'
+  if (m && isPublicMatchOutcome(m.outcome)) {
+    return describeMatchOutcome(
+      { status: m.status, outcome: m.outcome },
+      { seatLabels: [nameOf(0), nameOf(1)] },
+    ).primary
   }
-  if (Array.isArray(m?.result?.deltas) && finished) {
-    const ea = m!.result!.deltas![0]
-    const eb = m!.result!.deltas![1]
-    if (typeof ea === 'number' && typeof eb === 'number') {
-      if (ea > eb) return nameOf(0)
-      if (eb > ea) return nameOf(1)
-      return '平局'
-    }
+  if (m && hasPublicMatchOutcomeField(m)) {
+    return describeMatchOutcome(
+      { status: m.status ?? (finished ? 'completed' : undefined), outcome: null },
+      { seatLabels: [nameOf(0), nameOf(1)] },
+    ).primary
   }
-  if (eventWinner === null && finished) return '平局'
+  if (m?.winner === 0 || m?.winner === 1) return `${nameOf(m.winner)}胜`
+  if (eventWinner === 0 || eventWinner === 1) return `${nameOf(eventWinner)}胜`
+  if (m && finished) {
+    return describeMatchOutcome(
+      { status: m.status, outcome: m.outcome },
+      { seatLabels: [nameOf(0), nameOf(1)] },
+    ).primary
+  }
   if (!finished) return '进行中'
-  return '—'
+  return '赛果暂不可用'
 }
 
 export function fmtNet(n: number): string {

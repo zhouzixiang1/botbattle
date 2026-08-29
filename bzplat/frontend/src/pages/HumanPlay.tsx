@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { ErrorMsg, Loading } from '@/components/ui/status'
-import { playWsUrl } from '@/api'
+import { apiGet, playWsUrl } from '@/api'
 import { findGame, gameLabel, normalizeGameId, resolveTerminalReason, unsupportedGameLabel } from '@/games'
 import { describePlatformEvent } from '@/games/reasons'
 import type { SeatInfo } from '@/games/canvas-types'
@@ -137,6 +137,21 @@ export default function HumanPlay() {
     let attempt = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+    // WS 终局帧只携带最小 winner/result，不包含公共 outcome。运行快照中的
+    // 显式 outcome=null 不能被继续当作终态事实；终局后补取一次详情，与
+    // MatchViewer 共用后端的权威白名单投影。effect 级 disposed 同时防止路由
+    // 切换后旧对局的迟到响应覆盖新页面。
+    const refreshTerminalMatch = () => {
+      void apiGet<{ match: MatchSeatRow }>(`/api/matches/${encodeURIComponent(id)}`)
+        .then((detail) => {
+          if (disposed || String(detail.match?.id || '') !== id) return
+          if (detail.match.status === 'completed' || detail.match.status === 'aborted') {
+            setMatch(detail.match)
+          }
+        })
+        .catch(() => undefined)
+    }
+
     const connect = () => {
       if (overRef.current || disposed) return
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
@@ -173,8 +188,9 @@ export default function HumanPlay() {
                 reason: String(
                   terminal?.reason ||
                   (terminal?.type === 'error' ? 'platform_error' : snapshotMatch.reason || ''),
-                ),
+                  ),
               })
+              refreshTerminalMatch()
               // 服务端 pump 在 terminal event 后结束，但 handler 仍等待 receive_json；
               // 客户端确认快照为终态后主动关闭，触发后端 finally 取消订阅。
               ws.close(1000, 'match complete')
@@ -223,6 +239,7 @@ export default function HumanPlay() {
               }
               return next
             })
+            refreshTerminalMatch()
             setReconnecting(false)
             // 终态后不再需要双向通道；主动关闭令后端 receive_json 退出并 unsubscribe。
             ws.close(1000, 'match complete')
@@ -447,7 +464,7 @@ export default function HumanPlay() {
           {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
           {over ? (
             <span className="min-w-0 break-words font-medium text-foreground">
-              对局结束 · 胜者：{winnerLabel}
+              对局结束 · {winnerLabel}
               {endInfo?.reason && (
                 <span
                   data-testid="terminal-reason"

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games import normalize_game_id
 from bzplat.backend.matches.bot_debug import BotDebugCollector
+from bzplat.backend.matches.public_outcome import frozen_duplicate_mode
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.matches.result_contract import (
     build_engine_result_payload,
@@ -159,6 +160,41 @@ def _technical_incident_summary(events: list[dict]) -> dict:
     }
 
 
+def _technical_progress_events(
+    events: list[dict], *, duplicate: bool, leg: int | None
+) -> list[dict]:
+    """Select the one scoring game's prefix used by a technical adjudication.
+
+    Duplicate replay storage intentionally contains every prior 70-hand game.
+    A fault in game 2 must nevertheless persist only game 2's partial progress;
+    otherwise the top-level technical result can exceed the fixed per-game
+    length and the shared standings/outcome parser must reject it.  Missing or
+    malformed duplicate leg identity fails closed to zero progress instead of
+    borrowing hands from another scoring game.
+    """
+    if not duplicate:
+        return events
+    if isinstance(leg, bool) or not isinstance(leg, int) or leg < 0:
+        return []
+    return [event for event in events if event.get("leg") == leg]
+
+
+def _technical_result_deltas(
+    loser_seat: int, *, neutral: bool
+) -> tuple[int, int]:
+    """Preserve legacy technical margins outside independent-v1 contests.
+
+    Only ``independent_scoring_game_points_v1`` defines a technical winner as
+    referee metadata with no chip/board margin. Existing aggregate contests,
+    challenge/ladder/table matches and human matches keep the historical +/-1
+    persistence contract because rating ``delta_total`` and legacy tie-breaks
+    already consume it.
+    """
+    if neutral:
+        return 0, 0
+    return (-1, 1) if loser_seat == 0 else (1, -1)
+
+
 def _bounded_replay_events(events: list[dict]) -> list[dict]:
     """Keep the complete game replay but at most three technical diagnostics."""
     incident_samples = 0
@@ -194,14 +230,19 @@ def _authoritative_match_end(
     winner: int | None,
     reason: str,
     deltas: list[int],
+    *,
+    leg: int | None = None,
 ) -> dict[str, Any]:
     """Build the one public live completion event emitted by the orchestrator."""
-    return {
+    terminal: dict[str, Any] = {
         "type": "match_end",
         "winner": winner,
         "reason": reason,
         "deltas": [int(deltas[0]), int(deltas[1])],
     }
+    if isinstance(leg, int) and not isinstance(leg, bool) and leg >= 0:
+        terminal["leg"] = leg
+    return terminal
 
 
 def _authoritative_error(reason: str) -> dict[str, str]:
@@ -759,7 +800,8 @@ class MatchOrchestrator:
         # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，不再走 match_config。
         # match_config 仅保留版本快照等内部键（_run_match 读 _bot_a/b_version_id 解析版本路径）。
         # P2 residual：duplicate=True 时把标志 + seed 落 match_config，
-        # __run_match_inner 据此走 run_duplicate（2 leg 合并），并落 match_seed 供回放。
+        # __run_match_inner 据此走 run_duplicate（两场独立计分），并落
+        # match_seed 供同牌换座复现。
         spec = game_registry.get(gid)
         if duplicate and spec.build_match_plan is None:
             raise ValueError(f"游戏 {gid} 不支持 duplicate 对局")
@@ -770,8 +812,15 @@ class MatchOrchestrator:
             mc["_bot_a_version_id"] = int(version_a["id"])
         if version_b is not None:
             mc["_bot_b_version_id"] = int(version_b["id"])
-        if duplicate:
+        if match_type == TYPE_CONTEST:
+            # Contest scoring shape is frozen even for the ordinary single
+            # path.  Strict-v1 readers require this exact boolean so a SQL NULL
+            # or imported ``{}`` can never be guessed differently by generic
+            # Match and contest projections.
+            mc["duplicate"] = bool(duplicate)
+        elif duplicate:
             mc["duplicate"] = True
+        if duplicate:
             if duplicate_seed is not None:
                 mc["duplicate_seed"] = int(duplicate_seed)
 
@@ -1085,15 +1134,15 @@ class MatchOrchestrator:
         duplicate_seed: int | None = None,
         contest_pairing_id: int | None = None,
     ) -> str:
-        """复式赛制（duplicate）对局：跑 2 leg（同副牌交换座位）合并 net 判胜负。
+        """复式赛制（duplicate）对局：跑两场同副牌换座的独立计分场。
 
         签名与 challenge 一致，duplicate 标志只在编排层内部写入
         match_config，不是对外游戏规则配置。
-        内部走 runner.run_duplicate（每 leg 同 deal_sequence，seat_swap 翻转 deltas
-        累加到物理 bot）。游戏不支持 duplicate 时创建入口直接拒绝。
+        内部走 runner.run_duplicate（每场同 deal_sequence，seat_swap 翻转 deltas
+        回物理 Bot 视角）。游戏不支持 duplicate 时创建入口直接拒绝。
 
-        match 行落 1 条 merged result（deltas=2 leg 累加、winner 按 merged net 判），
-        供 standings/scoring 读取（与单 leg result 鸭子契约一致：result.deltas）。
+        一个物理 Match 行保存两条 ``result.legs`` 独立结果；顶层 delta 只供
+        破同分，顶层 winner 始终为空，不代表平局。
         """
         return await self.challenge(
             challenger_bot_id,
@@ -1194,12 +1243,99 @@ class MatchOrchestrator:
                 except (asyncio.QueueEmpty, asyncio.QueueFull):
                     pass
 
-    def _find_contest_pairing(self, contest_id: int, match_id: str) -> dict | None:
-        """P1：按 contest_id + match_id 定位 contest_pairing 行（读冻结 version_id 用）。"""
-        for p in self.store.list_contest_pairings(contest_id):
-            if p.get("match_id") == match_id:
-                return p
-        return None
+    def _execution_scoring_contract(
+        self,
+        match: dict[str, Any],
+        pairing: dict[str, Any] | None,
+    ) -> tuple[bool, bool] | None:
+        """Validate the frozen game plan and technical-delta policy.
+
+        Generic legacy Matches may omit ``duplicate`` and therefore mean a
+        single game.  A contest Match must additionally agree with the bounded
+        stage snapshot selected by its unique pairing.  Independent-v1 stages
+        require an explicit boolean in Match config; malformed/missing/mismatched
+        values return ``None`` so the caller aborts rather than executing the
+        wrong number of scoring games and permanently wedging the stage. The
+        second tuple item is true only for independent-v1, whose technical
+        adjudications carry zero margin; every older/non-contest path preserves
+        its historical +/-1 result and rating-delta semantics.
+        """
+        strict = False
+        expected: bool | None = None
+        contest_id = match.get("contest_id")
+        has_contest_evidence = (
+            pairing is not None
+            or contest_id is not None
+            or match.get("match_type") == TYPE_CONTEST
+        )
+        if has_contest_evidence:
+            # Local import avoids the package cycle: contest series parsing
+            # consumes matches.public_outcome, while matches.__init__ exports
+            # this orchestrator.
+            from bzplat.backend.contests.series import (
+                contest_match_binding_is_valid,
+            )
+            from bzplat.backend.contests.validation import (
+                SERIES_SCORING_INDEPENDENT,
+                contest_current_stage_index,
+                stage_duplicate_mode,
+                stage_scoring_contract_is_valid,
+            )
+
+            if (
+                isinstance(contest_id, bool)
+                or not isinstance(contest_id, int)
+                or pairing is None
+            ):
+                return None
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                return None
+            game_id = str(contest.get("game_id") or "")
+            if not contest_match_binding_is_valid(
+                pairing,
+                match,
+                expected_contest_id=contest_id,
+                expected_game_id=game_id,
+            ):
+                return None
+            raw_stages = contest.get("stages_json") or "[]"
+            try:
+                stages = (
+                    json.loads(raw_stages)
+                    if isinstance(raw_stages, str)
+                    else raw_stages
+                )
+            except (TypeError, ValueError):
+                return None
+            stage_idx = pairing.get("stage_idx")
+            if (
+                not isinstance(stages, list)
+                or isinstance(stage_idx, bool)
+                or not isinstance(stage_idx, int)
+                or not 0 <= stage_idx < len(stages)
+                or not isinstance(stages[stage_idx], dict)
+            ):
+                return None
+            if (
+                contest_current_stage_index(contest, stage_count=len(stages))
+                != stage_idx
+            ):
+                return None
+            stage = stages[stage_idx]
+            if not stage_scoring_contract_is_valid(stage, game_id=game_id):
+                return None
+            expected = stage_duplicate_mode(stage)
+            if expected is None:
+                return None
+            strict = (
+                stage.get("series_scoring") == SERIES_SCORING_INDEPENDENT
+            )
+
+        frozen = frozen_duplicate_mode(match, require_explicit=strict)
+        if frozen is None or (expected is not None and frozen != expected):
+            return None
+        return frozen, strict
 
     async def _run_match(
         self,
@@ -1270,6 +1406,29 @@ class MatchOrchestrator:
             self._safe_flush_terminal_replay(match_id, [], terminal_event)
             self._broadcast(match_id, terminal_event)
             return
+        # Resolve from the pairing's unique match_id rather than trusting the
+        # Match's own contest/type fields.  A corrupted linked Match that claims
+        # to be a challenge (or clears contest_id) must still fail before any
+        # Bot session is created.
+        contest_pairing = self.store.get_contest_pairing_for_match(match_id)
+        scoring_contract = self._execution_scoring_contract(m, contest_pairing)
+        if scoring_contract is None:
+            logger.error(
+                "match %s has malformed or stage-mismatched duplicate contract",
+                match_id,
+            )
+            self._update_match_owned(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
+            return
+        want_duplicate, neutral_technical_delta = scoring_contract
         bot_a = self.store.get_bot(m["bot_a_id"])
         bot_b = self.store.get_bot(m["bot_b_id"])
         # 防护：bot 被删除后（ON DELETE SET NULL → bot_a_id/bot_b_id 为 NULL），
@@ -1293,7 +1452,9 @@ class MatchOrchestrator:
                 self._broadcast(match_id, terminal_event)
                 return
             winner = 1 if bot_a is None else 0  # 缺失方判负，存活方赢
-            ea, eb = (-1, 1) if winner == 1 else (1, -1)
+            ea, eb = _technical_result_deltas(
+                1 - winner, neutral=neutral_technical_delta
+            )
             self._update_match_owned(
                 match_id, status=STATUS_COMPLETED, reason="bot_deleted",
                 winner=winner,
@@ -1317,10 +1478,9 @@ class MatchOrchestrator:
         version_a_id: int | None = None
         version_b_id: int | None = None
         if m.get("match_type") == TYPE_CONTEST and m.get("contest_id"):
-            pairing = self._find_contest_pairing(m["contest_id"], match_id)
-            if pairing:
-                version_a_id = pairing.get("bot_a_version_id")
-                version_b_id = pairing.get("bot_b_version_id")
+            if contest_pairing:
+                version_a_id = contest_pairing.get("bot_a_version_id")
+                version_b_id = contest_pairing.get("bot_b_version_id")
         else:
             # challenge/table/ladder：无论 API 是否显式选版本，创建时都已把当时
             # 的实际版本 ID 写入配置，排队期间切换 current 不会改变执行程序。
@@ -1339,7 +1499,6 @@ class MatchOrchestrator:
                 stored_mc = json.loads(stored_mc)
             except Exception:
                 stored_mc = {}
-        want_duplicate = bool(stored_mc.get("duplicate"))
         environments = (
             str(
                 stored_mc.get("_bot_a_environment")
@@ -1525,13 +1684,13 @@ class MatchOrchestrator:
                     time_budget_per_side=spec.time_budget_per_side,
                     execution_scope=execution_scope,
                 )
-            # duplicate：每 leg 独立判胜负（result.legs），不把净筹码合并判 1 场。
+            # 复式：result.legs 中每个 70 手计分场独立判胜并分别计分。
             # 胜负完全由 standings/ranking 读 result.legs 决定；match.winner 留 None。
             if want_duplicate:
                 winner = None  # 胜负由 standings 读 result.legs 决定（无单一 match 胜者）
                 terminal_reason = "completed"
                 legs_data = getattr(result, "legs", None) or []
-                # 破同分用：两 leg 物理 deltas 累加
+                # 组合 deltas 只供破同分，不产生系列级 winner。
                 ea = sum(int(lg.get("deltas", [0, 0])[0]) for lg in legs_data) if legs_data else 0
                 eb = sum(int(lg.get("deltas", [0, 0])[1]) for lg in legs_data) if legs_data else 0
                 self._update_match_owned(
@@ -1602,7 +1761,9 @@ class MatchOrchestrator:
             _ensure_technical_incident(events, exc)
             failed_seat = exc.failed_seat
             winner = 1 - failed_seat
-            ea, eb = (-1, 1) if failed_seat == 0 else (1, -1)
+            ea, eb = _technical_result_deltas(
+                failed_seat, neutral=neutral_technical_delta
+            )
             failed_bot_id = m["bot_a_id"] if failed_seat == 0 else m["bot_b_id"]
             failed_version_id = version_a_id if failed_seat == 0 else version_b_id
             failed_runtime = mode_a if failed_seat == 0 else mode_b
@@ -1627,15 +1788,27 @@ class MatchOrchestrator:
                 winner=winner,
                 result=build_technical_result_payload(
                     spec,
-                    events,
+                    _technical_progress_events(
+                        events, duplicate=want_duplicate, leg=exc.leg
+                    ),
                     deltas=[ea, eb],
-                    extra=_technical_incident_summary(events),
+                    extra={
+                        **_technical_incident_summary(events),
+                        "technical_game_index": (
+                            int(exc.leg) + 1
+                            if want_duplicate
+                            and isinstance(exc.leg, int)
+                            and not isinstance(exc.leg, bool)
+                            and exc.leg >= 0
+                            else 1
+                        ),
+                    },
                 ),
                 technical_loss=1,
                 ended_at=_now(),
             )
             terminal_event = _authoritative_match_end(
-                winner, exc.reason, [ea, eb]
+                winner, exc.reason, [ea, eb], leg=exc.leg
             )
             persist_debug()
             self._safe_flush_terminal_replay(match_id, events, terminal_event)
@@ -1681,17 +1854,38 @@ class MatchOrchestrator:
             # 失败未注解→默认 0）。
             crashed_seat = getattr(exc, "crashed_seat", None) or 0
             winner = 1 - crashed_seat
-            ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
+            ea, eb = _technical_result_deltas(
+                crashed_seat, neutral=neutral_technical_delta
+            )
             self._update_match_owned(
                 match_id, status=STATUS_COMPLETED, reason="technical_loss",
                 winner=winner,
                 result=build_technical_result_payload(
-                    spec, events, deltas=[ea, eb]
+                    spec,
+                    _technical_progress_events(
+                        events,
+                        duplicate=want_duplicate,
+                        leg=getattr(exc, "crashed_leg", None),
+                    ),
+                    deltas=[ea, eb],
+                    extra={
+                        "technical_game_index": (
+                            int(getattr(exc, "crashed_leg")) + 1
+                            if want_duplicate
+                            and isinstance(getattr(exc, "crashed_leg", None), int)
+                            and not isinstance(getattr(exc, "crashed_leg", None), bool)
+                            and int(getattr(exc, "crashed_leg")) >= 0
+                            else 1
+                        )
+                    },
                 ),
                 technical_loss=1, ended_at=_now(),
             )
             terminal_event = _authoritative_match_end(
-                winner, "technical_loss", [ea, eb]
+                winner,
+                "technical_loss",
+                [ea, eb],
+                leg=getattr(exc, "crashed_leg", None),
             )
             persist_debug()
             self._safe_flush_terminal_replay(match_id, events, terminal_event)
@@ -2281,7 +2475,7 @@ class MatchOrchestrator:
                 # semantics and are never mislabeled as Bot protocol failures.
                 _ensure_technical_incident(events, exc)
                 winner = 1 - bot_seat
-                ea, eb = (-1, 1) if bot_seat == 0 else (1, -1)
+                ea, eb = _technical_result_deltas(bot_seat, neutral=False)
                 logger.warning(
                     "bot technical failure match_id=%s reason=%s code=%s "
                     "bot_id=%s version_id=%s runtime=%s seat=%s turn=%s leg=%s error=%s",

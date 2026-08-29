@@ -19,6 +19,7 @@ const stageRows = [
     group_id: '',
     rank: 1,
     advancement: null,
+    counts: { unique_opponents: 3, encounter_groups: 3, match_jobs: 3, scoring_games: 3 },
   },
   {
     entry_id: 104,
@@ -34,6 +35,7 @@ const stageRows = [
     group_id: '',
     rank: 2,
     advancement: null,
+    counts: { unique_opponents: 2, encounter_groups: 2, match_jobs: 2, scoring_games: 2 },
   },
 ]
 
@@ -96,6 +98,11 @@ function contestDetail() {
         completed_pairings: 12,
         total_pairings: 12,
         advancement_final: true,
+        counts: {
+          encounter_groups: { completed: 12, total: 12 },
+          match_jobs: { completed: 9, total: 9 },
+          scoring_games: { completed: 9, planned: 9, terminal_unplayed: 0 },
+        },
         rows: stageRows,
       },
     ],
@@ -182,9 +189,10 @@ test('Swiss bye points stay separate from actual wins in stage and official stan
 
   await main.getByRole('tab', { name: /阶段积分/ }).click()
   await expect(main.getByText(/本阶段计分：胜 3 \/ 平 1 \/ 负 0/)).toBeVisible()
-  await expect(main.getByText(/胜\/平\/负仅统计真实对局/)).toBeVisible()
+  await expect(main.getByText(/计分场战绩不包含瑞士轮轮空/)).toBeVisible()
   const stageRow = main.getByRole('row').filter({ hasText: '测01' })
   await expect(stageRow).toContainText('1 胜 / 0 平 / 1 负 · 轮空 1')
+  await expect(stageRow).toContainText('2 场计分')
   const stageTableRegion = main.getByRole('region', { name: '阶段积分表', exact: true })
   await expect(stageTableRegion).toBeVisible()
   await expect(stageTableRegion).toHaveAttribute('tabindex', '0')
@@ -199,6 +207,7 @@ test('Swiss bye points stay separate from actual wins in stage and official stan
   await expect(stagePanel).toContainText(
     '1 胜 / 0 平 / 1 负 · 轮空 1',
   )
+  await expect(stagePanel).toContainText('2 场计分')
 
   await expect(main.getByText('德扑友谊赛2', { exact: true })).toBeVisible()
   await assertNoRootOverflow(page)

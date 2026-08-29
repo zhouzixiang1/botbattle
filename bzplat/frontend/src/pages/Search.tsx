@@ -4,6 +4,7 @@ import { Bot as BotIcon, Search as SearchIcon, Swords, User as UserIcon } from '
 
 import { apiGet, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -24,6 +25,8 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { fmtRating, fmtTime } from '@/lib/format'
 import { GAMES, gameIcon, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import type { MatchOutcomeSource } from '@/lib/match-outcome'
+import { outcomeSeatLabels } from '@/lib/match-seats'
 
 type SearchType = 'users' | 'bots' | 'matches'
 
@@ -43,7 +46,7 @@ interface BotRow {
   rating?: number
 }
 
-interface MatchRow extends MatchParticipantSource {
+interface MatchRow extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   game_id: string
   winner: number | null
@@ -263,12 +266,13 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
     <>
       <div className="hidden md:block">
         <DataTable className="rounded-none border-0" scrollLabel="搜索到的对局">
-          <Table aria-label="搜索到的对局" className="min-w-[38rem]">
+          <Table aria-label="搜索到的对局" className="min-w-[46rem]">
             <TableHeader>
               <TableRow>
                 <TableHead>序号</TableHead>
                 <TableHead>时间</TableHead>
                 <TableHead className="w-full min-w-[16rem]">对阵</TableHead>
+                <TableHead>赛果</TableHead>
                 <TableHead>游戏 / 性质</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -280,6 +284,13 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
                   <TableCell className="whitespace-normal">
                     <MatchParticipants source={match} />
+                  </TableCell>
+                  <TableCell className="max-w-[16rem] whitespace-normal">
+                    <MatchOutcome
+                      source={match}
+                      seatLabels={outcomeSeatLabels(match)}
+                      primaryOnly
+                    />
                   </TableCell>
                   <TableCell>
                     <div className="flex min-w-0 flex-col items-start gap-1">
@@ -303,6 +314,12 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
               <MatchNatureBadge matchType={match.match_type} source={match} />
             </div>
             <MatchParticipants source={match} className="mt-2" />
+            <MatchOutcome
+              source={match}
+              seatLabels={outcomeSeatLabels(match)}
+              primaryOnly
+              className="mt-1.5"
+            />
             <Button asChild variant="link" size="xs" className="mt-1 px-0"><Link to={`/match/${encodeURIComponent(match.id)}`}>打开回放</Link></Button>
           </li>
         ))}

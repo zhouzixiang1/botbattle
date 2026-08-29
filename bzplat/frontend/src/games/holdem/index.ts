@@ -37,13 +37,21 @@ export const holdemSpec: GameViewSpec = {
     layout: 'with-timeline',
     progress: (vm) => {
       const state = vm as HoldemViewModel
-      return state.handsStarted > 0
-        ? state.handsStarted
-        : null
+      return state.currentGameHandsStarted > 0
+        ? state.currentGameHandsStarted
+        : state.isDuplicate && state.leg > 0
+          ? 0
+          : null
     },
     progressTotal: (vm) => {
       const state = vm as HoldemViewModel
-      return state.totalHands * state.totalLegs
+      return state.totalHands
+    },
+    completedProgress: (vm) => (vm as HoldemViewModel).currentGameCompletedHands,
+    totalCompletedProgress: (vm) => (vm as HoldemViewModel).completedHands,
+    progressScopeLabel: (vm) => {
+      const state = vm as HoldemViewModel
+      return state.isDuplicate ? `第 ${state.leg + 1}/${state.totalLegs} 场` : null
     },
     Hud: HoldemReplayHud,
     navigation: {

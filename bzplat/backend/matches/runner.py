@@ -519,13 +519,7 @@ class MatchRunner:
         execution_scope: ExecutionScope | None,
     ) -> None:
         """Stop every session and prove a scoped execution has no worker left."""
-        first_error: BaseException | None = None
-        for session_id in session_ids:
-            try:
-                await self.runner.stop_session(session_id)
-            except BaseException as exc:  # cleanup must continue for the other seat
-                if first_error is None:
-                    first_error = exc
+        first_error = await self._stop_execution_sessions(session_ids)
         if execution_scope is not None:
             # Cleanup is one job-level operation: both seats, every Traditional
             # one-shot container and any uncertain create are removed by the
@@ -534,6 +528,25 @@ class MatchRunner:
             first_error = None
         if first_error is not None:
             raise first_error
+
+    async def _stop_execution_sessions(
+        self, session_ids: tuple[str, ...]
+    ) -> BaseException | None:
+        """Stop one scoring game's sessions without closing the durable job.
+
+        Duplicate games reuse one execution attempt but must not reuse either
+        Bot process or Traditional history.  Job-wide namespace cleanup remains
+        a once-only operation after the last game so the execution queue cannot
+        observe a mid-series ``cleanup_confirmed`` state.
+        """
+        first_error: BaseException | None = None
+        for session_id in session_ids:
+            try:
+                await self.runner.stop_session(session_id)
+            except BaseException as exc:  # cleanup must continue for the other seat
+                if first_error is None:
+                    first_error = exc
+        return first_error
 
     async def run_binaries(
         self,
@@ -922,19 +935,20 @@ class MatchRunner:
         execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> Any:
-        """P4 duplicate：跑多 leg（经 spec.build_match_plan），**每 leg 独立判胜负**。
+        """复式：按计划跑多个计分场，每场独立判胜负。
 
-        每 leg 用同 deal_sequence（消除运气）；seat_swap=True 的 leg 对调 decide 回调
-        （B 在 seat0）。每 leg 独立产出 winner + deltas（物理 bot A/B 视角，swap leg 翻转），
-        收集进 ``legs`` 字段——编排层（standings/ranking）按"打了两场"逐 leg 累加积分
-        （如 2 场 poker_3_1_0），**不再把两场净筹码合并判 1 场胜负**。
+        各场用同 deal_sequence（消除运气）；seat_swap=True 的计划对调 decide 回调
+        （B 在 seat0）。每场独立产出 winner + deltas（物理 bot A/B 视角，换座场翻转），
+        结果持久化在 ``legs`` 字段，编排层按每个计分场逐场累加 3/1/0。
 
-        decide 闭包复用 `_botzone_decide`（与 run_binaries 一致），支持 traditional/
-        longrunning 协议与 runtime_modes——真 Botzone bot 在两 leg 中均可正确收发。
-        游戏未声明 duplicate 计划时明确拒绝，不把请求悄悄改成单 leg。
+        每个计分场都重新建立并关闭两方逻辑会话：Traditional 不继承上一场的
+        requests/responses，LongRunning 也不复用上一场的常驻进程/进程内存。
+        decide 闭包仍复用 `_botzone_decide`（与 run_binaries 一致），支持两种
+        runtime mode；两场之间只共享冻结 deal_sequence 与换座计划。
+        游戏未声明 duplicate 计划时明确拒绝，不把请求悄悄改成单场。
 
-        返回带 ``legs`` 字段的结果（首 leg 的 MatchResult 结构 + legs 列表）。
-        final_chips/net 保留两 leg 物理累加（仅作分差破同分，不作为胜负判据）。
+        返回带 ``legs`` 字段的结果（首场 MatchResult 结构 + 逐场列表）。
+        final_chips/net 保留各场物理累加（仅作分差破同分，不作为胜负判据）。
         """
         from bzplat.backend.games import registry as _reg
 
@@ -962,65 +976,97 @@ class MatchRunner:
         )
         if EXECUTION_ENV_REMOTE_LOCAL in {env_a, env_b}:
             raise ValueError("本地 Bot 不支持复式正式赛制")
-        sid_a = await _open_match_session(
-            self.runner,
-            path_a,
-            rm_a,
-            failed_seat=0,
-            profile=_profile_for_environment(env_a, execution_profile_version),
-            execution_scope=execution_scope,
-        )
-        try:
-            sid_b = await _open_match_session(
-                self.runner,
-                path_b,
-                rm_b,
-                failed_seat=1,
-                profile=_profile_for_environment(
-                    env_b, execution_profile_version
-                ),
-                execution_scope=execution_scope,
-            )
-        except BaseException:
-            await self._close_execution_sessions((sid_a,), execution_scope)
-            raise
         gid = normalize_game_id(game_id)
         try:
             for li, leg in enumerate(legs_plan):
                 lp = dict(leg.get("params") or {})
                 lp.pop("match_seed", None)
                 swap = bool(leg.get("seat_swap"))
-
-                async def decide(player_idx: int, request: dict[str, Any]) -> dict[str, Any]:
-                    # seat_swap：seat0 → 物理 B（对调座位），seat1 → 物理 A
-                    if swap:
-                        sid = sid_b if player_idx == 0 else sid_a
-                    else:
-                        sid = sid_a if player_idx == 0 else sid_b
-                    try:
-                        physical_seat = 1 - player_idx if swap else player_idx
-                        return await _botzone_decide(
-                            self.runner, sid, request,
-                            game_id=gid, action_timeout=self.action_timeout,
-                            failed_seat=physical_seat,
-                            leg=li,
-                            on_debug=on_debug,
-                        )
-                    except BotTechnicalError as exc:
-                        _emit_technical_incident(leg_on_event, exc)
-                        raise
-                    except (BotCrashedError, PlatformRunnerError):
-                        # Bot 崩溃或平台沙箱故障都向上传播（与 run_binaries 一致）。
-                        raise
-
                 def leg_on_event(kind: str, ev: dict[str, Any]) -> None:
                     ev2 = {**ev, "leg": li}
                     if on_event:
                         on_event(kind, ev2)
 
-                res = await run_session(
-                    gid, decide, on_event=leg_on_event, **lp,
+                # Publicly delimit every independent scoring game before the
+                # first Bot process/session is opened.  A startup crash at the
+                # first request therefore still has an unambiguous ``leg`` in
+                # replay/live state and cannot be mistaken for a single game.
+                leg_on_event(
+                    "match_start",
+                    {"type": "match_start", "game_id": gid},
                 )
+
+                sid_a: str | None = None
+                sid_b: str | None = None
+                try:
+                    sid_a = await _open_match_session(
+                        self.runner,
+                        path_a,
+                        rm_a,
+                        failed_seat=0,
+                        profile=_profile_for_environment(
+                            env_a, execution_profile_version
+                        ),
+                        execution_scope=execution_scope,
+                    )
+                    sid_b = await _open_match_session(
+                        self.runner,
+                        path_b,
+                        rm_b,
+                        failed_seat=1,
+                        profile=_profile_for_environment(
+                            env_b, execution_profile_version
+                        ),
+                        execution_scope=execution_scope,
+                    )
+
+                    async def decide(
+                        player_idx: int, request: dict[str, Any]
+                    ) -> dict[str, Any]:
+                        # seat_swap：seat0 → 物理 B（对调座位），seat1 → 物理 A
+                        if swap:
+                            sid = sid_b if player_idx == 0 else sid_a
+                        else:
+                            sid = sid_a if player_idx == 0 else sid_b
+                        assert sid is not None
+                        try:
+                            physical_seat = 1 - player_idx if swap else player_idx
+                            return await _botzone_decide(
+                                self.runner,
+                                sid,
+                                request,
+                                game_id=gid,
+                                action_timeout=self.action_timeout,
+                                failed_seat=physical_seat,
+                                leg=li,
+                                on_debug=on_debug,
+                            )
+                        except BotTechnicalError as exc:
+                            _emit_technical_incident(leg_on_event, exc)
+                            raise
+                        except BotCrashedError as exc:
+                            # Preserve the current independent game for the
+                            # orchestrator's per-game technical progress contract.
+                            exc.crashed_leg = li
+                            raise
+                        except PlatformRunnerError:
+                            # 平台沙箱故障向上传播（与 run_binaries 一致）。
+                            raise
+
+                    res = await run_session(
+                        gid, decide, on_event=leg_on_event, **lp,
+                    )
+                except BotCrashedError as exc:
+                    # Session startup can fail before ``decide`` is entered.
+                    exc.crashed_leg = li
+                    raise
+                finally:
+                    session_ids = tuple(
+                        sid for sid in (sid_a, sid_b) if sid is not None
+                    )
+                    stop_error = await self._stop_execution_sessions(session_ids)
+                    if stop_error is not None:
+                        raise stop_error
                 if final_result is None:
                     final_result = res
                 merged_rounds_played += int(getattr(res, "rounds_played", 0))
@@ -1045,23 +1091,30 @@ class MatchRunner:
                     leg_winner = 1
                 else:
                     leg_winner = None  # 平局
-                leg_results.append({"winner": leg_winner, "deltas": list(leg_deltas)})
+                leg_results.append(
+                    {
+                        "winner": leg_winner,
+                        "deltas": list(leg_deltas),
+                        "rounds_played": int(getattr(res, "rounds_played", 0)),
+                    }
+                )
         finally:
-            await self._close_execution_sessions(
-                (sid_a, sid_b), execution_scope
-            )
-        # 构造结果：首 leg 结构 + legs 字段（每 leg 独立胜负）+ 累加 deltas（tiebreak 用）
+            if execution_scope is not None:
+                # Prove the whole attempt namespace empty exactly once, after
+                # every independent scoring game's sessions have been stopped.
+                await self._close_execution_sessions((), execution_scope)
+        # 构造结果：首场结构 + legs 逐场结果 + 仅供破同分的组合 deltas
         if final_result is not None:
             try:
                 final_result.rounds = merged_rounds
                 final_result.rounds_played = merged_rounds_played
                 final_result.events = merged_events
-                # net/final_chips 留作分差破同分（两 leg 物理累加），不作胜负判据
+                # net/final_chips 留作分差破同分（各场物理累加），不作胜负判据
                 if hasattr(final_result, "net"):
                     final_result.net = list(merged_deltas)
                 if hasattr(final_result, "final_chips"):
                     final_result.final_chips = list(merged_deltas)
-                # legs 字段：编排层（standings/ranking）按每 leg 独立判胜负累加积分
+                # legs 字段：编排层按每个计分场独立判胜负并累加积分
                 final_result.legs = leg_results
             except Exception:
                 pass

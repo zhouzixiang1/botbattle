@@ -9,7 +9,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { MatchParticipantIdentity } from '@/components/MatchParticipants'
-import { PairingResult } from '@/components/contest/pairing-result'
+import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
 import {
   DataTable,
   Table,
@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/ui/status'
 import { fmtTime } from '@/lib/format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import { outcomeParticipantStates, type PublicMatchOutcome } from '@/lib/match-outcome'
 import Pagination from '@/components/Pagination'
 
 export interface SchedulePairing extends MatchParticipantSource {
@@ -34,7 +35,9 @@ export interface SchedulePairing extends MatchParticipantSource {
   is_bye?: boolean
   match_id?: string | null
   status?: string
+  display_status?: string | null
   match_winner?: number | null
+  outcome?: PublicMatchOutcome | null
   scheduled_at?: string | null
   group_id?: string | null
   series_index?: number | null
@@ -54,11 +57,18 @@ function pairingSeriesKey(pairing: SchedulePairing, stageType?: string): string 
 interface Props {
   pairings: SchedulePairing[]
   stageType?: string
+  duplicate?: boolean
+  legacyAggregate?: boolean
 }
 
 const PER_PAGE = 30
 
-export default function ScheduleTable({ pairings, stageType }: Props) {
+export default function ScheduleTable({
+  pairings,
+  stageType,
+  duplicate = false,
+  legacyAggregate = false,
+}: Props) {
   const [page, setPage] = useState(1)
 
   // 扁平化为有序行：先按 round_num 分组排序，组内按 bracket_slot（淘汰）或 id（其他）排序。
@@ -123,9 +133,12 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
     <div className="min-w-0 space-y-2">
       <div className="divide-y overflow-hidden rounded-lg border md:hidden" aria-label="赛事对阵一览表移动视图">
         {pageRows.map(({ pairing: p, round, isSeriesStart }) => {
+          const status = effectivePairingStatus(p)
           const isBye = p.is_bye === true
-          const aWin = (isBye && p.status === 'completed') || p.match_winner === 0
-          const bWin = !isBye && p.match_winner === 1
+          const outcomeStates = outcomeParticipantStates(p.outcome)
+          const states = isBye && status === 'completed'
+            ? ['winner', 'neutral'] as const
+            : outcomeStates
           return (
             <article
               key={p.id}
@@ -137,25 +150,31 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
                 <span className="font-mono font-semibold text-foreground">
                   {p.group_id ? `${p.group_id} · ` : ''}R{round}
                   {p.series_size && p.series_size > 1
-                    ? ` · 本对 ${p.series_size} 场 · 第 ${p.series_index ?? 1}/${p.series_size}`
+                    ? duplicate
+                      ? ` · 本对 ${p.series_size} 组复式 · 第 ${p.series_index ?? 1}/${p.series_size} 组`
+                      : legacyAggregate
+                        ? ` · 本对 ${p.series_size} 场历史系列对局 · 旧版系列第 ${p.series_index ?? 1}/${p.series_size} 场`
+                      : ` · 本对 ${p.series_size} 场计分 · 第 ${p.series_index ?? 1}/${p.series_size} 场`
                     : ''}
                 </span>
                 <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
               </header>
               <div data-match-participants="true" className="grid min-w-0 gap-2">
-                <MatchParticipantIdentity source={p} side={0} variant="panel" state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'} textLines={2} />
-                <MatchParticipantIdentity source={p} side={1} variant="panel" state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'} emptyLabel={isBye ? '轮空 (bye)' : undefined} textLines={2} />
+                <MatchParticipantIdentity source={p} side={0} variant="panel" state={states[0]} textLines={2} />
+                <MatchParticipantIdentity source={p} side={1} variant="panel" state={states[1]} emptyLabel={isBye ? '轮空 (bye)' : undefined} textLines={2} />
               </div>
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <StatusBadge status={p.status || 'pending'} />
-                <PairingResult pairing={p} />
+                <StatusBadge status={status || 'pending'} />
+                <PairingResult pairing={p} primaryOnly={legacyAggregate} />
               </div>
               {p.match_id ? (
                 <Button asChild variant="outline" size="sm" className="min-h-11 w-full text-primary">
-                  <Link to={`/match/${p.match_id}`}>查看对局</Link>
+                  <Link to={`/match/${p.match_id}`}>{duplicate ? '查看复式回放' : legacyAggregate ? '查看历史对局' : '查看计分场'}</Link>
                 </Button>
               ) : (
-                <div className="flex min-h-11 items-center justify-center rounded-md bg-muted/40 text-xs text-muted-foreground">尚未生成对局</div>
+                <div className="flex min-h-11 items-center justify-center rounded-md bg-muted/40 text-xs text-muted-foreground">
+                  {duplicate ? '尚未生成复式交锋' : legacyAggregate ? '尚未生成历史系列对局' : '尚未生成计分场'}
+                </div>
               )}
             </article>
           )
@@ -176,11 +195,13 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
         </TableHeader>
         <TableBody>
           {pageRows.map(({ pairing: p, round, isRoundStart, isSeriesStart }) => {
-            const w = p.match_winner
+            const status = effectivePairingStatus(p)
             const isBye = p.is_bye === true
-            // 胜者着色：a 胜 → 座位1 高亮；b 胜 → 座位2 高亮（bye 时 a 自动晋级）
-            const aWin = (isBye && p.status === 'completed') || w === 0
-            const bWin = !isBye && w === 1
+            const outcomeStates = outcomeParticipantStates(p.outcome)
+            // 复式不存在组级胜者；只有单场 outcome 或轮空才着色。
+            const states = isBye && status === 'completed'
+              ? ['winner', 'neutral'] as const
+              : outcomeStates
             return (
               <TableRow key={p.id} data-series-start={isSeriesStart || undefined} className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'border-t-2 border-primary/20' : undefined}>
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
@@ -188,7 +209,14 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
                   {isRoundStart ? `R${round}` : ''}
                   {p.series_size && p.series_size > 1 && (
                     <span className="block whitespace-nowrap text-xs">
-                      {isSeriesStart ? `本对 ${p.series_size} 场 · ` : ''}第 {p.series_index ?? 1}/{p.series_size}
+                      {isSeriesStart
+                        ? duplicate
+                          ? `本对 ${p.series_size} 组复式 · `
+                          : legacyAggregate
+                            ? `本对 ${p.series_size} 场历史系列对局 · `
+                            : `本对 ${p.series_size} 场计分 · `
+                        : ''}
+                      {legacyAggregate && !duplicate ? '旧版系列' : '第'} {legacyAggregate && !duplicate ? `第 ${p.series_index ?? 1}/${p.series_size} 场` : `${p.series_index ?? 1}/${p.series_size}${duplicate ? ' 组' : ' 场'}`}
                     </span>
                   )}
                 </TableCell>
@@ -196,14 +224,14 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
                   <MatchParticipantIdentity
                     source={p}
                     side={0}
-                    state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'}
+                    state={states[0]}
                   />
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
                   <MatchParticipantIdentity
                     source={p}
                     side={1}
-                    state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'}
+                    state={states[1]}
                     emptyLabel={isBye ? '轮空 (bye)' : undefined}
                   />
                 </TableCell>
@@ -212,14 +240,14 @@ export default function ScheduleTable({ pairings, stageType }: Props) {
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col items-start gap-1">
-                    <StatusBadge status={p.status || 'pending'} />
-                    <PairingResult pairing={p} />
+                    <StatusBadge status={status || 'pending'} />
+                    <PairingResult pairing={p} primaryOnly={legacyAggregate} />
                   </div>
                 </TableCell>
                 <TableCell className="text-right">
                   {p.match_id ? (
-                    <Button asChild variant="ghost" size="xs" className="text-primary">
-                      <Link to={`/match/${p.match_id}`}>查看</Link>
+                    <Button asChild variant="ghost" size="xs" className="min-h-8 text-primary">
+                      <Link to={`/match/${p.match_id}`} aria-label={duplicate ? '查看复式回放' : legacyAggregate ? '查看历史对局' : '查看计分场'}>查看</Link>
                     </Button>
                   ) : (
                     <span className="text-xs text-muted-foreground">—</span>

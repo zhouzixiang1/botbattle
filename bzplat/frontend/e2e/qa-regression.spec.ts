@@ -103,7 +103,7 @@ function holdemProductionReplay0809(): Array<Record<string, unknown>> {
   return events
 }
 
-/** Holdem 复式赛：两局各 70 手，第二局引擎座位与物理 Bot 对调。 */
+/** Holdem 复式交锋：两场各 70 手，第二场引擎座位与物理 Bot 对调。 */
 function holdemDuplicateReplayFixture(): Array<Record<string, unknown>> {
   const events: Array<Record<string, unknown>> = []
   for (const leg of [0, 1] as const) {
@@ -114,8 +114,9 @@ function holdemDuplicateReplayFixture(): Array<Record<string, unknown>> {
         type: 'hand_start', hand, sb, bb: 1 - sb,
         chips: sb === 0 ? [19_950, 19_900] : [19_900, 19_950], leg,
       })
-      // 第二局最后一手：引擎座位 1 弃牌，换座后应展示为物理座位 1。
+      // 第二场最后一手：引擎座位 1 弃牌，换座后应展示为物理座位 1。
       if (leg === 1 && hand === 69) {
+        events.push({ type: 'turn', hand, player: 0, leg })
         events.push({ type: 'action', hand, player: 1, action: 'fold', amount: 0, leg })
       }
       events.push({
@@ -125,6 +126,31 @@ function holdemDuplicateReplayFixture(): Array<Record<string, unknown>> {
     }
   }
   events.push({ type: 'match_end', winner: null, reason: 'completed', deltas: [0, 0] })
+  return events
+}
+
+/** 第一场正常完成，第二场发牌前技术终局；当前场统计必须保持归零。 */
+function holdemDuplicateSecondGameTechnicalFixture(): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70, leg: 0 },
+  ]
+  for (let hand = 0; hand < 70; hand += 1) {
+    const sb = hand % 2
+    events.push(
+      {
+        type: 'hand_start', hand, sb, bb: 1 - sb,
+        chips: sb === 0 ? [19_950, 19_900] : [19_900, 19_950], leg: 0,
+      },
+      {
+        type: 'settle', hand, winners: [0], deltas: [100, -100],
+        chips: [20_100, 19_900], pot: 200, reason: 'showdown', leg: 0,
+      },
+    )
+  }
+  events.push(
+    { type: 'match_start', game_id: 'holdem', num_hands: 70, leg: 1 },
+    { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [0, 0], leg: 1 },
+  )
   return events
 }
 
@@ -1557,6 +1583,7 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
             id: humanId,
             game_id: 'holdem',
             status: 'running',
+            outcome: null,
             match_type: 'human',
             human_seat: 1,
             bot_a: { name: 'canonical_bot', owner_name: 'alpha' },
@@ -1604,6 +1631,43 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
       }),
     })
   })
+  let humanTerminalDetailRequests = 0
+  await page.route(`**/api/matches/${humanId}`, async (route) => {
+    humanTerminalDetailRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: humanId,
+          game_id: 'holdem',
+          status: 'completed',
+          winner: 0,
+          reason: 'completed',
+          match_type: 'human',
+          human_seat: 1,
+          bot_a: { name: 'canonical_bot', owner_name: 'alpha' },
+          bot_b: { owner_name: 'human_player', is_human: true },
+          result: { rounds_played: 70, deltas: [23, -23], normalized_delta: 0.23 },
+          outcome: {
+            kind: 'single',
+            planned_games: 1,
+            completed_games: 1,
+            score: { wins_a: 1, draws: 0, wins_b: 0 },
+            rounds_played: 70,
+            normalized_delta_a: 0.23,
+            games: [{
+              index: 1,
+              winner: 0,
+              rounds_played: 70,
+              normalized_delta_a: 0.23,
+            }],
+            termination: { kind: 'normal', reason: 'completed', loser: null },
+          },
+        },
+      }),
+    })
+  })
   await page.route('**/api/comments?*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -1632,8 +1696,9 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await expect(page).toHaveURL(new RegExp(`#\/play\/${humanId}$`))
   await expect.poll(() => humanPlayWsSearch).toBe('')
   const humanStatus = page.getByRole('region', { name: '人类对战状态' })
-  await expect(humanStatus).toContainText('对局结束 · 胜者：canonical_bot（@alpha）')
-  await expect(page.getByText('累计 +23 / -23', { exact: true })).toBeVisible()
+  await expect(humanStatus).toContainText('对局结束 · canonical_bot（@alpha）胜')
+  expect(humanTerminalDetailRequests).toBe(1)
+  await expect(page.getByText('本场净胜 +23 / -23', { exact: true })).toBeVisible()
   await monitor.expectClean(expectedViewerDetailCancellations())
 })
 
@@ -1813,6 +1878,19 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
         match_type: 'contest',
         bot_a: { id: 31, name: 'physical_alpha', owner_name: 'alpha' },
         bot_b: { id: 32, name: 'physical_beta', owner_name: 'beta' },
+        outcome: {
+          kind: 'duplicate',
+          planned_games: 2,
+          completed_games: 2,
+          score: { wins_a: 1, draws: 0, wins_b: 1 },
+          rounds_played: 140,
+          normalized_delta_a: 0,
+          games: [
+            { index: 1, winner: 0, rounds_played: 70, normalized_delta_a: 70 },
+            { index: 2, winner: 1, rounds_played: 70, normalized_delta_a: -70 },
+          ],
+          termination: { kind: 'normal', reason: 'completed', loser: null },
+        },
         result: {
           rounds_played: 140,
           deltas: [0, 0],
@@ -1833,29 +1911,51 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await page.goto(`/#/match/${matchId}`)
   await page.getByRole('button', { name: /直接查看最终结果/ }).click()
   const overview = page.getByTestId('holdem-position-overview')
-  await expect(page.getByText('复式赛按分局计分', { exact: true })).toBeVisible()
-  await expect(page.getByText('第 140/140 手', { exact: true })).toBeVisible()
-  await expect(overview).toContainText('第 2/2 局 · 当前手 70 / 70')
-  await expect(overview).toContainText('总计已结算 140 手')
-  await expect(overview).toContainText('剩余 0 手')
+  const outcome = page.locator('[data-match-outcome-kind="duplicate"]')
+  await expect(outcome).toContainText('physical_alpha（@alpha） 1胜 · 平 0 · physical_beta（@beta） 1胜')
+  await expect(outcome).toContainText('已完成 2/2 场计分')
+  await expect(outcome).toContainText('第 1 场：physical_alpha（@alpha）胜')
+  await expect(outcome).toContainText('第 2 场：physical_beta（@beta）胜')
+  await expect(page.getByText('第 2/2 场 · 第 70/70 手', { exact: true })).toBeVisible()
+  await expect(overview).toContainText('第 2/2 场 · 当前手 70 / 70')
+  await expect(overview).toContainText('本场已结算 70 手')
+  await expect(overview).toContainText('本场剩余 0 手')
   await expect(overview).toContainText('physical_alpha（@alpha） · 弃牌 · 座位 1')
-  await expect(overview).toContainText('胜手 physical_alpha（@alpha） 70 · physical_beta（@beta） 70')
-  await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuemax', '140')
-  await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuenow', '140')
-  await expect(overview.getByLabel('第 2 局第 70 手，physical_alpha（@alpha） -100')).toBeVisible()
+  await expect(overview).toContainText('胜手 physical_alpha（@alpha） 0 · physical_beta（@beta） 70')
+  await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('本场净胜-7,000')
+  await expect(overview.getByTestId('holdem-seat-state-2')).toContainText('本场净胜+7,000')
+  const combined = overview.getByTestId('holdem-duplicate-combined-summary')
+  await expect(combined).toContainText('复式交锋组合计 · 辅助信息')
+  await expect(combined).toContainText('总进度 140/140 手')
+  await expect(combined).toContainText('净变化 physical_alpha（@alpha） +0 · physical_beta（@beta） +0')
+  await expect(combined).toContainText('胜手 physical_alpha（@alpha） 70 · physical_beta（@beta） 70')
+  await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuemax', '70')
+  await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuenow', '70')
+  await expect(overview.getByLabel('第 2 场第 70 手，physical_alpha（@alpha） -100')).toBeVisible()
 
-  await expect(page.locator('main')).toContainText('第 2 局 · physical_alpha（@alpha） · 弃牌（座位 1）')
-  await expect(page.locator('main')).toContainText('结束 · 无单一整场胜者 · 正常结束')
+  await expect(page.locator('main')).toContainText('第 2 场 · physical_alpha（@alpha） · 弃牌（座位 1）')
+  await expect(page.locator('main')).toContainText('第 2 场 · 轮到 physical_beta（@beta）')
+  await expect(page.locator('main')).toContainText('结束 · 赛果已结算 · 正常结束')
   await expect(page.locator('main')).not.toContainText('结束 · 平局')
   await page.getByRole('combobox', { name: '跳转手' }).click()
-  const secondLegFirstHand = page.getByRole('option', { name: '第 2 局 · 第 1 手', exact: true })
+  const secondLegFirstHand = page.getByRole('option', { name: '第 2 场 · 第 1 手', exact: true })
   await expect(secondLegFirstHand).toBeVisible()
   await secondLegFirstHand.click()
   await page.getByRole('button', { name: '上一个事件', exact: true }).click()
-  await expect(overview).toContainText('第 2/2 局 · 等待发牌 · 共 140 手')
-  await expect(overview).toContainText('总计已结算 70 手')
-  await expect(overview).toContainText('剩余 70 手')
+  await expect(overview).toContainText('第 2/2 场 · 等待发牌 · 本场共 70 手')
+  await expect(overview).toContainText('本场已结算 0 手')
+  await expect(overview).toContainText('本场剩余 70 手')
+  await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuemax', '70')
+  await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuenow', '0')
+  await expect(overview).toContainText('胜手 physical_alpha（@alpha） 0 · physical_beta（@beta） 0')
+  await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('本场净胜+0')
+  await expect(overview.getByTestId('holdem-seat-state-2')).toContainText('本场净胜+0')
+  await expect(combined).toContainText('净变化 physical_alpha（@alpha） +7,000 · physical_beta（@beta） -7,000')
+  await expect(combined).toContainText('胜手 physical_alpha（@alpha） 70 · physical_beta（@beta） 0')
+  await expect(combined).toContainText('总进度 70/140 手')
   await expect(overview).toContainText('等待首个动作')
+  await expect(overview).toContainText('首手尚未结算')
+  await expect(overview.getByLabel(/第 1 场第 70 手/)).toHaveCount(0)
   await expect(overview).toContainText('尚未发牌')
   await expect(overview).not.toContainText('翻牌前')
   await expect(overview).not.toContainText('小盲')
@@ -1864,6 +1964,143 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(overview).not.toContainText('当前手 70')
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean(expectedDetailCancellations())
+})
+
+test('Holdem duplicate technical terminal stays a one-game decision without a group winner', async ({ page }) => {
+  const matchId = 'mock-holdem-duplicate-second-game-technical'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
+  const monitor = monitorBrowser(page)
+  await routeStructuredReplay(page, matchId, holdemDuplicateSecondGameTechnicalFixture())
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      match: {
+        id: matchId,
+        game_id: 'holdem',
+        status: 'completed',
+        winner: 1,
+        reason: 'protocol_error',
+        match_type: 'contest',
+        technical_loss: 1,
+        bot_a: { id: 41, name: 'crashed_alpha', owner_name: 'alpha' },
+        bot_b: { id: 42, name: 'healthy_beta', owner_name: 'beta' },
+        outcome: {
+          kind: 'duplicate',
+          planned_games: 2,
+          completed_games: 1,
+          score: { wins_a: 0, draws: 0, wins_b: 1 },
+          rounds_played: 0,
+          normalized_delta_a: 0,
+          games: [
+            { index: 2, winner: 1, rounds_played: 0, normalized_delta_a: 0 },
+          ],
+          termination: { kind: 'technical', reason: 'protocol_error', loser: 0 },
+        },
+        result: { rounds_played: 0, deltas: [0, 0], normalized_delta: 0 },
+      },
+    }),
+  }))
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  await page.setViewportSize({ width: 1366, height: 768 })
+  await page.goto(`/#/match/${matchId}`)
+
+  const resultCard = page.getByTestId('match-result-card')
+  await expect(resultCard).toContainText('技术终局 · 已计 1/2 场')
+  await expect(resultCard).toContainText('crashed_alpha（@alpha） 技术判负')
+  await expect(resultCard).toContainText('第 2 场：healthy_beta（@beta）胜')
+  await expect(resultCard.locator('[data-match-participant][data-participant-state="winner"]')).toHaveCount(0)
+  await expect(resultCard.locator('[data-match-participant][data-participant-state="loser"]')).toHaveCount(0)
+  await expect(page.getByRole('alert')).toContainText('Bot 技术判负')
+  await expect(page.getByRole('alert')).toContainText('crashed_alpha（@alpha） · 座位 1 发生技术故障。')
+  await expect(page.getByRole('alert')).not.toContainText('healthy_beta（@beta） · 座位 2 获胜')
+
+  const overview = page.getByTestId('holdem-position-overview')
+  await expect(overview).toContainText('第 2/2 场 · 未完成任何一手 · 本场共 70 手')
+  await expect(page.getByText('第 1/70 手', { exact: true })).toHaveCount(0)
+  await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('本场净胜+0')
+  await expect(overview.getByTestId('holdem-seat-state-2')).toContainText('本场净胜+0')
+  const combinedSummary = overview.getByTestId('holdem-duplicate-combined-summary')
+  await expect(combinedSummary).toContainText('总进度 70/140 手')
+  await expect(combinedSummary).toContainText('净变化 crashed_alpha（@alpha） +7,000 · healthy_beta（@beta） -7,000')
+  await expect(overview.locator('[data-slot="badge"]').filter({ hasText: /^未完成手牌$/ })).toBeVisible()
+  await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('交锋组已结束')
+  await expect(overview.getByTestId('holdem-seat-state-2')).toContainText('交锋组已结束')
+  await expect(page.locator('main')).not.toContainText('结束 · 平局')
+  await expect(page.getByRole('combobox', { name: '跳转手' })).toContainText('终局事件')
+  await page.getByRole('combobox', { name: '跳转手' }).click()
+  await page.getByRole('option', { name: '第 1 场 · 第 70 手', exact: true }).click()
+  await expect(page.getByText('第 1/2 场 · 第 70/70 手', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean(expectedDetailCancellations())
+})
+
+test('public outcome overrides conflicting legacy winner without treating missing outcome as a draw', async ({ page }) => {
+  await page.goto('/')
+  const labels = await page.evaluate(async () => {
+    const module = await import('/src/lib/match-seats.ts')
+    const duplicateOutcome = {
+      kind: 'duplicate' as const,
+      planned_games: 2,
+      completed_games: 2,
+      score: { wins_a: 1, draws: 0, wins_b: 1 },
+      rounds_played: 140,
+      normalized_delta_a: 0,
+      games: [
+        { index: 1, winner: 0 as const, rounds_played: 70, normalized_delta_a: 70 },
+        { index: 2, winner: 1 as const, rounds_played: 70, normalized_delta_a: -70 },
+      ],
+      termination: { kind: 'normal' as const, reason: 'completed', loser: null },
+    }
+    const singleDrawOutcome = {
+      kind: 'single' as const,
+      planned_games: 1,
+      completed_games: 1,
+      score: { wins_a: 0, draws: 1, wins_b: 0 },
+      rounds_played: 70,
+      normalized_delta_a: 0,
+      games: [{ index: 1, winner: null, rounds_played: 70, normalized_delta_a: 0 }],
+      termination: { kind: 'normal' as const, reason: 'draw', loser: null },
+    }
+    return {
+      conflicting: module.resolveWinnerLabel({
+        status: 'completed',
+        winner: 0,
+        outcome: duplicateOutcome,
+        bot_a: { id: 1, name: 'alpha' },
+        bot_b: { id: 2, name: 'beta' },
+      }, 0, true),
+      unavailable: module.resolveWinnerLabel({
+        status: 'completed',
+        winner: 0,
+        outcome: null,
+      }, 0, true),
+      legacyWinner: module.resolveWinnerLabel({
+        status: 'completed',
+        winner: 0,
+      }, null, true),
+      trueDraw: module.resolveWinnerLabel({
+        status: 'completed',
+        winner: null,
+        outcome: singleDrawOutcome,
+        bot_a: { id: 1, name: 'alpha' },
+        bot_b: { id: 2, name: 'beta' },
+      }, null, true),
+    }
+  })
+  expect(labels.conflicting).toBe('alpha（所属用户不可用） 1胜 · 平 0 · beta（所属用户不可用） 1胜')
+  expect(labels.unavailable).toBe('赛果暂不可用')
+  expect(labels.legacyWinner).toBe('座位 1（信息不可用）胜')
+  expect(labels.trueDraw).toBe('平局')
 })
 
 test('human Holdem reuses the public-position HUD without exposing hole-card text', async ({ page }) => {
@@ -2771,11 +3008,14 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   const humanFixtures = {
     'mock-human-score': {
       gameId: 'pencil', reason: 'score', label: '按最终得分判定', tone: 'neutral', winner: 1,
+      roundsPlayed: 4, deltaA: -1, scores: [0, 1] as const,
     },
     'mock-human-illegal': {
-      gameId: 'pencil', reason: 'illegal', label: '非法连边', tone: 'danger', winner: 0,
+      gameId: 'pencil', reason: 'illegal', label: '非法连边', tone: 'danger', winner: 1,
+      roundsPlayed: 0, deltaA: -2, scores: [0, 2] as const,
     },
   } as const
+  const humanTerminalDetailRequests: Record<string, number> = {}
 
   // WebSocket interception must be installed before the first Vite navigation.
   await page.routeWebSocket(
@@ -2789,13 +3029,17 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
           id,
           game_id: fixture.gameId,
           status: 'completed',
+          outcome: null,
           reason: fixture.reason,
           match_type: 'human',
           human_seat: 1,
           winner: fixture.winner,
           bot_a: { name: 'reason_bot', owner_name: 'alpha' },
           bot_b: { owner_name: 'human_player', is_human: true },
-          result: { rounds_played: 1, deltas: fixture.winner === 0 ? [1, -1] : [-1, 1] },
+          result: {
+            rounds_played: fixture.roundsPlayed,
+            deltas: [fixture.deltaA, -fixture.deltaA],
+          },
         },
         events: [
           ...(id === 'mock-human-illegal' ? [
@@ -2806,7 +3050,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
             type: 'match_end',
             winner: fixture.winner,
             reason: fixture.reason,
-            scores: fixture.gameId === 'pencil' ? [4, 9] : undefined,
+            scores: fixture.scores,
           },
         ],
       })), 0)
@@ -2841,6 +3085,56 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
         },
       }),
     }))
+  }
+  for (const [id, fixture] of Object.entries(humanFixtures)) {
+    humanTerminalDetailRequests[id] = 0
+    await page.route(`**/api/matches/${id}`, async (route) => {
+      humanTerminalDetailRequests[id] += 1
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          match: {
+            id,
+            game_id: fixture.gameId,
+            status: 'completed',
+            reason: fixture.reason,
+            winner: fixture.winner,
+            match_type: 'human',
+            human_seat: 1,
+            bot_a: { name: 'reason_bot', owner_name: 'alpha' },
+            bot_b: { owner_name: 'human_player', is_human: true },
+            result: {
+              rounds_played: fixture.roundsPlayed,
+              deltas: [fixture.deltaA, -fixture.deltaA],
+            },
+            outcome: {
+              kind: 'single',
+              planned_games: 1,
+              completed_games: 1,
+              score: {
+                wins_a: fixture.winner === 0 ? 1 : 0,
+                draws: 0,
+                wins_b: fixture.winner === 1 ? 1 : 0,
+              },
+              rounds_played: fixture.roundsPlayed,
+              normalized_delta_a: fixture.deltaA,
+              games: [{
+                index: 1,
+                winner: fixture.winner,
+                rounds_played: fixture.roundsPlayed,
+                normalized_delta_a: fixture.deltaA,
+              }],
+              termination: {
+                kind: 'normal',
+                reason: fixture.reason,
+                loser: null,
+              },
+            },
+          },
+        }),
+      })
+    })
   }
   await page.route('**/api/comments?*', async (route) => route.fulfill({
     status: 200,
@@ -2910,6 +3204,8 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
     // routed sockets before the second mocked human channel can deliver a snapshot.
     await page.evaluate((matchId) => { window.location.hash = `#/play/${matchId}` }, id)
     await expect(page).toHaveURL(new RegExp(`#\\/play\\/${id}$`))
+    await expect(page.getByRole('region', { name: '人类对战状态' }))
+      .toContainText('对局结束 · @human_player（真人）胜')
     const reason = page.getByTestId('terminal-reason')
     await expect(reason).toHaveText(`（${fixture.label}）`)
     await expect(reason).toHaveAttribute('data-tone', fixture.tone)
@@ -2920,6 +3216,10 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
       await expect(page.getByText('time_used', { exact: true })).toHaveCount(0)
     }
   }
+  expect(humanTerminalDetailRequests).toEqual({
+    'mock-human-score': 1,
+    'mock-human-illegal': 1,
+  })
 
   await loginThroughUi(page, ADMIN)
   await page.route('**/api/matches?*', async (route) => route.fulfill({
@@ -3844,12 +4144,15 @@ test('Holdem replay state includes blinds and treats all-in amount as raise-to',
     totalHands: 70,
     handsStarted: 2,
     completedHands: 2,
+    currentGameHandsStarted: 1,
+    currentGameCompletedHands: 1,
+    combinedNets: [-100, 100],
     sbSeat: 1,
     matchWinner: null,
     status: 'match_end',
   })
   expect(states.duplicate.seats.map((seat) => seat.chips)).toEqual([19950, 20050])
-  expect(states.duplicate.seats.map((seat) => seat.net)).toEqual([-100, 100])
+  expect(states.duplicate.seats.map((seat) => seat.net)).toEqual([-50, 50])
   expect(states.duplicate.lastSettle?.winners).toEqual([1])
   expect(states.aborted.status).toBe('error')
   expect(states.aborted.matchWinner).toBeNull()

@@ -14,6 +14,7 @@ import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, A
 import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
@@ -35,8 +36,13 @@ import {
   type MatchSeatRow,
   seatInfos,
   seatHeaderLabel,
-  resolveWinnerLabel,
 } from '@/lib/match-seats'
+import {
+  hasPublicMatchOutcomeField,
+  isPublicMatchOutcome,
+  outcomeParticipantStates,
+  singleOutcomeWinner,
+} from '@/lib/match-outcome'
 
 type MatchRow = MatchSeatRow & {
   id?: string
@@ -56,6 +62,7 @@ type ReplayPayload = {
 
 function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
   if (!match) return false
+  if (isPublicMatchOutcome(match.outcome) && match.outcome.termination.kind === 'technical') return true
   if (Number(match.technical_loss || 0) > 0) return true
   if ((match.result?.technical_incident_samples?.length ?? 0) > 0) return true
   if (Object.values(match.result?.technical_incidents_by_seat ?? {}).some((n) => Number(n) > 0)) return true
@@ -454,16 +461,8 @@ export default function MatchViewer() {
   const visibleSeatDetail = (seat: number) => (
     gameSpec?.seatDetail?.(visibleVm, seat) ?? gameSpec?.seatColors?.[seat]
   )
-  const colorLabel = (seat: number) => {
-    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-    if (!match) return `座位 ${seat + 1}`
-    // 动态棋色（如五子棋交换）经 seatDetail 取；固定棋色回退 seatColors。
-    const detail = visibleSeatDetail(seat)
-    return detail
-      ? `${seatHeaderLabel(match, seat as 0 | 1)}（${detail}）`
-      : seatHeaderLabel(match, seat as 0 | 1)
-  }
-  const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
+  const publicOutcome = isPublicMatchOutcome(match?.outcome) ? match.outcome : null
+  const hasOutcomeContract = hasPublicMatchOutcomeField(match)
   const visibleProgress = visibleVm && gameSpec ? gameSpec.replay.progress(visibleVm) : null
   const visibleProgressTotal = visibleVm && gameSpec?.replay.progressTotal
     ? gameSpec.replay.progressTotal(visibleVm)
@@ -510,18 +509,37 @@ export default function MatchViewer() {
   // 首决策德扑故障已经有 hand_start，但没有完成一手；只数 settle，避免终局
   // 到达、REST 尚未刷新时短暂显示伪造的“第 1/70 手”。没有 hand_start 的
   // admin/platform 中止则由 Holdem progress 返回 null，同样不显示假进度。
-  const completedProgress = gameSpec?.progressUnit === 'hand'
-    ? events.filter((event) => event.type === 'settle').length
+  const visibleCompletedProgress = visibleVm && gameSpec?.replay.completedProgress
+    ? gameSpec.replay.completedProgress(visibleVm)
+    : visibleProgress
+  const totalCompletedProgress = fullVm && gameSpec?.replay.totalCompletedProgress
+    ? gameSpec.replay.totalCompletedProgress(fullVm)
     : fullReplayProgress
-  const zeroProgressTechnicalTerminal = technicalTerminal && (
-    completedProgress == null || !Number.isFinite(completedProgress) || completedProgress <= 0
+  const atTerminalFrame = total > 0 && cur >= total - 1
+  const zeroProgressTechnicalFrame = technicalTerminal && atTerminalFrame && (
+    visibleCompletedProgress == null
+    || !Number.isFinite(visibleCompletedProgress)
+    || visibleCompletedProgress <= 0
   )
-  const progressText = !zeroProgressTechnicalTerminal && displayedProgress != null && displayedProgress > 0
+  const zeroProgressTechnicalMatch = technicalTerminal && (
+    totalCompletedProgress == null
+    || !Number.isFinite(totalCompletedProgress)
+    || totalCompletedProgress <= 0
+  )
+  const progressScopeLabel = visibleVm && gameSpec?.replay.progressScopeLabel
+    ? gameSpec.replay.progressScopeLabel(visibleVm)
+    : null
+  const progressCore = !zeroProgressTechnicalFrame && displayedProgress != null && displayedProgress > 0
     ? visibleProgressTotal != null && Number.isFinite(visibleProgressTotal) && visibleProgressTotal > 0
       ? `第 ${Math.min(displayedProgress, visibleProgressTotal)}/${visibleProgressTotal} ${progressUnitLabel}`
       : `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
     : null
+  const progressText = progressCore && progressScopeLabel
+    ? `${progressScopeLabel} · ${progressCore}`
+    : progressCore
   const failedSeat = (() => {
+    const outcomeLoser = publicOutcome?.termination.loser
+    if (outcomeLoser === 0 || outcomeLoser === 1) return outcomeLoser
     const sampleSeat = Number(technicalIncidents[0]?.seat)
     if (sampleSeat === 0 || sampleSeat === 1) return sampleSeat
     const counts = match?.result?.technical_incidents_by_seat ?? {}
@@ -531,10 +549,10 @@ export default function MatchViewer() {
   // 首个决策即技术终止时直接呈现权威终局。自动从头播放会让“已完成”页面
   // 暂时停在发牌事件，看起来像仍在正常比赛。
   useEffect(() => {
-    if (!zeroProgressTechnicalTerminal || total <= 0) return
+    if (!zeroProgressTechnicalMatch || total <= 0) return
     setCursor(total - 1)
     setPlaying(false)
-  }, [zeroProgressTechnicalTerminal, total])
+  }, [zeroProgressTechnicalMatch, total])
 
   // 定速播放节拍（直播+回放共用）：只由播放态/速度控制生命周期。不能依赖
   // total；高频 SSE 每次增加 total 都会清理并重建 timeout，事件间隔持续短于
@@ -587,6 +605,13 @@ export default function MatchViewer() {
 
   // 可选的游戏分段导航（当前德州按手）；边界算法由游戏包提供。
   const bounds = useMemo(() => navigation?.boundaries(events) ?? [], [events, navigation])
+  // match_end 是整条回放的权威终局帧，不属于最后一手。若仍把它映射到
+  // 最后一手，Select 会显示一个并非当前画面的值；用户再次选择该手时
+  // Radix 不会触发 onValueChange，也就无法从终局跳回最后一手。
+  const terminalNavigationIndex = navigation
+    && (events[total - 1]?.type === 'match_end' || events[total - 1]?.type === 'error')
+    ? total - 1
+    : null
   const jumpSegment = (delta: number) => {
     pause()
     if (!bounds.length) return
@@ -596,6 +621,9 @@ export default function MatchViewer() {
     setCursor(bounds[target] ?? 0)
   }
   const curSegmentIdx = (() => { for (let i = 0; i < bounds.length - 1; i++) if (cur >= bounds[i] && cur < bounds[i + 1]) return i; return bounds.length >= 2 ? bounds.length - 2 : 0 })()
+  const currentNavigationValue = terminalNavigationIndex !== null && cur === terminalNavigationIndex
+    ? 'terminal'
+    : String(curSegmentIdx)
 
   // 页面 main 是唯一纵向滚动 owner。右轨只给当前事件有限上下文，避免长回放
   // 在 1280/1560 与移动视口形成“页面滚动 + 日志滚动”的双纵滚。
@@ -604,11 +632,23 @@ export default function MatchViewer() {
 
   const GameIcon = gameIcon(gameId)
   const isLive = status === 'live' || isLiveMatch
-  const winnerSeat = match?.winner === 0 || match?.winner === 1
-    ? match.winner
-    : eventWinner === 0 || eventWinner === 1
-      ? eventWinner
-      : null
+  const outcomeWinner = singleOutcomeWinner(publicOutcome)
+  const winnerSeat = publicOutcome
+    ? outcomeWinner === 0 || outcomeWinner === 1 ? outcomeWinner : null
+    : hasOutcomeContract
+      ? null
+      : match?.winner === 0 || match?.winner === 1
+      ? match.winner
+      : eventWinner === 0 || eventWinner === 1
+        ? eventWinner
+        : null
+  const participantStates = publicOutcome
+    ? outcomeParticipantStates(publicOutcome)
+    : winnerSeat === 0
+      ? (['winner', 'loser'] as const)
+      : winnerSeat === 1
+        ? (['loser', 'winner'] as const)
+        : (['neutral', 'neutral'] as const)
   const playbackLabel = playing
     ? '暂停回放'
     : cur >= total - 1
@@ -629,13 +669,13 @@ export default function MatchViewer() {
     : undefined
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
-    const isWinner = winnerSeat === seat
+    const isWinner = participantStates[seat] === 'winner'
     return (
       <MatchParticipantIdentity
         source={match}
         side={seat}
         variant="panel"
-        state={isWinner ? 'winner' : winnerSeat != null ? 'loser' : 'neutral'}
+        state={participantStates[seat]}
         seatDetail={visibleSeatDetail(seat)}
         className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} border ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}
       />
@@ -739,9 +779,20 @@ export default function MatchViewer() {
               <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 {finished ? '对局结果' : '当前状态'}
               </div>
-              <div className="mt-1 break-words text-sm font-semibold text-foreground">
-                {finished ? winnerLabel : '对局进行中'}
-              </div>
+              {finished ? (
+                <MatchOutcome
+                  source={{
+                    status: match.status === 'aborted' ? 'aborted' : 'completed',
+                    outcome: match.outcome,
+                  }}
+                  seatLabels={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
+                  normalizedUnit={gameId === 'holdem' ? 'BB' : undefined}
+                  showGames
+                  className="mt-1 text-sm"
+                />
+              ) : (
+                <div className="mt-1 break-words text-sm font-semibold text-foreground">对局进行中</div>
+              )}
               {hasPersistedTerminalStatus && match.reason && (
                 <div
                   data-testid="terminal-reason"
@@ -876,7 +927,7 @@ export default function MatchViewer() {
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
             {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
-            {!zeroProgressTechnicalTerminal && (
+            {!zeroProgressTechnicalMatch && (
               <Card className="gap-0 py-0">
                 <CardContent className="px-3 py-2.5">
                   <div className="flex flex-wrap items-center justify-center gap-1.5">
@@ -893,8 +944,12 @@ export default function MatchViewer() {
                     )}
                     {navigation && bounds.length >= 2 && (
                       <Select
-                        value={String(curSegmentIdx)}
-                        onValueChange={(value) => seek(bounds[Number(value)] ?? 0)}
+                        value={currentNavigationValue}
+                        onValueChange={(value) => seek(
+                          value === 'terminal'
+                            ? terminalNavigationIndex ?? Math.max(0, total - 1)
+                            : bounds[Number(value)] ?? 0,
+                        )}
                       >
                         <SelectTrigger size="sm" className="h-8 w-[6.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
                           <SelectValue />
@@ -905,6 +960,9 @@ export default function MatchViewer() {
                               {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
                             </SelectItem>
                           ))}
+                          {terminalNavigationIndex !== null && (
+                            <SelectItem value="terminal">终局事件</SelectItem>
+                          )}
                         </SelectContent>
                       </Select>
                     )}

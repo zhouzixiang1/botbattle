@@ -106,8 +106,8 @@ export default function BotDebugPanel({
               {([0, 1] as const).map((seat) => {
                 const entries = bySeat[seat]
                 const allText = entries.map((entry) => {
-                  const leg = entry.leg == null ? '' : ` · Leg ${entry.leg + 1}`
-                  return `第 ${entry.turn} 次决策${leg}\n${debugText(entry.debug)}`
+                  const game = entry.leg == null ? '' : ` · 第 ${entry.leg + 1} 场`
+                  return `第 ${entry.turn} 次决策${game}\n${debugText(entry.debug)}`
                 }).join('\n\n')
                 return (
                   <TabsContent key={seat} value={String(seat)} className="min-w-0">
@@ -143,7 +143,7 @@ export default function BotDebugPanel({
                               <div className="mb-1.5 flex min-w-0 items-center gap-2">
                                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
                                   第 {entry.turn} 次决策
-                                  {entry.leg == null ? '' : ` · Leg ${entry.leg + 1}`}
+                                  {entry.leg == null ? '' : ` · 第 ${entry.leg + 1} 场`}
                                 </span>
                                 <Tooltip>
                                   <TooltipTrigger asChild>

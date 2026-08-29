@@ -230,6 +230,7 @@ def test_private_api_identity_gate_cannot_authorize_replacement_non_real_entry(
     original_projection = store_db_module._contest_identity_projection_sql
     projection_boundary = threading.Barrier(2)
     release_reader = threading.Event()
+    writer_started = threading.Event()
     first_call_lock = threading.Lock()
     first_call = True
     audits: list[dict] = []
@@ -261,29 +262,43 @@ def test_private_api_identity_gate_cannot_authorize_replacement_non_real_entry(
         "export_v2": f"/api/contests/{cid}/export?format=csv&schema=2",
     }[endpoint]
 
+    def replace_with_non_real_entry():
+        writer_started.set()
+        assert second.delete_contest_roster_entry(cid, entrant["id"])
+        second.update_contest(cid, require_real_name=0)
+        return second.add_entry(cid, entrant["id"], bot["id"])
+
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future = executor.submit(
                 client.get,
                 path,
                 headers={"Authorization": f"Bearer {org_tok}"},
             )
             projection_boundary.wait(timeout=5)
-            try:
-                assert second.delete_contest_roster_entry(cid, entrant["id"])
-                second.update_contest(cid, require_real_name=0)
-                replacement = second.add_entry(
-                    cid, entrant["id"], bot["id"]
-                )
-            finally:
+            if endpoint == "detail":
+                # Detail now reads contest, pairings, roster and identity under
+                # one SQLite snapshot.  Start the writer while that read
+                # transaction is open, then release the reader: the first
+                # response must remain the old authorized snapshot, and only a
+                # later request may observe the replacement non-real roster.
+                writer = executor.submit(replace_with_non_real_entry)
+                assert writer_started.wait(timeout=5)
                 release_reader.set()
-            response = future.result(timeout=10)
+                response = future.result(timeout=10)
+                replacement = writer.result(timeout=10)
+            else:
+                # Export is one joined SELECT whose identity gate and row are
+                # evaluated together.  Its query has not begun at this paused
+                # SQL-construction boundary, so the replacement wins first.
+                replacement = replace_with_non_real_entry()
+                release_reader.set()
+                response = future.result(timeout=10)
 
         assert response.status_code == 200, response.text
         assert int(store.get_contest(cid)["require_real_name"]) == 0
         assert replacement["identity_source"] is None
         private_values = ("张三", "13800000001", "测试大学", "2024001")
-        assert all(value not in response.text for value in private_values)
         identity_fields = (
             "real_name",
             "phone",
@@ -295,8 +310,19 @@ def test_private_api_identity_gate_cannot_authorize_replacement_non_real_entry(
         )
         if endpoint == "detail":
             row = response.json()["entries"][0]
-            assert all(field not in row for field in identity_fields)
+            assert row["real_name"] == "张三"
+            assert row["identity_source"] == "registration_profile"
+            assert all(value in response.text for value in private_values)
+            replacement_view = client.get(
+                path,
+                headers={"Authorization": f"Bearer {org_tok}"},
+            )
+            assert replacement_view.status_code == 200
+            replacement_row = replacement_view.json()["entries"][0]
+            assert all(field not in replacement_row for field in identity_fields)
+            assert all(value not in replacement_view.text for value in private_values)
         elif endpoint == "export_v1":
+            assert all(value not in response.text for value in private_values)
             row = next(
                 csv.DictReader(
                     io.StringIO(response.content.decode("utf-8-sig"))
@@ -317,6 +343,7 @@ def test_private_api_identity_gate_cannot_authorize_replacement_non_real_entry(
                 ),
             }]
         else:
+            assert all(value not in response.text for value in private_values)
             row = next(
                 csv.DictReader(
                     io.StringIO(response.content.decode("utf-8-sig"))

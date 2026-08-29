@@ -27,6 +27,13 @@ import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
 import { gameLabel, gameIcon } from '@/lib/games'
 import { isBotSelfPlay, resolveMatchParticipant, type MatchParticipantSource } from '@/lib/match-participants'
+import {
+  hasPublicMatchOutcomeField,
+  isPublicMatchOutcome,
+  outcomeLabelForSeat,
+  outcomeParticipantStates,
+  type MatchOutcomeSource,
+} from '@/lib/match-outcome'
 import { fmtTime, fmtRating, fmtDate } from '@/lib/format'
 import { CopyIdentifier } from '@/pages/public-page-ui'
 
@@ -67,7 +74,7 @@ interface BotProfile {
   technical_failures: number
 }
 
-interface MatchRow extends MatchParticipantSource {
+interface MatchRow extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   game_id: string
   status: string
@@ -112,24 +119,20 @@ function fmtSigned(value: number | null | undefined): string {
   return `${value > 0 ? '+' : ''}${value.toFixed(1)}`
 }
 
-function matchOutcome(m: MatchRow, botId: number): 'win' | 'loss' | 'draw' | 'selfplay' | '' {
-  if (m.status !== 'completed') return ''
-  if (isBotSelfPlay(m)) return 'selfplay'
-  if (m.winner === null) return 'draw'
+function botSeatForMatch(m: MatchRow, botId: number): 0 | 1 | null {
   const seatA = resolveMatchParticipant(m, 0)
   const seatB = resolveMatchParticipant(m, 1)
   // human 对局物理上会在两侧保存同一 Bot id；实际 Bot 座由 is_human 决定。
-  const botSeat = !seatA.isHuman && seatA.botId === botId
+  return !seatA.isHuman && seatA.botId === botId
     ? 0
     : !seatB.isHuman && seatB.botId === botId
       ? 1
       : null
-  if (botSeat == null) return ''
-  const won = m.winner === botSeat
-  return won ? 'win' : 'loss'
 }
 
 function participantStates(m: MatchRow) {
+  if (isPublicMatchOutcome(m.outcome)) return outcomeParticipantStates(m.outcome)
+  if (hasPublicMatchOutcomeField(m)) return ['neutral', 'neutral'] as const
   return m.status === 'completed' && m.winner === 0
     ? (['winner', 'loser'] as const)
     : m.status === 'completed' && m.winner === 1
@@ -137,13 +140,22 @@ function participantStates(m: MatchRow) {
       : (['neutral', 'neutral'] as const)
 }
 
-function MatchOutcome({ match, botId }: { match: MatchRow; botId: number }) {
-  const outcome = matchOutcome(match, botId)
+function BotPerspectiveOutcome({ match, botId }: { match: MatchRow; botId: number }) {
   if (match.status !== 'completed') return <StatusBadge status={match.status} />
+  if (isBotSelfPlay(match)) return <Badge variant="secondary">自博弈</Badge>
+  const botSeat = botSeatForMatch(match, botId)
+  const outcome = isPublicMatchOutcome(match.outcome) ? match.outcome : null
+  const label = botSeat == null ? '赛果暂不可用' : outcomeLabelForSeat(outcome, botSeat)
+  const singleWinner = outcome?.kind === 'single' ? outcome.games[0]?.winner : undefined
+  const variant = outcome?.kind === 'duplicate' || singleWinner === null
+    ? 'secondary'
+    : label === '胜'
+      ? 'default'
+      : label === '负'
+        ? 'destructive'
+        : 'outline'
   return (
-    <Badge variant={outcome === 'win' ? 'default' : outcome === 'loss' ? 'destructive' : 'secondary'}>
-      {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : outcome === 'selfplay' ? '自博弈' : '平'}
-    </Badge>
+    <Badge variant={variant}>{label}</Badge>
   )
 }
 
@@ -157,7 +169,7 @@ function MobileMatchCard({ match, botId }: { match: MatchRow; botId: number }) {
     >
       <header className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="mr-auto font-mono text-xs text-muted-foreground">{fmtTime(match.created_at)}</span>
-        <MatchOutcome match={match} botId={botId} />
+        <BotPerspectiveOutcome match={match} botId={botId} />
         <MatchNatureBadge matchType={match.match_type} source={match} />
       </header>
       <div data-match-participants="true" className="grid min-w-0 gap-2">
@@ -575,7 +587,7 @@ export default function BotDetail() {
         </StickyToolbar>
 
         <TabsContent value="history">
-          <DataRegion title="对局历史" description={`第 ${matchesPage} 页 · 每页 ${matchesPerPage} 场`}>
+          <DataRegion title="对局历史" description={`第 ${matchesPage} 页 · 每页 ${matchesPerPage} 条记录`}>
             {matchesError ? (
               <ErrorMsg msg={matchesError} className="px-4 py-6" />
             ) : matchesLoading ? (
@@ -614,7 +626,7 @@ export default function BotDetail() {
                           <MatchParticipants source={m} states={states} />
                         </TableCell>
                         <TableCell>
-                          <MatchOutcome match={m} botId={botId} />
+                          <BotPerspectiveOutcome match={m} botId={botId} />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           <MatchNatureBadge matchType={m.match_type} source={m} />

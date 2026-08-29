@@ -6,7 +6,7 @@
 
 纯游戏规则（牌型评估/下注状态机/边池结算/showdown）在 holdem_judge.py，0 平台依赖。
 本层只管平台特有：事件序列（6 类事件 dict 键不变）、decide 调用、跨手 Botzone 计分
-（每手复位筹码，比累计净输赢 net）、BotCrashedError 处理、P4 duplicate（deal_sequence）。
+（每手复位筹码，比累计净输赢 net）、技术异常透传、复式同牌序（deal_sequence）。
 
 协议：唯一响应信封为 ``{"response": int}``；其中 response 字段的整数采用
 TexasHoldem2p 动作编码，raise=「额外加注量」= delta。
@@ -65,8 +65,8 @@ def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
 
     每手是 52 张牌的洗牌序列，使用唯一的 Botzone 整数编码：
     ``card = (rank - 2) * 4 + suit``，``suit = 0♥1♦2♠3♣``。
-    同 seed → 同序列，两 leg（A-vs-B / B-vs-A）用同 deal_sequence 复现同牌局，
-    净筹码相加判胜负（消除运气）。
+    同 seed → 同序列；复式的两场（A-vs-B / B-vs-A）换座复现同牌局，
+    每场按自身 70 手筹码差独立判胜，合计筹码差只用于赛事破同分。
     """
     rng = random.Random(seed)
     out: list[list[int]] = []
@@ -129,7 +129,6 @@ class MatchSession:
 
     # ------------------------------------------------------------------ public
     async def run_async(self, decide: DecideFn) -> MatchResult:
-        crash_loser: int | None = None
         for h in range(self.num_hands):
             # Botzone 计分：每手筹码复位 starting_stack（不跨手累积，不因归零提前结束）
             try:
@@ -140,19 +139,17 @@ class MatchSession:
                 # 协议错误/超时由平台统一落技术判负，不能伪装成一手 fold。
                 raise
             except BotCrashedError:
-                # 对齐权威裁判：bot 崩溃不可恢复 → 判负（本手全筹码输给对手），不中止整场。
-                # _call_decide 抛 BotCrashedError 时，_current_actor 是崩溃方。
-                crash_loser = self._current_actor
-                self.net[crash_loser] -= self.starting_stack
-                self.net[1 - crash_loser] += self.starting_stack
-                break
+                # Bot 进程死亡与协议错误一样是权威技术终局。必须交给编排层
+                # 持久化 ``technical_loss=1``；若在这里伪装成不足 70 手的
+                # 普通结果，新赛事的固定场长门禁会正确拒绝却永久无法推进。
+                raise
         self._emit(
             "match_end",
             {
                 "rounds_played": len(self.rounds),
                 "final_chips": list(self.net),  # Botzone 计分：累计净输赢
-                "winner": (1 - crash_loser) if crash_loser is not None else None,
-                "reason": "crash" if crash_loser is not None else None,
+                "winner": None,
+                "reason": None,
             },
         )
         return MatchResult(

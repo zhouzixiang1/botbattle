@@ -703,9 +703,14 @@ def test_migrated_contest_publish_and_start_freeze_target_contract(tmp_path):
         ("missing_authorization", "显式授权迁移 ID 不一致"),
         ("published", "不是 open"),
         ("starts_at", "已进入赛程"),
+        ("current_stage_real", "已进入赛程"),
+        ("official_ready_real", "已进入赛程"),
         ("dispatched_entry", "已派发报名"),
         ("pairing", "已生成赛程/对局"),
         ("match", "已生成赛程/对局"),
+        ("stage_result", "已生成赛程/对局"),
+        ("official_result", "已生成赛程/对局"),
+        ("execution_job", "已生成赛程/对局"),
     ],
 )
 def test_rule_cutover_rejects_any_started_or_unreviewed_contest_state(
@@ -732,6 +737,17 @@ def test_rule_cutover_rejects_any_started_or_unreviewed_contest_state(
                 "UPDATE contests SET starts_at='2026-01-01T00:00:00' WHERE id=?",
                 (contest["id"],),
             )
+    elif blocker in {"current_stage_real", "official_ready_real"}:
+        field = (
+            "current_stage_idx"
+            if blocker == "current_stage_real"
+            else "official_results_ready"
+        )
+        with store._tx() as conn:
+            conn.execute(
+                f"UPDATE contests SET {field}=0.5 WHERE id=?",
+                (contest["id"],),
+            )
     elif blocker == "dispatched_entry":
         with store._tx() as conn:
             conn.execute(
@@ -750,6 +766,34 @@ def test_rule_cutover_rejects_any_started_or_unreviewed_contest_state(
             version["bot_id"],
             version["bot_id"],
             game_id="gomoku",
+            contest_id=contest["id"],
+        )
+    elif blocker == "stage_result":
+        store.upsert_stage_result(
+            contest["id"],
+            0,
+            entry["id"],
+            bot_id=version["bot_id"],
+        )
+    elif blocker == "official_result":
+        store.upsert_official_result(
+            contest["id"],
+            entry["id"],
+            1,
+            bot_id=version["bot_id"],
+            user_id=owner["id"],
+        )
+    elif blocker == "execution_job":
+        store.executions.resume()
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_MANUAL,
+            owner_user_id=owner["id"],
+            game_id="gomoku",
+            match_type=TYPE_CHALLENGE,
+            bot_a_id=version["bot_id"],
+            bot_b_id=version["bot_id"],
+            bot_a_version_id=version["id"],
+            bot_b_version_id=version["id"],
             contest_id=contest["id"],
         )
     _certify_projection(store)
@@ -798,6 +842,40 @@ def test_rule_cutover_rejects_roster_drift_after_review_without_partial_writes(
             plan,
             migrate_unstarted_contest_ids=ids,
         )
+    assert store.get_contest(contest["id"])["ruleset_version"] == (
+        GOMOKU_PREVIOUS_RULESET
+    )
+    assert store.get_protocol_cutover(plan["cutover_id"]) is None
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM rating_pool_archives WHERE game_id='gomoku'"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+def test_rule_cutover_rechecks_zero_result_graph_inside_apply_transaction(tmp_path):
+    store = Store(str(tmp_path / "contest-result-plan-drift.db"))
+    _set_previous_contract(store)
+    owner, version = _canonical_bot(store, tmp_path, "contest_result_drift")
+    contest = _open_unstarted_contest(
+        store, organizer_id=owner["id"], title="result graph drift"
+    )
+    entry = store.add_contest_entry_once(
+        contest["id"], owner["id"], version["bot_id"]
+    )
+    _certify_projection(store)
+    ids = (contest["id"],)
+    plan = _plan(
+        store,
+        "contest-result-drift-cutover",
+        migrate_unstarted_contest_ids=ids,
+    )
+    store.upsert_stage_result(
+        contest["id"], 0, entry["id"], bot_id=version["bot_id"]
+    )
+    _prepare_cold_cutover(store)
+
+    with pytest.raises(ValueError, match="已生成赛程/对局"):
+        _apply(store, plan, migrate_unstarted_contest_ids=ids)
     assert store.get_contest(contest["id"])["ruleset_version"] == (
         GOMOKU_PREVIOUS_RULESET
     )

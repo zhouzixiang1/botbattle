@@ -313,7 +313,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     const phaseLabel = gomokuPhaseLabel(next.phase, next.n)
     const turnLabel = next.matchOver
       ? next.winner === null
-        ? '平局'
+        ? `赛果已结算${next.reason ? ` · ${gomokuTerminalReason(next.reason, 'completed').label}` : ''}`
         : `${next.winner === 0 ? name0 : name1}胜${next.reason ? ` · ${gomokuTerminalReason(next.reason, 'completed').label}` : ''}`
       : next.toAct === 0 || next.toAct === 1
         ? `${next.toAct === 0 ? name0 : name1} · ${gomokuColorLabel(next.toColor)}`

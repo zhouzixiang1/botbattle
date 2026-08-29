@@ -368,6 +368,44 @@ def test_scheduler_dispatches_published_on_schedule(setup):
     assert store.get_contest(c["id"])["status"] == "running"
 
 
+def test_scheduler_rejects_real_stage_cursor_before_dispatch(setup):
+    store, mgr, sched, users = setup
+    c = mgr.create(
+        users["u1"],
+        "Malformed cursor",
+        template_id="holdem_rr",
+        game_id="holdem",
+        starts_at="2099-12-31T23:59:59",
+    )
+    asyncio.run(mgr.open_registration(c["id"]))
+    asyncio.run(mgr.register(c["id"], users["u1"], users["b1"]))
+    asyncio.run(mgr.register(c["id"], users["u2"], users["b2"]))
+    asyncio.run(mgr.publish(c["id"]))
+    published = store.get_contest(c["id"])
+    store.update_contest(
+        c["id"], starts_at=published["registration_closes_at"]
+    )
+    for pairing in store.list_contest_pairings(c["id"]):
+        store.update_contest_pairing(
+            pairing["id"], scheduled_at="2020-01-01T00:00:00"
+        )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET current_stage_idx=0.5 WHERE id=?",
+            (c["id"],),
+        )
+
+    before_calls = mgr.orch.calls
+    asyncio.run(sched._tick())
+    assert mgr.orch.calls == before_calls
+    assert store.get_contest(c["id"])["status"] == "published"
+    assert all(
+        pairing["match_id"] is None
+        for pairing in store.list_contest_pairings(c["id"])
+    )
+
+
 def test_scheduler_does_not_advance_future_contest(setup):
     """时间未到的赛事 scheduler 不推进。"""
     store, mgr, sched, users = setup

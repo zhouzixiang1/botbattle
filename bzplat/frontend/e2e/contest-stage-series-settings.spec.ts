@@ -14,29 +14,52 @@ const ORGANIZER = {
 const finalConfigs = [
   {
     stage_key: 'qualify',
-    label: '决赛资格循环',
+    label: '决赛全员循环排位',
     games_per_pair: { default: 2, allowed_values: [1, 2, 4] },
   },
   {
     stage_key: 'final8',
-    label: 'Top 8 决胜循环',
+    label: 'Top 8 决胜',
     games_per_pair: { default: 4, allowed_values: [2, 4, 6, 8, 10] },
   },
 ]
 
 const finalTemplateStages = [
-  { key: 'qualify', type: 'round_robin' },
-  { key: 'final8', type: 'double_round_robin' },
+  {
+    key: 'qualify',
+    type: 'round_robin',
+    allow_large_round_robin: true,
+    advance_count: 8,
+    scoring: 'poker_3_1_0',
+    rest_after_minutes: 10,
+    allow_bot_swap_in_rest: true,
+  },
+  {
+    key: 'final8',
+    type: 'double_round_robin',
+    ranking_mode: 'replace_top',
+    ranking_scope: 8,
+    scoring: 'poker_3_1_0',
+    rest_after_minutes: 0,
+    allow_bot_swap_in_rest: false,
+  },
 ]
 
 const prelimConfig = [{
   stage_key: 'prelim',
-  label: '瑞士预赛',
+  label: '预赛瑞士轮',
   games_per_pair: { default: 2, allowed_values: [1, 2, 4] },
   swiss_extra_rounds: { default: 2, min: 0, max: 4 },
 }]
 
-const prelimTemplateStages = [{ key: 'prelim', type: 'swiss' }]
+const prelimTemplateStages = [{
+  key: 'prelim',
+  type: 'swiss',
+  rounds: 0,
+  scoring: 'poker_3_1_0',
+  allow_bot_swap_in_rest: true,
+  rest_after_minutes: 0,
+}]
 
 function contestDetail(status: 'open' | 'published', final8Games: number) {
   const finalMatches = 28 * final8Games
@@ -52,8 +75,16 @@ function contestDetail(status: 'open' | 'published', final8Games: number) {
       game_id: 'holdem',
       current_stage_idx: 0,
       stages_json: JSON.stringify([
-        { key: 'qualify', type: 'round_robin', scoring: 'poker_3_1_0', games_per_pair: 2 },
-        { key: 'final8', type: 'double_round_robin', scoring: 'poker_3_1_0', games_per_pair: final8Games },
+        {
+          ...finalTemplateStages[0],
+          games_per_pair: 2,
+          series_scoring: 'independent_scoring_game_points_v1',
+        },
+        {
+          ...finalTemplateStages[1],
+          games_per_pair: final8Games,
+          series_scoring: 'independent_scoring_game_points_v1',
+        },
       ]),
       stage_series_settings: {
         qualify: { games_per_pair: 2 },
@@ -179,7 +210,12 @@ async function installPrelimContestApi(page: Page) {
             template_id: 'holdem_prelim_swiss',
             game_id: 'holdem',
             current_stage_idx: 0,
-            stages_json: JSON.stringify([{ key: 'prelim', type: 'swiss', rounds: 0, games_per_pair: 2, swiss_extra_rounds: 2 }]),
+            stages_json: JSON.stringify([{
+              ...prelimTemplateStages[0],
+              games_per_pair: 2,
+              swiss_extra_rounds: 2,
+              series_scoring: 'independent_scoring_game_points_v1',
+            }]),
             stage_series_settings: { prelim: { games_per_pair: 2, swiss_extra_rounds: 2 } },
           },
           entries: [],
@@ -219,20 +255,20 @@ test('final stage settings project scale and are saved before publishing', async
 
   const fairness = page.locator('[data-slot="data-region"]').filter({ has: page.getByRole('heading', { name: '赛制公平性与规模' }) })
   await expect(fairness).toBeVisible()
-  const final8 = fairness.getByRole('group', { name: 'Top 8 决胜循环' })
+  const final8 = fairness.getByRole('group', { name: 'Top 8 决胜' })
   await expect(final8).toContainText('28 组')
   await expect(final8).toContainText('112 场')
-  await final8.getByRole('combobox', { name: '每组交锋' }).click()
-  await page.getByRole('option', { name: '8 场', exact: true }).click()
+  await final8.getByRole('combobox', { name: '每对选手计分场数' }).click()
+  await page.getByRole('option', { name: '8 场计分', exact: true }).click()
   await expect(final8).toContainText('224 场')
-  await expect(page.getByText('预计 314', { exact: true })).toBeVisible()
+  await expect(page.getByText('预计 314 场', { exact: true })).toBeVisible()
   await expect(fairness.getByRole('alert')).toContainText('预计超过 8 小时')
 
   await page.getByRole('button', { name: '截止报名·出排期' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog).toContainText('决赛资格循环每组 2 场')
-  await expect(dialog).toContainText('Top 8 决胜循环每组 8 场')
-  await expect(dialog).toContainText('预计共 314 场实际对局')
+  await expect(dialog).toContainText('决赛全员循环排位每对选手 2 场计分')
+  await expect(dialog).toContainText('Top 8 决胜每对选手 8 场计分')
+  await expect(dialog).toContainText('预计共 314 场计分')
   await dialog.getByRole('button', { name: '确认发布' }).click()
 
   await expect(page.getByText('排期已发布', { exact: true }).first()).toBeVisible()
@@ -259,7 +295,7 @@ test('Swiss live projection respects the no-repeat cap for small cohorts', async
   await page.goto('/#/contests/7002')
 
   const fairness = page.locator('[data-slot="data-region"]').filter({ has: page.getByRole('heading', { name: '赛制公平性与规模' }) })
-  const prelim = fairness.getByRole('group', { name: '瑞士预赛' })
+  const prelim = fairness.getByRole('group', { name: '预赛瑞士轮' })
   await expect(prelim).toContainText('6 组')
   await expect(prelim).toContainText('12 场')
   await expect(prelim).toContainText('3 轮')
@@ -276,8 +312,8 @@ test('Swiss live projection respects the no-repeat cap for small cohorts', async
   await expect(prelim).toContainText('12 场')
   await expect(prelim).toContainText('3 轮')
 
-  await prelim.getByRole('combobox', { name: '每组交锋' }).click()
-  await page.getByRole('option', { name: '4 场', exact: true }).click()
+  await prelim.getByRole('combobox', { name: '每对选手计分场数' }).click()
+  await page.getByRole('option', { name: '4 场计分', exact: true }).click()
   await expect(prelim).toContainText('24 场')
   await expect(fairness.getByRole('alert')).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
@@ -346,6 +382,7 @@ test('built-in id with a custom stage graph publishes without injecting template
 
   await page.goto('/#/contests/7003')
   await expect(page.getByRole('heading', { name: '赛制公平性与规模' })).toHaveCount(0)
+  await expect(page.getByText('冻结阶段拓扑与内置模板不一致，已停用公平性设置编辑；发布时将保留当前冻结阶段。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '截止报名·出排期' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '确认发布' }).click()
   await expect.poll(() => writes).toEqual(['POST /api/contests/7003/publish'])

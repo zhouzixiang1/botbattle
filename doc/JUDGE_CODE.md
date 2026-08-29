@@ -34,13 +34,14 @@ games.registry.get(game_id).run_session(decide, **params)
 平台落库与公开 API 使用另一层稳定契约：`rounds_played`、`deltas`、`normalized_delta`，只能由
 `matches/result_contract.py` 构造。`GameSpec.progress_from_events` 计算本游戏进度，
 `GameSpec.normalize_delta` 把座位 1 原始分差转换成该游戏可比较的归一值。Holdem 的归一值是
-整场筹码分差除以大盲，并非按固定手数折算的速率；复式对局的 `rounds_played` 累加全部 leg。
+一条对局记录的组合筹码分差除以大盲，并非按固定手数折算的速率；复式记录的 `rounds_played`
+累加两场，但每场胜负独立产生赛事计分记录。
 
 ## 固定规则常量
 
 | 游戏 | 固定规则 |
 |------|----------|
-| Holdem | 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
+| Holdem | 每个计分场 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
 | Gomoku | 15×15；26 种指定开局；三手交换；五手二打；黑方长连/三三/四四禁手 |
 | Pencil | N=6；红先；每方累计棋钟 900 秒 |
 
@@ -54,7 +55,8 @@ games.registry.get(game_id).run_session(decide, **params)
 - 格式正确但下注不合法 → fold；Bot 信封/response 格式错误或超时由平台层在进入裁判前立即技术判负。现行 `holdem_hu_nlhe_allin_v2` 把 all-in 水位记为本街此前投入与剩余筹码之和；精确耗尽筹码的 call 进入 all-in 状态。覆盖短码全压的一方合法集仅为 fold/call，可只 call 匹配额并保留余额；为兼容同一 `holdem_action_v1` 的既有 Bot，此时 `response=-2` 规范化为精确 call，不产生虚假超额 all-in。下注关闭后只剩一名可行动玩家时直接发出剩余公共牌，不再逐街请求单人 check。
 - **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
 - **启动失败**由编排层处理：所有 Bot-vs-Bot 类型统一记为 `completed` + `technical_loss`，崩溃方判负；人类对战则记为 `aborted`（`bot_crashed`）。
-- `MatchSession` 一手 = 一轮，按手数循环，最终按累计净筹码判胜。
+- `MatchSession` 一手 = 一轮，每个 session 固定循环 70 手并按本场累计净筹码判胜；复式会新建
+  两个同牌换座 session，两场独立判胜，组合计分差只作后置破同分。
 
 ### 五子棋（规则 `gomoku_judge.py`，适配 `engine.py`）
 

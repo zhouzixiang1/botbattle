@@ -2,14 +2,17 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { MatchOutcome } from '@/components/MatchOutcome'
 import { Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
 import { findGame, gameLabel, resolveTerminalReason } from '@/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import { isPublicMatchOutcome, type MatchOutcomeSource } from '@/lib/match-outcome'
+import { outcomeSeatLabels } from '@/lib/match-seats'
 
-interface Match extends MatchParticipantSource {
+interface Match extends MatchParticipantSource, MatchOutcomeSource {
   id: string
   bot_a_id: number | null
   bot_b_id: number | null
@@ -49,6 +52,13 @@ function technicalIncidentCount(match: Match): number {
 
 function technicalIncidentText(error: string): string {
   return error || 'Bot 技术故障'
+}
+
+function progressLabel(match: Match, unit: '步' | '手'): string {
+  if (isPublicMatchOutcome(match.outcome) && match.outcome.kind === 'duplicate') {
+    return `${match.outcome.completed_games}/${match.outcome.planned_games} 场计分 · ${match.outcome.rounds_played} ${unit}`
+  }
+  return `${match.result?.rounds_played ?? 0} ${unit}`
 }
 
 export default function MatchesTab() {
@@ -145,7 +155,7 @@ export default function MatchesTab() {
             ))}
           </SelectContent>
         </Select>
-        <span className="text-xs text-muted-foreground">共 {total || matches.length} 局</span>
+        <span className="text-xs text-muted-foreground">共 {total || matches.length} 条对局记录</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
@@ -190,11 +200,18 @@ export default function MatchesTab() {
                 </TableCell>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {gameSpec
-                    ? `${m.result?.rounds_played ?? 0} ${gameSpec.progressUnit === 'move' ? '步' : '手'}`
+                    ? progressLabel(m, gameSpec.progressUnit === 'move' ? '步' : '手')
                     : '规则不可用'}
                 </TableCell>
                 <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">
-                  <div>{m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
+                  <MatchOutcome
+                    source={m}
+                    seatLabels={outcomeSeatLabels(m)}
+                    normalizedUnit={m.game_id === 'holdem' ? 'BB' : undefined}
+                    showGames
+                    className="font-sans"
+                  />
+                  <div className="mt-1">原始分差 {m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
                   {hasTerminalStatus && m.reason && (
                     <div
                       data-testid="terminal-reason"

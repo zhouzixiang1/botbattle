@@ -564,6 +564,41 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
     store.close()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("round_num", False),
+        ("round_num", "1"),
+        ("color_first", False),
+        ("color_first", 1.5),
+        ("series_index", 0),
+        ("series_index", "1"),
+        ("series_size", False),
+        ("series_size", 1.5),
+    ],
+)
+def test_published_pairing_batch_signature_rejects_coerced_coordinates(
+    field, value
+):
+    row = {
+        "round_num": 1,
+        "entry_a_id": 1,
+        "entry_b_id": 2,
+        "bot_a_id": 10,
+        "bot_b_id": 20,
+        "stage_key": "rr",
+        "group_id": "",
+        "bracket_slot": None,
+        "color_first": 0,
+        "pairing_seed": 123,
+        "series_index": 1,
+        "series_size": 1,
+        "status": "pending",
+    }
+    row[field] = value
+    assert ContestManager._pairing_batch_signature([row]) is None
+
+
 def test_concurrent_series_publish_creates_one_complete_batch(tmp_path):
     store, manager, contest_id, _bots = _published_series_fixture(
         tmp_path, "concurrent-series", duplicate=False
@@ -648,14 +683,23 @@ def _cyclic_scoring_fixture(
         deltas = [10, -10] if winner == 0 else [-10, 10]
         result = (
             {
+                "rounds_played": 140,
                 "deltas": [deltas[0] * 2, deltas[1] * 2],
                 "legs": [
-                    {"winner": winner, "deltas": list(deltas)},
-                    {"winner": winner, "deltas": list(deltas)},
+                    {
+                        "winner": winner,
+                        "deltas": list(deltas),
+                        "rounds_played": 70,
+                    },
+                    {
+                        "winner": winner,
+                        "deltas": list(deltas),
+                        "rounds_played": 70,
+                    },
                 ],
             }
             if duplicate
-            else {"deltas": deltas}
+            else {"rounds_played": 70, "deltas": deltas}
         )
         store.create_match(
             match_id,
@@ -665,6 +709,7 @@ def _cyclic_scoring_fixture(
             contest_id=contest["id"],
             match_type="contest",
             game_id="holdem",
+            match_config={"duplicate": duplicate},
         )
         store.bind_contest_pairing_match(
             contest["id"],
@@ -721,7 +766,18 @@ def test_series_scoring_and_record_weighted_cut1(
         pairing["match_id"]: store.get_match(pairing["match_id"])
         for pairing in pairings
     }
-    ranked = compute_official_ranking(standings, pairings, matches)
+    ranked = compute_official_ranking(
+        standings,
+        pairings,
+        matches,
+        stage={
+            "type": "round_robin",
+            "games_per_pair": games_per_pair,
+            "duplicate": duplicate,
+        },
+        planned_games_per_match=2 if duplicate else 1,
+        fixed_rounds_per_match=70,
+    )
     assert {row["tiebreaks"]["buchholz"] for row in ranked} == {buchholz}
     # Cut1 removes one highest-opponent-score scoring record, not one unique
     # opponent and not the entire repeated series against that opponent.
@@ -773,6 +829,7 @@ def test_duplicate_technical_terminal_without_legs_is_one_scoring_record(tmp_pat
         contest_id=contest["id"],
         match_type="contest",
         game_id="holdem",
+        match_config={"duplicate": True},
     )
     store.bind_contest_pairing_match(
         contest["id"],
@@ -785,7 +842,7 @@ def test_duplicate_technical_terminal_without_legs_is_one_scoring_record(tmp_pat
         status="completed",
         winner=0,
         reason="technical_loss",
-        result={"deltas": [1, -1]},
+        result={"rounds_played": 0, "deltas": [0, 0]},
         technical_loss=1,
         ended_at="2026-08-27T12:00:00+08:00",
     )
@@ -798,6 +855,7 @@ def test_duplicate_technical_terminal_without_legs_is_one_scoring_record(tmp_pat
     assert by_entry[entries[0]["id"]]["wins"] == 1
     assert by_entry[entries[1]["id"]]["points"] == 0
     assert by_entry[entries[1]["id"]]["losses"] == 1
+    assert all(row["delta_total"] == 0 for row in standings)
 
     pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
     ranked = compute_official_ranking(

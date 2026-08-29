@@ -452,11 +452,8 @@ def test_holdem_event_contract_keys():
             assert not missing, f"{etype} 事件缺键: {missing}（前端 reducer 会读 undefined）"
 
 
-def test_holdem_crash_loser_identified():
-    """P1：bot 崩溃 → 判负（崩溃方 net 扣全筹码，对手得全筹码）。
-
-    _call_decide 抛 BotCrashedError 时，_current_actor 必须是崩溃方。
-    """
+def test_holdem_runtime_crash_propagates_to_technical_adjudication():
+    """运行期崩溃必须由编排层落权威技术终局，不能伪装普通短局。"""
     import random as _r
     from bzplat.backend.runtime.binary_runner import BotCrashedError
 
@@ -470,9 +467,7 @@ def test_holdem_crash_loser_identified():
         return resp("call")
 
     session = MatchSession(num_hands=3, rng=_r.Random(1))
-    result = asyncio.run(session.run_async(crashing_bot))
-    # 崩溃方(座1) net 扣 STARTING_STACK，对手(座0) 得 STARTING_STACK
-    assert result.final_chips == [STARTING_STACK, -STARTING_STACK], f"crash net: {result.final_chips}"
-    me = next(e for e in result.events if e["type"] == "match_end")
-    assert me["reason"] == "crash"
-    assert me["winner"] == 0  # 座 1 崩溃 → 座 0 胜
+    with pytest.raises(BotCrashedError, match="test crash"):
+        asyncio.run(session.run_async(crashing_bot))
+    assert len(session.rounds) < session.num_hands
+    assert not [event for event in session.events if event["type"] == "match_end"]

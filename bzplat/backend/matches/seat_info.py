@@ -20,6 +20,7 @@ _PUBLIC_VIEWER_MATCH_FIELDS = frozenset(
         "status",
         "game_id",
         "result",
+        "outcome",
         "human_seat",
         "technical_loss",
         "started_at",
@@ -113,7 +114,9 @@ def with_seat_info(m: dict | None, human_user: dict | None = None) -> dict | Non
 
 def match_for_viewer(store: Any, match_id: str) -> dict | None:
     """观赛/订阅/人类 WS 统一入口：detailed JOIN + 嵌套 seats + 人类座修正。"""
-    m = store.get_match_detailed(match_id) or store.get_match(match_id)
+    m = store.get_match_detailed(
+        match_id, include_replay_incidents=False
+    ) or store.get_match(match_id)
     if not m:
         return None
     human_user = None
@@ -127,7 +130,13 @@ def match_for_viewer(store: Any, match_id: str) -> dict | None:
     # whitelist removes that private container.  This keeps REST, SSE and the
     # human WebSocket snapshot on one public contract without exposing local
     # agent ids or version/path details.
+    from bzplat.backend.games import registry as game_registry
+    from bzplat.backend.matches.public_outcome import build_public_outcome
     from bzplat.backend.store.public_contract import sanitize_public_match
 
+    outcome = build_public_outcome(
+        m, game_registry.get(str(m.get("game_id") or ""))
+    )
     public = sanitize_public_match(m) or m
+    public["outcome"] = outcome
     return with_seat_info(public, human_user=human_user)

@@ -11,6 +11,7 @@ from typing import Any
 from bzplat.backend.games import registry as _reg
 from bzplat.backend.contests.stages import PAIR_SERIES_STAGE_TYPES
 from bzplat.backend.store.schema import VALID_GAME_IDS
+from bzplat.backend.store.validation import exact_nonnegative_int
 
 # 阶段类型（与 stages.generate_stage_pairings 对齐）
 STAGE_TYPES = {
@@ -51,6 +52,7 @@ _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
     "group_round_robin": frozenset({"group_count", "advance_per_group"}),
     "group_double_round_robin": frozenset({"group_count", "advance_per_group"}),
     "swiss": frozenset({
+        "duplicate",
         "rounds",
         "games_per_pair",
         "series_scoring",
@@ -63,9 +65,230 @@ _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 SERIES_SCORING_AGGREGATE = "aggregate_match_points_v1"
+SERIES_SCORING_INDEPENDENT = "independent_scoring_game_points_v1"
 _SERIES_STAGE_FIELDS = frozenset(
     {"games_per_pair", "series_scoring", "swiss_extra_rounds", "effective_rounds"}
 )
+
+
+def contest_entry_eliminated(entry: Any) -> bool | None:
+    """Return the exact frozen elimination state, or ``None`` if malformed.
+
+    SQLite stores this flag as integer 0/1 but the historical table has no
+    CHECK constraint.  Never let imported values such as ``-1`` or ``2`` shrink
+    the expected participant graph through Python truthiness.  A missing field
+    is retained as a bounded compatibility default for old pure projections;
+    real Store rows always contain the NOT NULL column.
+    """
+    if not isinstance(entry, dict):
+        return None
+    if "eliminated" not in entry:
+        return False
+    value = entry.get("eliminated")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1):
+        return None
+    return bool(value)
+
+
+def active_contest_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Return the exact active cohort, failing closed on any damaged flag."""
+    active: list[dict[str, Any]] = []
+    for entry in entries:
+        eliminated = contest_entry_eliminated(entry)
+        if eliminated is None:
+            return None
+        if not eliminated:
+            active.append(entry)
+    return active
+
+
+def contest_current_stage_index(
+    contest: Any, *, stage_count: int | None = None
+) -> int | None:
+    """Return the exact persisted stage cursor, or ``None`` if malformed.
+
+    SQLite's non-STRICT INTEGER column can contain REAL/text values after a
+    low-level import.  ``int(0.5)`` and ``int("0")`` must never redirect such a
+    damaged lifecycle snapshot to stage zero.  Missing remains a bounded
+    compatibility default for old in-memory fixtures; the durable column is
+    NOT NULL and therefore an explicit ``None`` is invalid.
+    """
+    if not isinstance(contest, dict):
+        return None
+    value = contest.get("current_stage_idx", 0)
+    value = exact_nonnegative_int(value)
+    if value is None:
+        return None
+    if stage_count is not None:
+        stage_count = exact_nonnegative_int(stage_count)
+        if stage_count is None or value >= stage_count:
+            return None
+    return value
+
+
+def _valid_swiss_games_per_pair(games: int) -> bool:
+    """Swiss byes are equivalent only for one game or an even game count."""
+    return games == 1 or (games >= 2 and games % 2 == 0)
+
+
+def stage_duplicate_mode(stage: Any) -> bool | None:
+    """Return the exact persisted duplicate mode, or ``None`` if malformed.
+
+    Missing predates the duplicate feature and authoritatively means a normal
+    single-game Match.  Explicit values must be JSON booleans: accepting
+    truthy strings or integers would make contest views disagree with the
+    Store's strict generic-Match projection for the same damaged history.
+    """
+    if not isinstance(stage, dict):
+        return None
+    if "duplicate" not in stage:
+        return False
+    value = stage.get("duplicate")
+    return value if isinstance(value, bool) else None
+
+
+def stage_series_scoring_is_valid(stage: Any) -> bool:
+    """Validate the versioned series marker without rewriting legacy absence."""
+    if not isinstance(stage, dict):
+        return False
+    if "series_scoring" not in stage:
+        return True
+    return stage.get("series_scoring") in {
+        SERIES_SCORING_AGGREGATE,
+        SERIES_SCORING_INDEPENDENT,
+    }
+
+
+def stage_scoring_contract_is_valid(
+    stage: Any, *, game_id: str | None = None
+) -> bool:
+    """Validate a frozen stage before any score, advancement, or projection.
+
+    The current independent marker reuses the complete creation validator when
+    its game is known.  Read-only aggregate and pre-marker history keep their
+    established semantics, but every explicitly persisted scoring/ranking
+    switch still has an exact type and range; truthy coercion is never allowed.
+    """
+    if (
+        not isinstance(stage, dict)
+        or stage_duplicate_mode(stage) is None
+        or not stage_series_scoring_is_valid(stage)
+    ):
+        return False
+
+    mode = stage.get("series_scoring")
+    if "type" in stage and stage.get("type") not in STAGE_TYPES:
+        return False
+    if mode in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT}:
+        # An explicit version marker is a frozen scoring contract, not a
+        # request that may be default-filled again.  Imported/damaged history
+        # missing either field must block scoring instead of silently becoming
+        # RR or inheriting today's GameSpec scoring.  Only marker-less history
+        # retains that bounded fallback.
+        if (
+            "type" not in stage
+            or stage.get("type") not in STAGE_TYPES
+            or "scoring" not in stage
+            or stage.get("scoring") not in SCORINGS
+            or (stage.get("type") == "swiss" and "rounds" not in stage)
+            or bool(
+                set(stage)
+                - (_COMMON_STAGE_KEYS | _STAGE_TYPE_KEYS[stage["type"]])
+            )
+            or (
+                "ranking_scope" in stage
+                and stage.get("ranking_mode") != "replace_top"
+            )
+        ):
+            return False
+    if (
+        mode in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT}
+        and game_id is not None
+    ):
+        try:
+            spec = _game_spec(game_id)
+            if stage.get("scoring") != spec.default_scoring:
+                return False
+            validate_stage(
+                stage,
+                0,
+                game_id,
+                allow_read_only_aggregate=(
+                    mode == SERIES_SCORING_AGGREGATE
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
+
+    spec = None
+    if game_id is not None:
+        try:
+            spec = _game_spec(game_id)
+        except ValueError:
+            return False
+        scoring = stage.get("scoring")
+        if scoring is not None and scoring != spec.default_scoring:
+            return False
+        if stage_duplicate_mode(stage) is True and spec.build_match_plan is None:
+            return False
+    elif "scoring" in stage and not isinstance(stage.get("scoring"), str):
+        return False
+
+    games = stage.get("games_per_pair")
+    has_games = "games_per_pair" in stage
+    if has_games and (
+        isinstance(games, bool)
+        or not isinstance(games, int)
+        or games < 1
+    ):
+        return False
+    if mode in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT} and not has_games:
+        return False
+    if has_games:
+        if stage.get("type") not in PAIR_SERIES_STAGE_TYPES:
+            return False
+        maximum = spec.contest_games_per_pair_max if spec is not None else None
+        if spec is not None and (maximum is None or games > maximum):
+            return False
+        if stage.get("type") == "swiss" and not _valid_swiss_games_per_pair(games):
+            return False
+
+    exact_int_fields = {
+        "rounds": 0,
+        "effective_rounds": 1,
+        "swiss_extra_rounds": 0,
+        "advance_count": 1,
+        "advance_per_group": 1,
+        "group_count": 1,
+        "ranking_scope": 1,
+        "rest_after_minutes": 0,
+        "round_stagger_minutes": 0,
+    }
+    for key, minimum in exact_int_fields.items():
+        if key not in stage:
+            continue
+        value = stage.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < minimum
+        ):
+            return False
+    if stage.get("type") != "swiss" and any(
+        key in stage
+        for key in ("rounds", "effective_rounds", "swiss_extra_rounds")
+    ):
+        return False
+    if (
+        "ranking_mode" in stage
+        and stage.get("ranking_mode") != "replace_top"
+    ):
+        return False
+    for key in ("allow_bot_swap_in_rest", "allow_large_round_robin"):
+        if key in stage and not isinstance(stage.get(key), bool):
+            return False
+    return True
 
 
 def validate_template_id(tid: str) -> None:
@@ -118,7 +341,13 @@ def validate_match_config(cfg: Any, game_id: str) -> dict:
     return {}
 
 
-def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
+def validate_stage(
+    stage: dict,
+    idx: int,
+    game_id: str,
+    *,
+    allow_read_only_aggregate: bool = False,
+) -> dict:
     """校验并返回规整后的单个阶段配置。
 
     scoring 默认值从该游戏的 spec.default_scoring 派生（而非硬编码 holdem 的
@@ -254,27 +483,57 @@ def validate_stage(stage: dict, idx: int, game_id: str) -> dict:
 
     if "series_scoring" in stage:
         series_scoring = stage["series_scoring"]
-        if series_scoring != SERIES_SCORING_AGGREGATE:
+        if (
+            series_scoring == SERIES_SCORING_AGGREGATE
+            and not allow_read_only_aggregate
+        ):
+            raise ValueError(
+                f"阶段 {idx + 1} series_scoring={SERIES_SCORING_AGGREGATE!r} "
+                "仅供历史赛事只读，新赛事须使用 "
+                f"{SERIES_SCORING_INDEPENDENT!r}"
+            )
+        if series_scoring not in {
+            SERIES_SCORING_AGGREGATE,
+            SERIES_SCORING_INDEPENDENT,
+        }:
             raise ValueError(
                 f"阶段 {idx + 1} series_scoring 仅允许 "
-                f"{SERIES_SCORING_AGGREGATE!r}"
+                f"{SERIES_SCORING_INDEPENDENT!r}"
             )
         if stype not in PAIR_SERIES_STAGE_TYPES:
-            raise ValueError(f"阶段 {idx + 1} type 不支持系列聚合计分")
+            raise ValueError(f"阶段 {idx + 1} type 不支持多场独立计分")
         out["series_scoring"] = series_scoring
 
-    if out.get("series_scoring") == SERIES_SCORING_AGGREGATE:
+    if out.get("series_scoring") in {
+        SERIES_SCORING_AGGREGATE,
+        SERIES_SCORING_INDEPENDENT,
+    }:
         if "games_per_pair" not in out:
-            raise ValueError(f"阶段 {idx + 1} 系列聚合计分缺少 games_per_pair")
+            raise ValueError(f"阶段 {idx + 1} 多场计分缺少 games_per_pair")
     elif stype in {"double_round_robin", "swiss"} and "games_per_pair" in out:
         raise ValueError(
-            f"阶段 {idx + 1} {stype} 的 games_per_pair 必须使用系列聚合计分"
+            f"阶段 {idx + 1} {stype} 的 games_per_pair 必须使用多场独立计分"
+        )
+    elif "games_per_pair" in out and out.get("series_scoring") is None:
+        raise ValueError(
+            f"阶段 {idx + 1} games_per_pair 缺少 "
+            f"series_scoring={SERIES_SCORING_INDEPENDENT!r}"
         )
     if (
+        stype == "swiss"
+        and out.get("series_scoring")
+        in {SERIES_SCORING_AGGREGATE, SERIES_SCORING_INDEPENDENT}
+        and not _valid_swiss_games_per_pair(out["games_per_pair"])
+    ):
+        raise ValueError("Swiss games_per_pair 仅允许 1 或偶数，保证轮空等值计分")
+    if (
         "swiss_extra_rounds" in out or "effective_rounds" in out
-    ) and out.get("series_scoring") != SERIES_SCORING_AGGREGATE:
+    ) and out.get("series_scoring") not in {
+        SERIES_SCORING_AGGREGATE,
+        SERIES_SCORING_INDEPENDENT,
+    }:
         raise ValueError(
-            f"阶段 {idx + 1} 瑞士附加轮数必须使用系列聚合计分"
+            f"阶段 {idx + 1} 瑞士附加轮数必须使用多场独立计分"
         )
 
     if "ranking_mode" in stage:
@@ -310,7 +569,7 @@ def configure_games_per_pair(
     """Freeze a code-template series selection into validated stage snapshots.
 
     ``games_per_pair`` retains the legacy single-stage capability contract.
-    ``stage_series_settings`` is the stage-keyed aggregate-series contract; an
+    ``stage_series_settings`` is the stage-keyed independent-series contract; an
     omitted map applies all template defaults, while an explicit map must cover
     every advertised stage.  Both paths remain bounded by ``GameSpec``.
     """
@@ -376,6 +635,7 @@ def configure_games_per_pair(
                 "games_per_pair 仅支持标记为可配置的单阶段 round_robin 模板"
             )
         copied[0]["games_per_pair"] = selected
+        copied[0]["series_scoring"] = SERIES_SCORING_INDEPENDENT
 
     configured = [stage for stage in copied if "games_per_pair" in stage]
     if configured and (
@@ -574,7 +834,7 @@ def _configure_stage_series_settings(
                 f"阶段 {stage_key} games_per_pair 仅允许 {allowed}"
             )
         stage["games_per_pair"] = selected_games
-        stage["series_scoring"] = SERIES_SCORING_AGGREGATE
+        stage["series_scoring"] = SERIES_SCORING_INDEPENDENT
         stage.pop("effective_rounds", None)
         if "swiss_extra_rounds" in config:
             extra_cfg = config["swiss_extra_rounds"]
@@ -636,4 +896,8 @@ __all__ = [
     "validate_template",
     "configure_games_per_pair",
     "SERIES_SCORING_AGGREGATE",
+    "SERIES_SCORING_INDEPENDENT",
+    "stage_duplicate_mode",
+    "stage_scoring_contract_is_valid",
+    "stage_series_scoring_is_valid",
 ]

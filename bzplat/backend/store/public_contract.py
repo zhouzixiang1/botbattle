@@ -32,6 +32,21 @@ READ_TECHNICAL_INCIDENT_EVENTS = (
     HISTORICAL_TECHNICAL_INCIDENT_EVENTS | {TECHNICAL_INCIDENT_EVENT}
 )
 
+# Stage-result payloads are durable internal envelopes.  Public contest views
+# expose only this stable ranking projection, never arbitrary future payload
+# keys.  Keep the order canonical so pre-completion and persisted rows serialize
+# identically and clients do not need to know the storage envelope.
+PUBLIC_CONTEST_TIEBREAK_FIELDS = (
+    "points",
+    "buchholz",
+    "buchholz_cut1",
+    "sonneborn_berger",
+    "head_to_head",
+    "normalized_delta",
+    "technical_losses",
+    "seed",
+)
+
 # Replay/live events are a public protocol, not an arbitrary JSON transport.
 # Keep the complete set here so a future game/adapter must deliberately extend
 # the public projection before a new event type or field can cross REST/SSE/WS.
@@ -152,6 +167,48 @@ def _public_number(raw: Any) -> int | float | None:
     return raw
 
 
+def sanitize_public_contest_tiebreaks(raw: Any) -> dict[str, int | float] | None:
+    """Return one complete allow-listed contest tie-break projection.
+
+    New stage snapshots always persist all fields.  Empty legacy payloads and
+    malformed/imported history intentionally return ``None`` so presentation
+    can omit the detail instead of guessing values or leaking envelope fields.
+    """
+    if not isinstance(raw, dict):
+        return None
+    public: dict[str, int | float] = {}
+    for key in PUBLIC_CONTEST_TIEBREAK_FIELDS:
+        value = raw.get(key)
+        if key in {"technical_losses", "seed"}:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                return None
+            public[key] = value
+            continue
+        number = _public_number(value)
+        if number is None:
+            return None
+        public[key] = number
+    return public
+
+
+def sanitize_public_stage_result_payload(raw: Any) -> dict[str, Any]:
+    """Parse a persisted stage envelope and retain only public tie-breaks."""
+    payload = raw
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    tiebreaks = sanitize_public_contest_tiebreaks(payload.get("tiebreaks"))
+    return {"tiebreaks": tiebreaks} if tiebreaks is not None else {}
+
+
 def _public_deltas(raw: Any) -> list[int | float] | None:
     if not isinstance(raw, (list, tuple)) or len(raw) != 2:
         return None
@@ -231,9 +288,21 @@ def sanitize_public_result(raw: Any) -> dict[str, Any]:
             if leg_deltas is None:
                 continue
             winner = raw_leg.get("winner")
-            if winner not in (None, 0, 1) or isinstance(winner, bool):
+            if winner is not None and (
+                isinstance(winner, bool)
+                or not isinstance(winner, int)
+                or winner not in (0, 1)
+            ):
                 continue
-            legs.append({"winner": winner, "deltas": leg_deltas})
+            leg = {"winner": winner, "deltas": leg_deltas}
+            rounds_played = raw_leg.get("rounds_played")
+            if (
+                isinstance(rounds_played, int)
+                and not isinstance(rounds_played, bool)
+                and rounds_played >= 0
+            ):
+                leg["rounds_played"] = rounds_played
+            legs.append(leg)
         if legs:
             public["legs"] = legs
 
@@ -362,14 +431,22 @@ def sanitize_public_event(
         }
     if event_type == "match_end":
         winner = raw.get("winner")
-        if winner not in (None, 0, 1) or isinstance(winner, bool):
+        if winner is not None and (
+            isinstance(winner, bool)
+            or not isinstance(winner, int)
+            or winner not in (0, 1)
+        ):
             winner = None
-        return {
+        public_terminal: dict[str, Any] = {
             "type": "match_end",
             "winner": winner,
             "reason": canonical_public_completed_reason(raw.get("reason")),
             "deltas": _public_deltas(raw.get("deltas")) or [0, 0],
         }
+        leg = raw.get("leg")
+        if isinstance(leg, int) and not isinstance(leg, bool) and leg >= 0:
+            public_terminal["leg"] = leg
+        return public_terminal
     if event_type in READ_TECHNICAL_INCIDENT_EVENTS:
         sample = sanitize_public_incident(raw)
         if sample is None:

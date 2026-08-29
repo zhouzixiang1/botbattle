@@ -75,7 +75,7 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
         "technical_loss", "started_at", "ended_at", "created_at",
         "likes_count", "views_count", "rated", "rating_reason",
         "rating_settled", "bot_a_environment", "bot_b_environment",
-        "bot_a", "bot_b", "can_view_debug",
+        "bot_a", "bot_b", "can_view_debug", "outcome",
     }
     assert set(m) <= allowed
 

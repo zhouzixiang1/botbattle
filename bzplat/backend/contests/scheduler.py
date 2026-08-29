@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -21,6 +22,7 @@ from bzplat.backend.runtime.config import (
     CONTEST_SCHEDULER_CONFIG,
     ContestSchedulerConfig,
 )
+from bzplat.backend.contests.validation import contest_current_stage_index
 from bzplat.backend.store.schema import (
     CONTEST_DRAFT,
     CONTEST_OPEN,
@@ -35,6 +37,23 @@ logger = logging.getLogger(__name__)
 def _now() -> str:
     from datetime import datetime
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _scheduled_stage_index(contest: dict[str, Any]) -> int | None:
+    """Read one exact in-range persisted cursor from a scheduler snapshot."""
+    raw_stages = contest.get("stages_json")
+    if isinstance(raw_stages, str):
+        try:
+            stages = json.loads(raw_stages)
+        except (TypeError, ValueError):
+            return None
+    else:
+        stages = raw_stages
+    if not isinstance(stages, list) or not all(
+        isinstance(stage, dict) for stage in stages
+    ):
+        return None
+    return contest_current_stage_index(contest, stage_count=len(stages))
 
 
 class ContestScheduler:
@@ -122,7 +141,13 @@ class ContestScheduler:
             if not starts_at or now < starts_at:
                 continue
             try:
-                stage_idx = int(c.get("current_stage_idx") or 0)
+                stage_idx = _scheduled_stage_index(c)
+                if stage_idx is None:
+                    logger.error(
+                        "scheduler: contest %s has malformed stage cursor",
+                        c.get("id"),
+                    )
+                    continue
                 # 防御：published 态若无 pairing（publish 时 _begin_stage 异常未生成），补生成
                 pairings = self.manager.store.list_contest_pairings(c["id"], stage_idx=stage_idx)
                 if not pairings:
@@ -139,7 +164,13 @@ class ContestScheduler:
             if c["id"] in processed:
                 continue
             try:
-                stage_idx = int(c.get("current_stage_idx") or 0)
+                stage_idx = _scheduled_stage_index(c)
+                if stage_idx is None:
+                    logger.error(
+                        "scheduler: contest %s has malformed stage cursor",
+                        c.get("id"),
+                    )
+                    continue
                 await self.manager._dispatch_pending(c["id"], stage_idx)
                 await self.manager.maybe_finish(c["id"])
             except Exception:

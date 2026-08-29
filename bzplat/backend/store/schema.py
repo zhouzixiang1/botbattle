@@ -1456,6 +1456,22 @@ PUBLIC_MATCH_COMPLETED_REASONS = frozenset(
     }
 )
 
+# ``technical_loss`` is a scored adjudication axis, not merely presentation
+# metadata.  These completed reasons are written only when that flag is set;
+# the shared scoring parser rejects an explicit reason/flag disagreement so a
+# damaged import cannot turn a technical terminal into an ordinary played game
+# (or vice versa).  ``crash`` is intentionally absent: board-game engines have
+# historically used it as an ordinary referee result with technical_loss=0.
+TECHNICAL_MATCH_COMPLETED_REASONS = frozenset(
+    {
+        "bot_deleted",
+        "contest_bot_unavailable",
+        "protocol_error",
+        "technical_loss",
+        "timeout",
+    }
+)
+
 # 公开 match ``error`` 终局唯一允许的稳定原因码。任意内部异常文本、旧自定义
 # 管理员 reason 或未知值在公共边界一律归一为 platform_error；诊断详情只进日志。
 AUTO_IDLE_POLICY_CUTOVER_REASON = "auto_idle_policy_cutover"
