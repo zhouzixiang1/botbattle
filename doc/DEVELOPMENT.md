@@ -11,16 +11,25 @@
 | Node.js | ≥ 22 | 前端构建 |
 | Docker | 最新 | Bot 沙箱（必需；`BZ_BOT_LOCAL=1` 可退回本机仅测试用） |
 
-### 1.2 后端安装
+### 1.2 后端安装（仅本任务 worktree）
+
+现有生产主目录的共享 `.venv` 不得由开发任务修改。依赖不变时，可从 worktree CWD 使用
+`/home/zzx/project/botbattle/.venv/bin/python` 作为只读工具链；依赖新增/升级时在 worktree 建私有环境：
+
 ```bash
-cd /home/zzx/project/botbattle
+cd /home/zzx/project/botbattle/.worktrees/<任务名>
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'          # 装 bzplat 包 + pytest/httpx
 ```
 
-### 1.3 前端安装
+当前 `pyproject.toml` 只有最低版本约束，不是生产依赖锁；systemd 又固定执行主目录 `.venv/bin/python`。
+因此 Python 依赖变更不能原地发布：PR 必须同时提供精确生产 lock/constraints、并行新 venv 的构建/验收、
+受控启动切换和旧 release + 旧 lock + 旧 venv 的回滚方案。缺少该闭环即为部署 No-Go。
+
+### 1.3 前端安装（仅本任务 worktree）
 ```bash
-cd bzplat/frontend && npm install
+cd /home/zzx/project/botbattle/.worktrees/<任务名>/bzplat/frontend
+npm install
 ```
 
 ### 1.4 配置文件
@@ -71,8 +80,9 @@ BZ_INSTANCE_KEY=prod-main
 BZ_DOCKER_HOST=unix:///var/run/docker.sock
 BZ_PUBLIC_ORIGIN=https://bot.example.com
 
-scripts/platform-ctl.sh start     # 或：botzone serve
+scripts/platform-ctl.sh start     # 生产唯一控制入口；不要绕过为 raw botzone serve
 # 默认 127.0.0.1:50380
+# 仅首次安装且用户对精确主库写入明确授权时：
 botzone create-admin <user> <email> '<pass>'   # 建管理员（跳过邮箱验证）
 ```
 
@@ -141,8 +151,10 @@ label。若进程仍在、端口仍监听或本 namespace 容器仍存在，不�
    `active_count`、`uploads_in_flight`、`active_local_ai_leases`、`owned_execution_tasks`、
    `untracked_running_matches` 非零，或 `docker_launch_state` 非 `idle`，继续等待。
    `readiness_unavailable` 非空表示上传/任务探针不可用，或评分与赛事恢复仍在执行，不能视为就绪。
-4. 只有 ready 后才执行 `bash scripts/rebuild.sh`（构建并经统一入口重启），或按同一脚本的安全启停
-   边界完成维护。不要删除 DB 邻接 flock 文件，也不要跨 namespace 手工清容器。
+4. ready 后继续严格执行 `AGENTS.md` §1.8：停服并核对 PID/端口/instance 容器和 SQLite sidecar，
+   封存不同 inode 的冷备，在第三份临时 DB 预演迁移，随后才精确推进已审 target SHA、按 manifest/lock 更新依赖并
+   `bash scripts/rebuild.sh`。不要从 ready 直接 restart，不要打开唯一冷备，不要删除 DB 邻接 flock，
+   也不要跨 namespace 手工清容器。
 5. 重启健康检查通过后再次 GET。预期为 `dispatcher.state=running`、`accepting=false`、
    `maintenance.requested=true`；启动清理、attempt 恢复和赛事/评分对账不会解除部署门。
 6. 验证新版本后调用一次 `DELETE /api/admin/execution-queue/maintenance`。只有 ready 仍成立时才返回
@@ -155,7 +167,8 @@ Docker 不确定进入 `paused`，管理端执行“清场并恢复”后继续�
 
 ### 2.2 构建前端
 ```bash
-cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托管
+cd /home/zzx/project/botbattle/.worktrees/<任务名>/bzplat/frontend
+npm run build   # 只写本任务 worktree 的 dist
 ```
 > **关键前端依赖**：react 19 / vite 8 / tailwindcss v4 / shadcn(new-york) / recharts。
 > 视觉层另用 `gsap ^3.x`（npm 安装，2025-04 起 100% 免费商用，驱动 canvas 牌桌动画）+
@@ -167,6 +180,7 @@ cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托
 Linux x86_64 ELF，并检查产物类型：
 
 ```bash
+cd /home/zzx/project/botbattle/.worktrees/<任务名>
 bash samples/build_sample.sh
 file samples/{callbot,gomokubot,pencilbot}_linux_amd64
 sha256sum samples/gomoku_showcase/*_linux_amd64
@@ -182,11 +196,14 @@ sha256sum samples/gomoku_showcase/*_linux_amd64
 
 玩家侧跨系统构建说明不依赖仓库脚本，见 `wiki/BOT_DEV.md`。
 
-### 2.4 改完代码必须 rebuild + restart
-```bash
-bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
-```
-> 前端产物（`dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——**不 rebuild + restart 代码不生效**（常见症状：新路由 405）。
+### 2.4 运行时代码发布需要 rebuild（生产先排空）
+
+前端产物（`dist`）由后端 StaticFiles 托管、后端代码由运行进程加载，因此运行时代码不 rebuild 不会生效；
+但 `scripts/rebuild.sh` 本身不申请 drain、停服冷备、迁移预演、冻结 target SHA 的精确推进或依赖安装。生产必须完整执行
+§2.1 与 `AGENTS.md` §1.8，直到停服/冷备/预演/精确推进已审 target SHA/依赖步骤完成后才运行脚本。只有先 fetch、
+冻结并审阅完整 fast-forward 区间、确认其中全是纯文档/规则后，才无需 rebuild 或 restart；推进必须离线钉死该 SHA，
+不能在审阅后再用普通 `git pull` 获取远端新提交。若区间夹带运行时变更，必须在推进工作树前转完整发布流程。前端依赖变化按 `package-lock.json` 执行 `npm ci`；Python 依赖变化还必须先满足
+§1.2 的 lock + 并行 venv 发布门，禁止原地修改生产 `.venv`。
 
 ### 2.5 worktree 隔离开发（勿碰线上 50380）
 
@@ -221,7 +238,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
 - 每个并行 worktree 要把示例 `BZ_INSTANCE_KEY` 换成自己的稳定唯一值；不要与生产或其他 worktree 共用。即使当前使用 `BZ_BOT_LOCAL=1`，也保留该约束以防切回 Docker 后误清理。
 - `BZ_QA_INSTANCE=1` 通过独立代码能力门强制禁用自动排位；复制库中的 `execution_control.auto_enabled` 即使为真也无效，API 尝试开启返回 409。生产同样只以该字段作为自动 producer 的唯一开关，不存在 QA/生产两套参数 profile。
-- 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
+- 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md) §1.3“建立独立 worktree 与分支”与 §1.4“数据库、端口与运行时隔离”。
 
 ### 2.6 本地 Bot 客户端
 
@@ -252,7 +269,7 @@ python scripts/local_ai_client.py \
 |------|------|
 | **Python 包名** | 必须是 `bzplat`，**绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend...` |
 | **常量集中** | 所有状态码/对局类型/`REGISTERED_ENGINES`/`VALID_GAME_IDS`/平台 settings 键名集中在 `store/schema.py`，别散落 |
-| **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
+| **日志** | 后端生产代码禁止 `print()`，统一 `logging.getLogger(__name__)`；测试夹具/子进程样例及明确面向 stdout 的 CLI 输出除外 |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | `runtime/config.py` 固定 6 match slots / 12 sandbox units；`runtime/limits.py` 只允许节能档（每 Bot 1 核/512 MiB）与赛事档（每 Bot 2 核/2 GiB），后者仅 contest 来源可取，本地 Bot/真人不启动 Docker。job 入队冻结 sandbox/CPU/内存向量，claim 再按 affinity/cgroup/物理预算逐维准入，实际并发依组合为 1–6；显式启动值只能收紧，admin 不能抬高。每个 job 占 1 slot，赛事份额 1 不是额外槽；同一非 human Bot 全局至多一个 active job。全员及分组单/双循环均无人数硬上限，完整 O(n²) 排期只增加持久 job；历史 `allow_large_round_robin` 仅作 no-op 兼容。Bot 文件上限 100 MiB |
 | **赛事演进边界** | 模板人数范围、用途与时长只是非阻断推荐；新增/修改阶段结构须同步模板元数据、estimate、前端风险提示和测试。新 Holdem/Gomoku KO 只有冻结 `paired_swap_until_decided` 才可无限追加两场换座决胜组；历史无 marker 保持平局阻断。不得原地改写 running/finished 快照；仅 draft/open 且零 pairing/job/Match/正式结果的赛事可走现有 CAS 更新。Gomoku `swiss_round_bands` 在 publish 冻结 `effective_rounds`，不得在通用层加游戏名分支 |
@@ -260,17 +277,16 @@ python scripts/local_ai_client.py \
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
 | **前端组件** | 用 `@/components/ui/*` 共享原语，禁内联重复样式 |
-| **路径别名** | 前端用 `@/` → `src/`，禁相对路径 |
+| **路径别名** | 前端跨目录/跨层 import 用 `@/` → `src/`；同目录内部允许相对路径 |
 
 ## 4. Git 工作流
 
 遵循 [`AGENTS.md`](../AGENTS.md)（权威）：
-1. **分支工作流**：任何修改先从 `main` 切特性分支（`feat/...` 或 `fix/...`），在分支上完成。
-2. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并）；**禁止**本地 `git merge` 直推 `main`，禁止直接在 `main` 提交。
-3. **PR 合并后删除原分支**（本地 + 远端）。
-4. **提交前跑测试**：`pytest`（仓库根）；前端改了再 `npm run build`。
-5. **改动须同步三处**：① 测试（`bzplat/backend/tests/`）② 文档（`wiki/` 或 `doc/`，见 `AGENTS.md` 文档规范）③ 非显而易见的架构约定写入会话记忆（若环境提供 memory 目录）。
-6. **多 agent 协作**：不同任务用独立分支/独立 agent 隔离，每个 agent 只对自己的分支负责。
+1. 任何仓库修改先在独立 worktree 的 `feat/`、`fix/`、`refactor/`、`docs/`、`test/` 或 `chore/` 分支完成；主目录只维护 `main` 和生产服务。
+2. 合并必须走 GitHub Pull Request；禁止直接在 `main` 提交、push，或把本地 feature 分支 merge 到 `main`。PR 合并后只能按 `AGENTS.md` §1.8 将 main fast-forward 到已 fetch、已审阅的精确 target SHA；随后清理本任务 worktree 与本地/远端分支。
+3. 验证按 `AGENTS.md`“变更对应的最低验证矩阵”执行：后端最终候选跑完整 `pytest`；前端按影响跑 unit/build/Playwright；API、DB、运行时和发布候选另有隔离 smoke/迁移/浏览器门禁。
+4. 行为变更同步边界回归与下方文档影响矩阵。会话记忆仅在用户明确要求且环境允许时更新，不能替代测试和仓库文档。
+5. 多 agent 的不同任务使用独立 worktree；同一任务并行时预先划分互不重叠的文件所有权，公共文件由主负责人统一集成。
 
 ## 5. 模块扩展指南
 
@@ -329,8 +345,10 @@ systemd 模板使用 `UMask=0077`，`scripts/platform-ctl.sh` 也在创建 PID�
 把主机防火墙的 50380 入站限制到该网段，再同时设置
 `BZ_HOST=0.0.0.0` 与 `BZ_ALLOW_LAN_BIND=1`。缺 gate、其他非回环地址或无效端口都会在创建
 PID/日志/数据库前拒绝；CLI 同样执行该门，不能通过直接 systemctl 绕过。systemd 模板不再硬编码
-host/port，而由 CLI 从 `EnvironmentFile` 读取并安全默认到 `127.0.0.1:50380`。更新模板后必须
-重新 `install`、`daemon-reload`，再由 `scripts/platform-ctl.sh restart` 做有界健康验证。
+host/port，而由 CLI 从 `EnvironmentFile` 读取并安全默认到 `127.0.0.1:50380`。既有生产实例更新模板前
+必须先完成 §2.1 / `AGENTS.md` §1.8 的 maintenance 排空并达到 ready，再在停服发布窗内重新 `install`、
+`daemon-reload`，最后由 `scripts/platform-ctl.sh restart` 做有界健康验证；首次安装按本节上方的停服
+切换流程执行，不得与 PID fallback 并行。
 
 ### 6.2 日志（三文件 + 启动日志）
 - `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。Uvicorn HTTP/WS record 在 handler 序列化前只保留 path，不记录 query。
