@@ -167,6 +167,13 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
 返回 `blocked_code=deployment_maintenance` 和“部署维护中，恢复调度后继续排队”；恢复后自动回到真实
 容量阻塞或动态 ETA，持久 job 本身不写入临时维护原因。
 
+本机运维可用 `botzone maintenance begin|status|end` 直达同一 Store 事务（与 admin HTTP 端点等价的
+durable 语义：幂等 begin、paused 拒绝、ready CAS end、auto 保持关闭、缺库拒绝新建）。与 HTTP 的差异：判定不含运行中服务进程内的
+上传/任务探针（`uploads_in_flight`/`owned_execution_tasks`），begin 也不做进程内恢复守卫与
+上传/赛事活动互斥，且不写 HTTP 审计日志（改为向库邻接 `<db>.maintenance-cli.log` 追加一行）；
+`end` 因此必须显式 `--confirm-service-restarted` 确认目标服务已同版本重启，旧进程仍在运行时
+以 admin HTTP 端点为准。
+
 排空不会停止 dispatcher loop：当前 `starting/running/settling` 继续完成、取消、评分结算与精确
 Docker 清理，但不再 claim 或补充自动任务。赛事 scheduler/reconcile 在检查 Bot 可用性、绑定 Match、
 写赛事运行态或技术结果之前检查同一 admission gate；维护期间只保留 pending pairing，恢复后再派发。

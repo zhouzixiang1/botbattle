@@ -137,7 +137,12 @@ label。若进程仍在、端口仍监听或本 namespace 容器仍存在，不�
 
 #### 计划部署：先排空，再停服
 
-线上更新不得直接以 `restart` 抢断当前局。按以下顺序操作；三个 maintenance 端点均只允许超级管理员：
+线上更新不得直接以 `restart` 抢断当前局。按以下顺序操作；三个 maintenance 端点均只允许超级管理员。
+本机运维另有等价 CLI（与 `platform-ctl.sh` 同一信任层，不经 HTTP 认证）：
+`botzone maintenance begin|status|end [--db <库>] [--reason <原因>]`（`end` 另需 `--confirm-service-restarted`）——与 HTTP 共享 `execution_control`
+的同一事务语义（begin 幂等、paused 冲突拒绝、end 仅在 durable ready 时恢复接单、auto 保持关闭、
+目标库不存在时拒绝新建），dispatcher 下一轮轮询（≤1s）感知变化；其判定不含运行中服务进程内的
+上传/任务探针，非「服务已重启」场景优先用 admin HTTP 端点。
 
 1. 先确认执行服务为 `running`。若管理端显示运行环境故障 `paused`，先调用
    `POST /api/admin/execution-queue/resume` 完成精确清场与业务对账；未恢复时开始排空会返回
