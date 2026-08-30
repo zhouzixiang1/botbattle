@@ -2708,7 +2708,13 @@ async def match_events(match_id: str, request: Request):
         finally:
             orch.unsubscribe(match_id, q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    # 反向代理必须逐帧转发 SSE：首帧 snapshot 被默认 proxy_buffering 扣住时，
+    # 直播端棋盘会永远停在「加载中」。X-Accel-Buffering 是 nginx 的逐响应开关。
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── leaderboard ───────────────────────────────────────────────

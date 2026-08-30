@@ -134,6 +134,7 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
   access_log /var/log/nginx/botbattle.access.log botbattle_no_args;
   ```
   若必须用追加式（`$proxy_add_x_forwarded_for`），配套 `real_ip` 模块（`set_real_ip_from` + `real_ip_recursive on`）剥离可信段。
+- **SSE 观赛流禁止缓冲**：`/api/matches/{id}/events` 响应自带 `X-Accel-Buffering: no` 与 `Cache-Control: no-store`，nginx 依据该头对本响应禁用 `proxy_buffering` 并逐帧转发；反代把首帧 snapshot 扣在缓冲里时，直播端棋盘会永久停在「加载中」。运维侧为该路径额外配置 `proxy_buffering off` 属纵深防御，不是必需项。两个失效陷阱：把 `text/event-stream` 加入 `gzip_types`（gzip 过滤会重新聚合帧）或配置 `proxy_ignore_headers X-Accel-Buffering`，都会使该头不起作用。
 - `BZ_TRUSTED_PROXY_HOPS`：实际写入/追加 HTTP 转发头的受信代理层数（默认
   `1`=当前单层 nginx）。frp 是 TCP 透传、不写 HTTP 头，不能因此把该值改成 2；只有新增另一层
   会处理 XFF 的 HTTP 代理时才按真实拓扑调整。
