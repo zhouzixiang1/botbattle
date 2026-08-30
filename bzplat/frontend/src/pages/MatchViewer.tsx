@@ -898,14 +898,14 @@ export default function MatchViewer() {
             <div className={compactViewportDashboard
               ? 'min-w-0 md:col-start-1 md:row-start-1'
               : 'min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1'}>
-              <ReplayHud vm={visibleVm} seats={seats} />
+              <ReplayHud vm={visibleVm} seats={seats} liveEdge={atLive && realtime} />
             </div>
           )}
           {!viewportDashboard && ReplayHud && visibleVm !== null && (
             <div className={`min-w-0 ${timelineCollapsed
               ? 'xl:col-start-1 xl:row-start-1'
               : 'xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1'}`}>
-              <ReplayHud vm={visibleVm} seats={seats} />
+              <ReplayHud vm={visibleVm} seats={seats} liveEdge={atLive && realtime} />
             </div>
           )}
 
