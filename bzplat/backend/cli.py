@@ -138,6 +138,109 @@ def create_admin(
         typer.echo(f"created admin id={u['id']}")
 
 
+def _now_iso() -> str:
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")
+
+
+@app.command()
+def maintenance(
+    action: str = typer.Argument(..., help="begin | status | end"),
+    db: str = typer.Option(
+        None, "--db", help="目标数据库（默认 BZ_DB_PATH/.env，再退回 botzone.db）"
+    ),
+    reason: str = typer.Option("", "--reason", help="begin 时的排空原因（≤200 字符）"),
+    confirm_service_restarted: bool = typer.Option(
+        False,
+        "--confirm-service-restarted",
+        help="end 必须显式确认：目标服务已用同版本代码重启（进程内上传/任务探针不在 CLI 判定内）",
+    ),
+):
+    """部署维护排空控制（与 admin HTTP「准备维护/结束维护」同事务语义）。
+
+    供本机运维使用：与 platform-ctl.sh 同一信任层，不经 HTTP 认证。
+    dispatcher 下一轮轮询（≤1s）感知状态变化。end 的 ready CAS 与
+    Store 派生语义一致；运行中服务进程内的上传/任务探针不在本命令
+    判定内，非「服务已重启」场景优先用 admin HTTP 端点。操作会向
+    数据库邻接的 <db>.maintenance-cli.log 追加一行审计记录。
+    """
+    import sqlite3
+
+    from bzplat.backend.store.execution import (
+        ExecutionMaintenanceConflict,
+        ExecutionRepository,
+    )
+
+    _load_dotenv()
+    database = db or os.environ.get("BZ_DB_PATH") or "botzone.db"
+    candidate = Path(database).expanduser()
+    if not candidate.is_file():
+        raise typer.BadParameter(f"数据库不存在（拒绝新建）: {database}")
+    action = action.strip().lower()
+    if action not in {"begin", "status", "end"}:
+        raise typer.BadParameter("action 必须是 begin/status/end")
+    if len(reason) > 200:
+        raise typer.BadParameter("--reason 最长 200 字符（与 admin HTTP 一致）")
+    if action == "end" and not confirm_service_restarted:
+        raise typer.BadParameter(
+            "end 需要 --confirm-service-restarted：确认目标服务已用同版本代码"
+            "重启；旧进程仍在运行时请改用 admin HTTP 端点"
+        )
+    # 只读预检 drain 列：本命令可能在新代码下对仍在运行旧服务的库执行，
+    # 缺列说明该库来自更旧版本——静默 _migrate 会把迁移前置到停服/冷备
+    # 之前，破坏计划部署序列，必须拒绝。
+    try:
+        probe = sqlite3.connect(f"file:{candidate}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise typer.BadParameter(f"无法只读打开目标库: {exc}") from exc
+    try:
+        probe.execute("PRAGMA busy_timeout=3000")
+        columns = {row[1] for row in probe.execute(
+            "PRAGMA table_info(execution_control)"
+        )}
+    except sqlite3.Error as exc:
+        raise typer.BadParameter(f"目标库预检失败: {exc}") from exc
+    finally:
+        probe.close()
+    required = {"accepting", "auto_enabled", "deployment_drain_requested"}
+    missing = required - columns
+    if missing:
+        raise typer.BadParameter(
+            f"目标库缺少 execution_control 排空列 {sorted(missing)}："
+            "先按计划部署完成升级，再执行 maintenance"
+        )
+
+    store = Store(str(candidate))
+    repo = ExecutionRepository(store)
+    try:
+        if action == "begin":
+            repo.begin_maintenance(reason)
+        elif action == "end":
+            repo.end_maintenance()
+        status = repo.maintenance_status()
+    except ExecutionMaintenanceConflict as exc:
+        # 退出码 3 区分状态冲突与参数错误（typer.BadParameter 恒为 2）。
+        typer.echo(f"maintenance {action} failed: {exc.code}: {exc.message}", err=True)
+        raise typer.Exit(code=3) from exc
+    finally:
+        store.close()
+    if action in {"begin", "end"}:
+        audit_path = candidate.parent / f"{candidate.name}.maintenance-cli.log"
+        try:
+            with open(audit_path, "a", encoding="utf-8") as fh:
+                fh.write(
+                    f"{_now_iso()} action={action} reason={reason[:200]!r} "
+                    f"requested={int(status['requested'])} "
+                    f"ready={int(bool(status['ready']))}\n"
+                )
+        except OSError as exc:
+            # 状态已变更，审计失败只降级为告警，不能让运维误判操作失败。
+            typer.echo(f"maintenance audit write failed: {exc}", err=True)
+    typer.echo(f"db={candidate.resolve()}")
+    typer.echo(json.dumps(status, ensure_ascii=False))
+
+
 def _validated_cold_backup(database: Path, backup_raw: str | None) -> Path:
     if not backup_raw:
         raise typer.BadParameter("dry-run/apply 必须提供 --backup 的冷备绝对路径")
