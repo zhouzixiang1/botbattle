@@ -527,7 +527,7 @@ export default function HumanPlay() {
         >
           {viewportDashboard && ReplayHud && currentVm !== null && (
             <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
-              <ReplayHud vm={currentVm} seats={seats} />
+              <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
             </div>
           )}
           <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
@@ -588,7 +588,7 @@ export default function HumanPlay() {
           : 'grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]'}>
           {ReplayHud && currentVm !== null && (
             <div className="min-w-0 xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1">
-              <ReplayHud vm={currentVm} seats={seats} />
+              <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
             </div>
           )}
           <div className={`min-w-0 space-y-3 ${ReplayHud ? 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1' : ''}`}>

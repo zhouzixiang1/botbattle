@@ -66,6 +66,12 @@ export interface HumanTurnSurfaceProps extends HumanActionPanelProps {
 export interface GameAuxiliaryProps {
   vm: unknown
   seats?: SeatInfo[]
+  /**
+   * 视图正跟随直播边缘（直播态且游标在最新事件）。带累计棋钟的游戏
+   * HUD 由此让行动方棋钟本地每秒走秒，新 time_used 事件到达即校准；
+   * 回放、回退或暂停历史画面时不走。
+   */
+  liveEdge?: boolean
 }
 
 export interface HumanPlayViewSpec {

@@ -2,6 +2,7 @@ import { Clock } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import type { GameAuxiliaryProps } from '@/games/base'
+import { useTickingRemaining } from '@/games/clock-tick'
 import { gomokuSeatDetail, type GomokuViewModel } from '@/games/gomoku/reducer'
 import { eventSeatSubject } from '@/games/seat-display'
 
@@ -13,8 +14,14 @@ function formatClock(seconds: number | null): string {
 }
 
 /** 全场棋钟是五子棋规则状态，观战、回放与人机页共用同一视图。 */
-export function GomokuReplayHud({ vm, seats }: GameAuxiliaryProps) {
+export function GomokuReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
   const state = vm as GomokuViewModel
+  // 直播边缘对行动方本地走秒；新 time_used 事件到达即重新校准。
+  const timeRemaining = useTickingRemaining(
+    Boolean(liveEdge) && !state.matchOver,
+    state.timeRemaining,
+    state.toAct,
+  )
   return (
     <section
       data-testid="gomoku-clock-hud"
@@ -36,7 +43,7 @@ export function GomokuReplayHud({ vm, seats }: GameAuxiliaryProps) {
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 font-mono text-sm font-semibold tabular-nums text-foreground">
                 <Clock aria-hidden="true" className="size-3.5 text-muted-foreground" />
-                {formatClock(state.timeRemaining[seat])}
+                {formatClock(timeRemaining[seat])}
               </span>
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">

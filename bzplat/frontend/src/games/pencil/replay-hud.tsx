@@ -2,6 +2,7 @@ import { Clock } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import type { GameAuxiliaryProps } from '@/games/base'
+import { useTickingRemaining } from '@/games/clock-tick'
 import type { PencilViewModel } from '@/games/pencil/reducer'
 import { eventSeatSubject, seatDisplay } from '@/games/seat-display'
 
@@ -29,8 +30,15 @@ function metric(label: string, value: number, total?: number) {
  * 本组件同步切为纵向。空白区域只承载可从当前回放帧直接推导的局面数据，避免
  * 重复通用对阵卡或展示并不存在的策略指标。
  */
-export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
+export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
   const state = vm as PencilViewModel
+  // 直播边缘对行动方本地走秒；新 time_used 事件到达即重新校准。
+  // hook 必须先于早退 return 调用，state 为空时以全空数组退化为不显示。
+  const timeRemaining = useTickingRemaining(
+    Boolean(liveEdge) && !state?.matchOver,
+    state?.timeRemaining ?? [null, null],
+    state?.toAct === 0 || state?.toAct === 1 ? state.toAct : null,
+  )
   if (!state?.scores) return null
 
   const totalBoxes = Math.max(0, (state.nDots - 1) ** 2)
@@ -97,7 +105,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
         {([0, 1] as const).map((seat) => {
           const identity = identities[seat]
           const isActing = !state.matchOver && state.toAct === seat
-          const remaining = state.timeRemaining?.[seat]
+          const remaining = timeRemaining[seat]
           const timedOut = state.timeOut === seat
           const color = seat === 0 ? 'text-seat-1' : 'text-seat-2'
           const tint = seat === 0 ? 'bg-seat-1/5' : 'bg-seat-2/5'
@@ -125,7 +133,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
                   </span>
                 )}
                 {(remaining != null || timedOut) && (
-                  <span className={`ml-auto inline-flex shrink-0 items-center gap-1 ${isActing ? 'text-foreground' : ''}`}>
+                  <span className={`ml-auto inline-flex shrink-0 items-center gap-1 font-mono tabular-nums ${isActing ? 'text-foreground' : ''}`}>
                     <Clock className="size-3" />{formatClock(remaining ?? 0)}
                   </span>
                 )}
