@@ -418,7 +418,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
   `POST /api/auth/reset-password` 完成自助重置
 
 ### 4.5 实时端点
-- **SSE** `GET /api/matches/{id}/events`：观赛事件流（先推 snapshot 再增量）。snapshot 已是 `completed/aborted` 或收到 `match_end/error` 时由服务端结束生成器并退订；前端同步切换到终态回放且不重连。
+- **SSE** `GET /api/matches/{id}/events`：观赛事件流（先推 snapshot 再增量）。响应固定携带 `Cache-Control: no-store` 与 `X-Accel-Buffering: no`，反向代理必须逐帧转发——首帧被 `proxy_buffering` 扣住时直播端拿不到初始局面。snapshot 已是 `completed/aborted` 或收到 `match_end/error` 时由服务端结束生成器并退订；前端同步切换到终态回放且不重连。
 - **WebSocket** `WS /api/matches/{id}/play`：人类对战落子回传。发送与接收为两个受控任务；终态 snapshot、`match_end` 或 `error` 会由服务端主动关闭连接，finally 取消另一侧任务并退订，不能依赖浏览器自觉 close。
 - **本地 Bot WSS** `WS /api/local-ai/connect`：用户端连接器主动向平台建立长连接，以 Authorization Bearer 认证；拒绝浏览器 Origin 与 query token。裁判按 `request_id/match_id/turn/deadline` 下发请求，客户端只回固定 `response` 或有界 `failure` 信封；成功通过四项绑定的单次裁判响应属于服务端请求流量，不消耗防主动滥用的入站桶，心跳、无效、重复与错绑定帧仍计入并可被 1008 断开。断线重连不延长原 deadline，撤销/轮换立即使旧身份失效。
 
