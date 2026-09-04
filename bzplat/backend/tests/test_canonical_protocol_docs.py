@@ -137,14 +137,16 @@ def test_player_wiki_is_quickstart_first_and_scopes_compatibility_guidance() -> 
     assert ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<" in protocol
     assert "不会改发完整历史，也不会切换为 Traditional" in protocol
     assert "8 秒首回合健康检查" in protocol
-    assert "Pencil 的正式对局仍按每方 900 秒累计棋钟" in protocol
+    assert "Pencil 为每方累计 900 秒（默认）或单步 1 秒" in protocol
+    assert "人机局的 `applies_to` 为 `bot_only`" in protocol
 
     for platform in ("## 4. Linux", "## 5. Windows", "## 6. macOS"):
         assert platform in bot_dev
     assert "C：Alpine 静态编译" in bot_dev
     assert "Python：Linux PyInstaller 打包" in bot_dev
     assert "该 8 秒不会计入正式对局" in bot_dev
-    assert "不会替代或扣减双方各 900 秒累计棋钟" in pencil
+    assert "累计模式 `pencil_per_side_total_900s_v1`" in pencil
+    assert "人机练习只对 Bot 使用所选时限" in pencil
 
     wiki_text = "\n".join(
         path.read_text(encoding="utf-8") for path in (ROOT / "wiki").glob("*.md")
@@ -198,7 +200,7 @@ def test_player_wiki_explains_contest_formats_as_player_flows() -> None:
     game_docs = {
         "wiki/TEXAS.md": ("瑞士 → 单败", "复式单循环", "瑞士 → Top 8 排位循环"),
         "wiki/GOMOKU.md": ("分组双循环 → 单败", "瑞士 → 单败", "五子棋双循环"),
-        "wiki/PENCIL.md": ("分组双循环 → 单败", "瑞士 → 单败", "900 秒累计棋钟"),
+        "wiki/PENCIL.md": ("分组双循环 → 单败", "瑞士 → 单败", "每方累计 900 秒"),
     }
     for relative, required_phrases in game_docs.items():
         text = (ROOT / relative).read_text(encoding="utf-8")

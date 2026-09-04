@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,7 @@ from bzplat.backend.runtime.config import (
 from .db import (
     _active_game_contract_tx,
     _all_game_ids,
+    _finalize_terminal_replay_tx,
     _matches_table,
     _now,
     _registered_game_id,
@@ -39,6 +40,11 @@ from .db import (
 from .schema import (
     AUTO_IDLE_POLICY_CUTOVER_REASON,
     AUTO_YIELD_FOREGROUND_REASON,
+    CONTEST_CANCELLED,
+    CONTEST_FINISHED,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    CONTEST_RUNNING,
     EXECUTION_ACTIVE_STATES,
     EXECUTION_CANCELLED,
     EXECUTION_COMPLETED,
@@ -68,6 +74,7 @@ from .schema import (
     TYPE_HUMAN,
     TYPE_LADDER,
     VALID_RUNTIME_MODES,
+    validate_orphan_recovery_reason,
 )
 from .validation import exact_nonnegative_int
 
@@ -100,6 +107,16 @@ _AUTO_YIELD_REASONS = frozenset(
     {AUTO_IDLE_POLICY_CUTOVER_REASON, AUTO_YIELD_FOREGROUND_REASON}
 )
 _AUTO_GATE_BUSY = "busy"
+_QUEUE_CANDIDATE_PAGE_SIZE = 64
+_CONTEST_EXECUTION_SEAL_CHANGED = "contest_pairing_batch_changed"
+_CONTEST_TERMINAL_EXECUTION_REASONS = {
+    CONTEST_FINISHED: "contest_finished",
+    CONTEST_CANCELLED: "contest_cancelled",
+}
+_CONTEST_ACTIVE_EXECUTION_STATUSES = frozenset(
+    {CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST}
+)
+_CONTEST_SHOWCASE_EXECUTION_REASON = "contest_showcase_read_only"
 
 
 class ExecutionQueueClosed(ValueError):
@@ -158,6 +175,267 @@ def _parse_time(value: Any) -> datetime:
         return datetime.fromisoformat(str(value or ""))
     except ValueError:
         return datetime.min
+
+
+def _resolve_frozen_time_control(
+    game_id: str,
+    config: dict[str, Any],
+) -> Any:
+    """Resolve one execution clock without accepting arbitrary JSON values."""
+
+    from bzplat.backend.games import registry as game_registry
+
+    raw_id = config.get("time_control_id")
+    if "time_control_id" in config and (
+        not isinstance(raw_id, str) or not raw_id
+    ):
+        raise ValueError("execution request has invalid frozen time control")
+    return game_registry.get(game_id).resolve_time_control(raw_id)
+
+
+def _time_control_binding_is_valid(
+    job: dict[str, Any],
+    *,
+    contest_time_control_id: Any = None,
+) -> bool:
+    try:
+        config = json.loads(str(job.get("match_config") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    try:
+        from bzplat.backend.games import registry as game_registry
+
+        spec = game_registry.get(str(job.get("game_id") or ""))
+        control = _resolve_frozen_time_control(spec.game_id, config)
+    except (KeyError, TypeError, ValueError):
+        return False
+    if job.get("source") == EXECUTION_SOURCE_MANUAL:
+        rated = job.get("rated")
+        reason = job.get("rating_reason")
+        if (
+            isinstance(rated, bool)
+            or not isinstance(rated, int)
+            or rated not in (0, 1)
+            or not isinstance(reason, str)
+        ):
+            return False
+        alternate = control.id != spec.default_time_control_id
+        if alternate:
+            # The clock and rating pool are one frozen contract.  A queued
+            # request whose JSON drifted from default to alternate must never
+            # carry its old eligible marker into the Match transaction.
+            return rated == 0 and reason == "alternate_time_control"
+        if reason == "alternate_time_control":
+            return False
+    if job.get("source") != EXECUTION_SOURCE_CONTEST:
+        return True
+    try:
+        contest_control = spec.resolve_time_control(contest_time_control_id)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return control.id == contest_control.id
+
+
+def _strict_execution_match_config(value: Any) -> dict[str, Any]:
+    """Read one frozen Match config without guessing malformed legacy data."""
+
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        raise ValueError("match_config must be a JSON object")
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("match_config JSON is malformed") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("match_config must be a JSON object")
+    return dict(parsed)
+
+
+def _retry_recovery_binding_is_valid_tx(
+    conn: sqlite3.Connection,
+    job: dict[str, Any],
+    *,
+    match: dict[str, Any] | None,
+) -> bool:
+    """Bind retry/recovery to the exact job, Match, Contest and rating policy.
+
+    A missing ``time_control_id`` in old JSON (or a historical Contest NULL)
+    means that game's default.  Explicit malformed values and independently
+    valid but different ids are corruption and fail closed.
+    """
+
+    source = job.get("source")
+    contest: dict[str, Any] | None = None
+    if source == EXECUTION_SOURCE_CONTEST:
+        contest_id = job.get("contest_id")
+        if (
+            isinstance(contest_id, bool)
+            or not isinstance(contest_id, int)
+            or contest_id < 1
+        ):
+            return False
+        raw_contest = conn.execute(
+            "SELECT id,game_id,time_control_id FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        if raw_contest is None:
+            return False
+        contest = dict(raw_contest)
+        if (
+            contest.get("id") != contest_id
+            or contest.get("game_id") != job.get("game_id")
+            or not _time_control_binding_is_valid(
+                job,
+                contest_time_control_id=contest.get("time_control_id"),
+            )
+        ):
+            return False
+    elif not _time_control_binding_is_valid(job):
+        return False
+
+    if match is None:
+        return not str(job.get("current_match_id") or "")
+
+    match_id = match.get("id")
+    if (
+        not isinstance(match_id, str)
+        or not match_id
+        or str(job.get("current_match_id") or "") != match_id
+        or match.get("game_id") != job.get("game_id")
+        or match.get("match_type") != job.get("match_type")
+    ):
+        return False
+    try:
+        from bzplat.backend.games import registry as game_registry
+
+        spec = game_registry.get(str(job.get("game_id") or ""))
+        job_config = _strict_execution_match_config(job.get("match_config"))
+        match_config = _strict_execution_match_config(match.get("match_config"))
+        job_control = _resolve_frozen_time_control(spec.game_id, job_config)
+        match_control = _resolve_frozen_time_control(spec.game_id, match_config)
+    except (KeyError, TypeError, ValueError):
+        return False
+    if job_control.id != match_control.id:
+        return False
+
+    if source == EXECUTION_SOURCE_CONTEST:
+        match_contest_id = match.get("contest_id")
+        if (
+            match.get("match_type") != TYPE_CONTEST
+            or isinstance(match_contest_id, bool)
+            or not isinstance(match_contest_id, int)
+            or contest is None
+            or match_contest_id != contest.get("id")
+            or match_control.id
+            != spec.resolve_time_control(contest.get("time_control_id")).id
+        ):
+            return False
+    elif match.get("match_type") == TYPE_CONTEST or match.get("contest_id") is not None:
+        return False
+
+    if source != EXECUTION_SOURCE_MANUAL:
+        return True
+
+    rated = job.get("rated")
+    rating_reason = job.get("rating_reason")
+    if (
+        isinstance(rated, bool)
+        or not isinstance(rated, int)
+        or rated not in (0, 1)
+        or not isinstance(rating_reason, str)
+        or not rating_reason
+        or not isinstance(match_config.get("_rating_eligible"), bool)
+        or match_config["_rating_eligible"] is not bool(rated)
+        or match_config.get("_rating_reason") != rating_reason
+    ):
+        return False
+    policy_row = conn.execute(
+        "SELECT game_id,rating_pool_id,bot_a_id,bot_b_id,rated,rating_reason "
+        "FROM match_rating_policies WHERE match_id=?",
+        (match_id,),
+    ).fetchone()
+    if policy_row is None:
+        return False
+    policy = dict(policy_row)
+    return (
+        policy.get("game_id") == job.get("game_id")
+        and policy.get("rating_pool_id") == job.get("rating_pool_id")
+        and policy.get("bot_a_id") == job.get("bot_a_id")
+        and policy.get("bot_b_id") == job.get("bot_b_id")
+        and policy.get("rated") == rated
+        and policy.get("rating_reason") == rating_reason
+    )
+
+
+def _terminalize_time_control_changed_tx(
+    conn: sqlite3.Connection,
+    job: dict[str, Any],
+    *,
+    match: dict[str, Any] | None,
+) -> None:
+    """Persist one bounded fail-closed outcome for a drifted frozen clock."""
+
+    now = _now()
+    match_id = str(job.get("current_match_id") or "")
+    if match is not None and match.get("status") in {STATUS_PENDING, STATUS_RUNNING}:
+        conn.execute(
+            f"UPDATE {_matches_table(str(job['game_id']))} SET "
+            "status='aborted',winner=NULL,reason='time_control_changed',ended_at=? "
+            "WHERE id=? AND status IN ('pending','running')",
+            (now, match_id),
+        )
+    if match_id:
+        authoritative_match = conn.execute(
+            f"SELECT * FROM {_matches_table(str(job['game_id']))} WHERE id=?",
+            (match_id,),
+        ).fetchone()
+        if authoritative_match is None:
+            if match is not None:
+                raise ExecutionInvariantError(
+                    "time-control terminal Match disappeared"
+                )
+        else:
+            if authoritative_match["status"] not in {
+                STATUS_COMPLETED,
+                STATUS_ABORTED,
+            }:
+                raise ExecutionInvariantError(
+                    "time-control terminal Match is not terminal"
+                )
+            _finalize_terminal_replay_tx(
+                conn,
+                match=authoritative_match,
+                updated_at=now,
+            )
+    if job.get("source") == EXECUTION_SOURCE_CONTEST:
+        conn.execute(
+            "UPDATE contest_pairings SET match_id=NULL,status='pending' "
+            "WHERE id=? AND contest_id=? AND match_id=?",
+            (job.get("contest_pairing_id"), job.get("contest_id"), match_id),
+        )
+    if match_id:
+        conn.execute(
+            "UPDATE execution_job_attempts SET status='cancelled',terminal_at=?,"
+            "terminal_reason='time_control_changed' "
+            "WHERE job_id=? AND match_id=? AND status<>'completed'",
+            (now, int(job["id"]), match_id),
+        )
+    conn.execute(
+        "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+        "cancel_requested=0,cleanup_state='confirmed',next_attempt_at=NULL,"
+        "terminal_reason='time_control_changed',last_error='time_control_changed',"
+        "terminal_at=? WHERE id=?",
+        (now, int(job["id"])),
+    )
+    if job.get("auto_decision_id") is not None:
+        conn.execute(
+            "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+            "terminal_reason='time_control_changed',terminal_at=? WHERE id=?",
+            (now, int(job["auto_decision_id"])),
+        )
 
 
 def _contest_job_seed_binding_is_valid(
@@ -275,6 +553,230 @@ class ExecutionRepository:
         self, callback: Callable[[int], bool] | None
     ) -> None:
         self._local_agent_available = callback
+
+    @staticmethod
+    def _contest_execution_seal_is_valid_tx(
+        conn: sqlite3.Connection,
+        contest_id: Any,
+    ) -> bool:
+        """Require an exact current-stage execution manifest and seal.
+
+        Execution is intentionally stricter than historical read compatibility:
+        a published/running Contest can create or revive work only while its
+        current-stage manifest is a non-NULL integer and the topology revision
+        is exactly the sealed revision in this same transaction.
+        """
+        if (
+            isinstance(contest_id, bool)
+            or not isinstance(contest_id, int)
+            or contest_id < 1
+        ):
+            return False
+        contest = conn.execute(
+            "SELECT status,current_stage_idx,published_stage_pairing_count,"
+            "pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        if contest is None or contest["status"] not in ("published", "running"):
+            return False
+        current_stage_idx = exact_nonnegative_int(contest["current_stage_idx"])
+        manifest_count = exact_nonnegative_int(
+            contest["published_stage_pairing_count"]
+        )
+        current_revision = exact_nonnegative_int(
+            contest["pairing_topology_revision"]
+        )
+        sealed_revision = exact_nonnegative_int(
+            contest["sealed_pairing_topology_revision"]
+        )
+        return bool(
+            current_stage_idx is not None
+            and manifest_count is not None
+            and current_revision is not None
+            and sealed_revision is not None
+            and current_revision == sealed_revision
+        )
+
+    @staticmethod
+    def _cancel_queued_contest_jobs_for_invalid_seal_tx(
+        conn: sqlite3.Connection,
+        contest_id: int,
+    ) -> None:
+        """Make every queued request in one damaged Contest non-executable."""
+        terminal = _now()
+        conn.execute(
+            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+            "cancel_requested=0,terminal_reason=?,last_error=?,"
+            "next_attempt_at=NULL,terminal_at=? "
+            "WHERE source='contest' AND contest_id=? AND status='queued'",
+            (
+                _CONTEST_EXECUTION_SEAL_CHANGED,
+                _CONTEST_EXECUTION_SEAL_CHANGED,
+                terminal,
+                int(contest_id),
+            ),
+        )
+
+    def _terminalize_residual_terminal_contest_job_tx(
+        self,
+        conn: sqlite3.Connection,
+        job: dict[str, Any],
+    ) -> bool:
+        """Release ownership for a Match durably affiliated to a terminal Contest."""
+        match_id = job.get("current_match_id")
+        if not isinstance(match_id, str) or not match_id:
+            return False
+        table = _matches_table(str(job.get("game_id") or ""))
+        match = conn.execute(
+            f"SELECT contest_id FROM {table} WHERE id=?",
+            (match_id,),
+        ).fetchone()
+        direct_contest_id = (
+            exact_nonnegative_int(match["contest_id"])
+            if match is not None and match["contest_id"] is not None
+            else None
+        )
+        if (
+            match is not None
+            and match["contest_id"] is not None
+            and (direct_contest_id is None or direct_contest_id < 1)
+        ):
+            raise ExecutionInvariantError("Match Contest affiliation is invalid")
+
+        pairing_contest_ids: list[int] = []
+        for row in conn.execute(
+            "SELECT DISTINCT contest_id FROM contest_pairings "
+            "WHERE match_id=? ORDER BY contest_id",
+            (match_id,),
+        ).fetchall():
+            contest_id = exact_nonnegative_int(row["contest_id"])
+            if contest_id is None or contest_id < 1:
+                raise ExecutionInvariantError("pairing Contest affiliation is invalid")
+            pairing_contest_ids.append(contest_id)
+        affiliation_ids = set(pairing_contest_ids)
+        if direct_contest_id is not None:
+            affiliation_ids.add(direct_contest_id)
+
+        contests: dict[int, dict[str, Any]] = {}
+        if affiliation_ids:
+            placeholders = ",".join("?" for _ in affiliation_ids)
+            contests = {
+                int(row["id"]): dict(row)
+                for row in conn.execute(
+                    f"SELECT id,status,showcase_key FROM contests "
+                    f"WHERE id IN ({placeholders})",
+                    tuple(sorted(affiliation_ids)),
+                ).fetchall()
+            }
+        ordered_affiliations = (
+            [direct_contest_id] if direct_contest_id is not None else []
+        ) + pairing_contest_ids
+        reason = next(
+            (
+                (
+                    _CONTEST_SHOWCASE_EXECUTION_REASON
+                    if contests[contest_id]["showcase_key"] is not None
+                    else _CONTEST_TERMINAL_EXECUTION_REASONS[
+                        contests[contest_id]["status"]
+                    ]
+                )
+                for contest_id in ordered_affiliations
+                if contest_id in contests
+                and (
+                    contests[contest_id]["showcase_key"] is not None
+                    or contests[contest_id]["status"]
+                    in _CONTEST_TERMINAL_EXECUTION_REASONS
+                )
+            ),
+            None,
+        )
+        if (
+            reason is None
+            and match is None
+            and job.get("source") == EXECUTION_SOURCE_CONTEST
+        ):
+            contest_id = exact_nonnegative_int(job.get("contest_id"))
+            contest = (
+                conn.execute(
+                    "SELECT status FROM contests WHERE id=?",
+                    (contest_id,),
+                ).fetchone()
+                if contest_id is not None and contest_id >= 1
+                else None
+            )
+            reason = (
+                _CONTEST_TERMINAL_EXECUTION_REASONS.get(contest["status"])
+                if contest is not None
+                else None
+            )
+        if reason is None:
+            if match is None:
+                return False
+            if not affiliation_ids:
+                if job.get("source") == EXECUTION_SOURCE_CONTEST:
+                    raise ExecutionInvariantError(
+                        "Contest execution durable affiliation changed"
+                    )
+                return False
+            if len(contests) != len(affiliation_ids) or any(
+                contest["showcase_key"] is not None
+                or contest["status"] not in _CONTEST_ACTIVE_EXECUTION_STATUSES
+                for contest in contests.values()
+            ):
+                raise ExecutionInvariantError(
+                    "execution durable Contest affiliation is invalid"
+                )
+            if job.get("source") != EXECUTION_SOURCE_CONTEST:
+                raise ExecutionInvariantError(
+                    "non-Contest execution durable affiliation changed"
+                )
+            contest_id = exact_nonnegative_int(job.get("contest_id"))
+            if (
+                contest_id is None
+                or contest_id < 1
+                or affiliation_ids != {contest_id}
+            ):
+                raise ExecutionInvariantError(
+                    "Contest execution durable affiliation changed"
+                )
+            return False
+
+        job_id = exact_nonnegative_int(job.get("id"))
+        attempt_no = exact_nonnegative_int(job.get("attempt_count"))
+        public_id = job.get("public_id")
+        if (
+            job_id is None
+            or job_id < 1
+            or attempt_no is None
+            or attempt_no < 1
+            or not isinstance(public_id, str)
+            or not public_id
+        ):
+            raise ExecutionInvariantError("terminal Contest execution identity is invalid")
+        terminal = _now()
+        self._release_local_agent_leases_tx(
+            conn,
+            public_id=public_id,
+            attempt_no=attempt_no,
+            reason=reason,
+        )
+        conn.execute(
+            "UPDATE execution_job_attempts SET status='cancelled',terminal_at=?,"
+            "terminal_reason=? WHERE job_id=? AND attempt_no=? "
+            "AND status IN ('starting','running','settling')",
+            (terminal, reason, job_id, attempt_no),
+        )
+        changed = conn.execute(
+            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+            "cancel_requested=0,cleanup_state='confirmed',terminal_reason=?,"
+            "last_error='',next_attempt_at=NULL,terminal_at=? WHERE id=? "
+            "AND status IN ('starting','running','settling')",
+            (reason, terminal, job_id),
+        )
+        if changed.rowcount != 1:
+            raise ExecutionInvariantError("terminal Contest execution state changed")
+        return True
 
     def _is_local_agent_available(self, agent_id: int) -> bool:
         callback = self._local_agent_available
@@ -1363,16 +1865,19 @@ class ExecutionRepository:
         bot_b_id: int,
         bot_a_environment: str,
         bot_b_environment: str,
+        default_time_control: bool,
     ) -> tuple[bool, str]:
+        if source == EXECUTION_SOURCE_CONTEST:
+            return False, "contest"
+        if source == EXECUTION_SOURCE_HUMAN:
+            return False, "human"
+        if not default_time_control:
+            return False, "alternate_time_control"
         if EXECUTION_ENV_REMOTE_LOCAL in {
             bot_a_environment,
             bot_b_environment,
         }:
             return False, "remote_local"
-        if source == EXECUTION_SOURCE_CONTEST:
-            return False, "contest"
-        if source == EXECUTION_SOURCE_HUMAN:
-            return False, "human"
         if bot_a_id == bot_b_id:
             return False, "self_play"
         rows = conn.execute(
@@ -1498,9 +2003,18 @@ class ExecutionRepository:
             raise ValueError(f"unknown execution source: {source}")
         gid = _registered_game_id(game_id)
         contract = _active_game_contract_tx(conn, gid)
+        config = dict(match_config or {})
+        control = _resolve_frozen_time_control(gid, config)
+        config["time_control_id"] = control.id
+        from bzplat.backend.games import registry as game_registry
+
+        default_time_control = (
+            control.id == game_registry.get(gid).default_time_control_id
+        )
         if source == EXECUTION_SOURCE_CONTEST:
             contest = conn.execute(
-                "SELECT game_id,ruleset_version,protocol_version,rating_pool_id "
+                "SELECT game_id,ruleset_version,protocol_version,rating_pool_id,"
+                "time_control_id "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -1515,6 +2029,14 @@ class ExecutionRepository:
                 != contract["rating_pool_id"]
             ):
                 raise ValueError("赛事规则版本已退役或与当前游戏契约不一致")
+            try:
+                contest_control = game_registry.get(gid).resolve_time_control(
+                    contest["time_control_id"]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("赛事时限快照损坏") from exc
+            if contest_control.id != control.id:
+                raise ValueError("执行请求与赛事时限快照不一致")
         environment = self._execution_environment_tx(
             conn,
             source=source,
@@ -1562,11 +2084,11 @@ class ExecutionRepository:
             bot_b_id=int(bot_b_id),
             bot_a_environment=str(environment["bot_a_environment"]),
             bot_b_environment=str(environment["bot_b_environment"]),
+            default_time_control=default_time_control,
         )
         public = public_id or _new_public_id()
         now = created_at or _now()
         priority = SOURCE_PRIORITY[source]
-        config = dict(match_config or {})
         config.pop("_rating_eligible", None)
         config.pop("_rating_reason", None)
         if idempotency_fingerprint:
@@ -1659,6 +2181,11 @@ class ExecutionRepository:
     ) -> dict:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if (
+                source == EXECUTION_SOURCE_CONTEST
+                and not self._contest_execution_seal_is_valid_tx(conn, contest_id)
+            ):
+                raise ValueError("赛事当前阶段执行快照未严格封存")
             if public_id is not None:
                 existing = conn.execute(
                     "SELECT * FROM execution_jobs WHERE public_id=?", (public_id,)
@@ -1841,36 +2368,280 @@ class ExecutionRepository:
         include_held_auto: bool = False,
         allowed_sources: frozenset[str] | None = None,
     ) -> list[dict]:
+        """Materialise the public/admin queue projection in canonical order.
+
+        Claiming uses :meth:`_iter_ordered_queued_tx` directly so it can stop
+        after the first runnable page.  Snapshot callers deliberately retain a
+        complete list because they expose aggregate queue position and ETA.
+        """
+        return list(
+            self._iter_ordered_queued_tx(
+                conn,
+                aging_seconds=aging_seconds,
+                include_held_auto=include_held_auto,
+                allowed_sources=allowed_sources,
+            )
+        )
+
+    @staticmethod
+    def _queued_source_rows_tx(
+        conn: sqlite3.Connection,
+        *,
+        source: str,
+        due: str,
+        contest_id: int | None = None,
+    ) -> Iterator[dict]:
+        """Yield one source/contest stream in indexed, bounded pages.
+
+        A source has one immutable base priority, therefore its canonical
+        priority+aging order is exactly ``created_at,id``.  Cross-source aging
+        is merged in Python from only the stream heads.  Persisted priority or
+        timestamp drift is corruption and fails closed instead of silently
+        changing fairness.
+        """
+        if source not in EXECUTION_SOURCES:
+            raise ExecutionInvariantError("execution source is unknown")
+        if source == EXECUTION_SOURCE_CONTEST and contest_id is None:
+            raise ExecutionInvariantError("contest stream is missing contest_id")
+        index_name = (
+            "idx_execution_jobs_claim_contest_order"
+            if contest_id is not None
+            else "idx_execution_jobs_claim_source_order"
+        )
+        cursor: tuple[str, int] | None = None
+        while True:
+            clauses = [
+                "source=?",
+                "status='queued'",
+                "cancel_requested=0",
+                "(next_attempt_at IS NULL OR next_attempt_at<=?)",
+            ]
+            params: list[Any] = [source, due]
+            if contest_id is not None:
+                clauses.append("contest_id=?")
+                params.append(contest_id)
+            if cursor is not None:
+                clauses.append("(created_at>? OR (created_at=? AND id>?))")
+                params.extend((cursor[0], cursor[0], cursor[1]))
+            params.append(_QUEUE_CANDIDATE_PAGE_SIZE)
+            page = conn.execute(
+                "SELECT * FROM execution_jobs INDEXED BY "
+                + index_name
+                + " WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at,id LIMIT ?",
+                params,
+            ).fetchall()
+            if not page:
+                return
+            for raw in page:
+                row = dict(raw)
+                if int(row.get("priority") or 0) != SOURCE_PRIORITY[source]:
+                    raise ExecutionInvariantError(
+                        "execution source priority snapshot mismatch"
+                    )
+                try:
+                    datetime.fromisoformat(str(row.get("created_at") or ""))
+                except ValueError as exc:
+                    raise ExecutionInvariantError(
+                        "execution created_at snapshot is malformed"
+                    ) from exc
+                yield row
+            last = page[-1]
+            cursor = (str(last["created_at"]), int(last["id"]))
+
+    @staticmethod
+    def _queued_contest_ids_tx(
+        conn: sqlite3.Connection,
+        *,
+        due: str,
+    ) -> tuple[int, ...]:
+        """Enumerate distinct due contests with one indexed seek per id."""
+        contest_ids: list[int] = []
+        after: int | None = None
+        while True:
+            suffix = "" if after is None else " AND contest_id>?"
+            params: list[Any] = [EXECUTION_SOURCE_CONTEST, due]
+            if after is not None:
+                params.append(after)
+            row = conn.execute(
+                "SELECT contest_id FROM execution_jobs INDEXED BY "
+                "idx_execution_jobs_claim_contest_order "
+                "WHERE source=? AND status='queued' AND cancel_requested=0 "
+                "AND (next_attempt_at IS NULL OR next_attempt_at<=?)"
+                + suffix
+                + " ORDER BY contest_id LIMIT 1",
+                params,
+            ).fetchone()
+            if row is None:
+                break
+            contest_id = row["contest_id"]
+            if (
+                isinstance(contest_id, bool)
+                or not isinstance(contest_id, int)
+                or contest_id < 1
+            ):
+                raise ExecutionInvariantError(
+                    "queued contest request has invalid contest_id"
+                )
+            contest_ids.append(contest_id)
+            after = contest_id
+        return tuple(contest_ids)
+
+    @staticmethod
+    def _contest_fairness_history_tx(
+        conn: sqlite3.Connection,
+        contest_ids: tuple[int, ...],
+    ) -> dict[int, tuple[int, datetime]]:
+        """Read restart-safe service markers for a bounded contest-id set."""
+        history: dict[int, tuple[int, datetime]] = {}
+        # Keep well below SQLite builds with the legacy 999-variable limit;
+        # the product deliberately has no hard cap on concurrently queued
+        # contests either.
+        for offset in range(0, len(contest_ids), 400):
+            chunk = contest_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in chunk)
+            history_rows = conn.execute(
+                "SELECT j.contest_id,"
+                "MAX(COALESCE(j.claimed_at,a.created_at)) AS last_claimed_at,"
+                "COALESCE(MAX(a.id),0) AS last_claim_seq "
+                "FROM execution_jobs j "
+                "LEFT JOIN execution_job_attempts a ON a.job_id=j.id "
+                "WHERE j.source=? AND j.contest_id IN ("
+                + marks
+                + ") AND (j.claimed_at IS NOT NULL OR a.id IS NOT NULL) "
+                "GROUP BY j.contest_id",
+                (EXECUTION_SOURCE_CONTEST, *chunk),
+            ).fetchall()
+            history.update(
+                {
+                    int(row["contest_id"]): (
+                        int(row["last_claim_seq"] or 0),
+                        _parse_time(row["last_claimed_at"]),
+                    )
+                    for row in history_rows
+                }
+            )
+        return history
+
+    def _iter_ordered_queued_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        aging_seconds: int,
+        include_held_auto: bool = False,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> Iterator[dict]:
+        """Lazily merge the exact priority, barrier and contest-fair order."""
         control = conn.execute(
             "SELECT auto_enabled FROM execution_control WHERE singleton=1"
         ).fetchone()
         auto_enabled = bool(control and int(control["auto_enabled"] or 0))
         due = _now()
-        rows = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT * FROM execution_jobs WHERE status='queued' "
-                "AND cancel_requested=0 AND (next_attempt_at IS NULL OR next_attempt_at<=?)",
-                (due,),
-            ).fetchall()
-            if (allowed_sources is None or row["source"] in allowed_sources)
-            and (
-                include_held_auto
-                or auto_enabled
-                or row["source"] != EXECUTION_SOURCE_AUTO
+        selected_sources = set(EXECUTION_SOURCES if allowed_sources is None else allowed_sources)
+        if not selected_sources.issubset(EXECUTION_SOURCES):
+            raise ExecutionInvariantError("execution source filter is unknown")
+        if not include_held_auto and not auto_enabled:
+            selected_sources.discard(EXECUTION_SOURCE_AUTO)
+
+        streams: dict[tuple[str, str | int], Iterator[dict]] = {}
+        if EXECUTION_SOURCE_CONTEST in selected_sources:
+            contest_ids = self._queued_contest_ids_tx(conn, due=due)
+            for contest_id in contest_ids:
+                streams[(EXECUTION_SOURCE_CONTEST, contest_id)] = (
+                    self._queued_source_rows_tx(
+                        conn,
+                        source=EXECUTION_SOURCE_CONTEST,
+                        due=due,
+                        contest_id=contest_id,
+                    )
+                )
+        else:
+            contest_ids = ()
+        for source in sorted(selected_sources - {EXECUTION_SOURCE_CONTEST}):
+            streams[("source", source)] = self._queued_source_rows_tx(
+                conn,
+                source=source,
+                due=due,
             )
-        ]
+
+        heads: dict[tuple[str, str | int], dict] = {}
+
+        def advance(stream_key: tuple[str, str | int]) -> None:
+            try:
+                heads[stream_key] = next(streams[stream_key])
+            except StopIteration:
+                heads.pop(stream_key, None)
+
+        for stream_key in tuple(streams):
+            advance(stream_key)
+
         now = datetime.now()
-        rows.sort(
-            key=lambda row: (
+
+        def base_key(row: dict) -> tuple[int, datetime, int]:
+            return (
                 -self._effective_priority(
                     row, now=now, aging_seconds=aging_seconds
                 ),
                 _parse_time(row.get("created_at")),
                 int(row["id"]),
             )
+
+        history = (
+            self._contest_fairness_history_tx(conn, contest_ids)
+            if len(contest_ids) > 1
+            else {}
         )
-        return self._fair_contest_rows_tx(conn, rows)
+        while heads:
+            barrier_keys = [key for key in heads if key[0] != EXECUTION_SOURCE_CONTEST]
+            barrier_stream = (
+                min(barrier_keys, key=lambda key: base_key(heads[key]))
+                if barrier_keys
+                else None
+            )
+            barrier_row = heads.get(barrier_stream) if barrier_stream else None
+            barrier_order = base_key(barrier_row) if barrier_row is not None else None
+            contest_streams = [
+                key
+                for key, row in heads.items()
+                if key[0] == EXECUTION_SOURCE_CONTEST
+                and (barrier_order is None or base_key(row) < barrier_order)
+            ]
+            if contest_streams:
+                first_order = sorted(
+                    contest_streams, key=lambda key: base_key(heads[key])
+                )
+                first_position = {
+                    int(key[1]): position
+                    for position, key in enumerate(first_order)
+                }
+                fair_streams = sorted(
+                    contest_streams,
+                    key=lambda key: (
+                        *history.get(int(key[1]), (0, datetime.min)),
+                        first_position[int(key[1])],
+                        int(key[1]),
+                    ),
+                )
+                while True:
+                    appended = False
+                    for stream_key in fair_streams:
+                        row = heads.get(stream_key)
+                        if row is None or (
+                            barrier_order is not None
+                            and base_key(row) >= barrier_order
+                        ):
+                            continue
+                        yield row
+                        advance(stream_key)
+                        appended = True
+                    if not appended:
+                        break
+                continue
+            if barrier_stream is None:
+                return
+            yield heads[barrier_stream]
+            advance(barrier_stream)
 
     @staticmethod
     def _fair_contest_rows_tx(
@@ -1925,34 +2696,9 @@ class ExecutionRepository:
         # legacy fallback/tie-break: NTP or administrator clock correction must
         # not starve a contest whose old claim happened to be stamped in the
         # future.
-        history: dict[int, tuple[int, datetime]] = {}
-        # Keep well below SQLite builds with the legacy 999-variable limit;
-        # the product deliberately has no hard cap on concurrently queued
-        # contests either.
-        for offset in range(0, len(contest_ids), 400):
-            chunk = contest_ids[offset : offset + 400]
-            marks = ",".join("?" for _ in chunk)
-            history_rows = conn.execute(
-                "SELECT j.contest_id,"
-                "MAX(COALESCE(j.claimed_at,a.created_at)) AS last_claimed_at,"
-                "COALESCE(MAX(a.id),0) AS last_claim_seq "
-                "FROM execution_jobs j "
-                "LEFT JOIN execution_job_attempts a ON a.job_id=j.id "
-                "WHERE j.source=? AND j.contest_id IN ("
-                + marks
-                + ") AND (j.claimed_at IS NOT NULL OR a.id IS NOT NULL) "
-                "GROUP BY j.contest_id",
-                (EXECUTION_SOURCE_CONTEST, *chunk),
-            ).fetchall()
-            history.update(
-                {
-                    int(row["contest_id"]): (
-                        int(row["last_claim_seq"] or 0),
-                        _parse_time(row["last_claimed_at"]),
-                    )
-                    for row in history_rows
-                }
-            )
+        history = ExecutionRepository._contest_fairness_history_tx(
+            conn, contest_ids
+        )
         projected = list(rows)
         start = 0
         while start < len(rows):
@@ -2270,6 +3016,7 @@ class ExecutionRepository:
             target = None
             ahead_jobs = 0
             ahead_units = 0
+            ahead_rows: list[dict[str, Any]] = []
             if public_id:
                 target = conn.execute(
                     "SELECT * FROM execution_jobs WHERE public_id=?", (public_id,)
@@ -2283,6 +3030,7 @@ class ExecutionRepository:
                                 break
                             ahead_jobs += 1
                             ahead_units += int(row["sandbox_units"])
+                            ahead_rows.append(dict(row))
             active_bot_ids = self._active_non_human_bot_ids_tx(conn)
             projected_ordered = [
                 self._project_capacity_block_tx(
@@ -2313,6 +3061,10 @@ class ExecutionRepository:
                 "active": active,
                 "queued": projected_ordered,
                 "target": projected_target,
+                # Internal-only evidence for the dispatcher ETA.  Public
+                # projections expose only the aggregate seconds, never these
+                # configs, identities or queue rows.
+                "ahead": ahead_rows,
                 "ahead_jobs": ahead_jobs,
                 "ahead_sandbox_units": ahead_units,
                 "auto_scheduler": scheduler,
@@ -2345,7 +3097,16 @@ class ExecutionRepository:
         table = _matches_table(gid)
         bot_a_id = int(job["bot_a_id"])
         bot_b_id = int(job["bot_b_id"])
-        config = json.loads(str(job.get("match_config") or "{}"))
+        try:
+            config = json.loads(str(job.get("match_config") or "{}"))
+            if not isinstance(config, dict):
+                raise ValueError("match_config is not an object")
+            control = _resolve_frozen_time_control(gid, config)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ExecutionInvariantError(
+                "execution request has invalid frozen time control"
+            ) from exc
+        config["time_control_id"] = control.id
         # Browser response-loss idempotency is an execution-request concern;
         # it must not leak into the persisted public Match configuration.
         config.pop("_execution_idempotency_fingerprint", None)
@@ -2517,21 +3278,38 @@ class ExecutionRepository:
                 or capacity["untracked_running_matches"] != 0
             ):
                 return None
-            queued = self._ordered_queued_tx(
-                conn,
-                aging_seconds=aging_seconds,
-                allowed_sources=(
-                    frozenset({EXECUTION_SOURCE_AUTO})
-                    if claim_class == "auto"
-                    else _FOREGROUND_SOURCES
-                ),
+            claim_sources = (
+                frozenset({EXECUTION_SOURCE_AUTO})
+                if claim_class == "auto"
+                else _FOREGROUND_SOURCES
             )
-            non_contest_waiting = any(
-                row["source"] in {
-                    EXECUTION_SOURCE_MANUAL,
-                    EXECUTION_SOURCE_HUMAN,
-                }
-                for row in queued
+
+            def queued_candidates(
+                sources: frozenset[str] = claim_sources,
+            ) -> Iterator[dict]:
+                # A fresh iterator is required only for the explicit second
+                # contest-share pass.  Each iterator reads bounded indexed
+                # pages and stops as soon as claim finds runnable work.
+                return self._iter_ordered_queued_tx(
+                    conn,
+                    aging_seconds=aging_seconds,
+                    allowed_sources=sources,
+                )
+
+            non_contest_waiting = bool(
+                claim_class == "foreground"
+                and conn.execute(
+                    "SELECT 1 FROM execution_jobs INDEXED BY "
+                    "idx_execution_jobs_claim_source_order "
+                    "WHERE source IN (?,?) AND status='queued' "
+                    "AND cancel_requested=0 AND "
+                    "(next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 1",
+                    (
+                        EXECUTION_SOURCE_MANUAL,
+                        EXECUTION_SOURCE_HUMAN,
+                        _now(),
+                    ),
+                ).fetchone()
             )
             active_contest = int(
                 conn.execute(
@@ -2542,20 +3320,69 @@ class ExecutionRepository:
             active_bot_ids = self._active_non_human_bot_ids_tx(conn)
             selected: dict | None = None
             invalid_job_ids: set[int] = set()
+            invalid_contest_ids: set[int] = set()
             projection_ready: bool | None = None
+            contest_execution_seal_validity: dict[int, bool] = {}
+            published_batch_validity: dict[tuple[int, int], bool] = {}
             # First preserve the configured contest share while runnable
             # manual/human work exists.  If that pass finds no runnable
             # non-contest job, relax only the share gate so capacity never sits
             # idle behind a temporarily blocked owner/rating/version request.
             for relax_contest_share in (False, True):
-                if relax_contest_share and not (
+                share_blocks_contest = bool(
                     non_contest_waiting
                     and active_contest >= max(1, int(contest_share_slots))
-                ):
+                )
+                if relax_contest_share and not share_blocks_contest:
                     break
-                for job in queued:
+                pass_sources = (
+                    frozenset(
+                        {EXECUTION_SOURCE_MANUAL, EXECUTION_SOURCE_HUMAN}
+                    )
+                    if share_blocks_contest and not relax_contest_share
+                    else claim_sources
+                )
+                for job in queued_candidates(pass_sources):
                     if int(job["id"]) in invalid_job_ids:
                         continue
+                    if job["source"] == EXECUTION_SOURCE_CONTEST:
+                        contest_id = exact_nonnegative_int(job.get("contest_id"))
+                        if contest_id is None or contest_id < 1:
+                            terminal = _now()
+                            conn.execute(
+                                "UPDATE execution_jobs SET status='cancelled',"
+                                "retryable=0,cancel_requested=0,terminal_reason=?,"
+                                "last_error=?,next_attempt_at=NULL,terminal_at=? "
+                                "WHERE id=? AND status='queued'",
+                                (
+                                    _CONTEST_EXECUTION_SEAL_CHANGED,
+                                    _CONTEST_EXECUTION_SEAL_CHANGED,
+                                    terminal,
+                                    int(job["id"]),
+                                ),
+                            )
+                            invalid_job_ids.add(int(job["id"]))
+                            continue
+                        if contest_id in invalid_contest_ids:
+                            continue
+                        seal_valid = contest_execution_seal_validity.get(contest_id)
+                        if seal_valid is None:
+                            seal_valid = self._contest_execution_seal_is_valid_tx(
+                                conn,
+                                contest_id,
+                            )
+                            contest_execution_seal_validity[contest_id] = seal_valid
+                        if not seal_valid:
+                            # This is the first mutable claim-side check for a
+                            # Contest request.  A simultaneously retired ruleset,
+                            # version or resource snapshot must not let one row
+                            # escape the required whole-batch terminalization.
+                            self._cancel_queued_contest_jobs_for_invalid_seal_tx(
+                                conn,
+                                contest_id,
+                            )
+                            invalid_contest_ids.add(contest_id)
+                            continue
                     active_contract = _active_game_contract_tx(
                         conn, str(job["game_id"])
                     )
@@ -2581,6 +3408,27 @@ class ExecutionRepository:
                                 (terminal, int(job["auto_decision_id"])),
                             )
                         self._backoff_contest_pairing_tx(conn, job)
+                        invalid_job_ids.add(int(job["id"]))
+                        continue
+                    if (
+                        job["source"] != EXECUTION_SOURCE_CONTEST
+                        and not _time_control_binding_is_valid(job)
+                    ):
+                        terminal = _now()
+                        conn.execute(
+                            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                            "terminal_reason='time_control_changed',"
+                            "last_error='time_control_changed',terminal_at=? "
+                            "WHERE id=? AND status='queued'",
+                            (terminal, int(job["id"])),
+                        )
+                        if job.get("auto_decision_id") is not None:
+                            conn.execute(
+                                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                                "terminal_reason='time_control_changed',terminal_at=? "
+                                "WHERE id=? AND lifecycle='queued'",
+                                (terminal, int(job["auto_decision_id"])),
+                            )
                         invalid_job_ids.add(int(job["id"]))
                         continue
                     try:
@@ -2821,24 +3669,69 @@ class ExecutionRepository:
                         ):
                             continue
                     if job["source"] == EXECUTION_SOURCE_CONTEST:
+                        # Every freshly published stage is a sealed batch, and
+                        # later stage/round append transactions move that seal
+                        # forward while the contest is running.  Validate it
+                        # before looking up the target pairing so deleting either
+                        # that row or a sibling cannot degrade into one local
+                        # cancellation followed by a claim from a damaged graph.
+                        # This shares claim's BEGIN IMMEDIATE transaction and is
+                        # therefore still true when the Match is inserted.
+                        contest_claim = conn.execute(
+                            "SELECT status,starts_at,current_stage_idx,"
+                            "published_stage_pairing_count,"
+                            "pairing_topology_revision,"
+                            "sealed_pairing_topology_revision "
+                            "FROM contests WHERE id=?",
+                            (job["contest_id"],),
+                        ).fetchone()
+                        now = _now()
+                        published_due = bool(
+                            contest_claim is not None
+                            and contest_claim["status"] == "published"
+                            and contest_claim["starts_at"]
+                            and contest_claim["starts_at"] <= now
+                        )
+                        current_stage_idx = exact_nonnegative_int(
+                            contest_claim["current_stage_idx"]
+                            if contest_claim is not None
+                            else None
+                        )
+                        batch_key = (
+                            int(job["contest_id"]),
+                            current_stage_idx if current_stage_idx is not None else -1,
+                        )
+                        batch_valid = published_batch_validity.get(batch_key)
+                        if batch_valid is None:
+                            batch_valid = bool(
+                                contest_claim is not None
+                                and contest_claim["status"]
+                                in ("published", "running")
+                                and self._contest_execution_seal_is_valid_tx(
+                                    conn,
+                                    int(job["contest_id"]),
+                                )
+                            )
+                            published_batch_validity[batch_key] = batch_valid
+                        if not batch_valid:
+                            self._cancel_queued_contest_jobs_for_invalid_seal_tx(
+                                conn,
+                                batch_key[0],
+                            )
+                            invalid_contest_ids.add(batch_key[0])
+                            continue
                         pairing = conn.execute(
                             "SELECT p.*,c.status AS contest_status,c.starts_at,"
                             "c.current_stage_idx AS contest_current_stage_idx,"
                             "c.stages_json AS contest_stages_json,c.game_id AS contest_game_id,"
                             "c.ruleset_version AS contest_ruleset_version,"
                             "c.protocol_version AS contest_protocol_version,"
-                            "c.rating_pool_id AS contest_rating_pool_id "
+                            "c.rating_pool_id AS contest_rating_pool_id,"
+                            "c.time_control_id AS contest_time_control_id "
                             "FROM contest_pairings p JOIN contests c ON c.id=p.contest_id "
                             "WHERE p.id=? AND p.contest_id=?",
                             (job["contest_pairing_id"], job["contest_id"]),
                         ).fetchone()
-                        now = _now()
-                        published_due = bool(
-                            pairing is not None
-                            and pairing["contest_status"] == "published"
-                            and pairing["starts_at"]
-                            and pairing["starts_at"] <= now
-                        )
                         scheduled_due = bool(
                             pairing is not None
                             and (
@@ -2860,6 +3753,15 @@ class ExecutionRepository:
                             == job["protocol_version"]
                             and pairing["contest_rating_pool_id"]
                             == job["rating_pool_id"]
+                        )
+                        time_control_unchanged = bool(
+                            pairing is not None
+                            and _time_control_binding_is_valid(
+                                job,
+                                contest_time_control_id=pairing[
+                                    "contest_time_control_id"
+                                ],
+                            )
                         )
                         stage_contract_valid = False
                         seed_binding_valid = False
@@ -2909,6 +3811,7 @@ class ExecutionRepository:
                             or pairing["match_id"] is not None
                             or pairing["contest_status"] not in ("published", "running")
                             or not identity_unchanged
+                            or not time_control_unchanged
                             or not stage_contract_valid
                             or not seed_binding_valid
                         ):
@@ -3116,75 +4019,169 @@ class ExecutionRepository:
             )
 
     def retry(self, public_id: str, *, owner_user_id: int | None) -> dict:
+        binding_rejected = False
+        manifest_rejected = False
+        retried: dict[str, Any] | None = None
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            job = conn.execute(
+            raw_job = conn.execute(
                 "SELECT * FROM execution_jobs WHERE public_id=?", (public_id,)
             ).fetchone()
-            if job is None:
+            if raw_job is None:
                 raise ValueError("执行请求不存在")
+            job = dict(raw_job)
             if owner_user_id is not None and job["owner_user_id"] != owner_user_id:
                 raise PermissionError("无权重试该执行请求")
             if job["status"] != EXECUTION_INTERRUPTED or not int(job["retryable"]):
                 raise ValueError("该执行请求当前不可重试")
-            active_contract = _active_game_contract_tx(conn, str(job["game_id"]))
-            frozen_contract = {
-                "ruleset_version": str(job["ruleset_version"] or ""),
-                "protocol_version": str(job["protocol_version"] or ""),
-                "rating_pool_id": str(job["rating_pool_id"] or ""),
-            }
-            if frozen_contract != active_contract:
-                raise ValueError("该执行请求使用的规则版本已退役")
-            control = conn.execute(
-                "SELECT accepting,deployment_drain_requested "
-                "FROM execution_control WHERE singleton=1"
-            ).fetchone()
-            if control is None or int(control["accepting"] or 0) != 1:
-                if control is not None and int(
-                    control["deployment_drain_requested"] or 0
+            if (
+                job["source"] == EXECUTION_SOURCE_CONTEST
+                and not self._contest_execution_seal_is_valid_tx(
+                    conn,
+                    job.get("contest_id"),
+                )
+            ):
+                terminal = _now()
+                conn.execute(
+                    "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                    "cancel_requested=0,terminal_reason=?,last_error=?,"
+                    "next_attempt_at=NULL,terminal_at=? "
+                    "WHERE id=? AND status='interrupted'",
+                    (
+                        _CONTEST_EXECUTION_SEAL_CHANGED,
+                        _CONTEST_EXECUTION_SEAL_CHANGED,
+                        terminal,
+                        int(job["id"]),
+                    ),
+                )
+                self._cancel_queued_contest_jobs_for_invalid_seal_tx(
+                    conn,
+                    int(job["contest_id"]),
+                )
+                manifest_rejected = True
+            else:
+                active_contract = _active_game_contract_tx(
+                    conn, str(job["game_id"])
+                )
+                frozen_contract = {
+                    "ruleset_version": str(job["ruleset_version"] or ""),
+                    "protocol_version": str(job["protocol_version"] or ""),
+                    "rating_pool_id": str(job["rating_pool_id"] or ""),
+                }
+                if frozen_contract != active_contract:
+                    raise ValueError("该执行请求使用的规则版本已退役")
+                match_id = str(job.get("current_match_id") or "")
+                raw_match = (
+                    conn.execute(
+                        f"SELECT * FROM {_matches_table(str(job['game_id']))} "
+                        "WHERE id=?",
+                        (match_id,),
+                    ).fetchone()
+                    if match_id
+                    else None
+                )
+                match = dict(raw_match) if raw_match is not None else None
+                if not _retry_recovery_binding_is_valid_tx(
+                    conn,
+                    job,
+                    match=match,
                 ):
-                    raise ExecutionQueueClosed(
-                        "平台正在部署维护，暂不接收重试请求",
-                        code="deployment_maintenance",
+                    _terminalize_time_control_changed_tx(conn, job, match=match)
+                    binding_rejected = True
+                else:
+                    control = conn.execute(
+                        "SELECT accepting,deployment_drain_requested "
+                        "FROM execution_control WHERE singleton=1"
+                    ).fetchone()
+                    if control is None or int(control["accepting"] or 0) != 1:
+                        if control is not None and int(
+                            control["deployment_drain_requested"] or 0
+                        ):
+                            raise ExecutionQueueClosed(
+                                "平台正在部署维护，暂不接收重试请求",
+                                code="deployment_maintenance",
+                            )
+                        raise ExecutionQueueClosed(
+                            "执行队列正在启动或停止，请稍后重试"
+                        )
+                    if match is not None:
+                        if match.get("status") not in {
+                            STATUS_COMPLETED,
+                            STATUS_ABORTED,
+                        }:
+                            raise ExecutionInvariantError(
+                                "retry source match is not terminal"
+                            )
+                        _finalize_terminal_replay_tx(
+                            conn,
+                            match=match,
+                            updated_at=_now(),
+                        )
+                    conn.execute(
+                        "UPDATE execution_jobs SET status='queued',"
+                        "current_match_id=NULL,cancel_requested=0,"
+                        "cleanup_state='none',retryable=0,terminal_reason='',"
+                        "last_error='',claimed_at=NULL,started_at=NULL,"
+                        "settling_at=NULL,terminal_at=NULL,failure_count=0,"
+                        "next_attempt_at=NULL WHERE id=?",
+                        (int(job["id"]),),
                     )
-                raise ExecutionQueueClosed(
-                    "执行队列正在启动或停止，请稍后重试"
-                )
-            conn.execute(
-                "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
-                "cancel_requested=0,cleanup_state='none',retryable=0,terminal_reason='',"
-                "last_error='',claimed_at=NULL,started_at=NULL,settling_at=NULL,"
-                "terminal_at=NULL,failure_count=0,next_attempt_at=NULL WHERE id=?",
-                (int(job["id"]),),
-            )
-            if job["auto_decision_id"] is not None:
-                conn.execute(
-                    "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                    "dispatched_at=NULL,last_attempt_error='manual_retry' WHERE id=?",
-                    (int(job["auto_decision_id"]),),
-                )
-            if job["source"] in {
-                EXECUTION_SOURCE_MANUAL,
-                EXECUTION_SOURCE_HUMAN,
-            }:
-                self._yield_auto_to_foreground_tx(conn)
-            return dict(
-                conn.execute(
-                    "SELECT * FROM execution_jobs WHERE id=?", (int(job["id"]),)
-                ).fetchone()
-            )
+                    if job["auto_decision_id"] is not None:
+                        conn.execute(
+                            "UPDATE auto_match_decisions SET lifecycle='queued',"
+                            "match_id=NULL,dispatched_at=NULL,"
+                            "last_attempt_error='manual_retry' WHERE id=?",
+                            (int(job["auto_decision_id"]),),
+                        )
+                    if job["source"] in {
+                        EXECUTION_SOURCE_MANUAL,
+                        EXECUTION_SOURCE_HUMAN,
+                    }:
+                        self._yield_auto_to_foreground_tx(conn)
+                    retried = dict(
+                        conn.execute(
+                            "SELECT * FROM execution_jobs WHERE id=?",
+                            (int(job["id"]),),
+                        ).fetchone()
+                    )
+        if manifest_rejected:
+            # Raise only after the fail-closed cancellation committed.
+            raise ValueError("赛事当前阶段执行快照未严格封存")
+        if binding_rejected:
+            # Raise only after the fail-closed terminal state committed.
+            raise ValueError("time_control_changed")
+        if retried is None:
+            raise ExecutionInvariantError("execution retry result missing")
+        return retried
 
     def rollback_unstarted_claim(self, public_id: str, *, reason: str) -> bool:
         """Compensate a definite task-start failure before any public event."""
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             job_row = conn.execute(
-                "SELECT * FROM execution_jobs WHERE public_id=? AND status='starting'",
+                "SELECT * FROM execution_jobs WHERE public_id=? "
+                "AND status IN ('starting','running','settling')",
                 (public_id,),
             ).fetchone()
             if job_row is None:
                 return False
             job = dict(job_row)
+            if self._terminalize_residual_terminal_contest_job_tx(conn, job):
+                return True
+            if job["status"] != EXECUTION_STARTING:
+                return False
+            seal_rejected = bool(
+                job["source"] == EXECUTION_SOURCE_CONTEST
+                and not self._contest_execution_seal_is_valid_tx(
+                    conn,
+                    job.get("contest_id"),
+                )
+            )
+            if seal_rejected:
+                self._cancel_queued_contest_jobs_for_invalid_seal_tx(
+                    conn,
+                    int(job["contest_id"]),
+                )
             match_id = str(job.get("current_match_id") or "")
             replay = conn.execute(
                 "SELECT events_json FROM match_replays WHERE match_id=?", (match_id,)
@@ -3227,15 +4224,33 @@ class ExecutionRepository:
                 "UPDATE execution_job_attempts SET status=?,"
                 "terminal_at=?,terminal_reason=? WHERE job_id=? AND match_id=?",
                 (
-                    "cancelled" if cancel_reason else "interrupted",
+                    "cancelled" if cancel_reason or seal_rejected else "interrupted",
                     now,
-                    cancel_reason or str(reason)[:200],
+                    (
+                        _CONTEST_EXECUTION_SEAL_CHANGED
+                        if seal_rejected
+                        else cancel_reason or str(reason)[:200]
+                    ),
                     int(job["id"]),
                     match_id,
                 ),
             )
             failure_count = int(job.get("failure_count") or 0) + 1
-            if cancel_reason:
+            if seal_rejected:
+                conn.execute(
+                    "UPDATE execution_jobs SET status='cancelled',"
+                    "current_match_id=NULL,cancel_requested=0,"
+                    "cleanup_state='confirmed',retryable=0,last_error=?,"
+                    "terminal_reason=?,terminal_at=?,next_attempt_at=NULL "
+                    "WHERE id=?",
+                    (
+                        _CONTEST_EXECUTION_SEAL_CHANGED,
+                        _CONTEST_EXECUTION_SEAL_CHANGED,
+                        now,
+                        int(job["id"]),
+                    ),
+                )
+            elif cancel_reason:
                 conn.execute(
                     "UPDATE execution_jobs SET status='cancelled',"
                     "current_match_id=NULL,cleanup_state='confirmed',retryable=0,"
@@ -3269,9 +4284,9 @@ class ExecutionRepository:
                 delay = min(60, 2 ** min(failure_count - 1, 6))
                 # Flooring to whole seconds can collapse the first retry delay
                 # to almost zero when the transaction crosses a clock boundary.
-                next_attempt_at = (
-                    datetime.now() + timedelta(seconds=delay)
-                ).isoformat(timespec="microseconds")
+                retry_deadline = datetime.now() + timedelta(seconds=delay)
+                next_attempt_at = retry_deadline.isoformat(timespec="microseconds")
+                contest_scheduled_at = retry_deadline.isoformat(timespec="seconds")
                 conn.execute(
                     "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
                     "claimed_at=NULL,started_at=NULL,settling_at=NULL,terminal_at=NULL,"
@@ -3290,17 +4305,23 @@ class ExecutionRepository:
                         "WHEN scheduled_at IS NULL OR scheduled_at<? THEN ? "
                         "ELSE scheduled_at END WHERE id=? AND match_id IS NULL",
                         (
-                            next_attempt_at,
-                            next_attempt_at,
+                            contest_scheduled_at,
+                            contest_scheduled_at,
                             job["contest_pairing_id"],
                         ),
                     )
             if job.get("auto_decision_id") is not None:
-                if cancel_reason:
+                if cancel_reason or seal_rejected:
                     conn.execute(
                         "UPDATE auto_match_decisions SET lifecycle='cancelled',"
                         "match_id=NULL,terminal_reason=?,terminal_at=? WHERE id=?",
-                        (cancel_reason, now, int(job["auto_decision_id"])),
+                        (
+                            _CONTEST_EXECUTION_SEAL_CHANGED
+                            if seal_rejected
+                            else cancel_reason,
+                            now,
+                            int(job["auto_decision_id"]),
+                        ),
                     )
                 else:
                     conn.execute(
@@ -3332,8 +4353,13 @@ class ExecutionRepository:
         conn.execute(f"DELETE FROM {_matches_table(game_id)} WHERE id=?", (match_id,))
         conn.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
 
-    def recover_after_namespace_cleanup(self) -> dict:
-        """Recover active requests only after the exact instance label is zero."""
+    def recover_after_namespace_cleanup(
+        self, *, interruption_reason: str
+    ) -> dict:
+        """Recover active requests after label zero with an explicit source."""
+        interruption_reason = validate_orphan_recovery_reason(
+            interruption_reason
+        )
         recovered = {"requeued": 0, "interrupted": 0, "settling": 0}
         auto_recovered = False
         with self.store._tx() as conn:
@@ -3349,6 +4375,20 @@ class ExecutionRepository:
             ).fetchall()
             for raw in jobs:
                 job = dict(raw)
+                if self._terminalize_residual_terminal_contest_job_tx(conn, job):
+                    continue
+                seal_rejected = bool(
+                    job["source"] == EXECUTION_SOURCE_CONTEST
+                    and not self._contest_execution_seal_is_valid_tx(
+                        conn,
+                        job.get("contest_id"),
+                    )
+                )
+                if seal_rejected:
+                    self._cancel_queued_contest_jobs_for_invalid_seal_tx(
+                        conn,
+                        int(job["contest_id"]),
+                    )
                 auto_recovered = auto_recovered or (
                     job["source"] == EXECUTION_SOURCE_AUTO
                 )
@@ -3371,18 +4411,47 @@ class ExecutionRepository:
                     raise ExecutionInvariantError(
                         f"active job match missing: {job['public_id']}"
                     )
+                match_snapshot = dict(match)
+                if not seal_rejected and not _retry_recovery_binding_is_valid_tx(
+                    conn,
+                    job,
+                    match=match_snapshot,
+                ):
+                    if match_snapshot.get("status") == STATUS_COMPLETED:
+                        # A completed source may still be waiting for its
+                        # immutable rating settlement.  Do not rewrite or
+                        # release it as apparently valid; keep application
+                        # recovery closed for an operator to inspect.
+                        raise ExecutionInvariantError("time_control_changed")
+                    _terminalize_time_control_changed_tx(
+                        conn,
+                        job,
+                        match=match_snapshot,
+                    )
+                    continue
                 replay = conn.execute(
                     "SELECT events_json FROM match_replays WHERE match_id=?",
                     (match_id,),
                 ).fetchone()
+                replay_corrupt = False
                 try:
-                    events = json.loads((replay["events_json"] if replay else "") or "[]")
+                    parsed_events = json.loads(
+                        (replay["events_json"] if replay else "") or "[]"
+                    )
                 except (TypeError, ValueError):
-                    events = ["corrupt"]
-                events_observed = bool(events)
+                    replay_corrupt = True
+                    events = []
+                else:
+                    if isinstance(parsed_events, list):
+                        events = parsed_events
+                    else:
+                        replay_corrupt = True
+                        events = []
+                events_observed = replay_corrupt or bool(events)
                 runtime_failed = bool(str(job.get("last_error") or "").strip())
                 next_failure_count = int(job.get("failure_count") or 0)
                 next_attempt_at: str | None = None
+                contest_scheduled_at: str | None = None
                 if runtime_failed:
                     next_failure_count += 1
                     if job["source"] in {
@@ -3391,9 +4460,14 @@ class ExecutionRepository:
                     }:
                         delay = min(60, 2 ** min(next_failure_count - 1, 6))
                         # Preserve the full backoff across second boundaries.
-                        next_attempt_at = (
-                            datetime.now() + timedelta(seconds=delay)
-                        ).isoformat(timespec="microseconds")
+                        retry_deadline = datetime.now() + timedelta(seconds=delay)
+                        next_attempt_at = retry_deadline.isoformat(
+                            timespec="microseconds"
+                        )
+                        if job["source"] == EXECUTION_SOURCE_CONTEST:
+                            contest_scheduled_at = retry_deadline.isoformat(
+                                timespec="seconds"
+                            )
                 if match["status"] in (STATUS_COMPLETED, STATUS_ABORTED):
                     # A terminal Match is the durable winner of a crash race.
                     # Reconcile may have attached a scheduler-yield marker to
@@ -3401,6 +4475,12 @@ class ExecutionRepository:
                     # already-terminal Match.  Preserve a genuine prior yield,
                     # but do not reinterpret natural completion or an
                     # unrelated abort as a scheduler cancellation.
+                    terminal_at = _now()
+                    _finalize_terminal_replay_tx(
+                        conn,
+                        match=match_snapshot,
+                        updated_at=terminal_at,
+                    )
                     persisted_reason = str(job.get("terminal_reason") or "")
                     match_reason = str(match["reason"] or "")
                     if (
@@ -3420,7 +4500,7 @@ class ExecutionRepository:
                     conn.execute(
                         "UPDATE execution_jobs SET status='settling',settling_at=?,"
                         "cleanup_state='confirmed' WHERE id=?",
-                        (_now(), int(job["id"])),
+                        (terminal_at, int(job["id"])),
                     )
                     recovered["settling"] += 1
                     continue
@@ -3437,21 +4517,17 @@ class ExecutionRepository:
                         "WHERE id=? AND status IN ('pending','running')",
                         (yield_reason, now, match_id),
                     )
-                    terminal_event = {"type": "error", "reason": yield_reason}
-                    if not events or events[-1] != terminal_event:
-                        events.append(terminal_event)
-                    conn.execute(
-                        "UPDATE match_replays SET events_json=?,updated_at=? "
-                        "WHERE match_id=?",
-                        (
-                            json.dumps(
-                                events,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ),
-                            now,
-                            match_id,
-                        ),
+                    terminal_match = conn.execute(
+                        f"SELECT * FROM {table} WHERE id=?", (match_id,)
+                    ).fetchone()
+                    if terminal_match is None:
+                        raise ExecutionInvariantError(
+                            "yielded Match disappeared during recovery"
+                        )
+                    _finalize_terminal_replay_tx(
+                        conn,
+                        match=terminal_match,
+                        updated_at=now,
                     )
                     conn.execute(
                         "UPDATE execution_jobs SET status='settling',settling_at=?,"
@@ -3463,7 +4539,7 @@ class ExecutionRepository:
                         "events_observed=?,terminal_reason=? "
                         "WHERE job_id=? AND match_id=?",
                         (
-                            1 if events else 0,
+                            1,
                             yield_reason,
                             int(job["id"]),
                             match_id,
@@ -3487,13 +4563,38 @@ class ExecutionRepository:
                         "WHERE job_id=? AND match_id=?",
                         (
                             _now(),
-                            "runtime_failure_before_start"
-                            if runtime_failed
-                            else "restart_before_start",
+                            (
+                                _CONTEST_EXECUTION_SEAL_CHANGED
+                                if seal_rejected
+                                else "runtime_failure_before_start"
+                                if runtime_failed
+                                else interruption_reason
+                            ),
                             int(job["id"]),
                             match_id,
                         ),
                     )
+                    if seal_rejected:
+                        now = _now()
+                        conn.execute(
+                            "UPDATE execution_job_attempts SET status='cancelled' "
+                            "WHERE job_id=? AND match_id=?",
+                            (int(job["id"]), match_id),
+                        )
+                        conn.execute(
+                            "UPDATE execution_jobs SET status='cancelled',"
+                            "current_match_id=NULL,cancel_requested=0,"
+                            "retryable=0,cleanup_state='confirmed',last_error=?,"
+                            "terminal_reason=?,terminal_at=?,next_attempt_at=NULL "
+                            "WHERE id=?",
+                            (
+                                _CONTEST_EXECUTION_SEAL_CHANGED,
+                                _CONTEST_EXECUTION_SEAL_CHANGED,
+                                now,
+                                int(job["id"]),
+                            ),
+                        )
+                        continue
                     if runtime_failed and job["source"] in {
                         EXECUTION_SOURCE_MANUAL,
                         EXECUTION_SOURCE_HUMAN,
@@ -3521,15 +4622,15 @@ class ExecutionRepository:
                     )
                     if (
                         job["source"] == EXECUTION_SOURCE_CONTEST
-                        and next_attempt_at is not None
+                        and contest_scheduled_at is not None
                     ):
                         conn.execute(
                             "UPDATE contest_pairings SET scheduled_at=CASE "
                             "WHEN scheduled_at IS NULL OR scheduled_at<? THEN ? "
                             "ELSE scheduled_at END WHERE id=? AND match_id IS NULL",
                             (
-                                next_attempt_at,
-                                next_attempt_at,
+                                contest_scheduled_at,
+                                contest_scheduled_at,
                                 job["contest_pairing_id"],
                             ),
                         )
@@ -3539,7 +4640,10 @@ class ExecutionRepository:
                             "match_id=NULL,dispatched_at=NULL,last_attempt_error=? "
                             "WHERE id=?",
                             (
-                                str(job.get("last_error") or "restart_before_start")[:200],
+                                str(
+                                    job.get("last_error")
+                                    or interruption_reason
+                                )[:200],
                                 int(job["auto_decision_id"]),
                             ),
                         )
@@ -3547,32 +4651,39 @@ class ExecutionRepository:
                     continue
 
                 now = _now()
+                recovery_reason = (
+                    _CONTEST_EXECUTION_SEAL_CHANGED
+                    if seal_rejected
+                    else interruption_reason
+                )
                 conn.execute(
-                    f"UPDATE {table} SET status='aborted',reason='orphan_after_restart',"
+                    f"UPDATE {table} SET status='aborted',reason=?,"
                     "ended_at=? WHERE id=? AND status IN ('pending','running')",
-                    (now, match_id),
+                    (recovery_reason, now, match_id),
                 )
-                events.append(
-                    {"type": "error", "reason": "orphan_after_restart"}
+                terminal_match = conn.execute(
+                    f"SELECT * FROM {table} WHERE id=?", (match_id,)
+                ).fetchone()
+                if terminal_match is None:
+                    raise ExecutionInvariantError(
+                        "interrupted Match disappeared during recovery"
+                    )
+                _finalize_terminal_replay_tx(
+                    conn,
+                    match=terminal_match,
+                    updated_at=now,
                 )
                 conn.execute(
-                    "UPDATE match_replays SET events_json=?,updated_at=? "
-                    "WHERE match_id=?",
+                    "UPDATE execution_job_attempts SET status=?,events_observed=1,"
+                    "terminal_at=?,terminal_reason=? "
+                    "WHERE job_id=? AND match_id=?",
                     (
-                        json.dumps(
-                            events,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
+                        "cancelled" if seal_rejected else "interrupted",
                         now,
+                        recovery_reason,
+                        int(job["id"]),
                         match_id,
                     ),
-                )
-                conn.execute(
-                    "UPDATE execution_job_attempts SET status='interrupted',events_observed=1,"
-                    "terminal_at=?,terminal_reason='orphan_after_restart' "
-                    "WHERE job_id=? AND match_id=?",
-                    (now, int(job["id"]), match_id),
                 )
                 automatic_retry = job["source"] in {
                     EXECUTION_SOURCE_AUTO,
@@ -3584,6 +4695,20 @@ class ExecutionRepository:
                         "WHERE id=? AND match_id=?",
                         (job["contest_pairing_id"], match_id),
                     )
+                if seal_rejected:
+                    conn.execute(
+                        "UPDATE execution_jobs SET status='cancelled',"
+                        "current_match_id=NULL,cancel_requested=0,retryable=0,"
+                        "cleanup_state='confirmed',last_error=?,terminal_reason=?,"
+                        "terminal_at=?,next_attempt_at=NULL WHERE id=?",
+                        (
+                            _CONTEST_EXECUTION_SEAL_CHANGED,
+                            _CONTEST_EXECUTION_SEAL_CHANGED,
+                            now,
+                            int(job["id"]),
+                        ),
+                    )
+                    continue
                 if automatic_retry:
                     conn.execute(
                         "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
@@ -3598,15 +4723,15 @@ class ExecutionRepository:
                     )
                     if (
                         job["source"] == EXECUTION_SOURCE_CONTEST
-                        and next_attempt_at is not None
+                        and contest_scheduled_at is not None
                     ):
                         conn.execute(
                             "UPDATE contest_pairings SET scheduled_at=CASE "
                             "WHEN scheduled_at IS NULL OR scheduled_at<? THEN ? "
                             "ELSE scheduled_at END WHERE id=? AND match_id IS NULL",
                             (
-                                next_attempt_at,
-                                next_attempt_at,
+                                contest_scheduled_at,
+                                contest_scheduled_at,
                                 job["contest_pairing_id"],
                             ),
                         )
@@ -3616,7 +4741,7 @@ class ExecutionRepository:
                             "match_id=NULL,dispatched_at=NULL,last_attempt_error=? "
                             "WHERE id=?",
                             (
-                                str(job.get("last_error") or "orphan_after_restart")[:200],
+                                str(job.get("last_error") or interruption_reason)[:200],
                                 int(job["auto_decision_id"]),
                             ),
                         )
@@ -3624,10 +4749,15 @@ class ExecutionRepository:
                 else:
                     conn.execute(
                         "UPDATE execution_jobs SET status='interrupted',retryable=1,"
-                        "cleanup_state='confirmed',terminal_reason='orphan_after_restart',"
+                        "cleanup_state='confirmed',terminal_reason=?,"
                         "last_error='',terminal_at=?,failure_count=?,"
                         "next_attempt_at=NULL WHERE id=?",
-                        (now, next_failure_count, int(job["id"])),
+                        (
+                            interruption_reason,
+                            now,
+                            next_failure_count,
+                            int(job["id"]),
+                        ),
                     )
                     recovered["interrupted"] += 1
             if auto_recovered:
@@ -3656,7 +4786,7 @@ class ExecutionRepository:
                 job = dict(raw)
                 match_id = str(job["current_match_id"])
                 match = conn.execute(
-                    f"SELECT status,reason FROM {_matches_table(job['game_id'])} "
+                    f"SELECT * FROM {_matches_table(job['game_id'])} "
                     "WHERE id=?",
                     (match_id,),
                 ).fetchone()
@@ -3667,6 +4797,11 @@ class ExecutionRepository:
                         "settling execution has non-terminal match"
                     )
                 terminal = _now()
+                _finalize_terminal_replay_tx(
+                    conn,
+                    match=match,
+                    updated_at=terminal,
+                )
                 terminal_status = (
                     EXECUTION_COMPLETED
                     if match["status"] == STATUS_COMPLETED

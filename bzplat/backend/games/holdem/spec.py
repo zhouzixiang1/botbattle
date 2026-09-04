@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
@@ -74,7 +74,10 @@ def _progress_from_events(events: list[dict[str, Any]]) -> int:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    _validate_match_params(match_config)
+    cfg = dict(match_config)
+    time_control_id = cfg.pop("time_control_id", None)
+    _validate_match_params(cfg)
+    SPEC.resolve_time_control(time_control_id)
     # holdem ETA ∝ 手数（每手约 2s）；手数钉死 70
     return DEFAULT_HANDS * 2
 
@@ -155,6 +158,14 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；每个计分场固定 70 手；按本场筹码差判胜；复式两场独立计分。",
     preflight_check=_preflight_check,
+    time_controls=(
+        TimeControlSpec(
+            id="holdem_per_decision_60s_v1",
+            mode="per_decision",
+            seconds=60,
+        ),
+    ),
+    default_time_control_id="holdem_per_decision_60s_v1",
     build_match_plan=_build_match_plan,
     contest_games_per_pair_max=10,
 )

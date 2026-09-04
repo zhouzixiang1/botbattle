@@ -23,9 +23,13 @@ export default defineConfig({
     ['list'],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
   ],
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium', reducedMotion: 'no-preference' } },
+    { name: 'firefox', use: { browserName: 'firefox', reducedMotion: 'no-preference' } },
+    { name: 'webkit', use: { browserName: 'webkit', reducedMotion: 'reduce' } },
+  ],
   use: {
     baseURL,
-    browserName: 'chromium',
     headless: true,
     viewport: { width: 1440, height: 900 },
     trace: 'retain-on-failure',

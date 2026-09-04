@@ -148,11 +148,10 @@ class ContestScheduler:
                         c.get("id"),
                     )
                     continue
-                # 防御：published 态若无 pairing（publish 时 _begin_stage 异常未生成），补生成
-                pairings = self.manager.store.list_contest_pairings(c["id"], stage_idx=stage_idx)
-                if not pairings:
-                    logger.warning("scheduler: published contest %s has 0 pairings, regenerating", c["id"])
-                    await self.manager.ensure_published_pairings(c["id"], stage_idx)
+                # Manager owns the single recovery/integrity gate under the
+                # per-contest lock.  Pre-reading the complete batch here made
+                # every published scheduler tick materialise O(n^2) rows and
+                # also opened a check/dispatch race.
                 await self.manager._dispatch_pending(c["id"], stage_idx)
                 await self.manager.maybe_finish(c["id"])
             except Exception:

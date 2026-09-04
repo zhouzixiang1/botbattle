@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -19,6 +20,12 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import ROLE_ADMIN
 
 app = typer.Typer(help="botzone-platform CLI", no_args_is_help=True)
+
+_TEST_ONLY_SERVE_FLAGS = (
+    "BZ_BOT_LOCAL",
+    "BZ_SKIP_CAPTCHA",
+    "BZ_TEST_CAPTCHA",
+)
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -55,6 +62,16 @@ def serve(
     from bzplat.backend.qa_safety import qa_instance_enabled
 
     qa_instance = qa_instance_enabled(os.environ.get("BZ_QA_INSTANCE"))
+    enabled_test_flags = tuple(
+        name
+        for name in _TEST_ONLY_SERVE_FLAGS
+        if qa_instance_enabled(os.environ.get(name))
+    )
+    if enabled_test_flags and not qa_instance:
+        raise typer.BadParameter(
+            f"{', '.join(enabled_test_flags)} 仅允许隔离 QA 服务使用；"
+            "必须同时显式设置 BZ_QA_INSTANCE=1"
+        )
     if qa_instance:
         from bzplat.backend.qa_safety import assert_qa_server_startup_isolated
 
@@ -274,14 +291,35 @@ def _sha256_file(path: Path) -> str:
 
 
 def _sqlite_readonly_health(path: Path, *, label: str) -> None:
-    for suffix in ("-wal", "-journal"):
+    for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(str(path) + suffix)
-        if sidecar.exists() and sidecar.stat().st_size:
-            raise typer.BadParameter(f"{label} 存在非空 SQLite {suffix}，不是冷库")
+        if os.path.lexists(sidecar):
+            raise typer.BadParameter(f"{label} 存在 SQLite {suffix}，不是冷库")
+    try:
+        with path.open("rb") as database_file:
+            header = database_file.read(20)
+    except OSError as exc:
+        raise typer.BadParameter(f"{label} 无法读取 SQLite 文件头: {exc}") from exc
+    if header[:16] != b"SQLite format 3\x00":
+        raise typer.BadParameter(f"{label} 不是 SQLite 3 数据库")
+    if header[18:20] != b"\x01\x01":
+        raise typer.BadParameter(f"{label} 不是 journal_mode=delete 的冷库")
     try:
         with sqlite3.connect(
-            path.as_uri() + "?mode=ro&immutable=1", uri=True
+            path.as_uri() + "?mode=ro&immutable=1",
+            uri=True,
+            isolation_level=None,
         ) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA trusted_schema=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
+            if (
+                conn.execute("PRAGMA query_only").fetchone() != (1,)
+                or conn.execute("PRAGMA trusted_schema").fetchone() != (0,)
+                or conn.execute("PRAGMA foreign_keys").fetchone() != (1,)
+            ):
+                raise sqlite3.DatabaseError("只读 SQLite 安全参数无法启用")
+            conn.execute("BEGIN")
             integrity = conn.execute("PRAGMA integrity_check").fetchall()
             foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
     except sqlite3.Error as exc:
@@ -411,6 +449,394 @@ def _cutover_plan_copy(database: Path) -> Path:
 def _remove_cutover_plan_copy(path: Path) -> None:
     for suffix in ("-wal", "-shm", "-journal", ""):
         Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+@app.command("contest-official-repair")
+def contest_official_repair(
+    db: str = typer.Option(..., "--db", help="待修复冷库的 canonical 绝对路径"),
+    backup: str = typer.Option(..., "--backup", help="逐字节冷备的 canonical 绝对路径"),
+    contest_id: int | None = typer.Option(None, "--contest-id"),
+    scan_all: bool = typer.Option(False, "--scan-all", help="只读扫描全部 ready 终态赛事"),
+    apply: bool = typer.Option(False, "--apply", help="提交唯一缺失末行；默认 dry-run"),
+    verify: bool = typer.Option(False, "--verify", help="只读验证审核 postimage"),
+    confirm_db: str = typer.Option(..., "--confirm-db"),
+    confirm_contest_id: int | None = typer.Option(None, "--confirm-contest-id"),
+    confirm_service_stopped: bool = typer.Option(False, "--confirm-service-stopped"),
+    confirm_maintenance_ready: bool = typer.Option(False, "--confirm-maintenance-ready"),
+    confirm_cold_backup: bool = typer.Option(False, "--confirm-cold-backup"),
+    expect_authority_digest: str | None = typer.Option(
+        None, "--expect-authority-digest"
+    ),
+    expect_old_official_digest: str | None = typer.Option(
+        None, "--expect-old-official-digest"
+    ),
+    expect_repaired_official_digest: str | None = typer.Option(
+        None, "--expect-repaired-official-digest"
+    ),
+    expect_plan_digest: str | None = typer.Option(None, "--expect-plan-digest"),
+    expect_target_preimage_sha256: str | None = typer.Option(
+        None, "--expect-target-preimage-sha256"
+    ),
+    expect_source_business_digest: str | None = typer.Option(
+        None, "--expect-source-business-digest"
+    ),
+    expect_post_business_digest: str | None = typer.Option(
+        None, "--expect-post-business-digest"
+    ),
+):
+    """Audit or repair one exact legacy Pencil Swiss-to-KO official tail.
+
+    This command is a cold, explicit maintenance tool.  It does not construct
+    ``Store`` for the target database, run migrations, replay Match standings,
+    replace existing official rows or establish a lifecycle seal.
+    """
+    from bzplat.backend.contests.official_repair import (
+        OfficialRepairError,
+        apply_official_results_repair,
+        finalize_official_repair_guard,
+        offline_official_repair_guard,
+        plan_official_results_repair,
+        scan_official_results_repairs,
+        validate_official_repair_file,
+        validate_official_repair_inventory,
+        validate_offline_repair_database_state,
+    )
+
+    def begin_readonly_snapshot(connection: sqlite3.Connection) -> None:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        connection.execute("PRAGMA foreign_keys=ON")
+        if (
+            connection.execute("PRAGMA query_only").fetchone()[0] != 1
+            or connection.execute("PRAGMA trusted_schema").fetchone()[0] != 0
+            or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+        ):
+            raise RuntimeError("计划副本无法启用只读 SQLite 安全参数")
+        connection.execute("BEGIN")
+
+    def read_plan(path: Path, selected_contest_id: int):
+        _sqlite_readonly_health(path, label="计划副本")
+        with sqlite3.connect(
+            path.as_uri() + "?mode=ro&immutable=1",
+            uri=True,
+            isolation_level=None,
+        ) as connection:
+            begin_readonly_snapshot(connection)
+            validate_offline_repair_database_state(connection)
+            return plan_official_results_repair(connection, selected_contest_id)
+
+    def read_scan(path: Path) -> list[dict]:
+        _sqlite_readonly_health(path, label="计划副本")
+        with sqlite3.connect(
+            path.as_uri() + "?mode=ro&immutable=1",
+            uri=True,
+            isolation_level=None,
+        ) as connection:
+            begin_readonly_snapshot(connection)
+            validate_offline_repair_database_state(connection)
+            return scan_official_results_repairs(connection)
+
+    try:
+        database = validate_official_repair_file(
+            db, label="目标数据库", mode=0o600
+        )
+        cold_backup = validate_official_repair_file(
+            backup, label="冷备", mode=0o400
+        )
+        if database.samefile(cold_backup):
+            raise RuntimeError("冷备不能与目标数据库是同一个 inode")
+        if confirm_db != str(database):
+            raise RuntimeError("--confirm-db 必须逐字等于目标 canonical 绝对路径")
+        if not (
+            confirm_service_stopped
+            and confirm_maintenance_ready
+            and confirm_cold_backup
+        ):
+            raise RuntimeError("必须分别确认停服、维护排空与冷备封存")
+        if scan_all:
+            if (
+                apply
+                or verify
+                or contest_id is not None
+                or confirm_contest_id is not None
+            ):
+                raise RuntimeError("--scan-all 仅允许独立 dry-run，不能指定赛事或 apply")
+        else:
+            if apply and verify:
+                raise RuntimeError("--apply 与 --verify 不能同时使用")
+            if (
+                isinstance(contest_id, bool)
+                or not isinstance(contest_id, int)
+                or contest_id < 1
+                or confirm_contest_id != contest_id
+            ):
+                raise RuntimeError("必须用相同正整数确认 --contest-id")
+
+        with offline_official_repair_guard(database) as guard:
+            _sqlite_readonly_health(database, label="目标数据库")
+            _sqlite_readonly_health(cold_backup, label="冷备")
+            def stable_file_stat(
+                path: Path,
+            ) -> tuple[int, int, int, int, int, int, int, int]:
+                current = path.stat()
+                return (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_size,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                    current.st_mode,
+                    current.st_uid,
+                    current.st_nlink,
+                )
+
+            target_stat = stable_file_stat(database)
+            backup_stat = stable_file_stat(cold_backup)
+            target_digest = _sha256_file(database)
+            backup_digest = _sha256_file(cold_backup)
+            expected_target_stat = target_stat
+            expected_target_digest = target_digest
+            if (
+                stable_file_stat(database) != target_stat
+                or stable_file_stat(cold_backup) != backup_stat
+            ):
+                raise RuntimeError("目标数据库或冷备在审计期间变化")
+
+            target_copy = _cutover_plan_copy_from(database, database)
+            backup_copy: Path | None = None
+            try:
+                if scan_all:
+                    scan = read_scan(target_copy)
+                    report = {
+                        "mode": "scan",
+                        "backup_sha256": backup_digest,
+                        "blocked": sum(
+                            row["eligibility"] == "blocked" for row in scan
+                        ),
+                        "contests": scan,
+                        "repairable": sum(
+                            row["eligibility"] == "repairable" for row in scan
+                        ),
+                        "valid": sum(
+                            row["eligibility"] == "valid" for row in scan
+                        ),
+                        "target_preimage_sha256": target_digest,
+                    }
+                elif not apply and not verify:
+                    if target_digest != backup_digest:
+                        raise RuntimeError("dry-run 要求目标与冷备逐字节相同")
+                    assert contest_id is not None
+                    plan = read_plan(target_copy, contest_id)
+                    if not plan.eligible:
+                        raise RuntimeError("目标赛事已经修复，无需生成 apply 计划")
+                    validate_official_repair_inventory(
+                        read_scan(target_copy),
+                        contest_id,
+                        repaired=False,
+                    )
+                    report = {
+                        "mode": "dry-run",
+                        **plan.public_report(),
+                        "backup_sha256": backup_digest,
+                        "target_preimage_sha256": target_digest,
+                    }
+                else:
+                    assert contest_id is not None
+                    reviewed_preimage = str(
+                        expect_target_preimage_sha256 or ""
+                    ).lower()
+                    if len(reviewed_preimage) != 64 or reviewed_preimage != backup_digest:
+                        raise RuntimeError("审核 target preimage digest 与冷备不一致")
+                    expected = {
+                        "authority_digest": str(expect_authority_digest or "").lower(),
+                        "old_official_digest": str(
+                            expect_old_official_digest or ""
+                        ).lower(),
+                        "repaired_official_digest": str(
+                            expect_repaired_official_digest or ""
+                        ).lower(),
+                        "plan_digest": str(expect_plan_digest or "").lower(),
+                        "source_business_digest": str(
+                            expect_source_business_digest or ""
+                        ).lower(),
+                        "expected_post_business_digest": str(
+                            expect_post_business_digest or ""
+                        ).lower(),
+                    }
+                    if any(len(value) != 64 for value in expected.values()):
+                        raise RuntimeError("apply 缺少完整审核 digest")
+                    backup_copy = _cutover_plan_copy_from(cold_backup, database)
+                    backup_plan = read_plan(backup_copy, contest_id)
+                    validate_official_repair_inventory(
+                        read_scan(backup_copy),
+                        contest_id,
+                        repaired=False,
+                    )
+                    if (
+                        not backup_plan.eligible
+                        or backup_plan.authority_digest != expected["authority_digest"]
+                        or backup_plan.old_official_digest
+                        != expected["old_official_digest"]
+                        or backup_plan.repaired_official_digest
+                        != expected["repaired_official_digest"]
+                        or backup_plan.plan_digest != expected["plan_digest"]
+                        or backup_plan.source_business_digest
+                        != expected["source_business_digest"]
+                        or backup_plan.expected_post_business_digest
+                        != expected["expected_post_business_digest"]
+                    ):
+                        raise RuntimeError("冷备计划与审核 digest 不一致")
+                    if verify or target_digest != reviewed_preimage:
+                        # Lost-output retry: prove both preimage and current
+                        # postimage from immutable copies, then return before
+                        # opening the target in read-write mode.
+                        current_plan = read_plan(target_copy, contest_id)
+                        validate_official_repair_inventory(
+                            read_scan(target_copy),
+                            contest_id,
+                            repaired=True,
+                        )
+                        if (
+                            not current_plan.already_applied
+                            or current_plan.authority_digest
+                            != backup_plan.authority_digest
+                            or current_plan.repaired_official_digest
+                            != backup_plan.repaired_official_digest
+                            or current_plan.old_official_digest
+                            != backup_plan.repaired_official_digest
+                            or current_plan.source_business_digest
+                            != backup_plan.expected_post_business_digest
+                            or current_plan.expected_post_business_digest
+                            != backup_plan.expected_post_business_digest
+                        ):
+                            raise RuntimeError("目标偏离审核 preimage 且不是精确 postimage")
+                        report = {
+                            "mode": "verify" if verify else "already-applied",
+                            **current_plan.public_report(),
+                            "backup_sha256": backup_digest,
+                            "target_postimage_sha256": target_digest,
+                            "target_preimage_sha256": reviewed_preimage,
+                            "zero_write": True,
+                        }
+                    else:
+                        current_plan = read_plan(target_copy, contest_id)
+                        if current_plan.public_report() != backup_plan.public_report():
+                            raise RuntimeError("目标计划与冷备计划不一致")
+                        repaired = apply_official_results_repair(
+                            database,
+                            contest_id,
+                            expected_authority_digest=expected["authority_digest"],
+                            expected_old_official_digest=expected[
+                                "old_official_digest"
+                            ],
+                            expected_repaired_official_digest=expected[
+                                "repaired_official_digest"
+                            ],
+                            expected_plan_digest=expected["plan_digest"],
+                            expected_source_business_digest=expected[
+                                "source_business_digest"
+                            ],
+                            expected_post_business_digest=expected[
+                                "expected_post_business_digest"
+                            ],
+                            expected_target_stat=target_stat,
+                            expected_target_preimage_sha256=reviewed_preimage,
+                            cold_backup_path=cold_backup,
+                            expected_backup_stat=backup_stat,
+                            expected_backup_sha256=backup_digest,
+                            guard=guard,
+                        )
+                        committed_target_stat = stable_file_stat(database)
+                        committed_target_digest = _sha256_file(database)
+                        if stable_file_stat(database) != committed_target_stat:
+                            raise RuntimeError(
+                                "修复后目标数据库在建立文件基线期间变化"
+                            )
+                        _sqlite_readonly_health(database, label="修复后目标数据库")
+                        post_plan = read_plan(database, contest_id)
+                        validate_official_repair_inventory(
+                            read_scan(database),
+                            contest_id,
+                            repaired=True,
+                        )
+                        if (
+                            not post_plan.already_applied
+                            or post_plan.authority_digest
+                            != repaired.authority_digest
+                            or post_plan.old_official_digest
+                            != repaired.old_official_digest
+                            or post_plan.repaired_official_digest
+                            != repaired.repaired_official_digest
+                            or post_plan.source_business_digest
+                            != repaired.source_business_digest
+                            or post_plan.expected_post_business_digest
+                            != repaired.expected_post_business_digest
+                        ):
+                            raise RuntimeError(
+                                "修复后目标数据库不等于事务已验证 postimage"
+                            )
+                        if (
+                            stable_file_stat(database) != committed_target_stat
+                            or _sha256_file(database) != committed_target_digest
+                            or stable_file_stat(database) != committed_target_stat
+                        ):
+                            raise RuntimeError(
+                                "修复后目标数据库在逻辑复核期间变化"
+                            )
+                        if _sha256_file(cold_backup) != backup_digest:
+                            raise RuntimeError("冷备在 apply 期间变化")
+                        expected_target_stat = committed_target_stat
+                        expected_target_digest = committed_target_digest
+                        report = {
+                            "mode": "applied",
+                            **repaired.public_report(),
+                            "backup_sha256": backup_digest,
+                            "target_postimage_sha256": expected_target_digest,
+                            "target_preimage_sha256": reviewed_preimage,
+                            "zero_write": False,
+                        }
+            finally:
+                _remove_cutover_plan_copy(target_copy)
+                if backup_copy is not None:
+                    _remove_cutover_plan_copy(backup_copy)
+            rendered_report = json.dumps(
+                report, ensure_ascii=False, sort_keys=True, indent=2
+            )
+
+            def validate_final_state() -> None:
+                validate_official_repair_file(
+                    cold_backup, label="冷备", mode=0o400
+                )
+                if (
+                    stable_file_stat(cold_backup) != backup_stat
+                    or _sha256_file(cold_backup) != backup_digest
+                    or stable_file_stat(cold_backup) != backup_stat
+                ):
+                    raise RuntimeError("冷备在 repair 审计期间变化")
+                if (
+                    stable_file_stat(database) != expected_target_stat
+                    or _sha256_file(database) != expected_target_digest
+                    or stable_file_stat(database) != expected_target_stat
+                ):
+                    raise RuntimeError("目标数据库在最终 repair 复核后发生变化")
+
+            finalize_official_repair_guard(
+                guard,
+                database,
+                validate_final_state=validate_final_state,
+            )
+            try:
+                typer.echo(rendered_report)
+                sys.stdout.flush()
+            except BrokenPipeError as exc:
+                raise typer.Exit(code=1) from exc
+            if report.get("mode") == "scan" and int(report.get("blocked") or 0) > 0:
+                raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except (OfficialRepairError, OSError, RuntimeError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @app.command("rating-rebuild")

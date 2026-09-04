@@ -9,6 +9,7 @@ import {
   type LiveContestPairing,
   type LiveContestStanding,
 } from '@/components/contest/LiveContestSpectator'
+import { FormatSnapshotAudit } from '@/components/contest/FormatSnapshotAudit'
 import type { EliminationTiebreakProjection } from '@/components/contest/elimination-tiebreak-status'
 import { PageFrame, PageHeader } from '@/components/layout'
 import { Button } from '@/components/ui/button'
@@ -20,6 +21,7 @@ import { stageSeriesDisplayLabel } from '@/components/contest/stage-series'
 import { PAIRED_SWAP_TIEBREAK } from '@/components/contest/template-guidance'
 import { fmtTime } from '@/lib/format'
 import { gameLabel } from '@/lib/games'
+import { parseMatchTimeControl, timeControlDescription, timeControlLabel } from '@/lib/time-controls'
 
 type ContestStatus = 'draft' | 'open' | 'published' | 'running' | 'rest' | 'finished' | 'cancelled'
 
@@ -32,6 +34,8 @@ interface LiveContestResponse {
     showcase: boolean
     immutable: boolean
     official_results_ready: boolean
+    time_control?: unknown
+    format_snapshot?: unknown
     starts_at: string | null
     ends_at: string | null
     rest_ends_at: string | null
@@ -46,6 +50,7 @@ interface LiveContestResponse {
     effective_rounds?: number | null
     scoring_mode?: string | null
     tiebreak?: string | null
+    overall_ranking?: 'cross_group_fair_v1' | null
   } | null
   series: {
     games_per_pair: number | null
@@ -273,6 +278,8 @@ export default function ContestLive() {
   }
 
   const status = live.contest.status
+  const parsedTimeControl = parseMatchTimeControl(live.contest.time_control, live.contest.game_id)
+  const timeControl = parsedTimeControl?.applies_to === 'both_bots' ? parsedTimeControl : null
   const terminal = status === 'cancelled' || (status === 'finished' && live.contest.official_results_ready)
   const seriesText = seriesSummary(live.series)
   const scheduleText = status === 'rest' && live.contest.rest_ends_at
@@ -304,6 +311,11 @@ export default function ContestLive() {
         description={(
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
+            <span>
+              {timeControl
+                ? `${timeControlLabel(timeControl)} · ${timeControlDescription(timeControl)}`
+                : '对局时限配置暂不可用'}
+            </span>
             {seriesText && <span>{seriesText}</span>}
             {unboundedTiebreak && (
               <span className="font-medium text-warning-foreground">
@@ -321,12 +333,20 @@ export default function ContestLive() {
         )}
       />
       {error && !offline && <ErrorMsg msg={`${error}；已保留上一次赛况。`} />}
+      <FormatSnapshotAudit value={live.contest.format_snapshot} />
       <LiveContestSpectator
         status={status}
         stageLabel={liveStageLabel}
         stageType={live.stage?.type}
         duplicate={live.series?.duplicate === true}
         legacyAggregate={live.series?.scoring_mode === 'aggregate_match_points_v1'}
+        rankingMode={
+          live.stage?.overall_ranking === 'cross_group_fair_v1'
+            ? 'cross_group'
+            : ['group_round_robin', 'group_double_round_robin'].includes(live.stage?.type || '')
+              ? 'group_only'
+              : 'overall'
+        }
         snapshot={immutableSnapshot}
         progress={live.progress}
         counts={live.counts}

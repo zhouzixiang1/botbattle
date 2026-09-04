@@ -17,10 +17,58 @@ TEMPLATES: list[dict[str, Any]] = [
         "purpose": "fairness",
         "time_class": "medium",
         "game_id": "pencil",
+        "time_control_ids": [
+            "pencil_per_side_total_900s_v1",
+            "pencil_per_decision_1s_v1",
+        ],
+        "default_time_control_id": "pencil_per_side_total_900s_v1",
+        # Optional navigation only: this never copies entries or advances
+        # players from the linked independent event.
+        "allows_navigation_source_contest": True,
         "stages": [
             {
                 "key": "drr",
                 "type": "double_round_robin",
+                "scoring": SCORING_CCGC,
+                "rest_after_minutes": 0,
+                "allow_bot_swap_in_rest": False,
+            },
+        ],
+    },
+    {
+        "id": "pencil_group_drr",
+        "name": "点格棋：随机均衡分组双循环",
+        "summary": (
+            "按组织者选择的组数一次性随机均衡分组；组内每对 Bot 交换先后手各赛一局，"
+            "不附带淘汰赛。"
+        ),
+        "recommended_min": 4,
+        "recommended_max": None,
+        "purpose": "ranking",
+        "time_class": "medium",
+        "game_id": "pencil",
+        "time_control_ids": [
+            "pencil_per_side_total_900s_v1",
+            "pencil_per_decision_1s_v1",
+        ],
+        "default_time_control_id": "pencil_per_side_total_900s_v1",
+        # Optional navigation only: this never copies entries or advances
+        # players from the linked independent event.
+        "allows_navigation_source_contest": True,
+        "stage_format_configs": [
+            {
+                "stage_key": "groups",
+                "field": "group_count",
+                "min": 2,
+            },
+        ],
+        "stages": [
+            {
+                "key": "groups",
+                "type": "group_double_round_robin",
+                "group_count": 2,
+                "group_assignment": "secure_random_balanced_v1",
+                "overall_ranking": "cross_group_fair_v1",
                 "scoring": SCORING_CCGC,
                 "rest_after_minutes": 0,
                 "allow_bot_swap_in_rest": False,

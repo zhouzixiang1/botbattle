@@ -130,6 +130,7 @@ export interface ExecutionRequestSnapshot {
     min_seconds: number
     max_seconds: number
     dynamic: true
+    available?: boolean
     note: string
   }
   capacity_blocked_code?: string
@@ -692,9 +693,15 @@ export function ExecutionRequestCard({
               <span className="min-w-0 break-words [overflow-wrap:anywhere]">{blockedReason}</span>
             </p>
           ) : (
-            <p className="mt-1 text-muted-foreground">
-              动态预计等待 {durationRange(eta.min_seconds, eta.max_seconds)}；{eta.note}。
-            </p>
+            eta.available === false ? (
+              <p className="mt-1 text-warning-foreground" role="status">
+                动态预计等待暂不可用；{eta.note}。
+              </p>
+            ) : (
+              <p className="mt-1 text-muted-foreground">
+                动态预计等待 {durationRange(eta.min_seconds, eta.max_seconds)}；{eta.note}。
+              </p>
+            )
           )}
         </div>
       )}

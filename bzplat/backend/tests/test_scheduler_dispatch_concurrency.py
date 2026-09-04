@@ -26,7 +26,7 @@ def _app(tmp_path):
 
 
 def _setup_contest(app, tmp_path: Path, *, status="running"):
-    """建一个 running 赛事 + 1 个 pending pairing（2 bot）。"""
+    """Create one canonical sealed pending batch in the requested active state."""
     from bzplat.backend.crypto import hash_password
     store = app.state.store
     org = store.create_user("org", "org@e.com", hash_password("pw123456"))
@@ -44,16 +44,35 @@ def _setup_contest(app, tmp_path: Path, *, status="running"):
         player["id"], "botB", binary_path=str(path_b), format="elf", game_id="holdem"
     )
     cid = store.create_contest(
-        "DupTest", organizer_id=org["id"], game_id="holdem", status=status,
+        "DupTest", organizer_id=org["id"], game_id="holdem", status="published",
         starts_at="2000-01-01T00:00:00" if status == "published" else None,
         stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
     )["id"]
     entry_a = store.add_contest_entry(cid, org["id"], b1["id"])
     entry_b = store.add_contest_entry(cid, player["id"], b2["id"])
-    store.add_contest_pairing(
-        cid, b1["id"], b2["id"], stage_idx=0, stage_key="rr",
-        entry_a_id=entry_a["id"], entry_b_id=entry_b["id"], status="pending",
+    pairings = store.create_contest_stage_pairings(
+        cid,
+        0,
+        [
+            {
+                "bot_a_id": b1["id"],
+                "bot_b_id": b2["id"],
+                "stage_key": "rr",
+                "entry_a_id": entry_a["id"],
+                "entry_b_id": entry_b["id"],
+                "status": "pending",
+                "published_at": "2026-01-01T00:00:00",
+                "scheduled_at": (
+                    "2000-01-01T00:00:00" if status == "published" else None
+                ),
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=(status == "running"),
     )
+    assert len(pairings) == 1
+    assert store.contest_stage_manifest_is_valid(cid, 0)
     return store, org, cid, b1, b2
 
 

@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { loginThroughUi, monitorBrowser, withCleanup } from './helpers'
+import { cookieOriginHeaders, loginThroughUi, monitorBrowser, withCleanup } from './helpers'
 
 const ADMIN = process.env.BZ_E2E_ADMIN || 'qa_admin'
 const MIN_TOUCH_TARGET_PX = 44
@@ -264,6 +264,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
         mutable: false,
       })
       const runtimePatchResponse = await page.request.patch('/api/admin/settings/runtime', {
+        headers: cookieOriginHeaders(page),
         data: { max_concurrent_matches: 1 },
       })
       expect(runtimePatchResponse.status()).toBe(404)
@@ -862,6 +863,7 @@ test('admin manual schedule persists in the isolated DB and emits an audit recor
     await loginThroughUi(page, ADMIN)
     const title = `PW Admin schedule DB ${Date.now()}`
     const create = await page.request.post('/api/contests', {
+      headers: cookieOriginHeaders(page),
       data: {
         title,
         game_id: 'holdem',
@@ -907,7 +909,9 @@ test('admin manual schedule persists in the isolated DB and emits an audit recor
     await monitor.expectClean()
   }, async () => {
     if (contestId === null) return
-    const remove = await page.request.delete(`/api/admin/contests/${contestId}`)
+    const remove = await page.request.delete(`/api/admin/contests/${contestId}`, {
+      headers: cookieOriginHeaders(page),
+    })
     expect(remove.status(), await remove.text()).toBe(200)
   })
 })

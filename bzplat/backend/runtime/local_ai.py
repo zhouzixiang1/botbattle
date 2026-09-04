@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 import secrets
 import time
 from collections import OrderedDict
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from bzplat.backend.runtime.binary_runner import BotTechnicalError
+from bzplat.backend.runtime.config import LOCAL_AI_PREPARE_TIMEOUT_SEC
 
 
 _LOCAL_AI_CLIENT_FAILURES: dict[str, tuple[str, str]] = {
@@ -37,6 +39,7 @@ _LOCAL_AI_CLIENT_FAILURES: dict[str, tuple[str, str]] = {
     "bot_decision_timeout": ("decision_timeout", "本地 Bot 决策超时"),
 }
 LOCAL_AI_CLIENT_FAILURE_REASONS = frozenset(_LOCAL_AI_CLIENT_FAILURES)
+LOCAL_AI_WEBSOCKET_SUBPROTOCOL = "botbattle.local-ai.v2"
 
 
 class LocalAIHubError(RuntimeError):
@@ -79,6 +82,7 @@ class LocalAITechnicalError(BotTechnicalError):
 class LocalAITurn:
     """One immutable request sent to a connector."""
 
+    phase: Literal["prepare", "decision"]
     request_id: str
     match_id: str
     agent_id: str
@@ -130,6 +134,11 @@ class _ConnectionState:
 class _PendingTurn:
     message: LocalAITurn
     response: asyncio.Future[Any]
+    decision_started: asyncio.Future[float] | None = None
+    decision_timeout: float | None = None
+    prepared_input: Any = None
+    decision_started_at: float | None = None
+    decision_ended_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -231,10 +240,7 @@ class LocalAIHub:
                 return False
             if state.connection.connection_id != connection_id:
                 raise LocalAIConnectionError("stale_connection")
-            connection = state.connection
-            state.connection = None
-            self._drain_queue(connection.queue)
-            connection.queue.put_nowait(_CONNECTION_CLOSED)
+            self._close_current_connection_locked(state)
             return True
 
     async def revoke(self, agent_id: str) -> None:
@@ -258,10 +264,7 @@ class LocalAIHub:
             if state is None:
                 return
             if state.connection is not None:
-                connection = state.connection
-                state.connection = None
-                self._drain_queue(connection.queue)
-                connection.queue.put_nowait(_CONNECTION_CLOSED)
+                self._close_current_connection_locked(state)
             if state.pending is not None:
                 self._fail_pending_locked(
                     state,
@@ -376,21 +379,39 @@ class LocalAIHub:
         async with self._lock:
             connection = self._current_connection_locked(agent_id, connection_id)
             queue = connection.queue
-        try:
-            if timeout is None:
-                item = await queue.get()
-            else:
-                item = await asyncio.wait_for(queue.get(), timeout=timeout)
-        except TimeoutError:
-            return None
-        if item is _CONNECTION_CLOSED:
-            raise LocalAIConnectionError("connection_closed")
-        async with self._lock:
-            connection = self._current_connection_locked(agent_id, connection_id)
-            connection.last_seen_at = self._clock()
-        if not isinstance(item, LocalAITurn):  # pragma: no cover - internal guard
-            raise RuntimeError("unexpected local AI queue item")
-        return item
+        loop = asyncio.get_running_loop()
+        wait_deadline = None if timeout is None else loop.time() + timeout
+        while True:
+            try:
+                if wait_deadline is None:
+                    item = await queue.get()
+                else:
+                    remaining = wait_deadline - loop.time()
+                    if remaining <= 0:
+                        try:
+                            item = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return None
+                    else:
+                        item = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except TimeoutError:
+                return None
+            if item is _CONNECTION_CLOSED:
+                raise LocalAIConnectionError("connection_closed")
+            if not isinstance(item, LocalAITurn):  # pragma: no cover - internal guard
+                raise RuntimeError("unexpected local AI queue item")
+            async with self._lock:
+                connection = self._current_connection_locked(
+                    agent_id, connection_id
+                )
+                state = self._agents[agent_id]
+                if not self._queued_turn_is_current_locked(state, item):
+                    # A terminal/cancel operation can win after queue.get() but
+                    # before this lock.  Never deliver that closed request or
+                    # its private input to a connector now serving a later job.
+                    continue
+                connection.last_seen_at = self._clock()
+                return item
 
     async def request_decision(
         self,
@@ -400,13 +421,22 @@ class LocalAIHub:
         match_id: str,
         seat: int,
         turn: int,
-        deadline_at: float,
+        deadline_at: float | None = None,
         input: Any,
+        decision_timeout: float | None = None,
+        on_decision_elapsed: Callable[[float], None] | None = None,
     ) -> Any:
         """Deliver one turn and await the exactly-bound response.
 
-        ``deadline_at`` is an absolute value in the hub clock's domain.  Neither
-        disconnection nor reconnect changes it.
+        Existing connector callers may supply an absolute ``deadline_at``.
+        Match execution supplies ``decision_timeout`` instead and uses a secure
+        two-phase hand-off.  The first, independently bounded ``prepare`` frame
+        contains no game input.  After the connector confirms that its process
+        exists, the hub freezes the game deadline and only then queues the full
+        ``decision`` frame.  Startup therefore cannot consume the chess clock,
+        while an untrusted connector cannot inspect or compute the position
+        before that clock starts.  Reconnect after decision delivery keeps the
+        same absolute deadline.
         """
 
         agent_id = self._required_text(agent_id, "agent_id")
@@ -417,8 +447,20 @@ class LocalAIHub:
         if int(turn) < 1:
             raise ValueError("turn 必须从 1 开始")
         turn = int(turn)
-        deadline_at = float(deadline_at)
+        if (deadline_at is None) == (decision_timeout is None):
+            raise ValueError("deadline_at 与 decision_timeout 必须且只能提供一个")
+        relative_timeout: float | None = None
+        if decision_timeout is not None:
+            if isinstance(decision_timeout, bool):
+                raise ValueError("decision_timeout 必须为有限正数")
+            relative_timeout = float(decision_timeout)
+            if not math.isfinite(relative_timeout) or relative_timeout <= 0:
+                raise ValueError("decision_timeout 必须为有限正数")
+        else:
+            deadline_at = float(deadline_at)
         loop = asyncio.get_running_loop()
+        decision_started_at: float | None = None
+        pending: _PendingTurn | None = None
 
         async with self._lock:
             state = self._agents.get(agent_id)
@@ -434,7 +476,7 @@ class LocalAIHub:
             if request_id in self._seen_request_ids:
                 raise LocalAIHubError("request_id_already_used")
             self._seen_request_ids.add(request_id)
-            if deadline_at <= self._clock():
+            if relative_timeout is None and deadline_at <= self._clock():
                 self._remember_terminal_locked(
                     request_id,
                     _TerminalRequest(agent_id, match_id, turn, "timed_out"),
@@ -445,34 +487,84 @@ class LocalAIHub:
                     seat=seat,
                     turn=turn,
                 )
-            message = LocalAITurn(
-                request_id=request_id,
-                match_id=match_id,
-                agent_id=agent_id,
-                seat=seat,
-                turn=turn,
-                deadline_at=deadline_at,
-                input=copy.deepcopy(input),
-            )
+            # Copy the private input before publishing any pending state.  A
+            # relative Match request deliberately does not place this value in
+            # the prepare frame, so the connector cannot pre-compute off-clock.
+            pending_input = copy.deepcopy(input)
             response: asyncio.Future[Any] = loop.create_future()
-            pending = _PendingTurn(message, response)
+            if relative_timeout is not None:
+                prepare_deadline_at = self._clock() + LOCAL_AI_PREPARE_TIMEOUT_SEC
+                decision_started = loop.create_future()
+                message = LocalAITurn(
+                    phase="prepare",
+                    request_id=request_id,
+                    match_id=match_id,
+                    agent_id=agent_id,
+                    seat=seat,
+                    turn=turn,
+                    deadline_at=prepare_deadline_at,
+                    input=None,
+                )
+                pending = _PendingTurn(
+                    message,
+                    response,
+                    decision_started=decision_started,
+                    decision_timeout=relative_timeout,
+                    prepared_input=pending_input,
+                )
+            else:
+                assert deadline_at is not None
+                message = LocalAITurn(
+                    phase="decision",
+                    request_id=request_id,
+                    match_id=match_id,
+                    agent_id=agent_id,
+                    seat=seat,
+                    turn=turn,
+                    deadline_at=deadline_at,
+                    input=pending_input,
+                )
+                pending = _PendingTurn(message, response)
             state.pending = pending
-            # A connector that was online when the durable execution lease was
-            # claimed may be inside its bounded reconnect backoff between two
-            # turns.  Keep this request pending against the original absolute
-            # deadline; ``register`` re-delivers the exact same turn.  Unknown
-            # or revoked agents still fail immediately above, and initial claim
-            # admission still requires a live, idle connection.
             if state.connection is not None:
                 state.connection.queue.put_nowait(self._copy_turn(message))
 
-        delay = max(0.0, deadline_at - self._clock())
         try:
+            if pending.decision_started is not None:
+                prepare_delay = max(
+                    0.0, pending.message.deadline_at - self._clock()
+                )
+                done, _ = await asyncio.wait(
+                    (pending.decision_started, response),
+                    timeout=prepare_delay,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if response in done:
+                    return await response
+                if pending.decision_started not in done:
+                    async with self._lock:
+                        state = self._agents.get(agent_id)
+                        if state is not None and state.pending is pending:
+                            self._fail_pending_locked(
+                                state,
+                                error_code="local_ai_unavailable",
+                                message="本地 Bot 未在准备时限内就绪",
+                                outcome="failed",
+                            )
+                            self._close_current_connection_locked(state)
+                    return await response
+                deadline_at = pending.decision_started.result()
+                decision_started_at = pending.decision_started_at
+            assert deadline_at is not None
+            delay = max(0.0, deadline_at - self._clock())
             return await asyncio.wait_for(asyncio.shield(response), timeout=delay)
         except TimeoutError:
             async with self._lock:
                 state = self._agents.get(agent_id)
                 if state is not None and state.pending is pending:
+                    if pending.decision_started_at is not None:
+                        pending.decision_ended_at = deadline_at
+                    self._discard_queued_request_locked(state, request_id)
                     state.pending = None
                     self._remember_terminal_locked(
                         request_id,
@@ -480,6 +572,12 @@ class LocalAIHub:
                     )
                     if not response.done():
                         response.cancel()
+                    # A decision frame may already be in the connector.  The
+                    # sequential v2 client has no independent cancel channel,
+                    # so close this exact transport to wake its wait_closed
+                    # watcher and kill the old process before the agent can be
+                    # considered available for another Match.
+                    self._close_current_connection_locked(state)
             raise self._technical_error(
                 "本地 Bot 未在决策截止时间前响应",
                 error_code="local_ai_timeout",
@@ -490,6 +588,9 @@ class LocalAIHub:
             async with self._lock:
                 state = self._agents.get(agent_id)
                 if state is not None and state.pending is pending:
+                    if pending.decision_started_at is not None:
+                        pending.decision_ended_at = self._clock()
+                    self._discard_queued_request_locked(state, request_id)
                     state.pending = None
                     self._remember_terminal_locked(
                         request_id,
@@ -497,7 +598,97 @@ class LocalAIHub:
                     )
                     if not response.done():
                         response.cancel()
+                    self._close_current_connection_locked(state)
             raise
+        finally:
+            if decision_started_at is None and pending is not None:
+                decision_started_at = pending.decision_started_at
+            decision_ended_at = (
+                pending.decision_ended_at if pending is not None else None
+            )
+            if (
+                decision_started_at is not None
+                and decision_ended_at is not None
+                and on_decision_elapsed is not None
+            ):
+                on_decision_elapsed(
+                    max(0.0, decision_ended_at - decision_started_at)
+                )
+            # A terminal hub operation can win the lock immediately before the
+            # caller is cancelled.  Retrieve its internal Future exception so
+            # asyncio never reports an unhandled technical fault; the caller's
+            # cancellation still remains authoritative.
+            if pending is not None:
+                if pending.response.done() and not pending.response.cancelled():
+                    pending.response.exception()
+                if (
+                    pending.decision_started is not None
+                    and not pending.decision_started.done()
+                ):
+                    pending.decision_started.cancel()
+
+    async def mark_prepared(
+        self,
+        agent_id: str,
+        connection_id: str,
+        *,
+        request_id: Any,
+        match_id: Any,
+        turn: Any,
+    ) -> LocalAIResponseAcceptance:
+        """Start one relative decision clock and release its private input.
+
+        The exact binding and current connection are checked under the same hub
+        lock that changes the phase, so duplicate/stale preparation frames can
+        neither extend a deadline nor receive the hidden request.
+        """
+
+        async with self._lock:
+            state, pending, request_id, match_id, turn = self._bound_pending_locked(
+                agent_id,
+                connection_id,
+                request_id=request_id,
+                match_id=match_id,
+                turn=turn,
+                require_decision=False,
+            )
+            if pending.message.phase != "prepare":
+                raise LocalAIResponseRejected("decision_already_started")
+            if pending.decision_started is None or pending.decision_timeout is None:
+                raise LocalAIResponseRejected("invalid_pending_phase")
+            prepared_at = self._clock()
+            if prepared_at >= pending.message.deadline_at:
+                self._fail_pending_locked(
+                    state,
+                    error_code="local_ai_unavailable",
+                    message="本地 Bot 未在准备时限内就绪",
+                    outcome="failed",
+                )
+                self._close_current_connection_locked(state)
+                raise LocalAIResponseRejected("preparation_deadline_exceeded")
+            # This second defensive copy remains platform preparation.  Finish
+            # it before freezing the authoritative game clock.
+            delivery_input = copy.deepcopy(pending.prepared_input)
+            now = self._clock()
+            deadline_at = now + pending.decision_timeout
+            decision = LocalAITurn(
+                phase="decision",
+                request_id=request_id,
+                match_id=match_id,
+                agent_id=agent_id,
+                seat=pending.message.seat,
+                turn=turn,
+                deadline_at=deadline_at,
+                input=delivery_input,
+            )
+            pending.message = decision
+            pending.prepared_input = None
+            pending.decision_started_at = now
+            self._discard_queued_request_locked(state, request_id)
+            state.connection.queue.put_nowait(self._copy_turn(decision))
+            if not pending.decision_started.done():
+                pending.decision_started.set_result(deadline_at)
+            return LocalAIResponseAcceptance(request_id, match_id, turn)
 
     async def submit_response(
         self,
@@ -520,6 +711,8 @@ class LocalAIHub:
                 turn=turn,
             )
 
+            pending.decision_ended_at = self._clock()
+            self._discard_queued_request_locked(state, request_id)
             state.pending = None
             self._remember_terminal_locked(
                 request_id,
@@ -545,13 +738,16 @@ class LocalAIHub:
             raise LocalAIResponseRejected("invalid_failure_reason")
         error_code, public_message = _LOCAL_AI_CLIENT_FAILURES[reason]
         async with self._lock:
-            state, _pending, request_id, match_id, turn = self._bound_pending_locked(
+            state, pending, request_id, match_id, turn = self._bound_pending_locked(
                 agent_id,
                 connection_id,
                 request_id=request_id,
                 match_id=match_id,
                 turn=turn,
+                require_decision=False,
             )
+            if pending.message.phase == "prepare" and reason != "bot_start_failed":
+                raise LocalAIResponseRejected("invalid_failure_phase")
             self._fail_pending_locked(
                 state,
                 error_code=error_code,
@@ -568,6 +764,7 @@ class LocalAIHub:
         request_id: Any,
         match_id: Any,
         turn: Any,
+        require_decision: bool = True,
     ) -> tuple[_AgentState, _PendingTurn, str, str, int]:
         """Resolve the one pending request shared by response and failure frames."""
 
@@ -601,14 +798,25 @@ class LocalAIHub:
             or message.turn != turn
         ):
             raise LocalAIResponseRejected("request_binding_mismatch")
+        if require_decision and message.phase != "decision":
+            raise LocalAIResponseRejected("decision_not_started")
         if self._clock() >= message.deadline_at:
+            preparing = message.phase == "prepare"
             self._fail_pending_locked(
                 state,
-                error_code="local_ai_timeout",
-                message="本地 Bot 未在决策截止时间前响应",
-                outcome="timed_out",
+                error_code=("local_ai_unavailable" if preparing else "local_ai_timeout"),
+                message=(
+                    "本地 Bot 未在准备时限内就绪"
+                    if preparing
+                    else "本地 Bot 未在决策截止时间前响应"
+                ),
+                outcome=("failed" if preparing else "timed_out"),
+                ended_at=(None if preparing else message.deadline_at),
             )
-            raise LocalAIResponseRejected("deadline_exceeded")
+            self._close_current_connection_locked(state)
+            raise LocalAIResponseRejected(
+                "preparation_deadline_exceeded" if preparing else "deadline_exceeded"
+            )
         return state, pending, request_id, match_id, turn
 
     def _current_connection_locked(
@@ -632,10 +840,16 @@ class LocalAIHub:
         error_code: str,
         message: str,
         outcome: Literal["timed_out", "revoked", "failed"],
+        ended_at: float | None = None,
     ) -> None:
         pending = state.pending
         if pending is None:
             return
+        if pending.decision_started_at is not None:
+            pending.decision_ended_at = (
+                float(ended_at) if ended_at is not None else self._clock()
+            )
+        self._discard_queued_request_locked(state, pending.message.request_id)
         state.pending = None
         turn = pending.message
         self._remember_terminal_locked(
@@ -653,6 +867,52 @@ class LocalAIHub:
                     turn=turn.turn,
                 )
             )
+
+    @staticmethod
+    def _queued_turn_is_current_locked(
+        state: _AgentState, item: LocalAITurn
+    ) -> bool:
+        pending = state.pending
+        if pending is None:
+            return False
+        current = pending.message
+        return (
+            item.agent_id == state.agent_id == current.agent_id
+            and item.request_id == current.request_id
+            and item.match_id == current.match_id
+            and item.seat == current.seat
+            and item.turn == current.turn
+            and item.phase == current.phase
+            and item.deadline_at == current.deadline_at
+        )
+
+    @staticmethod
+    def _discard_queued_request_locked(
+        state: _AgentState, request_id: str
+    ) -> None:
+        connection = state.connection
+        if connection is None:
+            return
+        retained: list[object] = []
+        while True:
+            try:
+                item = connection.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(item, LocalAITurn) and item.request_id == request_id:
+                continue
+            retained.append(item)
+        for item in retained:
+            connection.queue.put_nowait(item)
+
+    @staticmethod
+    def _close_current_connection_locked(state: _AgentState) -> None:
+        connection = state.connection
+        if connection is None:
+            return
+        state.connection = None
+        LocalAIHub._drain_queue(connection.queue)
+        connection.queue.put_nowait(_CONNECTION_CLOSED)
 
     def _remember_terminal_locked(
         self, request_id: str, item: _TerminalRequest
@@ -719,6 +979,7 @@ class LocalAIHub:
     @staticmethod
     def _copy_turn(turn: LocalAITurn) -> LocalAITurn:
         return LocalAITurn(
+            phase=turn.phase,
             request_id=turn.request_id,
             match_id=turn.match_id,
             agent_id=turn.agent_id,
@@ -731,6 +992,7 @@ class LocalAIHub:
 
 __all__ = [
     "LOCAL_AI_CLIENT_FAILURE_REASONS",
+    "LOCAL_AI_WEBSOCKET_SUBPROTOCOL",
     "LocalAIBusyError",
     "LocalAIConnection",
     "LocalAIConnectionError",

@@ -4,9 +4,11 @@ import {
   type Page,
   type Request,
   type Response,
+  type Route,
 } from '@playwright/test'
 
 export const PASSWORD = process.env.BZ_E2E_PASSWORD || 'Test1234'
+const QA_CAPTCHA_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='
 
 type BrowserIssue =
   | { kind: 'pageerror'; message: string }
@@ -217,22 +219,67 @@ export async function loginThroughUi(
   username: string,
   password = PASSWORD,
 ): Promise<Response> {
-  await page.goto('/#/login')
-  await page.locator('#login-username').fill(username)
-  await page.locator('#login-password').fill(password)
-  // The isolated E2E backend must run with BZ_SKIP_CAPTCHA=1. The field remains
-  // required in the real browser, so populate it and still submit the actual form.
-  await page.getByPlaceholder('图中字符或算式结果').fill('skip')
-  const responsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/api/auth/login',
-  )
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  const response = await responsePromise
-  expect(response.status(), await response.text()).toBe(200)
-  await expect(page).toHaveURL(/\/#\/$/)
-  return response
+  const captchaPattern = '**/api/auth/captcha'
+  const fulfillQaCaptcha = async (route: Route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (
+      request.method() !== 'GET' ||
+      url.pathname !== '/api/auth/captcha' ||
+      url.search !== ''
+    ) {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        captcha_id: 'e2e-skip-captcha',
+        image_base64: QA_CAPTCHA_IMAGE,
+        ttl: 300,
+      }),
+    })
+  }
+
+  // This helper is only valid against the isolated backend's
+  // BZ_SKIP_CAPTCHA=1 capability. Avoid exhausting the production captcha GET
+  // budget while keeping the real login POST, cookie rotation and CSRF path.
+  // The route is scoped to this login and removed so endpoint-specific tests
+  // continue to exercise the real captcha service.
+  await page.route(captchaPattern, fulfillQaCaptcha)
+  try {
+    await page.goto('/#/login')
+    await page.locator('#login-username').fill(username)
+    await page.locator('#login-password').fill(password)
+    await page.getByPlaceholder('图中字符或算式结果').fill('skip')
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/auth/login',
+    )
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    const response = await responsePromise
+    expect(response.status(), await response.text()).toBe(200)
+    await expect(page).toHaveURL(/\/#\/$/)
+    return response
+  } finally {
+    await page.unroute(captchaPattern, fulfillQaCaptcha)
+  }
+}
+
+/**
+ * Playwright's context-bound APIRequestContext shares the browser cookie jar,
+ * but it does not synthesize the browser Origin header for unsafe requests.
+ * Keep direct cookie-authenticated fixture writes subject to the production
+ * same-origin CSRF contract by deriving the exact origin from a navigated page.
+ */
+export function cookieOriginHeaders(page: Page): { Origin: string } {
+  const url = new URL(page.url())
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`cookie-authenticated fixture page has no HTTP origin: ${page.url()}`)
+  }
+  return { Origin: url.origin }
 }
 
 export function versionRow(dialog: Locator, version: number) {

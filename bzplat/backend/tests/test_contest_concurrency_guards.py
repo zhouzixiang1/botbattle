@@ -480,24 +480,26 @@ def test_force_finish_rejects_while_real_runner_is_blocked(tmp_path):
 
 def test_safe_reconcile_dispatch_rechecks_terminal_state_after_lock(tmp_path):
     async def exercise():
-        store, contest_id, _, bots = _manager_fixture(tmp_path, status="running")
-        store.add_contest_pairing(
-            contest_id, bots[0]["id"], bots[1]["id"], status="pending",
-            stage_idx=0, stage_key="rr",
-        )
+        store, contest_id, _, _ = _manager_fixture(tmp_path, status="open")
         orch = _CountingOrch()
         manager = ContestManager(store, orch)
+        await manager.publish(contest_id)
+        assert store.contest_stage_manifest_is_valid(contest_id, 0)
         lock = manager._lock(contest_id)
         await lock.acquire()
         try:
             dispatch_task = asyncio.create_task(manager._dispatch_pending_safe(contest_id, 0))
             await asyncio.sleep(0)
             assert not dispatch_task.done()
-            store.update_contest(contest_id, status="finished")
+            # Model a concurrent legitimate cancellation while dispatch is
+            # waiting for the per-contest lock.  Once admitted, dispatch must
+            # re-read the terminal state before creating any Match.
+            store.update_contest(contest_id, status="cancelled")
         finally:
             lock.release()
 
         await dispatch_task
+        assert store.get_contest(contest_id)["status"] == "cancelled"
         assert orch.calls == 0
         assert store.list_matches(contest_id=contest_id) == []
 

@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Bug, Inbox, Mail, RefreshCw, Send } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { apiGet, apiJson, errMsg, userToken, type ApiRequestInit, type CurrentUser } from '@/api'
+import { apiGet, apiJson, errMsg, type ApiRequestInit, type CurrentUser } from '@/api'
 import type { ThreadDetail, ThreadSummary } from '@/components/communications/types'
 import { THREAD_KIND_LABELS } from '@/components/communications/types'
 import { ThreadView } from '@/components/communications/thread-view'
@@ -34,19 +34,16 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
   const [detailLoading, setDetailLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
-  const authToken = useRef(userToken.get()).current
   const listRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
   const detailRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
   const sendRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
 
   const requestOptions = useCallback((signal?: AbortSignal): Omit<ApiRequestInit, 'method' | 'body'> => ({
     signal,
-    suppressAuth: true,
-    credentials: authToken ? 'omit' : 'include',
-    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+    credentials: 'include',
     cache: 'no-store',
     referrerPolicy: 'no-referrer',
-  }), [authToken])
+  }), [])
 
   const loadThreads = useCallback(async () => {
     if (!user) return

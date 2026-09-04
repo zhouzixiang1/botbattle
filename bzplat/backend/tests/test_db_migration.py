@@ -18,6 +18,23 @@ import sqlite3
 import pytest
 
 from bzplat.backend.store import Store
+from bzplat.backend.store.schema import (
+    CONTEST_ENTRY_PAGE_INDEX_SQL,
+    CONTEST_PAIRING_SCHEDULE_INDEX_SQL,
+    CONTEST_PAIRING_SYNC_INDEX_SQL,
+    EXECUTION_CLAIM_CONTEST_ORDER_INDEX_SQL,
+    EXECUTION_CLAIM_SOURCE_ORDER_INDEX_SQL,
+    EXECUTION_CONTEST_DISPATCH_GAP_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_ALL_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_OWNER_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_PUBLIC_INDEX_SQL,
+    CONTEST_SOURCE_PROTECTED_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_ALL_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_OWNER_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_PUBLIC_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_PROTECTED_INDEX_SQL,
+    CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL,
+)
 
 
 # ── 新库 schema 正确性 ────────────────────────────────────────
@@ -26,6 +43,9 @@ def test_new_db_has_per_game_match_tables(tmp_path):
     s = Store(str(tmp_path / "new.db"))
     with s._tx() as c:
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        contest_columns = {
+            row[1] for row in c.execute("PRAGMA table_info(contests)")
+        }
     s.close()
     assert "matches_holdem" in tables
     assert "matches_gomoku" in tables
@@ -33,6 +53,789 @@ def test_new_db_has_per_game_match_tables(tmp_path):
     assert "matches_index" in tables
     assert "matches" not in tables  # 旧单表不存在
     assert "match_replays" in tables  # replay 表保留（全局）
+    with sqlite3.connect(tmp_path / "new.db") as connection:
+        email_code_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(email_codes)")
+        }
+    assert email_code_columns["failed_attempts"][4] == "0"
+    assert "published_stage_pairing_count" in contest_columns
+    assert "pairing_topology_revision" in contest_columns
+    assert "sealed_pairing_topology_revision" in contest_columns
+
+
+def test_legacy_email_codes_gain_persistent_failure_budget_on_reopen(tmp_path):
+    path = tmp_path / "legacy-email-code-attempts.db"
+    store = Store(str(path))
+    user = store.create_user("legacy-code", "legacy-code@example.com", "hash")
+    store.add_email_code(
+        user["id"], "reset", "123456", "2099-01-01T00:00:00"
+    )
+    store.close()
+
+    with sqlite3.connect(path) as legacy:
+        legacy.execute("ALTER TABLE email_codes DROP COLUMN failed_attempts")
+
+    migrated = Store(str(path))
+    try:
+        columns = {
+            row[1]: row
+            for row in migrated._conn.execute("PRAGMA table_info(email_codes)")
+        }
+        assert columns["failed_attempts"][4] == "0"
+        row = migrated._conn.execute(
+            "SELECT failed_attempts FROM email_codes WHERE user_id=?",
+            (user["id"],),
+        ).fetchone()
+        assert row["failed_attempts"] == 0
+    finally:
+        migrated.close()
+
+
+_PAIRING_TOPOLOGY_TRIGGERS = (
+    "trg_contest_pairing_topology_insert",
+    "trg_contest_pairing_topology_delete",
+    "trg_contest_pairing_topology_update",
+    "trg_contest_pairing_topology_stage_cursor",
+    "trg_contest_pairing_topology_manifest",
+)
+_CONTEST_JOB_REF_TRIGGERS = (
+    "trg_execution_contest_pairing_ref_insert",
+    "trg_execution_contest_pairing_ref_update",
+)
+_CONTEST_LIFECYCLE_REVISION_TRIGGERS = (
+    "trg_contest_lifecycle_revision_update",
+    "trg_contest_entries_lifecycle_revision_insert",
+    "trg_contest_entries_lifecycle_revision_delete",
+    "trg_contest_entries_lifecycle_revision_update",
+    "trg_contest_stage_results_lifecycle_revision_insert",
+    "trg_contest_stage_results_lifecycle_revision_delete",
+    "trg_contest_stage_results_lifecycle_revision_update",
+)
+
+
+def test_pairing_topology_revision_fresh_legacy_and_reopen_fail_closed(tmp_path):
+    path = tmp_path / "pairing-topology-legacy.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "topology-owner", "topology-owner@example.test", "hash"
+    )
+    safe = store.create_contest(
+        "safe topology", owner["id"], status="published", game_id="holdem"
+    )
+    damaged = store.create_contest(
+        "damaged topology", owner["id"], status="published", game_id="holdem"
+    )
+    with store._tx() as connection:
+        safe_pairing = connection.execute(
+            "INSERT INTO contest_pairings(contest_id,status,stage_idx) "
+            "VALUES(?,'pending',0)",
+            (safe["id"],),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO contest_pairings(contest_id,status,stage_idx) "
+            "VALUES(?,'pending',0)",
+            (damaged["id"],),
+        )
+    store.seal_published_stage_pairing_count(
+        safe["id"],
+        0,
+        expected_count=1,
+        expected_existing_ids=[safe_pairing],
+    )
+    with store._tx() as connection:
+        # Simulate a latent pre-revision cardinality defect.  The new epoch may
+        # certify neither this row nor the superficially intact one above.
+        connection.execute(
+            "UPDATE contests SET published_stage_pairing_count=2 WHERE id=?",
+            (damaged["id"],),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (damaged["id"],),
+        )
+    assert {
+        row[0]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        )
+    }.issuperset({*_PAIRING_TOPOLOGY_TRIGGERS, *_CONTEST_JOB_REF_TRIGGERS})
+    assert "pairing_topology_revision" not in store.get_contest(safe["id"])
+    assert "sealed_pairing_topology_revision" not in store.get_contest(safe["id"])
+    store.close()
+
+    legacy = sqlite3.connect(path)
+    for name in _CONTEST_LIFECYCLE_REVISION_TRIGGERS:
+        legacy.execute(f"DROP TRIGGER {name}")
+    for name in _PAIRING_TOPOLOGY_TRIGGERS:
+        legacy.execute(f"DROP TRIGGER {name}")
+    legacy.execute(
+        "ALTER TABLE contests DROP COLUMN sealed_pairing_topology_revision"
+    )
+    legacy.execute("ALTER TABLE contests DROP COLUMN pairing_topology_revision")
+    legacy.commit()
+    legacy.close()
+
+    migrated = Store(str(path))
+    safe_header = migrated._conn.execute(
+        "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+        "FROM contests WHERE id=?",
+        (safe["id"],),
+    ).fetchone()
+    damaged_header = migrated._conn.execute(
+        "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+        "FROM contests WHERE id=?",
+        (damaged["id"],),
+    ).fetchone()
+    # A pre-epoch topology seal cannot prove the roster, stage-decision rows,
+    # or frozen format that the lifecycle read model consumes.  Migration must
+    # never bless it from a cardinality scan.
+    assert tuple(safe_header) == (0, None)
+    assert tuple(damaged_header) == (0, None)
+    assert migrated._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert migrated._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    migrated.close()
+
+    reopened = Store(str(path))
+    assert tuple(
+        reopened._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (safe["id"],),
+        ).fetchone()
+    ) == (0, None)
+    assert tuple(
+        reopened._conn.execute(
+            "SELECT pairing_topology_revision,"
+            "sealed_pairing_topology_revision FROM contests WHERE id=?",
+            (damaged["id"],),
+        ).fetchone()
+    ) == (0, None)
+    reopened.close()
+
+
+def test_contest_lifecycle_revision_epoch_is_fresh_and_reopen_stable(tmp_path):
+    path = tmp_path / "contest-lifecycle-fresh.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "lifecycle-fresh-owner", "lifecycle-fresh-owner@example.test", "hash"
+    )
+    contest = store.create_contest(
+        "lifecycle fresh", owner["id"], status="published", game_id="holdem"
+    )
+    trigger_names = {
+        row[0]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        )
+    }
+    assert set(_CONTEST_LIFECYCLE_REVISION_TRIGGERS) <= trigger_names
+    assert tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    ) == (0, None)
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+    store.close()
+
+    reopened = Store(str(path))
+    assert tuple(
+        reopened._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    ) == (0, 0)
+    reopened.close()
+
+
+def test_contest_lifecycle_revision_topology_only_epoch_never_preserves_seal(
+    tmp_path,
+):
+    path = tmp_path / "contest-lifecycle-topology-only.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "lifecycle-topology-owner",
+        "lifecycle-topology-owner@example.test",
+        "hash",
+    )
+    contest = store.create_contest(
+        "lifecycle topology only",
+        owner["id"],
+        status="published",
+        game_id="holdem",
+    )
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+    revision = int(
+        store._conn.execute(
+            "SELECT pairing_topology_revision FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()[0]
+    )
+    store.close()
+
+    with sqlite3.connect(path) as connection:
+        for name in _CONTEST_LIFECYCLE_REVISION_TRIGGERS:
+            connection.execute(f"DROP TRIGGER {name}")
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }.issuperset(_PAIRING_TOPOLOGY_TRIGGERS)
+
+    migrated = Store(str(path))
+    assert tuple(
+        migrated._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    ) == (revision, None)
+    migrated.close()
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    (
+        _CONTEST_LIFECYCLE_REVISION_TRIGGERS[-1],
+        _PAIRING_TOPOLOGY_TRIGGERS[0],
+    ),
+)
+def test_contest_lifecycle_revision_missing_trigger_invalidates_every_seal_once(
+    tmp_path, missing_name,
+):
+    path = tmp_path / "contest-lifecycle-missing-trigger.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "lifecycle-missing-owner",
+        "lifecycle-missing-owner@example.test",
+        "hash",
+    )
+    contests = [
+        store.create_contest(
+            f"lifecycle missing {index}",
+            owner["id"],
+            status="published",
+            game_id="holdem",
+        )
+        for index in range(2)
+    ]
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision"
+        )
+    store.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"DROP TRIGGER {missing_name}")
+
+    migrated = Store(str(path))
+    assert [
+        tuple(row)
+        for row in migrated._conn.execute(
+            "SELECT sealed_pairing_topology_revision FROM contests ORDER BY id"
+        ).fetchall()
+    ] == [(None,), (None,)]
+    assert migrated._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+        (missing_name,),
+    ).fetchone() is not None
+    with migrated._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision"
+        )
+    expected = [
+        tuple(row)
+        for row in migrated._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests ORDER BY id"
+        ).fetchall()
+    ]
+    migrated.close()
+
+    reopened = Store(str(path))
+    assert [
+        tuple(row)
+        for row in reopened._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests ORDER BY id"
+        ).fetchall()
+    ] == expected
+    reopened.close()
+
+
+def test_contest_lifecycle_revision_trigger_drift_fails_startup(tmp_path):
+    path = tmp_path / "contest-lifecycle-trigger-drift.db"
+    store = Store(str(path))
+    store.close()
+    name = _CONTEST_LIFECYCLE_REVISION_TRIGGERS[0]
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"DROP TRIGGER {name}")
+        connection.execute(
+            f"CREATE TRIGGER {name} AFTER UPDATE OF status ON contests "
+            "BEGIN SELECT 1; END"
+        )
+    with pytest.raises(RuntimeError, match="canonical trigger definition mismatch"):
+        Store(str(path))
+    gc.collect()
+
+
+def test_contest_lifecycle_revision_epoch_upgrade_is_one_transaction(tmp_path):
+    path = tmp_path / "contest-lifecycle-epoch-rollback.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "lifecycle-rollback-owner",
+        "lifecycle-rollback-owner@example.test",
+        "hash",
+    )
+    contest = store.create_contest(
+        "lifecycle rollback", owner["id"], status="published", game_id="holdem"
+    )
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+    expected_header = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    store.close()
+
+    missing_name = _CONTEST_LIFECYCLE_REVISION_TRIGGERS[0]
+    drift_name = _CONTEST_LIFECYCLE_REVISION_TRIGGERS[-1]
+    drift_sql = (
+        f"CREATE TRIGGER {drift_name} AFTER UPDATE OF points "
+        "ON contest_stage_results BEGIN SELECT 1; END"
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"DROP TRIGGER {missing_name}")
+        connection.execute(f"DROP TRIGGER {drift_name}")
+        connection.execute(drift_sql)
+
+    with pytest.raises(RuntimeError, match="canonical trigger definition mismatch"):
+        Store(str(path))
+    gc.collect()
+
+    with sqlite3.connect(path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest["id"],),
+            ).fetchone()
+        ) == expected_header
+        triggers = {
+            row[0]: " ".join(str(row[1]).rstrip(";").split())
+            for row in connection.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert missing_name not in triggers
+        assert triggers[drift_name] == " ".join(drift_sql.split())
+
+
+def test_contest_lifecycle_revision_tracks_exact_business_dependencies(tmp_path):
+    path = tmp_path / "contest-lifecycle-fields.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "lifecycle-fields-owner", "lifecycle-fields-owner@example.test", "hash"
+    )
+    other_user = store.create_user(
+        "lifecycle-fields-user", "lifecycle-fields-user@example.test", "hash"
+    )
+    bot = store.create_bot(owner["id"], "lifecycle-fields-bot")
+    first = store.create_contest(
+        "lifecycle fields first", owner["id"], status="running", game_id="holdem"
+    )
+    second = store.create_contest(
+        "lifecycle fields second", owner["id"], status="running", game_id="holdem"
+    )
+
+    def revision(contest_id: int) -> int:
+        return int(
+            store._conn.execute(
+                "SELECT pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()[0]
+        )
+
+    with store._tx() as connection:
+        entry_id = connection.execute(
+            "INSERT INTO contest_entries(contest_id,user_id,bot_id,registered_at) "
+            "VALUES(?,?,NULL,'2026-09-03T00:00:00')",
+            (first["id"], owner["id"]),
+        ).lastrowid
+    assert revision(first["id"]) == 1
+
+    contest_dependencies = (
+        ("game_id", "gomoku"),
+        ("template_id", "lifecycle-template-v2"),
+        ("stages_json", '[{"type":"round_robin"}]'),
+        ("format_snapshot_json", '{"version":1}'),
+        ("source_contest_id", second["id"]),
+    )
+    expected_first = revision(first["id"])
+    for field, value in contest_dependencies:
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contests SET {field}=? WHERE id=?",
+                (value, first["id"]),
+            )
+        expected_first += 1
+        assert revision(first["id"]) == expected_first
+        # No-op updates do not manufacture a second revision.
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contests SET {field}=? WHERE id=?",
+                (value, first["id"]),
+            )
+        assert revision(first["id"]) == expected_first
+
+    # Ordinary pre-active state progression is not itself a stage decision;
+    # entering or leaving rest/finished is.
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET status='rest' WHERE id=?", (first["id"],)
+        )
+    expected_first += 1
+    assert revision(first["id"]) == expected_first
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET status='running' WHERE id=?", (first["id"],)
+        )
+    expected_first += 1
+    assert revision(first["id"]) == expected_first
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET status='finished' WHERE id=?", (first["id"],)
+        )
+    expected_first += 1
+    assert revision(first["id"]) == expected_first
+
+    excluded_contest_fields = (
+        ("title", "lifecycle fields renamed"),
+        ("description", "progress metadata"),
+        ("starts_at", "2026-09-05T00:00:00"),
+        ("ends_at", "2026-09-06T00:00:00"),
+        ("rest_ends_at", "2026-09-07T00:00:00"),
+        ("official_results_ready", 1),
+        ("phase", "preliminary"),
+        ("time_control_id", "holdem-standard-v1"),
+        ("require_real_name", 1),
+    )
+    for field, value in excluded_contest_fields:
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contests SET {field}=? WHERE id=?",
+                (value, first["id"]),
+            )
+        assert revision(first["id"]) == expected_first
+
+    entry_dependencies = (
+        ("id", entry_id + 1000),
+        ("user_id", other_user["id"]),
+        ("bot_id", bot["id"]),
+        ("group_id", "A"),
+        ("seed", 7),
+        ("eliminated", 1),
+    )
+    current_entry_id = entry_id
+    for field, value in entry_dependencies:
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contest_entries SET {field}=? WHERE id=?",
+                (value, current_entry_id),
+            )
+        if field == "id":
+            current_entry_id = value
+        expected_first += 1
+        assert revision(first["id"]) == expected_first
+
+    for field, value in (
+        ("registered_at", "2026-09-03T01:00:00"),
+        ("dispatched_at", "2026-09-03T02:00:00"),
+        ("real_name_snapshot", "snapshot"),
+    ):
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contest_entries SET {field}=? WHERE id=?",
+                (value, current_entry_id),
+            )
+        assert revision(first["id"]) == expected_first
+
+    second_before = revision(second["id"])
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_entries SET contest_id=? WHERE id=?",
+            (second["id"], current_entry_id),
+        )
+    expected_first += 1
+    assert revision(first["id"]) == expected_first
+    assert revision(second["id"]) == second_before + 1
+
+    with store._tx() as connection:
+        result_id = connection.execute(
+            "INSERT INTO contest_stage_results("
+            "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+            "losses,delta_total,group_id,rank_in_group,payload_json) "
+            "VALUES(?,0,'stage-0',?, ?,3,1,0,0,10,'A',1,'{}')",
+            (second["id"], current_entry_id, bot["id"]),
+        ).lastrowid
+    expected_second = second_before + 2
+    assert revision(second["id"]) == expected_second
+
+    stage_dependencies = (
+        ("id", result_id + 1000),
+        ("stage_idx", 1),
+        ("stage_key", "stage-1"),
+        ("entry_id", current_entry_id + 1),
+        ("bot_id", None),
+        ("points", 4.5),
+        ("wins", 2),
+        ("draws", 1),
+        ("losses", 1),
+        ("delta_total", -5),
+        ("group_id", "B"),
+        ("rank_in_group", 2),
+        ("payload_json", '{"overall_rank":2}'),
+    )
+    current_result_id = result_id
+    for field, value in stage_dependencies:
+        with store._tx() as connection:
+            connection.execute(
+                f"UPDATE contest_stage_results SET {field}=? WHERE id=?",
+                (value, current_result_id),
+            )
+        if field == "id":
+            current_result_id = value
+        expected_second += 1
+        assert revision(second["id"]) == expected_second
+
+    first_before_move = revision(first["id"])
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_stage_results SET contest_id=? WHERE id=?",
+            (first["id"], current_result_id),
+        )
+    assert revision(second["id"]) == expected_second + 1
+    assert revision(first["id"]) == first_before_move + 1
+
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_stage_results WHERE id=?", (current_result_id,)
+        )
+        connection.execute(
+            "DELETE FROM contest_entries WHERE id=?", (current_entry_id,)
+        )
+    assert revision(first["id"]) == first_before_move + 2
+    assert revision(second["id"]) == expected_second + 2
+    store.close()
+
+
+def test_pairing_topology_update_tracks_only_exact_identity_changes(tmp_path):
+    path = tmp_path / "pairing-topology-update.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "topology-update-owner", "topology-update-owner@example.test", "hash"
+    )
+    contest = store.create_contest(
+        "topology update", owner["id"], status="published", game_id="holdem"
+    )
+    with store._tx() as connection:
+        pairing_id = connection.execute(
+            "INSERT INTO contest_pairings(contest_id,status,stage_idx) "
+            "VALUES(?,'pending',0)",
+            (contest["id"],),
+        ).lastrowid
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=1,
+        expected_existing_ids=[pairing_id],
+    )
+
+    store.update_pairing(
+        pairing_id,
+        status="running",
+        match_id="progress-only",
+        scheduled_at="2099-01-01T00:00:00",
+    )
+    def header() -> tuple[int, int]:
+        return tuple(
+            store._conn.execute(
+                "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest["id"],),
+            ).fetchone()
+        )
+    assert header() == (2, 2)
+
+    identity_changes = (
+        {"round_num": 2},
+        {"stage_key": "rewritten"},
+        {"group_id": "B"},
+        {"bracket_slot": 3},
+        {"color_first": 1},
+        {"series_index": 2, "series_size": 3},
+        {"tiebreak_group": 1, "tiebreak_game": 1},
+        {"tiebreak_game": 2},
+        {"pairing_seed": 424242},
+        {"published_at": "2026-09-02T01:02:03"},
+    )
+    expected_revision = 2
+    for identity in identity_changes:
+        expected_revision += 1
+        # Series/tiebreak coordinates are immutable through the public Store
+        # method, but the canonical trigger must still guard direct maintenance
+        # SQL and older writers that can reach the same database.
+        if set(identity).intersection(
+            {"series_index", "series_size", "tiebreak_group", "tiebreak_game", "pairing_seed", "published_at"}
+        ):
+            with store._tx() as connection:
+                connection.execute(
+                    "UPDATE contest_pairings SET "
+                    + ",".join(f"{field}=?" for field in identity)
+                    + " WHERE id=?",
+                    (*identity.values(), pairing_id),
+                )
+        else:
+            store.update_pairing(pairing_id, **identity)
+        assert header() == (expected_revision, 2)
+        if set(identity).intersection(
+            {"series_index", "series_size", "tiebreak_group", "tiebreak_game", "pairing_seed", "published_at"}
+        ):
+            with store._tx() as connection:
+                connection.execute(
+                    "UPDATE contest_pairings SET "
+                    + ",".join(f"{field}=?" for field in identity)
+                    + " WHERE id=?",
+                    (*identity.values(), pairing_id),
+                )
+        else:
+            store.update_pairing(pairing_id, **identity)
+        assert header() == (expected_revision, 2)
+    store.close()
+
+    reopened = Store(str(path))
+    assert tuple(
+        reopened._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    ) == (12, 2)
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "initial", "value"),
+    [
+        ("series_index", {"series_size": 3}, 2),
+        ("series_size", {}, 3),
+        ("tiebreak_group", {"tiebreak_group": 1, "tiebreak_game": 1}, 2),
+        ("tiebreak_game", {"tiebreak_group": 1, "tiebreak_game": 1}, 2),
+        ("pairing_seed", {}, 424242),
+        ("published_at", {}, "2026-09-02T01:02:03"),
+    ],
+)
+def test_pairing_topology_new_coordinates_each_bump_revision(
+    tmp_path, field, initial, value
+):
+    store = Store(str(tmp_path / f"topology-{field}.db"))
+    owner = store.create_user(
+        f"topology-{field}", f"topology-{field}@example.test", "hash"
+    )
+    contest = store.create_contest(
+        f"topology {field}", owner["id"], status="published", game_id="holdem"
+    )
+    columns = {"contest_id": contest["id"], **initial}
+    with store._tx() as connection:
+        pairing_id = connection.execute(
+            "INSERT INTO contest_pairings("
+            + ",".join(columns)
+            + ") VALUES("
+            + ",".join("?" for _ in columns)
+            + ")",
+            tuple(columns.values()),
+        ).lastrowid
+    store.seal_published_stage_pairing_count(
+        contest["id"], 0, expected_count=1, expected_existing_ids=[pairing_id]
+    )
+    before = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    assert before[0] == before[1]
+    with store._tx() as connection:
+        connection.execute(
+            f"UPDATE contest_pairings SET {field}=? WHERE id=?",
+            (value, pairing_id),
+        )
+    after = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    assert after == (before[0] + 1, before[1])
+    store.close()
+
+
+def test_pairing_topology_trigger_drift_and_partial_schema_fail_closed(tmp_path):
+    drift_path = tmp_path / "pairing-topology-trigger-drift.db"
+    store = Store(str(drift_path))
+    store.close()
+    connection = sqlite3.connect(drift_path)
+    connection.executescript(
+        "DROP TRIGGER trg_contest_pairing_topology_update;"
+        "CREATE TRIGGER trg_contest_pairing_topology_update "
+        "AFTER UPDATE OF id,contest_id,stage_idx ON contest_pairings "
+        "BEGIN SELECT 1; END;"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="canonical trigger definition mismatch"):
+        Store(str(drift_path))
+    gc.collect()
+
+    partial_path = tmp_path / "pairing-topology-partial.db"
+    store = Store(str(partial_path))
+    store.close()
+    connection = sqlite3.connect(partial_path)
+    for name in _PAIRING_TOPOLOGY_TRIGGERS:
+        connection.execute(f"DROP TRIGGER {name}")
+    connection.execute(
+        "ALTER TABLE contests DROP COLUMN sealed_pairing_topology_revision"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="topology revision schema is partial"):
+        Store(str(partial_path))
+    gc.collect()
 
 
 def test_new_db_ratings_composite_pk(tmp_path):
@@ -81,6 +884,489 @@ def test_contest_pairings_match_id_no_db_fk(tmp_path):
     # 不应有引用 matches_holdem/gomoku/pencil 或 matches 的 FK
     ref_tables = {r[2] for r in fk_rows}  # r[2] = referenced table
     assert not any("matches" in t for t in ref_tables)
+
+
+def test_contest_pairing_schedule_index_is_canonical_planned_and_reopen_safe(
+    tmp_path,
+):
+    path = tmp_path / "contest-schedule-index.db"
+    store = Store(str(path))
+    with store._tx() as connection:
+        schedule_definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_contest_pairings_schedule",),
+        ).fetchone()[0]
+        sync_definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_contest_pairings_completion_sync",),
+        ).fetchone()[0]
+        schedule_plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND status=? "
+                "AND (scheduled_at IS NULL OR scheduled_at<=?)",
+                (1, 0, "pending", "2099-01-01T00:00:00"),
+            )
+        )
+        sync_plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id,match_id FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND status<>? "
+                "AND match_id IS NOT NULL ORDER BY id",
+                (1, 0, "completed"),
+            )
+        )
+        sync_exists_plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND status<>? "
+                "AND match_id IS NOT NULL LIMIT 1",
+                (1, 0, "completed"),
+            )
+        )
+    assert "".join(schedule_definition.split()).lower() == "".join(
+        CONTEST_PAIRING_SCHEDULE_INDEX_SQL.split()
+    ).lower()
+    assert "".join(sync_definition.split()).lower() == "".join(
+        CONTEST_PAIRING_SYNC_INDEX_SQL.split()
+    ).lower()
+    assert "idx_contest_pairings_schedule" in schedule_plan
+    assert "idx_contest_pairings_completion_sync" in sync_plan
+    assert "idx_contest_pairings_completion_sync" in sync_exists_plan
+
+    owner = store.create_user(
+        "sync-index-owner", "sync-index-owner@example.com", "hash"
+    )
+    contest = store.create_contest("sync index scale", owner["id"])
+    with store._tx() as connection:
+        connection.executemany(
+            "INSERT INTO contest_pairings(contest_id,match_id,status,stage_idx) "
+            "VALUES(?,?,'completed',0)",
+            ((contest["id"], f"completed-{index}") for index in range(10_000)),
+        )
+        progress_steps = 0
+
+        def count_progress() -> int:
+            nonlocal progress_steps
+            progress_steps += 1
+            return 0
+
+        connection.set_progress_handler(count_progress, 1)
+        try:
+            incomplete = connection.execute(
+                "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                "AND stage_idx=? AND status<>? AND match_id IS NOT NULL LIMIT 1",
+                (contest["id"], 0, "completed"),
+            ).fetchone()
+        finally:
+            connection.set_progress_handler(None, 0)
+    assert incomplete is None
+    # The partial index excludes all 10k mirrored rows.  A regression to an
+    # index that merely stores every bound Match takes about 40k VM steps.
+    assert progress_steps < 500
+    store.close()
+
+    # Simulate a legacy schema that predates the index; first reopen migrates it,
+    # second reopen proves the canonical check and creation are idempotent.
+    connection = sqlite3.connect(path)
+    connection.execute("DROP INDEX idx_contest_pairings_schedule")
+    connection.execute("DROP INDEX idx_contest_pairings_completion_sync")
+    connection.commit()
+    connection.close()
+    migrated = Store(str(path))
+    migrated.close()
+    reopened = Store(str(path))
+    assert reopened._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
+
+    malformed_path = tmp_path / "contest-schedule-index-malformed.db"
+    malformed = Store(str(malformed_path))
+    malformed.close()
+    connection = sqlite3.connect(malformed_path)
+    connection.execute("DROP INDEX idx_contest_pairings_schedule")
+    connection.execute(
+        "CREATE INDEX idx_contest_pairings_schedule "
+        "ON contest_pairings(contest_id,status)"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="schedule index definition mismatch"):
+        Store(str(malformed_path))
+
+    malformed_sync_path = tmp_path / "contest-sync-index-malformed.db"
+    malformed_sync = Store(str(malformed_sync_path))
+    malformed_sync.close()
+    connection = sqlite3.connect(malformed_sync_path)
+    connection.execute("DROP INDEX idx_contest_pairings_completion_sync")
+    connection.execute(
+        "CREATE INDEX idx_contest_pairings_completion_sync "
+        "ON contest_pairings(contest_id,status)"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="completion sync index definition mismatch"):
+        Store(str(malformed_sync_path))
+
+
+def test_contest_entry_page_index_is_canonical_planned_and_reopen_safe(tmp_path):
+    path = tmp_path / "contest-entry-page-index.db"
+    store = Store(str(path))
+    with store._tx() as connection:
+        definition = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_contest_entries_page_order",),
+        ).fetchone()[0]
+        plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT e.id,e.contest_id,e.user_id,e.bot_id,e.registered_at,"
+                "e.group_id,e.seed,e.eliminated,e.dispatched_at,"
+                "b.name,u.username FROM contest_entries e "
+                "LEFT JOIN bots b ON e.bot_id=b.id "
+                "LEFT JOIN users u ON e.user_id=u.id "
+                "WHERE e.contest_id=? "
+                "ORDER BY e.seed,e.registered_at,e.id LIMIT ? OFFSET ?",
+                (1, 20, 0),
+            )
+        )
+    assert "".join(definition.split()).lower() == "".join(
+        CONTEST_ENTRY_PAGE_INDEX_SQL.split()
+    ).lower()
+    assert "idx_contest_entries_page_order" in plan
+    assert "USE TEMP B-TREE FOR ORDER BY" not in plan
+    store.close()
+
+    # A legacy database gains the index on its first open; the second open must
+    # certify the same definition without further schema churn.
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP INDEX idx_contest_entries_page_order")
+    migrated = Store(str(path))
+    migrated.close()
+    with sqlite3.connect(path) as connection:
+        migrated_schema_version = int(
+            connection.execute("PRAGMA schema_version").fetchone()[0]
+        )
+    reopened = Store(str(path))
+    assert int(reopened._conn.execute("PRAGMA schema_version").fetchone()[0]) == (
+        migrated_schema_version
+    )
+    assert reopened._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
+
+    malformed_path = tmp_path / "contest-entry-page-index-malformed.db"
+    malformed = Store(str(malformed_path))
+    malformed.close()
+    with sqlite3.connect(malformed_path) as connection:
+        connection.execute("DROP INDEX idx_contest_entries_page_order")
+        connection.execute(
+            "CREATE INDEX idx_contest_entries_page_order "
+            "ON contest_entries(contest_id,id)"
+        )
+    with pytest.raises(RuntimeError, match="entry page index definition mismatch"):
+        Store(str(malformed_path))
+
+
+def test_contest_source_search_schema_is_fresh_legacy_reopen_and_drift_safe(tmp_path):
+    path = tmp_path / "contest-source-search.db"
+    store = Store(str(path))
+    owner = store.create_user(
+        "source-search-owner", "source-search-owner@example.test", "hash"
+    )
+    contest = store.create_contest(
+        "旧标题 决赛 ABC", owner["id"], game_id="gomoku", status="finished"
+    )
+    store.update_contest(contest["id"], official_results_ready=1)
+    with store._tx() as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ("contest_source_search_grams",),
+        ).fetchone()[0]
+        index_sql = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='index' "
+                "AND name LIKE 'idx_contests_source_%'"
+            )
+        }
+        assert connection.execute(
+            "SELECT 1 FROM contest_source_search_grams "
+            "WHERE gram_len=2 AND gram='决赛' AND contest_id=?",
+            (contest["id"],),
+        ).fetchone()
+    assert " ".join(table_sql.split()).lower() == " ".join(
+        CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL.split()
+    ).lower()
+    expected_indexes = {
+        "idx_contests_source_protected": CONTEST_SOURCE_PROTECTED_INDEX_SQL,
+        "idx_contests_source_navigation_all": CONTEST_SOURCE_NAVIGATION_ALL_INDEX_SQL,
+        "idx_contests_source_navigation_public": CONTEST_SOURCE_NAVIGATION_PUBLIC_INDEX_SQL,
+        "idx_contests_source_navigation_owner": CONTEST_SOURCE_NAVIGATION_OWNER_INDEX_SQL,
+        "idx_contests_source_default_protected": CONTEST_SOURCE_DEFAULT_PROTECTED_INDEX_SQL,
+        "idx_contests_source_default_navigation_all": CONTEST_SOURCE_DEFAULT_NAVIGATION_ALL_INDEX_SQL,
+        "idx_contests_source_default_navigation_public": CONTEST_SOURCE_DEFAULT_NAVIGATION_PUBLIC_INDEX_SQL,
+        "idx_contests_source_default_navigation_owner": CONTEST_SOURCE_DEFAULT_NAVIGATION_OWNER_INDEX_SQL,
+    }
+    for name, expected in expected_indexes.items():
+        assert " ".join(index_sql[name].split()).lower() == " ".join(
+            expected.split()
+        ).lower()
+
+    # Direct SQL is covered by the same canonical insert/update/delete triggers.
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET title='新标题 半决赛 xyz' WHERE id=?",
+            (contest["id"],),
+        )
+        assert not connection.execute(
+            "SELECT 1 FROM contest_source_search_grams "
+            "WHERE gram_len=2 AND gram='旧标' AND contest_id=?",
+            (contest["id"],),
+        ).fetchone()
+        assert connection.execute(
+            "SELECT 1 FROM contest_source_search_grams "
+            "WHERE gram_len=3 AND gram='半决赛' AND contest_id=?",
+            (contest["id"],),
+        ).fetchone()
+        connection.execute(
+            "UPDATE contests SET status='draft',official_results_ready='bad',"
+            "showcase_key='hidden',created_at='2026-09-02T01:02:03' WHERE id=?",
+            (contest["id"],),
+        )
+        hints = connection.execute(
+            "SELECT DISTINCT created_at,is_nonshowcase,is_protected,"
+            "is_nav_public,is_nav_hidden FROM contest_source_search_grams "
+            "WHERE contest_id=?",
+            (contest["id"],),
+        ).fetchone()
+        assert tuple(hints) == ("2026-09-02T01:02:03", 0, 0, 0, 0)
+        connection.execute(
+            "UPDATE contests SET status='finished',official_results_ready=1,"
+            "showcase_key=NULL WHERE id=?",
+            (contest["id"],),
+        )
+        direct_id = connection.execute(
+            "INSERT INTO contests(title,description,organizer_id,status,created_at,"
+            "game_id) VALUES('直接写入 决赛','',?,'draft','2026-09-02',"
+            "'gomoku')",
+            (owner["id"],),
+        ).lastrowid
+        assert connection.execute(
+            "SELECT 1 FROM contest_source_search_grams "
+            "WHERE gram_len=2 AND gram='决赛' AND contest_id=?",
+            (direct_id,),
+        ).fetchone()
+        connection.execute("DELETE FROM contests WHERE id=?", (direct_id,))
+        assert not connection.execute(
+            "SELECT 1 FROM contest_source_search_grams WHERE contest_id=?",
+            (direct_id,),
+        ).fetchone()
+    store.close()
+    with sqlite3.connect(path) as connection:
+        stable_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+    reopened = Store(str(path))
+    assert int(reopened._conn.execute("PRAGMA schema_version").fetchone()[0]) == (
+        stable_version
+    )
+    reopened.close()
+
+    # Simulate a legacy DB that predates the projection and its triggers.
+    with sqlite3.connect(path) as connection:
+        for name in (
+            "trg_contest_source_search_insert",
+            "trg_contest_source_search_update",
+            "trg_contest_source_search_delete",
+        ):
+            connection.execute(f"DROP TRIGGER {name}")
+        connection.execute("DROP TABLE contest_source_search_grams")
+    migrated = Store(str(path))
+    assert migrated.list_contest_source_candidates(
+        game_id="gomoku", query="半决赛"
+    )["items"] == [{"id": contest["id"], "title": "新标题 半决赛 xyz"}]
+    migrated.close()
+    Store(str(path)).close()
+
+    drift_path = tmp_path / "contest-source-search-drift.db"
+    drift = Store(str(drift_path))
+    drift.close()
+    with sqlite3.connect(drift_path) as connection:
+        connection.execute("DROP INDEX idx_contests_source_protected")
+        connection.execute(
+            "CREATE INDEX idx_contests_source_protected ON contests(game_id,id)"
+        )
+    with pytest.raises(RuntimeError, match="canonical index definition mismatch"):
+        Store(str(drift_path))
+
+    trigger_drift_path = tmp_path / "contest-source-trigger-drift.db"
+    trigger_drift = Store(str(trigger_drift_path))
+    trigger_drift.close()
+    with sqlite3.connect(trigger_drift_path) as connection:
+        connection.execute("DROP TRIGGER trg_contest_source_search_update")
+        connection.execute(
+            "CREATE TRIGGER trg_contest_source_search_update "
+            "AFTER UPDATE OF title ON contests BEGIN SELECT 1; END"
+        )
+    with pytest.raises(RuntimeError, match="canonical trigger definition mismatch"):
+        Store(str(trigger_drift_path))
+
+    table_drift_path = tmp_path / "contest-source-table-drift.db"
+    table_drift = Store(str(table_drift_path))
+    table_drift.close()
+    with sqlite3.connect(table_drift_path) as connection:
+        for name in (
+            "trg_contest_source_search_insert",
+            "trg_contest_source_search_update",
+            "trg_contest_source_search_delete",
+        ):
+            connection.execute(f"DROP TRIGGER {name}")
+        connection.execute("DROP TABLE contest_source_search_grams")
+        connection.execute(
+            "CREATE TABLE contest_source_search_grams(contest_id INTEGER)"
+        )
+    with pytest.raises(RuntimeError, match="source search table definition mismatch"):
+        Store(str(table_drift_path))
+
+
+def test_unreleased_contest_gram_projection_fails_closed_without_drop(tmp_path):
+    path = tmp_path / "unreleased-contest-grams.db"
+    store = Store(str(path))
+    store.close()
+    unreleased_table_sql = (
+        "CREATE TABLE contest_source_search_grams ("
+        "gram_len INTEGER NOT NULL CHECK(gram_len IN (1,2,3)),"
+        "gram TEXT NOT NULL COLLATE NOCASE,"
+        "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,"
+        "PRIMARY KEY(gram_len,gram,contest_id)) WITHOUT ROWID"
+    )
+    unreleased_index_sql = (
+        "CREATE INDEX idx_contests_source_protected "
+        "ON contests(game_id,created_at DESC,id DESC) WHERE showcase_key IS NULL "
+        "AND status='finished' AND typeof(official_results_ready)='integer' "
+        "AND official_results_ready=1"
+    )
+    unreleased_trigger_sql = (
+        "CREATE TRIGGER trg_contest_source_search_update AFTER UPDATE OF title "
+        "ON contests BEGIN SELECT 1; END"
+    )
+    with sqlite3.connect(path) as connection:
+        for name in (
+            "trg_contest_source_search_insert",
+            "trg_contest_source_search_update",
+            "trg_contest_source_search_delete",
+        ):
+            connection.execute(f"DROP TRIGGER {name}")
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name LIKE 'idx_contests_source_%'"
+        ).fetchall():
+            connection.execute(f"DROP INDEX {name}")
+        connection.execute("DROP TABLE contest_source_search_grams")
+        connection.execute(unreleased_table_sql)
+        connection.execute(unreleased_index_sql)
+        connection.execute(unreleased_trigger_sql)
+
+    with pytest.raises(RuntimeError, match="source search table definition mismatch"):
+        Store(str(path))
+
+    with sqlite3.connect(path) as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            ("contest_source_search_grams",),
+        ).fetchone()[0]
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ("trg_contest_source_search_update",),
+        ).fetchone()[0]
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_contests_source_protected",),
+        ).fetchone()[0]
+    assert " ".join(table_sql.split()).lower() == " ".join(
+        unreleased_table_sql.split()
+    ).lower()
+    assert " ".join(trigger_sql.split()).lower() == " ".join(
+        unreleased_trigger_sql.split()
+    ).lower()
+    assert " ".join(index_sql.split()).lower() == " ".join(
+        unreleased_index_sql.split()
+    ).lower()
+
+
+def test_execution_claim_indexes_are_canonical_planned_and_reopen_safe(tmp_path):
+    path = tmp_path / "execution-claim-indexes.db"
+    store = Store(str(path))
+    expected = {
+        "idx_execution_jobs_claim_source_order": EXECUTION_CLAIM_SOURCE_ORDER_INDEX_SQL,
+        "idx_execution_jobs_claim_contest_order": EXECUTION_CLAIM_CONTEST_ORDER_INDEX_SQL,
+        "idx_execution_jobs_contest_dispatch_gap": EXECUTION_CONTEST_DISPATCH_GAP_INDEX_SQL,
+    }
+    with store._tx() as connection:
+        definitions = {
+            name: connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (name,),
+            ).fetchone()[0]
+            for name in expected
+        }
+        source_plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM execution_jobs INDEXED BY "
+                "idx_execution_jobs_claim_source_order "
+                "WHERE source=? AND status='queued' AND cancel_requested=0 "
+                "ORDER BY created_at,id LIMIT 64",
+                ("contest",),
+            )
+        )
+        gap_plan = " ".join(
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT contest_pairing_id FROM execution_jobs "
+                "INDEXED BY idx_execution_jobs_contest_dispatch_gap "
+                "WHERE source=? AND contest_id=? AND status IN (?,?) LIMIT 1",
+                ("contest", 1, "cancelled", "interrupted"),
+            )
+        )
+    for name, sql in expected.items():
+        assert "".join(definitions[name].split()).lower() == "".join(
+            sql.split()
+        ).lower()
+    assert "idx_execution_jobs_claim_source_order" in source_plan
+    assert "idx_execution_jobs_contest_dispatch_gap" in gap_plan
+    store.close()
+
+    # A database created before these indexes gets them on first open; a
+    # second reopen proves the canonical certification is idempotent.
+    connection = sqlite3.connect(path)
+    for name in expected:
+        connection.execute(f'DROP INDEX "{name}"')
+    connection.commit()
+    connection.close()
+    migrated = Store(str(path))
+    migrated.close()
+    reopened = Store(str(path))
+    assert reopened._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
+
+    malformed_path = tmp_path / "execution-claim-index-malformed.db"
+    malformed = Store(str(malformed_path))
+    malformed.close()
+    connection = sqlite3.connect(malformed_path)
+    connection.execute("DROP INDEX idx_execution_jobs_claim_source_order")
+    connection.execute(
+        "CREATE INDEX idx_execution_jobs_claim_source_order "
+        "ON execution_jobs(source,status)"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="execution queue index definition mismatch"):
+        Store(str(malformed_path))
 
 
 def _make_legacy_neutral_contract_db(tmp_path, name: str) -> tuple[str, dict[str, int]]:
@@ -860,6 +2146,7 @@ def test_migrate_old_db_drops_matches_keeps_users(tmp_path):
     migrated_contest = s2.get_contest(1)
     assert migrated_contest["title"] == "old"
     assert migrated_contest["showcase_key"] is None
+    assert migrated_contest["published_stage_pairing_count"] is None
     # 对局数据丢弃
     assert s2.get_match("m1") is None
     # ratings game_id 回填

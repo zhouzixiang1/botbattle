@@ -20,6 +20,7 @@ import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -32,6 +33,7 @@ import type { SeatInfo } from '@/games/canvas-types'
 import { describePlatformEvent } from '@/games/reasons'
 import { eventSeatSubject } from '@/games/seat-display'
 import type { RawEvent } from '@/games/base'
+import { parseMatchTimeControl, timeControlDescription, timeControlLabel } from '@/lib/time-controls'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -51,6 +53,7 @@ type MatchRow = MatchSeatRow & {
   reason?: string
   can_view_debug?: boolean
   contest_id?: number | null
+  time_control?: unknown
 }
 
 type ReplayPayload = {
@@ -105,6 +108,7 @@ const RATING_REASON_LABEL: Record<string, string> = {
   owner_missing: '历史所有者缺失 · 不计平台排行榜',
   remote_local: '本地 Bot 练习 · 不计平台排行榜',
   ranked_bot_not_selected: '未派遣排行榜 Bot · 不计平台排行榜',
+  alternate_time_control: '替代时限练习 · 不计平台排行榜',
 }
 
 function ratingBadge(match: MatchRow): {
@@ -489,6 +493,7 @@ export default function MatchViewer() {
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
   const compactViewportDashboard = viewportDashboard && timelineCollapsed
   const ratingStateBadge = match ? ratingBadge(match) : null
+  const matchTimeControl = parseMatchTimeControl(match?.time_control, gameId)
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
     : resolveTerminalReason(match?.reason, match?.status)
@@ -720,6 +725,16 @@ export default function MatchViewer() {
           >
             {ratingStateBadge.label}
           </Badge>
+        )}
+        {matchTimeControl && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge data-testid="match-time-control" variant="outline" className="max-w-full whitespace-normal text-[10px]">
+                {timeControlLabel(matchTimeControl)}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">{timeControlDescription(matchTimeControl)}</TooltipContent>
+          </Tooltip>
         )}
         {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
             回退到本地连接态（connecting/live/match_end/error/replay）。

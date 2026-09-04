@@ -129,6 +129,14 @@ class MatchSession:
 
     # ------------------------------------------------------------------ public
     async def run_async(self, decide: DecideFn) -> MatchResult:
+        self._emit(
+            "match_start",
+            {
+                "game_id": "holdem",
+                "num_hands": self.num_hands,
+                "first": 0,
+            },
+        )
         for h in range(self.num_hands):
             # Botzone 计分：每手筹码复位 starting_stack（不跨手累积，不因归零提前结束）
             try:

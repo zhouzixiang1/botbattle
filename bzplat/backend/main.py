@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -9,11 +10,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from bzplat.backend.api_routes import router as api_router
-from bzplat.backend.auth.auth_manager import AuthManager
+from bzplat.backend.auth.auth_manager import COOKIE_NAME, AuthManager
 from bzplat.backend.auth.captcha import CaptchaStore
 from bzplat.backend.auth.routes import router as auth_router
 from bzplat.backend.bots import BotManager
@@ -36,6 +39,10 @@ from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     BOT_UPLOAD_ADMISSION_SLOTS,
+    HUMAN_WS_HANDSHAKE_MAX_ATTEMPTS,
+    HUMAN_WS_HANDSHAKE_MAX_BUCKETS,
+    HUMAN_WS_HANDSHAKE_MAX_INFLIGHT,
+    HUMAN_WS_HANDSHAKE_WINDOW_SECONDS,
 )
 from bzplat.backend.runtime.docker_supervisor import (
     DockerSupervisor,
@@ -48,9 +55,12 @@ from bzplat.backend.runtime.limits import (
     effective_host_resource_budget,
 )
 from bzplat.backend.runtime.local_ai_service import LocalAIService
+from bzplat.backend.runtime.websocket_gate import WebSocketHandshakeGate
 from bzplat.backend.security import (
     AccessLogMiddleware,
     BotUploadBodyLimitMiddleware,
+    CookieOriginCSRFMiddleware,
+    CredentialedAPINoStoreMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
     trusted_proxy_networks,
@@ -144,6 +154,12 @@ def create_app(
         validate_local_docker_configuration()
     store = Store(db_path)
     local_ai_service = LocalAIService(store)
+    human_play_handshake_gate = WebSocketHandshakeGate(
+        max_attempts=HUMAN_WS_HANDSHAKE_MAX_ATTEMPTS,
+        window_seconds=HUMAN_WS_HANDSHAKE_WINDOW_SECONDS,
+        max_inflight=HUMAN_WS_HANDSHAKE_MAX_INFLIGHT,
+        max_buckets=HUMAN_WS_HANDSHAKE_MAX_BUCKETS,
+    )
     store.executions.set_local_agent_available(local_ai_service.is_available_now)
     _seed_site_settings(store)
     effective_conc = _effective_max_concurrent(max_concurrent)
@@ -327,6 +343,44 @@ def create_app(
                         await execution_dispatcher.close()
 
     app = FastAPI(title="botzone-platform", version="0.1.0", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_error(request, exc: RequestValidationError):
+        # Keep FastAPI's public 422 shape, including loc/type/msg, while making
+        # the response safe for every value that JSON parsing/Pydantic may echo
+        # in ``input``. In particular, a raw ``\ud800`` escape becomes a lone
+        # surrogate in Python; Starlette's default ensure_ascii=False renderer
+        # then raises UnicodeEncodeError while trying to report the validation
+        # failure. ASCII JSON escaping is lossless and always UTF-8 encodable.
+        errors = exc.errors()
+        path = request.url.path
+        if path == "/api/auth" or path.startswith("/api/auth/"):
+            # Authentication bodies contain passwords, verification codes and
+            # personal identifiers. Pydantic's diagnostic-only ``input``,
+            # ``ctx`` and ``url`` fields must never reflect those values back to
+            # clients (or any downstream response capture). Keep only the stable
+            # public fields already consumed by form validation UIs.
+            errors = [
+                {
+                    key: error[key]
+                    for key in ("loc", "msg", "type")
+                    if key in error
+                }
+                for error in errors
+            ]
+        content = {"detail": jsonable_encoder(errors)}
+        payload = json.dumps(
+            content,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return Response(
+            content=payload,
+            status_code=422,
+            media_type="application/json",
+        )
+
     app.state.store = store
     app.state.auth = auth
     app.state.auth_manager = auth
@@ -335,6 +389,7 @@ def create_app(
     app.state.bot_manager = bot_manager
     app.state.binary_runner = binary_runner
     app.state.local_ai_service = local_ai_service
+    app.state.human_play_handshake_gate = human_play_handshake_gate
     # Upload preflight runs in a worker thread and must own its BinaryRunner.
     # Sharing the orchestrator runner across event loops/threads would race its
     # session map and subprocess transports.
@@ -363,13 +418,24 @@ def create_app(
     app.state.runtime_ceiling = concurrent_ceiling()
     app.state.trusted_proxy_cidrs = trusted_proxy_cidrs
 
-    # Added first = innermost user middleware: still before FastAPI form parsing,
+    # Added first = innermost user middleware: still before FastAPI body parsing,
     # while the existing security/access layers can decorate and log its 413.
     app.add_middleware(BotUploadBodyLimitMiddleware)
+    app.add_middleware(
+        CookieOriginCSRFMiddleware,
+        cookie_name=COOKIE_NAME,
+        public_origin=os.environ.get("BZ_PUBLIC_ORIGIN", ""),
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         RateLimitMiddleware,
         trusted_proxy_cidrs=trusted_proxy_cidrs,
+    )
+    # Wrap rate-limit/CSRF/FastAPI responses alike so credential-varying API
+    # success and error bodies can never enter browser or shared caches.
+    app.add_middleware(
+        CredentialedAPINoStoreMiddleware,
+        cookie_name=COOKIE_NAME,
     )
     # AccessLog 最后 add = 最外层，记录所有请求（含被限流的 429）
     app.add_middleware(
@@ -418,6 +484,7 @@ def create_app(
     app.mount("/avatars", StaticFiles(directory=str(avatars_dir)), name="avatars")
 
     if dist.is_dir():
+        dist_root = dist.resolve()
         assets = dist / "assets"
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
@@ -428,10 +495,18 @@ def create_app(
 
         @app.get("/{full_path:path}")
         def spa(full_path: str):
-            # API 已由前面路由处理；其余走 SPA
-            candidate = dist / full_path
+            # API 已由前面路由处理。只允许解析后仍位于 dist 内的普通
+            # 文件；encoded ``..``、绝对路径和指向目录外的 symlink 均
+            # 稳定 404，不能借 SPA catch-all 读取服务器文件。
+            if "\\" in full_path or ".." in full_path.split("/"):
+                raise HTTPException(404, "Not Found")
+            try:
+                candidate = (dist_root / full_path).resolve()
+                candidate.relative_to(dist_root)
+            except (OSError, RuntimeError, ValueError):
+                raise HTTPException(404, "Not Found") from None
             if candidate.is_file():
                 return FileResponse(candidate)
-            return FileResponse(dist / "index.html")
+            return FileResponse(dist_root / "index.html")
 
     return app

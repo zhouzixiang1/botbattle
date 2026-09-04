@@ -50,6 +50,19 @@ test('participant fit is advisory and offers matching alternatives', () => {
   )
 })
 
+test('strict participant bands are described as publish requirements', () => {
+  const seededFinal: ContestTemplateGuidance = {
+    id: 'seeded',
+    name: '保护种子正式赛',
+    recommended_min: 22,
+    recommended_max: 26,
+    participant_range_is_strict: true,
+  }
+  assert.equal(recommendedRangeLabel(seededFinal), '限 22–26 人')
+  assert.match(templateFitMessage(seededFinal, 21) || '', /不符合发布人数要求/)
+  assert.match(templateFitMessage(seededFinal, 24) || '', /符合发布人数要求/)
+})
+
 test('unbounded paired-swap tiebreak is explicit rather than inferred from KO', () => {
   assert.equal(templateHasUnboundedTiebreak({
     stages: [{ type: 'single_elimination', tiebreak: 'paired_swap_until_decided' }],

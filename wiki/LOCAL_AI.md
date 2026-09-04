@@ -64,7 +64,31 @@ python local_ai_client.py --url $env:BOTBATTLE_LOCAL_AI_URL --command python my_
 
 ## 本机 Bot 收到什么
 
-平台发给客户端的控制消息如下。`input_line` 是要原样写入 Bot stdin 的一行 Traditional 信封：
+连接器必须使用当前下载脚本协商 WSS 子协议 `botbattle.local-ai.v2`。旧脚本不理解下面的两阶段计时，平台会在把接入登记为在线之前拒绝连接；升级脚本后再重新连接即可，不会让旧客户端静默取得对局后技术负。
+
+正常回合先收到一条不含局面与历史的准备消息。客户端须在独立的 8 秒准备时限内启动 Traditional 进程，再回送精确绑定的 `prepared`：
+
+```json
+{
+  "type": "prepare_turn",
+  "request_id": "req_...",
+  "match_id": "20260813...",
+  "turn": 3,
+  "seat": 1,
+  "prepare_timeout_ms": 8000
+}
+```
+
+```json
+{
+  "type": "prepared",
+  "request_id": "req_...",
+  "match_id": "20260813...",
+  "turn": 3
+}
+```
+
+平台确认当前连接、请求、对局和回合仍完全一致后，才冻结本回合的 Bot 棋钟并下发完整决策消息。`input_line` 是要原样写入 Bot stdin 的一行 Traditional 信封：
 
 ```json
 {
@@ -72,12 +96,13 @@ python local_ai_client.py --url $env:BOTBATTLE_LOCAL_AI_URL --command python my_
   "request_id": "req_...",
   "match_id": "20260813...",
   "turn": 3,
+  "seat": 1,
   "input_line": "{\"requests\":[...],\"responses\":[...]}",
   "timeout_ms": 8000
 }
 ```
 
-客户端每回合执行一次指定命令，向 stdin 写入 `input_line` 加换行，只读取 stdout 首行，然后回送：
+客户端向已就绪进程的 stdin 写入 `input_line` 加换行，只读取 stdout 首行，然后回送：
 
 ```json
 {
@@ -103,9 +128,9 @@ python local_ai_client.py --url $env:BOTBATTLE_LOCAL_AI_URL --command python my_
 }
 ```
 
-`reason` 只可能是 `bot_start_failed`、`bot_no_response`、`bot_output_too_large`、`bot_output_invalid`、`bot_io_failed` 或 `bot_decision_timeout`。平台确认 `request_id + match_id + turn` 与当前待答回合完全一致后，立即按本地 Bot 技术故障结束该局并释放执行槽；错局、错回合和晚到消息都会拒绝。本机路径、命令参数、stderr 和原始异常不会上传。
+`reason` 只可能是 `bot_start_failed`、`bot_no_response`、`bot_output_too_large`、`bot_output_invalid`、`bot_io_failed` 或 `bot_decision_timeout`。准备阶段只能上报 `bot_start_failed`；其余类别只属于已经开始计时的决策阶段。平台确认 `request_id + match_id + turn` 与当前待答回合完全一致后，立即按本地 Bot 技术故障结束该局并释放执行槽；错局、错回合和晚到消息都会拒绝。本机路径、命令参数、stderr 和原始异常不会上传。
 
-客户端把单次输入限制为 1 MiB、stdout 首行限制为 64 KiB，并按平台给出的 `timeout_ms` 结束超时进程。stderr 不上传。连接若在 Bot 思考时中断，客户端会立即结束该回合的 Bot 进程并进入重连，不会空等到决策超时。断线后按 1、2、4、8、16、30 秒退避重连；平台只会在原截止时间尚未到达时重发同一决策，重连不会延长时间。
+客户端把单次输入限制为 1 MiB、stdout 首行限制为 64 KiB，并按平台给出的 `timeout_ms` 结束超时进程。正常两阶段路径中，进程启动属于准备阶段，不消耗游戏棋钟；棋钟从完整 `turn` 交给已就绪进程起，到完整 stdout 首行到达为止。stderr 不上传。准备期间断线仍受原 8 秒准备截止时间约束；连接若在 Bot 思考时中断，客户端会立即结束该回合的 Bot 进程并进入重连，不会空等到决策超时。断线后按 1、2、4、8、16、30 秒退避重连；平台只会在原截止时间尚未到达时重发同一决策，重连不会延长时间。决策已开始后重连收到的是剩余时限内的直接 `turn`，此时重新创建进程也必须包含在原剩余时限内。
 
 ## 两个本地 Bot 对战
 
@@ -124,7 +149,7 @@ python local_ai_client.py --url $env:BOTBATTLE_LOCAL_AI_URL --command python my_
 - **令牌泄露**：立即在“我的 Bot”中“更换令牌”；旧令牌随即失效。停止使用时撤销接入。
 - **一直离线**：重新复制页面给出的 `wss://` 地址，确认系统时间正确、网络允许出站 HTTPS/WSS，并检查令牌没有首尾空格。
 - **Bot 未响应或本局立即技术结束**：先看客户端终端中的本机诊断，再直接给程序输入一行完整信封，确认命令能启动、只向 stdout 输出一行 JSON 且立即 flush；这些本机诊断不会上传平台。
-- **频繁超时**：本机进程启动时间也计入本回合时限。减少启动开销，或先用更简单的局面定位协议问题。
+- **频繁超时**：正常回合的进程启动不计游戏棋钟；先确认脚本已升级并能在 8 秒准备时限内启动，再检查程序收到完整 `turn` 后是否及时读取 stdin、只输出一行 JSON 并 flush。若是在决策中断线后重连，进程重建仍受原剩余时限约束。
 - **需要 LongRunning**：当前本地接入不支持；请上传 ELF 并选择 LongRunning，或先把程序改为 Traditional 调试。
 
 ## 三类用户各自关注什么

@@ -36,12 +36,14 @@ def _make_contest(store, *, status="draft", stages='[{"key":"s1","type":"swiss",
     return c["id"]
 
 
-def test_force_finish_running_to_finished(tmp_path):
+def test_force_finish_rejects_unsealed_running_state(tmp_path):
+    """Direct-Store running rows without a frozen stage batch fail closed."""
     store, mgr = _mgr(tmp_path)
     cid = _make_contest(store, status="running")
-    c = asyncio.run(mgr.finish(cid))
-    assert c["status"] == "finished"
-    assert c.get("ends_at")
+    with pytest.raises(ValueError, match="完整固化|完整性"):
+        asyncio.run(mgr.finish(cid))
+    assert store.get_contest(cid)["status"] == "running"
+    assert store.list_official_results(cid) == []
 
 
 def test_force_finish_rejects_non_running(tmp_path):

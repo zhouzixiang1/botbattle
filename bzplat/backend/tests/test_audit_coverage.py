@@ -21,6 +21,7 @@ import pytest
 from starlette.requests import Request
 
 from bzplat.backend.api_routes import match_events
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.orchestrator import HumanInactive, MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
@@ -33,6 +34,8 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import STATUS_ABORTED, STATUS_COMPLETED, STATUS_RUNNING
 from bzplat.backend.tests.execution_helpers import (
     challenge_and_start,
+    claim_next_queued,
+    enable_execution_queue,
     human_and_start,
 )
 
@@ -420,7 +423,16 @@ def test_sse_terminal_snapshot_ignores_stale_active_prefix(store: Store):
     snapshot = orch.subscribe(match_id).get_nowait()
     assert snapshot["match"]["status"] == STATUS_COMPLETED
     assert snapshot["events"] == [
-        {"type": "match_start", "game_id": "gomoku"},
+        {
+            "type": "match_start",
+            "game_id": "gomoku",
+            "time_control": {
+                "id": "gomoku_per_side_total_900s_v1",
+                "mode": "per_side_total",
+                "seconds": 900,
+                "applies_to": "both_bots",
+            },
+        },
         {"type": "match_end", "winner": 0, "reason": "five", "deltas": [1, -1]},
     ]
 
@@ -867,7 +879,10 @@ def test_rating_recovery_excludes_contest_and_human_but_marks_selfplay(store: St
     _, bb = _user_with_bot(
         store, name="semanticsb", path=_fixture_binary(store, "semantics-b")
     )
-    contest = store.create_contest("rating semantics", owner["id"], status="running")
+    # Rating recovery only needs a durable contest affiliation.  Use an
+    # explicitly imported terminal row instead of inventing an active contest
+    # with no lifecycle manifest/seal.
+    contest = store.create_contest("rating semantics", owner["id"], status="finished")
     cases = (
         ("rating-contest", ba["id"], bb["id"], "contest", contest["id"]),
         ("rating-human", ba["id"], bb["id"], "human", None),
@@ -1045,7 +1060,9 @@ def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: S
     # event-free manual runtime failure is deleted, but remains an explicit
     # owner-retryable interruption; no synthetic public platform_error match
     # survives and no hidden automatic retry is started on the user's behalf.
-    recovered = store.executions.recover_after_namespace_cleanup()
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    )
     assert recovered == {"requeued": 0, "interrupted": 1, "settling": 0}
     assert store.get_match(mid) is None
     interrupted = store.executions.get(job["public_id"])
@@ -1130,7 +1147,10 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
 
     async def exercise_aborted_humans():
         mids = []
-        for exc in (BotCrashedError("bot gone"), HumanInactive("human idle")):
+        for exc in (
+            BotCrashedError("bot gone", crashed_seat=0),
+            HumanInactive("human idle"),
+        ):
             aborted_orch = MatchOrchestrator(
                 store, runner=AbortedHumanRunner(exc), max_concurrent=1
             )
@@ -1451,12 +1471,6 @@ def test_orchestrator_shutdown_cancels_and_drains_owned_tasks(store: Store):
 
 def test_contest_crash_blames_correct_seat_bot_b(store: Store):
     """赛事对局收到 crashed_seat=1 → 技术判负 winner=0（bot_a 赢）。"""
-    from bzplat.backend.store.schema import (
-        CONTEST_RUNNING,
-
-        TYPE_CONTEST,
-    )
-
     class CrashingRunner:
         async def run_binaries(self, *args, **kwargs):
             raise BotCrashedError("controlled startup crash", crashed_seat=1)
@@ -1469,43 +1483,29 @@ def test_contest_crash_blames_correct_seat_bot_b(store: Store):
         store, name="badu2", path=os.path.abspath("samples/gomokubot_linux_amd64")
     )
 
-    # 建一个 running 赛事 + 报名
+    # 从正式发布/派发链生成完整 manifest、版本快照、execution job 与 Match，
+    # 避免手工 running fixture 绕过 active lifecycle seal。
     cid = store.create_contest(
         "t", ua["id"], game_id="gomoku", template_id="gomoku_rr",
         stages_json=json.dumps(
             [{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]
         ),
     )["id"]
-    store.update_contest(cid, status=CONTEST_RUNNING)
-    entry_a = store.add_contest_entry(cid, ua["id"], ba["id"])
-    entry_b = store.add_contest_entry(cid, ub["id"], bb["id"])
-    pairing = store.add_contest_pairing(
-        cid,
-        ba["id"],
-        bb["id"],
-        stage_idx=0,
-        stage_key="rr",
-        entry_a_id=entry_a["id"],
-        entry_b_id=entry_b["id"],
-    )
-    mid = _new_match_id()
-    store.create_match(
-        mid, ba["id"], bb["id"], owner_id=ua["id"], contest_id=cid,
-        game_id="gomoku", match_type=TYPE_CONTEST,
-        match_config={"duplicate": False},
-    )
-    store.bind_contest_pairing_match(
-        cid, pairing["id"], mid, require_execution_admission=False
-    )
+    store.add_contest_entry(cid, ua["id"], ba["id"])
+    store.add_contest_entry(cid, ub["id"], bb["id"])
+    manager = ContestManager(store, orch)
 
     async def run():
-        task = orch._run_match(mid)
-        try:
-            await asyncio.wait_for(task, timeout=20)
-        except Exception:
-            pass
+        enable_execution_queue(store)
+        await manager.start(cid)
+        job = claim_next_queued(orch)
+        mid = str(job["current_match_id"])
+        task = orch._tasks.get(mid)
+        if task is not None:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=20)
+        return mid
 
-    asyncio.run(run())
+    mid = asyncio.run(run())
     m = store.get_match(mid)
     assert m["status"] == "completed", f"expected completed, got {m['status']}"
     assert m["reason"] == "technical_loss"
@@ -1516,12 +1516,6 @@ def test_contest_crash_blames_correct_seat_bot_b(store: Store):
 
 def test_contest_crash_blames_correct_seat_bot_a(store: Store):
     """赛事对局收到 crashed_seat=0 → 技术判负 winner=1（bot_b 赢）。"""
-    from bzplat.backend.store.schema import (
-        CONTEST_RUNNING,
-
-        TYPE_CONTEST,
-    )
-
     class CrashingRunner:
         async def run_binaries(self, *args, **kwargs):
             raise BotCrashedError("controlled startup crash", crashed_seat=0)
@@ -1540,36 +1534,21 @@ def test_contest_crash_blames_correct_seat_bot_a(store: Store):
             [{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]
         ),
     )["id"]
-    store.update_contest(cid, status=CONTEST_RUNNING)
-    entry_a = store.add_contest_entry(cid, ua["id"], ba["id"])
-    entry_b = store.add_contest_entry(cid, ub["id"], bb["id"])
-    pairing = store.add_contest_pairing(
-        cid,
-        ba["id"],
-        bb["id"],
-        stage_idx=0,
-        stage_key="rr",
-        entry_a_id=entry_a["id"],
-        entry_b_id=entry_b["id"],
-    )
-    mid = _new_match_id()
-    store.create_match(
-        mid, ba["id"], bb["id"], owner_id=ub["id"], contest_id=cid,
-        game_id="gomoku", match_type=TYPE_CONTEST,
-        match_config={"duplicate": False},
-    )
-    store.bind_contest_pairing_match(
-        cid, pairing["id"], mid, require_execution_admission=False
-    )
+    store.add_contest_entry(cid, ua["id"], ba["id"])
+    store.add_contest_entry(cid, ub["id"], bb["id"])
+    manager = ContestManager(store, orch)
 
     async def run():
-        task = orch._run_match(mid)
-        try:
-            await asyncio.wait_for(task, timeout=20)
-        except Exception:
-            pass
+        enable_execution_queue(store)
+        await manager.start(cid)
+        job = claim_next_queued(orch)
+        mid = str(job["current_match_id"])
+        task = orch._tasks.get(mid)
+        if task is not None:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=20)
+        return mid
 
-    asyncio.run(run())
+    mid = asyncio.run(run())
     m = store.get_match(mid)
     assert m["status"] == "completed", f"expected completed, got {m['status']}"
     assert m["reason"] == "technical_loss"

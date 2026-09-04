@@ -51,6 +51,19 @@ def _people(
     return users, bots
 
 
+def _canonical_tiebreaks(points: int | float, seed: int) -> dict[str, int | float]:
+    return {
+        "points": points,
+        "buchholz": 0,
+        "buchholz_cut1": 0,
+        "sonneborn_berger": 0,
+        "head_to_head": 0,
+        "normalized_delta": 0,
+        "technical_losses": 0,
+        "seed": seed,
+    }
+
+
 def _bind_match(
     store: Store,
     contest_id: int,
@@ -59,6 +72,7 @@ def _bind_match(
     *,
     status: str,
     duplicate: bool = False,
+    frozen_duplicate: bool | None = None,
 ) -> None:
     store.create_match(
         match_id,
@@ -68,7 +82,11 @@ def _bind_match(
         contest_id=contest_id,
         match_type="contest",
         game_id="holdem",
-        match_config={"duplicate": True} if duplicate else None,
+        match_config=(
+            {"duplicate": frozen_duplicate}
+            if frozen_duplicate is not None
+            else ({"duplicate": True} if duplicate else None)
+        ),
     )
     store.bind_contest_pairing_match(
         contest_id,
@@ -141,26 +159,32 @@ def _live_fixture(tmp_path: Path):
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    pairs = [(0, 1), (0, 2), (0, 3), (1, 2)]
-    pairings = []
-    for ordinal, (first, second) in enumerate(pairs, start=1):
-        pairings.append(
-            store.add_pairing(
-                contest["id"],
-                bots[first]["id"],
-                bots[second]["id"],
-                entry_a_id=entries[first]["id"],
-                entry_b_id=entries[second]["id"],
-                stage_idx=0,
-                stage_key="dup_rr",
-                round_num=ordinal,
-                pairing_seed=7000 + ordinal,
-                published_at="2026-08-27T10:00:00+08:00",
-                scheduled_at=(
+    pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+    pairings = store.create_contest_stage_pairings(
+        contest["id"],
+        0,
+        [
+            {
+                "bot_a_id": bots[first]["id"],
+                "bot_b_id": bots[second]["id"],
+                "entry_a_id": entries[first]["id"],
+                "entry_b_id": entries[second]["id"],
+                "stage_idx": 0,
+                "stage_key": "dup_rr",
+                "round_num": ordinal,
+                "pairing_seed": 7000 + ordinal,
+                "published_at": "2026-08-27T10:00:00",
+                "scheduled_at": (
                     "2099-12-31T23:59:59" if ordinal == 4 else None
                 ),
-            )
-        )
+            }
+            for ordinal, (first, second) in enumerate(pairs, start=1)
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )
+    assert store.contest_stage_manifest_is_valid(contest["id"], 0)
     _bind_match(
         store,
         contest["id"],
@@ -183,7 +207,6 @@ def _live_fixture(tmp_path: Path):
         "live-queued",
         status="pending",
     )
-    store.update_contest(contest["id"], status="running")
     return app, contest, entries, bots
 
 
@@ -195,7 +218,7 @@ def _all_keys(value: Any) -> set[str]:
     return set()
 
 
-def test_live_projection_is_three_select_snapshot_without_n_plus_one(
+def test_live_projection_is_four_select_snapshot_without_n_plus_one(
     tmp_path, monkeypatch
 ):
     app, contest, _entries, _bots = _live_fixture(tmp_path)
@@ -248,17 +271,16 @@ def test_live_projection_is_three_select_snapshot_without_n_plus_one(
         store._conn.set_trace_callback(None)
     assert response.status_code == 200, response.text
     selects = [sql for sql in traced if sql.lstrip().upper().startswith("SELECT")]
-    assert len(selects) == 3, selects
+    assert len(selects) == 4, selects
     assert any("FROM contests" in sql for sql in selects)
     assert any("FROM contest_pairings" in sql and "m.result" in sql for sql in selects)
     assert any("FROM contest_entries" in sql for sql in selects)
+    assert any("FROM contest_stage_results" in sql for sql in selects)
 
     payload = response.json()
     assert payload["progress"] == {
         "completed": 1,
-        # Two whole RR opponent groups are deliberately absent from the
-        # fixture.  Strict-v1 totals come from the four-entry cohort, not from
-        # the surviving fixture rows.
+            # Strict-v1 totals come from the complete four-entry cohort.
         "total": 6,
         "running": 1,
         "pending": 4,
@@ -296,7 +318,52 @@ def test_live_projection_is_three_select_snapshot_without_n_plus_one(
 
     detail = client.get(f"/api/contests/{contest['id']}")
     assert detail.status_code == 200, detail.text
-    stage_summary = detail.json()["stage_standings"][0]
+    detail_payload = detail.json()
+    assert set(detail_payload["contest"]) == {
+        "id",
+        "title",
+        "description",
+        "organizer_id",
+        "status",
+        "registration_opens_at",
+        "registration_closes_at",
+        "starts_at",
+        "ends_at",
+        "created_at",
+        "game_id",
+        "ruleset_version",
+        "protocol_version",
+        "rating_pool_id",
+        "stages_json",
+        "current_stage_idx",
+        "template_id",
+        "rest_ends_at",
+        "phase",
+        "source_contest_id",
+        "time_control_id",
+        "official_results_ready",
+        "require_real_name",
+        "showcase_key",
+        "format_snapshot",
+        "games_per_pair",
+        "stage_series_settings",
+        "stage_format_settings",
+        "time_control",
+        "template_name",
+    }
+    stage_summary = detail_payload["stage_standings"][0]
+    assert set(stage_summary) == {
+        "stage_idx",
+        "stage_key",
+        "status",
+        "source",
+        "completed_pairings",
+        "total_pairings",
+        "counts",
+        "advancement_final",
+        "elimination_tiebreak",
+        "rows",
+    }
     assert stage_summary["status"] == "running"
     assert stage_summary["total_pairings"] == 6
     assert stage_summary["counts"] == payload["counts"]
@@ -333,6 +400,533 @@ def test_live_projection_is_three_select_snapshot_without_n_plus_one(
         "2099-12-31T23:59:59",
         payload["contest"]["starts_at"],
     }
+
+
+def _installed_two_player_decision(tmp_path: Path, suffix: str):
+    app = create_app(db_path=str(tmp_path / f"active-decision-{suffix}.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        f"decision-{suffix}-org",
+        f"decision-{suffix}-org@example.com",
+        "hash",
+        role="organizer",
+    )
+    users, bots = _people(store, tmp_path, 2, prefix=f"decision-{suffix}")
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+    }
+    contest = store.create_contest(
+        "Installed decision authority",
+        organizer["id"],
+        status="published",
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+        for user, bot in zip(users, bots, strict=True)
+    ]
+    manager = app.state.contest_manager
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
+    )
+    pairing = store.list_contest_pairings(contest["id"], stage_idx=0)[0]
+    match_id = f"active-decision-{suffix}"
+    _bind_match(
+        store,
+        contest["id"],
+        pairing,
+        match_id,
+        status="completed",
+    )
+    _ranked, decision_revision, decision_entries, decision_groups = (
+        manager._ensure_stage_decision(contest["id"], 0)
+    )
+    frozen_order = [
+        row["bot_id"]
+        for row in store.list_stage_results(contest["id"], stage_idx=0)
+    ]
+    assert frozen_order == [bots[0]["id"], bots[1]["id"]]
+    return (
+        app,
+        contest,
+        entries,
+        bots,
+        match_id,
+        frozen_order,
+        decision_revision,
+        decision_entries,
+        decision_groups,
+    )
+
+
+@pytest.mark.parametrize("lifecycle_status", ["running", "rest"])
+def test_active_installed_decision_is_the_only_detail_and_live_ranking(
+    tmp_path, monkeypatch, lifecycle_status
+):
+    """A transition retry and public Top table consume one immutable decision."""
+    (
+        app,
+        contest,
+        _entries,
+        _bots,
+        match_id,
+        frozen_order,
+        decision_revision,
+        decision_entries,
+        decision_groups,
+    ) = (
+        _installed_two_player_decision(tmp_path, lifecycle_status)
+    )
+    store = app.state.store
+    manager = app.state.contest_manager
+
+    # Model the transition-failure window: the immutable decision is already
+    # installed, but a corrupt/imported Match now replays the opposite result.
+    # The public read must not expose that newer replay while retry logic still
+    # advances from the old decision.
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE matches_holdem SET winner=1,result=? WHERE id=?",
+            (
+                json.dumps({"rounds_played": 70, "deltas": [-10, 10]}),
+                match_id,
+            ),
+        )
+    replayed_order = [
+        row["bot_id"] for row in manager.standings(contest["id"], stage_idx=0)
+    ]
+    assert replayed_order == list(reversed(frozen_order))
+    if lifecycle_status == "rest":
+        store.enter_contest_rest_from_decision(
+            contest["id"],
+            0,
+            expected_revision=decision_revision,
+            expected_status="running",
+            expected_entries=decision_entries,
+            expected_stage_groups=decision_groups,
+            rest_ends_at="2099-01-01T00:00:00",
+        )
+
+    def unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("installed stage decision was replayed from Match")
+
+    monkeypatch.setattr(manager, "standings", unexpected_replay)
+    client = TestClient(app)
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["stage_standings"][0]["source"] == "persisted"
+    assert [row["bot_id"] for row in detail["stage_standings"][0]["rows"]] == frozen_order
+    assert [row["bot_id"] for row in detail["standings"]] == frozen_order
+    assert [row["bot_id"] for row in live["standings"]] == frozen_order
+
+
+@pytest.mark.parametrize(
+    ("column", "damaged_value"),
+    [
+        ("points", "bad"),
+        ("points", float("inf")),
+        ("wins", -1),
+        ("wins", "bad"),
+        ("delta_total", "bad"),
+        ("points", 999),
+    ],
+)
+def test_detail_and_live_reject_malformed_persisted_stage_statistics(
+    tmp_path, column, damaged_value
+):
+    """Weak SQLite values cannot crash or contradict a decision artifact."""
+    suffix = f"bad-stat-{column}-{str(damaged_value).replace('.', '_')}"
+    (
+        app,
+        contest,
+        entries,
+        _bots,
+        _match_id,
+        _frozen_order,
+        _decision_revision,
+        _decision_entries,
+        _decision_groups,
+    ) = (
+        _installed_two_player_decision(tmp_path, suffix)
+    )
+    store = app.state.store
+    with store._tx() as connection:
+        connection.execute(
+            f"UPDATE contest_stage_results SET {column}=? "
+            "WHERE contest_id=? AND stage_idx=0 AND entry_id=?",
+            (damaged_value, contest["id"], entries[0]["id"]),
+        )
+
+    client = TestClient(app)
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["stage_standings"][0]["rows"] == []
+    assert detail["standings"] == []
+    assert live["standings"] == []
+    assert live["progress"]["completed"] == 0
+
+
+@pytest.mark.parametrize("corruption", ["delete", "coordinate"])
+def test_detail_and_live_reject_current_topology_seal_drift(tmp_path, corruption):
+    """A changed current graph cannot keep publishing its old sealed ranking."""
+    app, contest, _entries, _bots = _live_fixture(tmp_path)
+    store = app.state.store
+    client = TestClient(app)
+    before = client.get(f"/api/contests/{contest['id']}/live")
+    assert before.status_code == 200, before.text
+    assert before.json()["standings"]
+    target = store.list_contest_pairings(contest["id"], stage_idx=0)[-1]
+    with store._tx() as connection:
+        if corruption == "delete":
+            connection.execute(
+                "DELETE FROM contest_pairings WHERE id=?", (target["id"],)
+            )
+        else:
+            connection.execute(
+                "UPDATE contest_pairings SET round_num=round_num+100 WHERE id=?",
+                (target["id"],),
+            )
+
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["standings"] == []
+    assert detail["stage_standings"][0]["rows"] == []
+    assert live["standings"] == []
+    assert live["progress"]["completed"] == 0
+
+
+@pytest.mark.parametrize("future_artifact", ["pairing", "stage-result"])
+def test_detail_and_live_reject_future_stage_artifacts(tmp_path, future_artifact):
+    """No artifact beyond the persisted cursor may authenticate current reads."""
+    app, contest, entries, bots = _live_fixture(tmp_path)
+    store = app.state.store
+    client = TestClient(app)
+    current_stage = json.loads(store.get_contest(contest["id"])["stages_json"])[0]
+    stages = [current_stage, {**current_stage, "key": "future"}]
+    store.update_contest(contest["id"], stages_json=json.dumps(stages))
+    if future_artifact == "pairing":
+        store.add_pairing(
+            contest["id"],
+            bots[0]["id"],
+            bots[1]["id"],
+            entry_a_id=entries[0]["id"],
+            entry_b_id=entries[1]["id"],
+            stage_idx=1,
+            stage_key="future",
+        )
+    else:
+        with store._tx() as connection:
+            connection.execute(
+                "INSERT INTO contest_stage_results("
+                "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+                "losses,delta_total,group_id,rank_in_group,payload_json) "
+                "VALUES(?,1,'future',?,?,0,0,0,0,0,'',1,'{}')",
+                (contest["id"], entries[0]["id"], bots[0]["id"]),
+            )
+
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["standings"] == []
+    assert detail["stage_standings"][0]["rows"] == []
+    assert live["standings"] == []
+    assert live["progress"]["completed"] == 0
+
+
+def test_live_uses_compact_topology_seal_for_omitted_predecessor_graph(tmp_path):
+    """Current-only polling proves history via the transition seal, not rows alone."""
+    app = create_app(db_path=str(tmp_path / "live-predecessor-seal.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        "live-seal-org", "live-seal-org@example.com", "hash", role="organizer"
+    )
+    users, bots = _people(store, tmp_path, 4, prefix="live-seal")
+    stages = [
+        {
+            "key": "qualifier",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "advance_count": 2,
+        },
+        {
+            "key": "final",
+            "type": "double_round_robin",
+            "scoring": "poker_3_1_0",
+            "ranking_mode": "replace_top",
+            "ranking_scope": 2,
+        },
+    ]
+    contest = store.create_contest(
+        "Live predecessor seal",
+        organizer["id"],
+        status="published",
+        game_id="holdem",
+        stages_json=json.dumps(stages),
+    )
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+    manager = ContestManager(store, _ReadOnlyOrchestrator())
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
+    )
+    for pairing in store.list_contest_pairings(contest["id"], stage_idx=0):
+        _bind_match(
+            store,
+            contest["id"],
+            pairing,
+            f"live-seal-qualifier-{pairing['id']}",
+            status="completed",
+        )
+    ranked, decision_revision, _decision_entries, expected_groups = (
+        manager._ensure_stage_decision(contest["id"], 0)
+    )
+    projected, updates = manager._plan_participant_advancement(
+        contest["id"], 0, ranked_rows=ranked
+    )
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            1,
+            dispatch_pending=False,
+            entry_rows=projected,
+            entry_updates=updates,
+            source_decision_revision=decision_revision,
+            source_stage_groups=expected_groups,
+        )
+    )
+    compact_snapshot = store.contest_live_snapshot(contest["id"])
+    assert compact_snapshot is not None
+    assert compact_snapshot["pairings_include_history"] is False
+    assert {
+        row["stage_idx"] for row in compact_snapshot["pairings"]
+    } == {1}
+    assert store.contest_stage_manifest_is_valid(contest["id"], 1)
+
+    client = TestClient(app)
+    detail_ok = client.get(f"/api/contests/{contest['id']}")
+    live_ok = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_ok.status_code == live_ok.status_code == 200
+    assert len(detail_ok.json()["standings"]) == 2
+    assert len(live_ok.json()["standings"]) == 2
+
+    historical_pairing_id = store.list_contest_pairings(
+        contest["id"], stage_idx=0
+    )[0]["id"]
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?", (historical_pairing_id,)
+        )
+
+    detail_damaged = client.get(f"/api/contests/{contest['id']}")
+    live_damaged = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_damaged.status_code == live_damaged.status_code == 200
+    assert detail_damaged.json()["standings"] == []
+    assert live_damaged.json()["standings"] == []
+    assert live_damaged.json()["progress"]["completed"] == 0
+    store.close()
+
+
+def test_finished_unsealed_live_reads_history_before_accepting_current_snapshot(
+    tmp_path,
+):
+    """An omitted predecessor graph cannot downgrade a proven contradiction."""
+    app = create_app(db_path=str(tmp_path / "finished-unsealed-history.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        "finished-unsealed-org",
+        "finished-unsealed-org@example.com",
+        "hash",
+        role="organizer",
+    )
+    users, bots = _people(store, tmp_path, 4, prefix="finished-unsealed")
+    stages = [
+        {
+            "key": "qualifier",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "advance_count": 2,
+        },
+        {
+            "key": "final",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "ranking_mode": "replace_top",
+            "ranking_scope": 2,
+        },
+    ]
+    contest = store.create_contest(
+        "Finished unsealed history",
+        organizer["id"],
+        status="published",
+        game_id="holdem",
+        stages_json=json.dumps(stages),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+        for user, bot in zip(users, bots, strict=True)
+    ]
+    manager = app.state.contest_manager
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
+    )
+    for pairing in store.list_contest_pairings(contest["id"], stage_idx=0):
+        _bind_match(
+            store,
+            contest["id"],
+            pairing,
+            f"finished-unsealed-q-{pairing['id']}",
+            status="completed",
+        )
+    ranked, _decision_revision, _decision_entries, _expected_groups = (
+        manager._ensure_stage_decision(contest["id"], 0)
+    )
+    qualifier_order = [
+        int(row["entry_id"]) for row in sorted(ranked, key=lambda row: row["rank"])
+    ]
+    expected_finalists = set(qualifier_order[:2])
+    wrong_finalists = set(qualifier_order[2:])
+    assert expected_finalists.isdisjoint(wrong_finalists)
+
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contest_entries SET eliminated=1 WHERE contest_id=?",
+            (contest["id"],),
+        )
+        connection.executemany(
+            "UPDATE contest_entries SET eliminated=0 WHERE contest_id=? AND id=?",
+            [(contest["id"], entry_id) for entry_id in wrong_finalists],
+        )
+        connection.execute(
+            "UPDATE contests SET current_stage_idx=1,"
+            "published_stage_pairing_count=NULL,"
+            "sealed_pairing_topology_revision=NULL WHERE id=?",
+            (contest["id"],),
+        )
+    entry_by_id = {int(entry["id"]): entry for entry in entries}
+    wrong_order = sorted(wrong_finalists)
+    first, second = (entry_by_id[entry_id] for entry_id in wrong_order)
+    final_pairing = store.add_pairing(
+        contest["id"],
+        first["bot_id"],
+        second["bot_id"],
+        entry_a_id=first["id"],
+        entry_b_id=second["id"],
+        stage_idx=1,
+        stage_key="final",
+        published_at="2026-08-27T10:00:00",
+    )
+    # This fixture deliberately models an imported legacy terminal artifact.
+    # Active bind APIs correctly reject the missing seal, so create the
+    # historical Match first and attach it in the same low-level import below.
+    store.create_match(
+        "finished-unsealed-final",
+        first["bot_id"],
+        second["bot_id"],
+        owner_id=first["user_id"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        "finished-unsealed-final",
+        status="completed",
+        winner=0,
+        result={"rounds_played": 70, "deltas": [10, -10]},
+        ended_at="2026-08-27T10:03:00+08:00",
+    )
+    current_rows = []
+    for rank, entry_id in enumerate(wrong_order, 1):
+        entry = entry_by_id[entry_id]
+        points = 3 if rank == 1 else 0
+        current_rows.append(
+            (
+                contest["id"],
+                entry_id,
+                entry["bot_id"],
+                points,
+                1 if rank == 1 else 0,
+                0,
+                0 if rank == 1 else 1,
+                10 if rank == 1 else -10,
+                rank,
+                json.dumps(
+                    {
+                        "tiebreaks": _canonical_tiebreaks(
+                            points, int(entry["seed"])
+                        )
+                    }
+                ),
+            )
+        )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contest_pairings SET match_id=?,status='completed' "
+            "WHERE id=?",
+            ("finished-unsealed-final", final_pairing["id"]),
+        )
+        connection.executemany(
+            "INSERT INTO contest_stage_results("
+            "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+            "losses,delta_total,group_id,rank_in_group,payload_json) "
+            "VALUES(?,1,'final',?,?,?,?,?,?,?,'',?,?)",
+            current_rows,
+        )
+        connection.execute(
+            "UPDATE contests SET status='finished',"
+            "published_stage_pairing_count=1,"
+            "sealed_pairing_topology_revision=NULL WHERE id=?",
+            (contest["id"],),
+        )
+
+    live_snapshot = store.contest_live_snapshot(contest["id"])
+    assert live_snapshot is not None
+    assert live_snapshot["pairings_include_history"] is True
+    assert {row["stage_idx"] for row in live_snapshot["pairings"]} == {0, 1}
+    client = TestClient(app)
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["stage_standings"][1]["rows"] == []
+    assert detail["standings"] == []
+    assert live["standings"] == []
 
 
 def test_outcome_is_identical_across_match_detail_contest_bracket_and_live(tmp_path):
@@ -490,8 +1084,11 @@ def test_missing_frozen_entry_is_rejected_but_unique_markerless_history_recovers
         }
     else:
         assert all(outcome is not None for outcome in surfaces)
-        assert any(float(row["points"]) > 0 for row in detail["standings"])
-        assert any(float(row["points"]) > 0 for row in live["standings"])
+        # Markerless legacy outcome decoding remains available for the one
+        # Match, but mutating a frozen pairing invalidates the current topology
+        # seal.  Neither detail nor live may aggregate that damaged graph.
+        assert detail["standings"] == []
+        assert live["standings"] == []
     assert detail["stage_standings"][0]["status"] != "completed"
     manager = app.state.contest_manager
     assert manager._stage_done(contest["id"], 0) is False
@@ -738,7 +1335,7 @@ def test_malformed_stage_scoring_contract_is_fail_closed_across_lifecycle_and_ap
     contest = store.create_contest(
         "Invalid duplicate history",
         organizer["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=json.dumps([stage]),
     )
@@ -746,17 +1343,16 @@ def test_malformed_stage_scoring_contract_is_fail_closed_across_lifecycle_and_ap
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    pairing = store.add_pairing(
-        contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-        stage_idx=0,
-        stage_key="dup_rr",
-        series_index=1,
-        series_size=1,
+    manager = app.state.contest_manager
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
     )
+    pairing = store.list_contest_pairings(contest["id"], stage_idx=0)[0]
     _bind_match(
         store,
         contest["id"],
@@ -765,19 +1361,8 @@ def test_malformed_stage_scoring_contract_is_fail_closed_across_lifecycle_and_ap
         status="completed",
         duplicate=True,
     )
-    manager = app.state.contest_manager
     assert manager._stage_done(contest["id"], 0) is True
-    for entry, bot in zip(entries, bots):
-        store.upsert_stage_result(
-            contest["id"],
-            0,
-            entry["id"],
-            bot_id=bot["id"],
-            stage_key="dup_rr",
-            points=99,
-            wins=33,
-            rank_in_group=1,
-        )
+    manager._ensure_stage_decision(contest["id"], 0)
 
     if invalid_value is _MISSING:
         stage.pop(invalid_field)
@@ -788,6 +1373,13 @@ def test_malformed_stage_scoring_contract_is_fail_closed_across_lifecycle_and_ap
         connection.execute(
             "UPDATE contests SET stages_json=? WHERE id=?",
             (json.dumps([stage]), contest["id"]),
+        )
+        # Isolate the malformed stage contract from the lifecycle-seal gate:
+        # this is an explicit damaged import whose revision is otherwise exact.
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
         )
 
     client = TestClient(app)
@@ -819,28 +1411,25 @@ def test_malformed_stage_scoring_contract_is_fail_closed_across_lifecycle_and_ap
     assert manager._stage_done(contest["id"], 0) is False
     assert manager._has_unfinished_pairings(contest["id"]) is True
     ranked_rows = manager._rank_stage_rows(contest["id"], 0)
-    assert len(ranked_rows) == 2
-    assert all(float(row["points"]) == 0 for row in ranked_rows)
-    assert all(int(row["counts"]["scoring_games"]) == 0 for row in ranked_rows)
+    assert ranked_rows == []
     with pytest.raises(ValueError, match="拒绝计算晋级名单"):
         manager._advance_participants(contest["id"], 0)
     assert all(
         int(row.get("eliminated") or 0) == 0
         for row in store.list_contest_entries(contest["id"])
     )
-    assert all(float(row["points"]) == 0 for row in detail_payload["standings"])
+    assert detail_payload["standings"] == []
     stage_summary = detail_payload["stage_standings"][0]
     assert stage_summary["status"] != "completed"
-    assert stage_summary["source"] == "live"
-    assert all(float(row["points"]) == 0 for row in stage_summary["rows"])
-    assert all(row["advancement"] is None for row in stage_summary["rows"])
+    assert stage_summary["source"] == "persisted"
+    assert stage_summary["rows"] == []
     assert live_payload["series"] is None
     assert live_payload["counts"]["scoring_games"] == {
         "completed": 0,
         "planned": 0,
         "terminal_unplayed": 0,
     }
-    assert all(float(row["points"]) == 0 for row in live_payload["standings"])
+    assert live_payload["standings"] == []
 
 
 @pytest.mark.parametrize(
@@ -1117,11 +1706,18 @@ def test_malformed_stage_coordinates_are_bounded_across_contest_views(
 def test_malformed_official_ready_flag_is_not_public_or_recovered(tmp_path):
     app, contest, _entries, _bots = _live_fixture(tmp_path)
     store = app.state.store
-    store.update_contest(contest["id"], status="finished")
+    # Explicit imported terminal residue: generic lifecycle writes correctly
+    # cannot skip the immutable stage-decision transaction.
     with store._tx() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "UPDATE contests SET official_results_ready=0.5 WHERE id=?",
+            "UPDATE contests SET status='finished',official_results_ready=0.5 "
+            "WHERE id=?",
+            (contest["id"],),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
             (contest["id"],),
         )
 
@@ -1140,7 +1736,7 @@ def test_malformed_official_ready_flag_is_not_public_or_recovered(tmp_path):
     assert official.status_code == 409
 
 
-def test_missing_all_pairings_for_one_strict_entry_keeps_zero_row_in_detail_live(
+def test_missing_all_pairings_for_one_strict_entry_invalidates_detail_live_seal(
     tmp_path,
 ):
     app, contest, entries, bots = _live_fixture(tmp_path)
@@ -1160,7 +1756,7 @@ def test_missing_all_pairings_for_one_strict_entry_keeps_zero_row_in_detail_live
                     [
                         {
                             "key": "prelim",
-                            "type": "single_elimination",
+                            "type": "round_robin",
                             "scoring": "poker_3_1_0",
                         },
                         final_stage,
@@ -1193,25 +1789,11 @@ def test_missing_all_pairings_for_one_strict_entry_keeps_zero_row_in_detail_live
     )
     assert summary["status"] == "running"
     assert summary["total_pairings"] == 6
-    assert len(summary["rows"]) == 4
-    detail_missing = next(
-        row for row in summary["rows"] if row["bot_id"] == bots[3]["id"]
-    )
-    assert detail_missing["points"] == 0
-    assert detail_missing["counts"] == {
-        "encounter_groups": 0,
-        "unique_opponents": 0,
-        "match_jobs": 0,
-        "scoring_games": 0,
-    }
+    assert summary["rows"] == []
 
     live = client.get(f"/api/contests/{contest['id']}/live")
     assert live.status_code == 200, live.text
-    live_missing = next(
-        row for row in live.json()["standings"] if row["bot_id"] == bots[3]["id"]
-    )
-    assert live_missing["points"] == 0
-    assert live_missing["counts"] == detail_missing["counts"]
+    assert live.json()["standings"] == []
 
 
 @pytest.mark.parametrize("stage_type", ["round_robin", "swiss"])
@@ -1241,14 +1823,13 @@ def test_damaged_eliminated_flag_blocks_later_stage_ranking_and_completion(
     contest = store.create_contest(
         "Damaged elimination state",
         organizer["id"],
-        status="running",
+        status="published",
         game_id="holdem",
-        current_stage_idx=1,
         stages_json=json.dumps(
             [
                 {
                     "key": "prelim",
-                    "type": "single_elimination",
+                    "type": "round_robin",
                     "scoring": "poker_3_1_0",
                 },
                 strict_stage,
@@ -1259,43 +1840,53 @@ def test_damaged_eliminated_flag_blocks_later_stage_ranking_and_completion(
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    pairing = store.add_pairing(
-        contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-        stage_idx=1,
-        stage_key="strict_stage",
-        round_num=1,
-        series_index=1,
-        series_size=1,
+    manager = ContestManager(store, _ReadOnlyOrchestrator())
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
     )
-    match_id = f"damaged-elim-{stage_type}"
-    store.create_match(
-        match_id,
-        bots[0]["id"],
-        bots[1]["id"],
-        owner_id=users[0]["id"],
-        contest_id=contest["id"],
-        match_type="contest",
-        game_id="holdem",
-        match_config={"duplicate": False},
+    for pairing in store.list_contest_pairings(contest["id"], stage_idx=0):
+        _bind_match(
+            store,
+            contest["id"],
+            pairing,
+            f"damaged-elim-prelim-{stage_type}-{pairing['id']}",
+            status="completed",
+        )
+    ranked, decision_revision, _decision_entries, source_groups = (
+        manager._ensure_stage_decision(contest["id"], 0)
     )
-    store.bind_contest_pairing_match(
-        contest["id"],
-        pairing["id"],
-        match_id,
-        require_execution_admission=False,
+    projected, entry_updates = manager._plan_participant_advancement(
+        contest["id"], 0, ranked_rows=ranked
     )
-    store.update_match(
-        match_id,
-        status="completed",
-        winner=0,
-        result={"rounds_played": 70, "deltas": [10, -10]},
-        ended_at="2026-08-29T12:00:00+08:00",
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            1,
+            dispatch_pending=False,
+            entry_rows=projected,
+            entry_updates=entry_updates,
+            source_decision_revision=decision_revision,
+            source_stage_groups=source_groups,
+        )
     )
-    store.complete_contest_pairing_for_match(contest["id"], match_id)
+    current_pairings = store.list_contest_pairings(contest["id"], stage_idx=1)
+    match_pairings = [row for row in current_pairings if row.get("bot_b_id")]
+    for pairing in match_pairings:
+        _bind_match(
+            store,
+            contest["id"],
+            pairing,
+            f"damaged-elim-{stage_type}-{pairing['id']}",
+            status="completed",
+            frozen_duplicate=False,
+        )
+    assert manager._stage_done(contest["id"], 1) is True
+    assert len(manager.standings(contest["id"], stage_idx=1)) == 3
     with pytest.raises(ValueError, match="eliminated"):
         store.update_entry(
             contest["id"],
@@ -1310,8 +1901,12 @@ def test_damaged_eliminated_flag_blocks_later_stage_ranking_and_completion(
             "UPDATE contest_entries SET eliminated=? WHERE id=?",
             (damaged_eliminated, entries[-1]["id"]),
         )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
 
-    manager = ContestManager(store, _ReadOnlyOrchestrator())
     assert manager.standings(contest["id"], stage_idx=1) == []
     assert manager._stage_done(contest["id"], 1) is False
     assert manager._has_unfinished_pairings(contest["id"]) is True
@@ -1330,25 +1925,28 @@ def test_damaged_eliminated_flag_blocks_later_stage_ranking_and_completion(
     assert stage_summary["status"] != "completed"
     assert stage_summary["rows"] == []
     assert stage_summary["completed_pairings"] == 0
-    assert stage_summary["total_pairings"] == 1
+    assert stage_summary["total_pairings"] == len(current_pairings)
     assert stage_summary["counts"]["encounter_groups"]["completed"] == 0
-    assert stage_summary["counts"]["encounter_groups"]["total"] == 1
+    assert (
+        stage_summary["counts"]["encounter_groups"]["total"]
+        == len(match_pairings)
+    )
     assert stage_summary["counts"]["match_jobs"]["completed"] == 0
-    assert stage_summary["counts"]["match_jobs"]["total"] == 1
+    assert stage_summary["counts"]["match_jobs"]["total"] == len(match_pairings)
     assert stage_summary["counts"]["scoring_games"]["completed"] == 0
-    assert stage_summary["counts"]["scoring_games"]["planned"] == 1
+    assert stage_summary["counts"]["scoring_games"]["planned"] == len(match_pairings)
 
     live = live_response.json()
     assert live["standings"] == []
     assert live["series"] is None
     assert live["progress"]["completed"] == 0
-    assert live["progress"]["total"] == 1
+    assert live["progress"]["total"] == len(current_pairings)
     assert live["counts"]["encounter_groups"]["completed"] == 0
-    assert live["counts"]["encounter_groups"]["total"] == 1
+    assert live["counts"]["encounter_groups"]["total"] == len(match_pairings)
     assert live["counts"]["match_jobs"]["completed"] == 0
-    assert live["counts"]["match_jobs"]["total"] == 1
+    assert live["counts"]["match_jobs"]["total"] == len(match_pairings)
     assert live["counts"]["scoring_games"]["completed"] == 0
-    assert live["counts"]["scoring_games"]["planned"] == 1
+    assert live["counts"]["scoring_games"]["planned"] == len(match_pairings)
 
 
 def test_detail_projects_future_final_counts_from_frozen_advance_cohort(tmp_path):
@@ -1413,6 +2011,133 @@ def test_detail_projects_future_final_counts_from_frozen_advance_cohort(tmp_path
     }
 
 
+def test_detail_and_live_require_complete_predecessor_for_current_cohort(tmp_path):
+    """Current pairings/active flags cannot replace a complete qualifier proof."""
+    app = create_app(db_path=str(tmp_path / "current-cohort-proof.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        "current-cohort-proof-org",
+        "current-cohort-proof-org@example.com",
+        "hash",
+        role="organizer",
+    )
+    users, bots = _people(store, tmp_path, 4, prefix="current-cohort-proof")
+    stages = [
+        {
+            "key": "qualifier",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "advance_count": 2,
+        },
+        {
+            "key": "final",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "ranking_mode": "replace_top",
+            "ranking_scope": 2,
+        },
+    ]
+    contest = store.create_contest(
+        "Current cohort proof",
+        organizer["id"],
+        status="running",
+        game_id="holdem",
+        current_stage_idx=1,
+        stages_json=json.dumps(stages),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    for index, entry in enumerate(entries):
+        store.update_entry(
+            contest["id"],
+            users[index]["id"],
+            eliminated=int(index >= 2),
+        )
+    # Both historical artifacts name only the same plausible Top 2. Neither
+    # may prove that the missing two entrants actually lost the qualifier.
+    store.add_pairing(
+        contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        stage_idx=0,
+        stage_key="qualifier",
+    )
+    store.add_pairing(
+        contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        stage_idx=1,
+        stage_key="final",
+    )
+    with store._tx() as connection:
+        connection.executemany(
+            "INSERT INTO contest_stage_results("
+            "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+            "losses,delta_total,group_id,rank_in_group,payload_json) "
+            "VALUES(?,0,'qualifier',?,?,0,0,0,0,0,'',?, '{}')",
+            [
+                (contest["id"], entries[0]["id"], bots[0]["id"], 1),
+                (contest["id"], entries[1]["id"], bots[1]["id"], 2),
+            ],
+        )
+
+    manager = ContestManager(store, _ReadOnlyOrchestrator())
+    assert manager.standings(contest["id"], stage_idx=1) == []
+    client = TestClient(app)
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    assert detail["standings"] == []
+    assert detail["stage_standings"][0]["rows"] == []
+    assert detail["stage_standings"][1]["rows"] == []
+    assert live_response.json()["standings"] == []
+    store.close()
+
+
+def test_detail_and_live_reject_ambiguous_nonterminal_knockout(tmp_path):
+    """Imported KO history without an advancement rule stays unpublished."""
+    app, contest, _entries, _bots = _live_fixture(tmp_path)
+    store = app.state.store
+    store.update_contest(
+        contest["id"],
+        current_stage_idx=0,
+        stages_json=json.dumps(
+            [
+                {"key": "qualifier", "type": "single_elimination"},
+                {
+                    "key": "final",
+                    "type": "double_round_robin",
+                    "ranking_mode": "replace_top",
+                    "ranking_scope": 2,
+                },
+            ]
+        ),
+    )
+
+    client = TestClient(app)
+    detail_response = client.get(f"/api/contests/{contest['id']}")
+    live_response = client.get(f"/api/contests/{contest['id']}/live")
+
+    assert detail_response.status_code == 200, detail_response.text
+    assert live_response.status_code == 200, live_response.text
+    detail = detail_response.json()
+    live = live_response.json()
+    assert detail["standings"] == []
+    assert detail["stage_standings"][0]["rows"] == []
+    assert detail["stage_standings"][0]["status"] != "completed"
+    assert live["standings"] == []
+    assert live["progress"]["completed"] == 0
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("series_scoring", "expected_deltas"),
     [
@@ -1443,7 +2168,7 @@ def test_unavailable_duplicate_freezes_match_contract_across_every_projection(
     contest = store.create_contest(
         "Unavailable duplicate",
         organizer["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=json.dumps([stage]),
     )
@@ -1451,20 +2176,16 @@ def test_unavailable_duplicate_freezes_match_contract_across_every_projection(
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    store.add_pairing(
-        contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-        stage_idx=0,
-        stage_key="dup_rr",
-        series_index=1,
-        series_size=1,
+    manager = ContestManager(store, _ReadOnlyOrchestrator())
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
     )
     store.update_bot(bots[1]["id"], is_active=0)
-    manager = ContestManager(store, _ReadOnlyOrchestrator())
-    import asyncio
 
     asyncio.run(manager._dispatch_pending(contest["id"], 0))
     pairing = store.list_contest_pairings(contest["id"])[0]
@@ -1536,7 +2257,7 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
     contest = store.create_contest(
         "V1 live ranking",
         users[0]["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=json.dumps([stage]),
     )
@@ -1556,19 +2277,33 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
         (2, 4, 1, 0, margin_b_loss),
         (2, 2, 3, 0, 10),
     ]
-    for ordinal, (round_num, first, second, winner, margin) in enumerate(games, 1):
-        pairing = store.add_pairing(
-            contest["id"],
-            bots[first]["id"],
-            bots[second]["id"],
-            entry_a_id=entries[first]["id"],
-            entry_b_id=entries[second]["id"],
-            stage_idx=0,
-            stage_key="swiss",
-            round_num=round_num,
-            series_index=1,
-            series_size=1,
-        )
+    pairings = store.create_contest_stage_pairings(
+        contest["id"],
+        0,
+        [
+            {
+                "bot_a_id": bots[first]["id"],
+                "bot_b_id": bots[second]["id"],
+                "entry_a_id": entries[first]["id"],
+                "entry_b_id": entries[second]["id"],
+                "stage_idx": 0,
+                "stage_key": "swiss",
+                "round_num": round_num,
+                "series_index": 1,
+                "series_size": 1,
+                "pairing_seed": 8100 + ordinal,
+                "published_at": "2026-08-28T12:00:00",
+            }
+            for ordinal, (round_num, first, second, _winner, _margin) in enumerate(
+                games, 1
+            )
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )
+    for ordinal, (pairing, game) in enumerate(zip(pairings, games, strict=True), 1):
+        _round_num, first, second, winner, margin = game
         match_id = f"rank-v1-{ordinal}"
         store.create_match(
             match_id,
@@ -1578,7 +2313,7 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
             contest_id=contest["id"],
             match_type="contest",
             game_id="holdem",
-                match_config={"duplicate": False},
+            match_config={"duplicate": False},
         )
         store.bind_contest_pairing_match(
             contest["id"],
@@ -1595,6 +2330,7 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
             ended_at=f"2026-08-28T12:{ordinal:02d}:00+08:00",
         )
         store.complete_contest_pairing_for_match(contest["id"], match_id)
+    assert store.contest_stage_manifest_is_valid(contest["id"], 0)
 
     client = TestClient(app)
     detail = client.get(f"/api/contests/{contest['id']}").json()
@@ -1686,6 +2422,11 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
             "WHERE contest_id=? AND stage_idx=0 AND entry_id=?",
             (json.dumps(payload), contest["id"], victim_entry_id),
         )
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
     bounded = client.get(f"/api/contests/{contest['id']}")
     assert bounded.status_code == 200
     bounded_payload = bounded.json()
@@ -1704,14 +2445,16 @@ def test_live_and_detail_use_frozen_official_tiebreak_chain_before_delta(
             "WHERE contest_id=? AND stage_idx=0 AND entry_id=?",
             (contest["id"], victim_entry_id),
         )
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
     malformed = client.get(f"/api/contests/{contest['id']}")
     assert malformed.status_code == 200
-    malformed_victim = next(
-        row
-        for row in malformed.json()["stage_standings"][0]["rows"]
-        if row["entry_id"] == victim_entry_id
-    )
-    assert "tiebreaks" not in malformed_victim
+    malformed_payload = malformed.json()
+    assert malformed_payload["stage_standings"][0]["rows"] == []
+    assert malformed_payload["standings"] == []
 
 
 def test_contest_detail_and_bracket_do_not_replay_or_n_plus_one_matches(
@@ -1753,6 +2496,7 @@ def test_contest_detail_and_bracket_do_not_replay_or_n_plus_one_matches(
         assert not any("match_replays" in sql for sql in selects)
         assert not any("json_each" in sql or "events_json" in sql for sql in selects)
         assert not ({"result", "events"} & _all_keys(response.json()))
+        assert not any(key.startswith("_") for key in _all_keys(response.json()))
 
 
 def test_injected_standings_keeps_snapshot_scoring_after_stage_drift(tmp_path, monkeypatch):
@@ -1866,7 +2610,14 @@ def test_live_group_ranks_showcase_and_current_stage_roster_filter(tmp_path):
         status="open",
         game_id="holdem",
         stages_json=json.dumps(
-            [{"key": "groups", "type": "group_round_robin", "group_count": 2}]
+            [
+                {
+                    "key": "groups",
+                    "type": "group_round_robin",
+                    "group_count": 2,
+                    "scoring": "poker_3_1_0",
+                }
+            ]
         ),
     )
     entries = [
@@ -1890,7 +2641,17 @@ def test_live_group_ranks_showcase_and_current_stage_roster_filter(tmp_path):
             group_id=group_id,
             round_num=ordinal,
         )
-    store.update_contest(contest["id"], official_results_ready=1)
+    store.update_contest(contest["id"], status="published")
+    grouped_pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=len(grouped_pairings),
+        expected_existing_ids=[int(row["id"]) for row in grouped_pairings],
+    )
+    store.update_contest(
+        contest["id"], status="running", official_results_ready=1
+    )
     store.freeze_contest_showcase(contest["id"], "grouped-live-showcase")
 
     client = TestClient(app)
@@ -1903,8 +2664,8 @@ def test_live_group_ranks_showcase_and_current_stage_roster_filter(tmp_path):
         ranks_by_group.setdefault(row["group_id"], []).append(row["rank"])
     assert ranks_by_group == {"A": [1, 2], "B": [1, 2]}
 
-    # A later stage only includes its persisted pairing participants.  The two
-    # non-qualifiers must not reappear as zero-point leaders.
+    # A direct-Store later stage with no persisted predecessor decision cannot
+    # use its active flags or surviving pairing endpoints as cohort authority.
     later = store.create_contest(
         "Filtered final",
         users[0]["id"],
@@ -1932,10 +2693,7 @@ def test_live_group_ranks_showcase_and_current_stage_roster_filter(tmp_path):
         stage_key="final",
     )
     filtered = client.get(f"/api/contests/{later['id']}/live").json()
-    assert {row["bot_id"] for row in filtered["standings"]} == {
-        bots[1]["id"],
-        bots[3]["id"],
-    }
+    assert filtered["standings"] == []
 
     empty = store.create_contest(
         "No pairings yet",
@@ -1947,3 +2705,18 @@ def test_live_group_ranks_showcase_and_current_stage_roster_filter(tmp_path):
     for user, bot in zip(users, bots):
         store.add_contest_entry(empty["id"], user["id"], bot["id"])
     assert client.get(f"/api/contests/{empty['id']}/live").json()["standings"] == []
+
+    # Historical SQLite schemas do not CHECK the seed type.  A malformed
+    # imported value must invalidate the computed ranking without turning
+    # either public read model into a 500 response.
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_entries SET seed=? WHERE id=?",
+            ("bad", later_entries[0]["id"]),
+        )
+    damaged_detail = client.get(f"/api/contests/{later['id']}")
+    damaged_live = client.get(f"/api/contests/{later['id']}/live")
+    assert damaged_detail.status_code == 200
+    assert damaged_live.status_code == 200
+    assert damaged_detail.json()["standings"] == []
+    assert damaged_live.json()["standings"] == []

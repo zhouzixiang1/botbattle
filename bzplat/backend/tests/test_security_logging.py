@@ -603,21 +603,31 @@ def test_upload_body_limit_preserves_real_disconnect_without_413():
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "limited"),
+    ("method", "path", "expected_code"),
     [
-        ("POST", "/api/bots/7/versions", True),
-        ("POST", "/api/bots/not-an-int/versions", True),
-        ("POST", "/api/feedback/bugs/bug_test/attachments", True),
-        ("POST", "/api/auth/avatar", True),
-        ("GET", "/api/bots", False),
-        ("GET", "/api/auth/avatar", False),
-        ("POST", "/api/feedback/bugs/bug_test/attachments/", False),
-        ("POST", "/api/bots/7/versions/", False),
-        ("POST", "/api/bots/7/versions/extra", False),
-        ("POST", "/api/bots-extra", False),
+        ("POST", "/api/bots/7/versions", "upload_body_too_large"),
+        ("POST", "/api/bots/not-an-int/versions", "upload_body_too_large"),
+        (
+            "POST",
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("POST", "/api/auth/avatar", "avatar_body_too_large"),
+        ("GET", "/api/bots", None),
+        ("GET", "/api/auth/avatar", None),
+        (
+            "POST",
+            "/api/feedback/bugs/bug_test/attachments/",
+            "api_body_too_large",
+        ),
+        ("POST", "/api/bots/7/versions/", "api_body_too_large"),
+        ("POST", "/api/bots/7/versions/extra", "api_body_too_large"),
+        ("POST", "/api/bots-extra", "api_body_too_large"),
     ],
 )
-def test_upload_body_limit_matches_only_exact_upload_routes(method, path, limited):
+def test_body_limit_uses_specific_upload_policy_then_generic_api_policy(
+    method, path, expected_code
+):
     called = False
     sent: list[dict] = []
 
@@ -646,8 +656,10 @@ def test_upload_body_limit_matches_only_exact_upload_routes(method, path, limite
         )
 
     asyncio.run(exercise())
-    assert called is (not limited)
-    assert sent[0]["status"] == (413 if limited else 204)
+    assert called is (expected_code is None)
+    assert sent[0]["status"] == (413 if expected_code else 204)
+    if expected_code:
+        assert json.loads(sent[1]["body"])["detail"]["code"] == expected_code
 
 
 @pytest.mark.parametrize(

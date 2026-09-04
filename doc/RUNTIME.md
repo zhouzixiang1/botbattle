@@ -2,6 +2,20 @@
 
 本文说明全来源执行队列、本地 Docker supervisor、Bot 沙箱资源、决策超时与恢复边界。
 
+## HTTP、认证与实时连接边界
+
+- 浏览器会话只使用同源 HttpOnly `bz_session`。前端不得读取或持久化登录响应中的 bearer，也不得把完整用户投影、邮箱或实名字段写入 `localStorage`；升级后的模块加载会尽力删除旧 `bzplat_token/bzplat_user`，刷新时通过 `/api/auth/me` 恢复内存态。跨标签只广播随机 `bzplat_auth_epoch`，接收方必须先清旧投影并 `/me` 对账，旧页面私有动作在身份变更后 fail closed；BroadcastChannel/storage 都不可用时，每次私有请求先重新验证 `/me`。登出仅在服务端 2xx 后清理/广播/导航，网络、5xx 或异常 401 保留当前身份与页面。脚本、CLI 与本地 Bot 等非浏览器客户端仍可显式使用 `Authorization: Bearer`。
+- cookie-authenticated 的 POST/PUT/PATCH/DELETE 只接受与 canonical `BZ_PUBLIC_ORIGIN` 精确一致的 HTTP(S) `Origin`；Origin 缺失、畸形或不同源时 403。显式 Bearer 认证优先于 cookie，继续保持不依赖浏览器 Origin 的 API 合约。隔离 QA 可以把 `BZ_PUBLIC_ORIGIN` 设为浏览器实际使用的 `http://127.0.0.1:<vite-port>`；公网生产必须使用实际 HTTPS origin，并同时启用 secure cookie 与 HSTS。局域网 HTTP 只作为受控直连诊断面，不得冒充生产 HTTPS origin 建立 cookie-only 人机 WebSocket。
+- 任一 `/api` 请求只要携 Authorization header 或 `bz_session`，成功与错误响应都统一为 `Cache-Control: private, no-store, max-age=0`、`Pragma: no-cache`、`Referrer-Policy: no-referrer`，并在已有值上合并 `Vary: Authorization, Cookie`；Bot/profile/赛事等允许匿名但 payload 或 404 会随身份变化的端点，在匿名响应也声明同一 `Vary`。整个 `/api/auth/*` 命名空间（含路由/依赖前返回的 `413/422/404`）即使入站匿名也显式 no-store；其 validation `422` 只允许 `loc/msg/type`，不得返回 `input/ctx/url`。新增鉴权投影不得依赖调用者自行补缓存头。
+- 请求体在 ASGI receive 层、FastAPI/Pydantic/multipart 之前按实际 chunk 累计；`Content-Length` 只用于提前拒绝，不能放宽额度。认证 JSON 硬顶 64 KiB，其余 unsafe `/api` 为 1 MiB；Bot 上传为 101 MiB 原始 multipart（100 MiB 文件 + 1 MiB 信封），Bug 图片为 6 MiB（5+1），头像为 3 MiB（2+1）。跨界 chunk 不再交给下游，返回稳定 413。
+- IP 限流同时使用按 method + 规范化路径的分级桶和每 IP 全 `/api` 总桶；Bot version、Bug attachment、Local AI rotate 等动态 public ID 被折叠到模板路径，不能靠轮换 ID 获取新额度。内存桶表最多 50000 项，满且无过期项可清时 fail closed。该实现以及下述 SSE/WS 连接额度只承诺**单进程** Uvicorn；部署多个 worker 前必须引入共享限流/配额后端，不能把每 worker 数字当全站上限。
+- SPA catch-all 只返回解析后仍位于 `frontend/dist` 内的普通文件；`..` segment、反斜杠、绝对路径、解析异常和指向目录外的 symlink 均 404。访问/审计日志只保留 path、不含 query，所有可控字段先转为单行可打印文本并限制 1024 字符，防止换行注入和无界放大。
+- 匿名观赛 SSE 在创建 2000 帧队列及 snapshot 前同步预留额度：单进程总数 64、单局 32、单 IP 8。人类对战 WebSocket 在 Origin/query-token 门后、任何 session/Match 数据库读取前先按可信 peer 执行 30 次/60 秒握手桶和全局 16 个 inflight；peer 表最多 2048 项，满且无过期项可回收时 fail closed，缺 Cookie 不查询 session、无效 session 不查询 Match。鉴权后要求精确正整数 user ID，并在分配订阅/snapshot 前同步预留：单进程总数 32、单局 4、单用户 4；超限稳定以 `1013 + connection_limit` 关闭。拒绝、snapshot 构造失败、首个 SSE body 前断开、普通断开、取消、终态、显式退订与 shutdown 必须由完整 response scope 幂等归还；编排器内部订阅不消耗公共 SSE 额度。人类动作帧在 JSON/数据库前执行 4 KiB UTF-8 硬顶，并按同一用户跨连接与可信 peer IP 共享 `burst=10/refill=2s⁻¹` 的 token 桶；两类 identity 合计最多 4096 项，不能靠重连或四条并行 socket 刷新。超大小/速率分别以 1009/1008 关闭；通过后仍在每个 frame 及真正 resolve 动作前重新验证最初 cookie session、active 用户和 Match owner，改密、登出、停用或权限漂移后只能以 `session_revoked` / 1008 关闭，不能提交该动作。前端对 1008/1009/1013 或任何稳定策略原因锁存终止状态并停止自动重连；只有没有策略原因的网络 1001/1006 才做有界指数退避。连接收到 snapshot 可以重同步局面，但不能清除策略关闭锁存或恢复其重连预算。
+- 人机 WS 的 server queue 也不继承握手时的一次性授权：每个 event 在 `send_json` 前紧邻复核 exact session、active user，以及 Match 的 `TYPE_HUMAN + human_user_id + human_seat` 与连接冻结值完全一致。撤销、停用、owner/type/seat 漂移或复核异常后，原 event 和所有后续业务帧均不得出站；sender/receiver 通过共享 lock 等待同一条固定 `session_revoked` reject 与 1008 policy close 完成，再由统一 finally 退订并释放 quota。并发发现失效不能重复 reject/close，也不能因一个 task 先返回而取消另一个尚未完成的关闭序列。
+- 停用用户是强撤销线性点：Store 在同一 `BEGIN IMMEDIATE` 内写 `is_active=0`、删除全部 session、撤销 Local AI identity 并释放 active lease；登录发 session 也在 writer lock 内复核用户仍 active，且 `password_hash` 精确等于该登录刚验证的代际。改密以相同旧 hash 做 CAS，并在更新成功的同一事务删除全部 session。因而停用、改密或重置无论在昂贵密码校验前后提交，旧密码登录都不能在撤销后迟到创建 token；重新启用账号也不恢复旧 session/identity。
+- 用户或 Bot 停用事务只返回本次 newly-revoked Local AI targets，每项同时冻结 authoritative `owner_id/bot_id` scope；历史 revoked 行不进入返回值或请求工作量。HTTP/service 在任何 `await` 前先严格校验并把整批登记到有界进程内 pending registry，再逐项关闭 hub transport，只有 `hub.revoke` 成功后才 forget 当前连接与 pending 项。若 DB 已提交而 transport 关闭/输出失败，重复同一停用即使没有新撤销行，也只从精确 scope 的有界当前连接/待收敛 registry 重试；不得查询历史 tombstone 来重建工作列表。关闭过程仍须抗请求取消，单次复杂度由当前/待收敛连接上限约束而不随历史撤销数增长。
+- 密码重置始终绑定该账号最新邮箱码，错误提交通过持久 `failed_attempts` CAS 计数，单凭据最多 5 次并在耗尽后失效；比较验证码、消费凭据、更新密码和删除全部 session 共用一个 `BEGIN IMMEDIATE`，跨连接/进程/重启只有一个赢家，任一步异常整体回滚。
+
 ## Docker 硬限制
 
 > **原则：一个平台进程、一个本地 socket、一个精确 label namespace。** 生产命令一律显式使用
@@ -14,7 +28,8 @@
   PE、Mach-O、ARM64 ELF 与脚本在上传校验阶段拒绝。
 - 首次启动 Bot 前在平台准备阶段检查/按 `linux/amd64` 拉取镜像并复核架构；该阶段不计入 Bot
   决策时限或 Pencil 累计棋钟。镜像与 Docker 控制面故障属于平台恢复事件，不判 Bot 技术负。
-- `BZ_BOT_LOCAL=1` 只供测试：直接运行兼容的本机 ELF，不施加 Docker 隔离，禁止生产启用。
+- `BZ_BOT_LOCAL=1` 只供隔离 QA：直接运行兼容的本机 ELF，不施加 Docker 隔离，必须同时启用 `BZ_QA_INSTANCE=1`。同样，`BZ_SKIP_CAPTCHA` 与 `BZ_TEST_CAPTCHA` 任一为真都要求 QA marker；CLI 在日志、SQLite 和运行目录创建前拒绝其他组合。生产唯一入口 `scripts/platform-ctl.sh` 无论是否误设 QA marker 都无条件拒绝这三项测试开关。
+- 在上述 `BZ_SKIP_CAPTCHA=1` 隔离 E2E 中，共享登录 helper 只精确 mock `GET /api/auth/captcha` 并继续真实提交登录表单；不得拦截登录 POST、其他认证路径或一般网络错误。这样浏览器套件不会从共享 QA IP 污染 captcha 限流桶；真实 captcha 响应、校验失败和 60/60s 边界由开启限流的独立安全测试覆盖，生产限流与启动护栏不因 E2E mock 放宽。
 
 LongRunning 对局会同时保留双方各一个容器；Traditional 在决策点创建当前行动方容器并在响应后清理。
 两条路径复用同一个命令构造器，先 `create`，再 `start -a -i`，最后按精确 label 删除并确认清零：
@@ -68,19 +83,19 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 
 ## 决策超时
 
-- `GameSpec.time_budget_per_side=None` 的游戏（当前仅 holdem）使用代码常量 **60 秒 / 决策**；Gomoku 与 Pencil 为每座位 **900 秒累计棋钟**。管理端、数据库和环境变量均不能覆盖。
-- Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。赛事 ETA 以两方棋钟合计 **1800 秒/局**作为保守上界，再按基础计分场与代码并发上限计算；它不包含既有队列等待、阶段休息或不封顶淘汰加赛。
-- Bot 单步超时或 Pencil 累计棋钟耗尽在第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`；不会生成代替动作继续对局。Bot-vs-Bot 技术结果进入评分/赛事积分，人机局由人类获胜但不计 Glicko。人类侧逐回合/累计超时仍走人类 inactivity 与游戏裁判逻辑。
-- 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
-- 棋钟成功决策写入 `time_used {seat,used,remaining,budget}`，耗尽写入 `time_out {seat,used,budget}`；事件进入回放/SSE，点格棋对局页据此展示双方剩余时间和「超时」标记。
-- **故障语义**（详见 [对局](#/wiki?slug=guide)）：Bot 信封/response 格式错误 → `completed + reason=protocol_error + technical_loss=1`；Bot 决策超时 → `completed + reason=timeout + technical_loss=1`。两者在首个故障终止，回放写 `technical_incident`，结果只公开 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条 `technical_incident_samples`；结构化日志带 `match_id/bot_id/version_id/runtime/seat/turn` 且不记录原始 stdout/私有路径。历史回放中的旧错误事件只在服务端读取时归一化，不作为新写入或对外字段。Bot-vs-Bot 评分，人机局不评分；格式正确但游戏内非法动作仍归裁判。中途崩溃由引擎计分判负；Bot-vs-Bot 启动失败结算为 `completed + technical_loss`，human 启动失败为 `aborted + bot_crashed`。执行队列中的 Docker 控制故障不伪造 `platform_error` 对局：dispatcher 暂停并在 label 清零后按 attempt 是否已有公开事件精确补偿；上传预检的平台故障返回 503，不改变原激活版本，也不阻塞主事件循环。
+- GameSpec 只接受代码注册的版本化时限：Holdem `holdem_per_decision_60s_v1`（唯一默认），Gomoku `gomoku_per_side_total_900s_v1`（默认）/`gomoku_per_side_total_300s_v1`，Pencil `pencil_per_side_total_900s_v1`（默认）/`pencil_per_decision_1s_v1`。管理端、数据库任意秒数和环境变量均不能创建或覆盖注册项。
+- `per_decision` 在每个权威决策点重新给当前 Bot 完整预算；`per_side_total` 为双方各一只独立累计钟，在一局内扣减、下一局重置。两种模式都只计算完整请求交给已就绪 Bot至完整响应到达的区间，平台排队、容器创建/启动与预热不计；Traditional/LongRunning 使用同一边界。
+- 时限在 Contest、execution job 与 Match 冻结；claim、retry、recovery、runner 必须核对 `id/mode/seconds/applies_to` 完全一致，未知、错型、异游戏或当前注册表漂移都 fail closed。赛事 ETA 读取冻结项：Gomoku 300/900 秒分别按 600/1800 秒单局上界，Pencil 累计 900 秒按 1800 秒，单步 1 秒按 84 次定时请求（60 次占边 + 最多 24 次强制 `pass` 确认）；均不包含既有队列、阶段休息或不封顶加赛。
+- Bot 时限耗尽第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`，不会生成替代动作。普通挑战只有游戏默认时限可进入 Rating；替代时限、人机与赛事不计 Rating（赛事技术结果仍按赛事积分处理）。
+- 人类对战的所选时限只作用于 Bot；真人仍使用 `human_action_timeout` 默认 **120 秒 / 回合**等待 WebSocket 动作，不扣 Bot 累计钟，也不创建另一只游戏时限钟。页面和公开 Match 必须明确标记 `applies_to=bot_only` 的非对称练习。
+- `match_start`、详情、直播和回放公开同一 `{id,mode,seconds,applies_to}`；后续计时事件携带当前使用量/剩余量和超时座位。前端 Bot-vs-Bot 累计模式从 `match_start.time_control` 初始化双方，`bot_only` 人机投影只显示实际 Bot 座位；单步模式在每条权威 Bot `turn` 重置对应座位。新事件不得再写死或依赖 `budget=900`。
+- **故障语义**（详见 [对局](#/wiki?slug=guide)）：Bot 信封/response 格式错误 → `completed + reason=protocol_error + technical_loss=1`；Bot 决策超时 → `completed + reason=timeout + technical_loss=1`。两者在首个故障终止，回放写 `technical_incident`，结果只公开 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条 `technical_incident_samples`；结构化日志带 `match_id/bot_id/version_id/runtime/seat/turn` 且不记录原始 stdout/私有路径。历史回放中的旧错误事件只在服务端读取时归一化，不作为新写入或对外字段。Bot-vs-Bot 评分，人机局不评分；格式正确但游戏内非法动作仍归裁判。中途崩溃由引擎计分判负；Bot-vs-Bot 启动失败结算为 `completed + technical_loss`，human 启动失败为 `aborted + bot_crashed`。所有崩溃路径都必须携带精确物理座位 `0/1`；缺失、布尔或越界值是平台不变量故障，禁止默认 seat 0 并生成技术胜负。执行队列中的 Docker 控制故障不伪造 `platform_error` 对局：dispatcher 暂停并在 label 清零后按 attempt 是否已有公开事件精确补偿；上传预检的平台故障返回 503，不改变原激活版本，也不阻塞主事件循环。
 - **中止公开边界**：中止对局的 replay/SSE/WS 终局只发送 `{"type":"error","reason":"稳定原因码"}`；不发送 `message`、异常文本或路径。未知/历史自由文本统一投影为 `platform_error`，管理员中止固定为 `admin_aborted`，详细诊断只写结构化日志。pending/running 的 `reason` 为空，页面不会在对局仍运行时提前显示“正常结束”。
 - **完成公开边界**：完成对局的 replay/SSE/WS 终局只发送 `match_end {winner,reason,deltas}`；`reason` 只能取 `schema.PUBLIC_MATCH_COMPLETED_REASONS`，未知英文/中文自由文本统一为 `completed`。复式记录的顶层 `winner=NULL` 表示没有组合整体胜者，不得解释为平局；逐场胜负来自 `result.legs`。公开详情中的 `result` 只保留进度、净结果、复式 leg 与脱敏技术故障摘要，执行用 `match_config` 和其他诊断字段不对外返回；赛事、列表与详情另使用统一的正向白名单 `outcome` 摘要，绝不返回 replay/events。
 - **事件公开边界**：非终态 replay/live 也只允许逐事件声明的字段；未知事件类型整条丢弃，已知事件的额外诊断字段丢弃。活跃真人德扑的公开观赛隐藏双方底牌与 `your_turn.request`，本人鉴权 WebSocket 只获得自己座位的底牌和请求；结束后才提供完整回放。SSE/WS 快照与可见性元数据全部构造成功后才注册队列；故障不留孤儿订阅，元数据缺失时默认按最严格可见性投影。
 - 本平台默认 Traditional（每个决策点重启进程）；显式选择 LongRunning 并完成精确握手后才整场长驻。两种模式使用相同 stdin/stdout 单行 JSON 信封；缺失/错误握手立即协议判负，不回退。
 
-平台不按编程语言调整时限。无累计棋钟的游戏统一使用
-`runtime/config.py::ACTION_TIMEOUT_SEC`；Pencil 使用 GameSpec 固定的每方 900 秒累计预算。
+平台不按编程语言调整时限，也不从旧 `runtime/config.py::ACTION_TIMEOUT_SEC` 或任意环境值推导新局。历史无冻结字段的记录只在兼容读边界按旧默认解释；已发布、运行中与终态赛事不回写，draft/open 也仅能在完整执行图为空时通过 CAS 补等价默认。
 
 ## 全局执行容量
 
@@ -157,6 +172,8 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
   其他生命周期继续按其历史 marker（或无 marker 的平局阻断）运行。
 
 ## 部署排空状态机
+
+部署前先以不输出敏感值的方式核对 `.env`：`BZ_BOT_LOCAL`、`BZ_SKIP_CAPTCHA`、`BZ_TEST_CAPTCHA` 必须未设或为假；`BZ_PUBLIC_ORIGIN` 必须是实际公网 HTTPS origin，`BZ_SECURE_COOKIE=1`、`BZ_HSTS=1`、`BZ_RATE_LIMIT=1`，反向代理部署还要启用 `BZ_TRUST_PROXY=1` 并把 `BZ_TRUSTED_PROXY_CIDRS` 收紧到真实本机代理 peer。`scripts/platform-ctl.sh` 会在 status/start/restart/stop 等任何生产控制动作前重新拒绝三项测试开关；不要靠手工 `unset` 后绕过对目标 `.env` 的审查。
 
 计划部署使用独立、持久的 `deployment_drain_requested` 控制位，不能用 dispatcher 的
 `paused/stopped` 或临时 `pause_reason` 代替。管理员开始排空时，Store 在一个
@@ -504,13 +521,23 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
   auto/contest 变为 `cancelled + non-retryable`，auto decision 同步取消，四类均不创建 Match。该分流避免
   对无人可修复的后台请求无限重试，同时让用户发起的请求保留明确恢复入口；contest pairing 会复位为
   `pending + match_id=NULL` 并把 `scheduled_at` 至少后移 30 秒，避免 scheduler 对同一坏版本热循环。
-- crash 后若 replay 已有公开事件，旧 Match 保留为 `aborted + orphan_after_restart` 审计，旧 attempt
-  标为 `interrupted`，绝不复活同一 Match。只有 manual/human 对用户显示可重试；auto/contest 的旧 job
+- 恢复时若 replay 已有公开事件，旧 Match 保留为 `aborted` 审计，旧 attempt 标为 `interrupted`，绝不
+  复活同一 Match。新进程启动恢复精确写 `orphan_after_service_restart`，同一进程清理执行环境后恢复精确写
+  `orphan_after_runtime_recovery`；尚未开始的孤立 pending Match 使用对应的 `orphan_pending_*` 原因。若
+  Match 终态已先提交但 replay flush 尚未完成，或赛事对账遇到已绑定的 terminal Match，恢复事务必须从
+  Match 的权威 status/reason/result 补唯一 `match_end/error`，保留可解析的非终态前缀并替换陈旧终态；
+  replay 缺失时创建，损坏时只写 canonical 终局且不记录原文，写入失败则 Match/pairing/replay 整体回滚。
+  历史 `orphan_after_restart` / `orphan_pending_after_restart` 无法再区分来源，只读兼容并明确标为旧记录，禁止新写。
+  只有 manual/human 对用户显示可重试；auto/contest 的旧 job
   固定 `retryable=0`，分别由自动 producer 与赛事 pairing 状态机决定是否生成/排入后续工作，不能经
   通用 `/retry` 复活。运行期基础设施失败时，manual/human 进入可重试 `interrupted`；auto/contest 的
   同一持久 job 以 `failure_count/next_attempt_at` 执行 1、2、4…最多 60 秒退避，赛事 pairing 的
   `scheduled_at` 同步后移，避免恢复成功后每秒创建 attempt/Match 的热循环。普通无错误重启仍即时恢复。
   不会为基础设施故障伪造 `platform_error` 局或重复 active job。
+- Bot 进程退出或 stdin 已被进程状态/transport 明确证明关闭时，`BrokenPipeError`、
+  `ConnectionResetError` 以及 uvloop 的 closed-transport `RuntimeError` 都归一为该场 `BotCrashedError`；
+  这类单场 Bot 故障不得暂停 dispatcher、清理整个 namespace 或中止其他对局。未能证明 transport 已关闭的
+  普通 `RuntimeError` 仍按平台异常上抛，不能仅凭错误文本把平台编程故障归给 Bot。
 - 已写 Match 终态但进程尚未来得及确认清理的 job 恢复为 `settling`；清理与后续评分 settlement 均幂等。
   用户可取消本人 queued manual/human，管理员可按权限取消更广范围；取消 active 请求只置标记并由
   dispatcher 经 orchestrator 安全收敛，精确 label 清零前不释放容量。管理员取消 queued contest 时 pairing
@@ -585,10 +612,10 @@ producer 与 claim 都必须在各自 `BEGIN IMMEDIATE` 内重新检查持久前
 及可选 `next_eligible_at`。`state` 为 `disabled/foreground_busy/contest_guard/cooldown/ready/yielding/running`，
 `reason` 是稳定机器码，前端必须本地化而不得直出；这使“已启用但等待前台/赛事/冷却”、“正在安全收口”与“正在闲时运行”可以区分。POST 挑战/人机返回
 HTTP 202 与 request public_id、真实前台 `ahead_jobs`、`ahead_sandbox_units`、容量及动态 ETA 区间；auto
-永不计入前台顺位或 ETA。
+永不计入前台顺位或 ETA。等待 ETA 先验证 target 的冻结时限，上界只累加非 auto 前台 active 与 ahead job 各自的冻结单场上界，排除 target 自身时长；任一纳入项损坏时不猜测，返回 `available=false`。
 `GET/DELETE /api/execution-requests/{public_id}` 用于查询/取消，interrupted 的人工/人机可 POST `retry`。
 所有投影都由白名单构造，不返回内部 DB id、version id、二进制路径、checksum、token、match_config 或
-Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间，而非承诺时间。
+Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的保守动态上界，而非承诺时间。
 
 ### 旧库迁移与 schema 幂等边界
 
@@ -619,6 +646,100 @@ Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间
   `DROP/CREATE`，`schema_version` 不因这些 trigger 改变；缺失/过期定义修复一次，对象类型冲突、非法
   identifier 或创建后定义不符会抛错并由 Store 事务回滚。Store 的其他迁移仍可能执行 DML，所以整体
   只保证逻辑幂等，不保证数据库文件字节、SHA-256 或 mtime 不变。
+
+### 历史正式榜单行离线修复
+
+`contest-official-repair` 不是通用恢复器，只允许修复经发布前 inventory 明确批准的单个历史形状：九人
+Pencil Swiss→八人 KO 已完整结束且 `official_results_ready=1`，现有正式榜是确定性九人候选的精确前八行，
+唯一缺失者是唯一 eliminated entry 的第九名，lifecycle 三元组精确为 `(NULL, integer 0, NULL)`。工具不会
+调用 Match 排名重放、不会执行 Store migration、不会改变 status/ready/manifest/revision/seal、不会删除或
+重插既有八行。raw authority 必须逐 SQLite 类型和值匹配生产盘点：`stages_json` 为 TEXT，entry、pairing 与
+stage-result 的 `group_id` 为 TEXT 空串，stage 0/1 的 pairing 与 stage-result `stage_key` 分别为 TEXT
+`swiss`/`ko`；空 BLOB、非空组名、错型或错阶段键一律 No-Go，不得以 truthiness 或默认空串归一。赛事与
+Match 的 ruleset/protocol/rating-pool、NULL time-control，entry seed 1..9、Bot owner/game/protocol，单场
+pairing 的座位/系列/决胜/seed/版本/canonical 时间，以及 23 个 Match 的 organizer/赛事/座位/版本/config、
+无 human/无 match seed 也必须逐项匹配观测形状；跨用户、跨游戏、重复 Bot、悬空版本或任一冻结契约漂移均阻断。两阶段 17 行 snapshot 与 27 条 pairing/23 场 outcome 按 stage/seed 对照已审匿名 typed 指纹，包含 KO 槽位、排期存在性、逐场 winner/delta/REAL normalized-delta/rounds/reason/technical-loss；Match 三时间为有序 canonical 秒级 TEXT，likes/views 为非负严格整数。所有冷库 JSON 使用有界、拒重复键/NaN/Infinity/深递归及非 canonical 数值词法的严格解析，并拒绝额外字段、整数/浮点别名、下溢/舍入、负零及同步篡改 stats/tiebreak/rank。它只兼容已观测到的两项无语义历史布局：正式榜新增列在 SQLite 中的物理顺序不同，以及 Swiss
+冻结阶段仅缺可由九人名册唯一推导的 `effective_rounds`；正式榜只接受 fresh/已观测迁移库两种完整建表定义，
+包括显式与隐藏列、默认值、真实 `AUTOINCREMENT`、唯一约束、外键动作、额外约束及 lifecycle trigger 定义，
+注释不能伪造约束。其余阶段字段仍须逐项一致。任何其它
+缺行、模板、人数、stage、topology、binding、identity 或 official 差异都是 No-Go。
+
+必须在完整计划部署维护窗内执行，顺序如下：
+
+1. 在线请求 maintenance 并等待 `ready=true`，核对上传、owned task、恢复回调、active job/lease、未跟踪
+   running Match、active attempt、Docker launch journal 与本 instance 容器全部静默；随后通过唯一平台控制脚本停服，确认
+   PID/50380 已消失。数据库中必须持久为 `stopped + drain=1 + accepting=0 + auto=0`，邻接
+   `.execution-dispatcher.lock` 必须保留原 inode、owner、0600 权限且无人持锁，DB 的 `-wal/-shm/-journal`
+   三种 sidecar 目录项必须完全不存在；空文件和指向不存在目标的悬空 symlink 同样阻断。
+2. 先制作并封存迁移前冷备。目标 release 推进后，只在停服状态完成并验收 Store schema migration；再从
+   **迁移后、修复前**目标制作第二份不同 inode 的逐字节冷备。目标 DB 保持 0600，repair 冷备设为 0400；
+   记录两者 canonical 绝对路径、inode、size/mtime、SHA-256、`cmp`、`integrity_check=ok` 与空
+   `foreign_key_check`；SQLite 文件头必须同时证明持久 `journal_mode=delete`，不能把已关闭且无 sidecar 的 WAL
+   文件误当成可 apply 冷库。下列 `--backup` 只能使用第二份冷备，不能使用旧 schema 冷备。
+3. 先执行全库 inventory。修复前必须恰有指定赛事为唯一 `repairable`，`blocked=0`；其它所有
+   finished+ready 表都必须为 `valid`。出现 blocked 时命令以非零退出，禁止继续。
+
+```bash
+python -m bzplat.backend.cli contest-official-repair \
+  --db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.post-migration.pre-repair.cold.db \
+  --scan-all --confirm-db /absolute/path/botzone.db \
+  --confirm-service-stopped --confirm-maintenance-ready --confirm-cold-backup \
+  > /absolute/path/reports/official-repair-scan-before.json
+```
+
+4. 默认模式是 target 零写 dry-run，并强制目标与冷备逐字节相同。保存 JSON，人工审核
+   `authority_digest`、`old_official_digest`、`repaired_official_digest`、`plan_digest`、
+   `source_business_digest`、`expected_post_business_digest` 与 `target_preimage_sha256`；报告不含
+   entry/user/Bot 身份。所有 digest 必须来自同一次 dry-run。
+
+```bash
+python -m bzplat.backend.cli contest-official-repair \
+  --db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.post-migration.pre-repair.cold.db \
+  --contest-id <approved-id> --confirm-contest-id <approved-id> \
+  --confirm-db /absolute/path/botzone.db \
+  --confirm-service-stopped --confirm-maintenance-ready --confirm-cold-backup \
+  > /absolute/path/reports/official-repair-dry.json
+```
+
+5. apply 必须逐项回填上述同一审核报告；路径、lock inode、冷备、maintenance 事实、全库 inventory 与六项
+   digest 会在写前再次验证。raw SQLite `BEGIN IMMEDIATE` 取得写锁后、首个业务读取与 DML 前，还会以
+   stat/SHA/stat sandwich 重新绑定 dry-run 审核的 target inode/preimage；稳定 SQLite header contract 也进入
+   source/post business digest，故 `user_version`、application/schema identity 等同 inode 漂移在首次 apply、verify
+   与 lost-output retry 都会阻断。唯一 DML 是显式 INSERT 缺失 rank 9；任一
+   触发器/validator/postimage/integrity/FK 失败都整事务回滚。提交后仍持有同一 flock，先立即固定目标
+   SHA-256/stat 基线，再从新的 raw 只读连接复核逻辑 postimage，并要求复核前后与最终输出前始终等于该基线；
+   全部最终 target/backup SHA/stat、guard/path/sidecar 校验必须在同一 flock 内先完成；随后仍持锁写出并 flush
+   成功 JSON，输出之后只释放锁和文件描述符，不再执行可改变结论的业务校验。若其间发生漂移或 BrokenPipe，
+   命令不得声称成功，维护窗保持开启并按 lost-output 流程核实。
+
+```bash
+python -m bzplat.backend.cli contest-official-repair \
+  --db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.post-migration.pre-repair.cold.db \
+  --contest-id <approved-id> --confirm-contest-id <approved-id> --apply \
+  --confirm-db /absolute/path/botzone.db \
+  --confirm-service-stopped --confirm-maintenance-ready --confirm-cold-backup \
+  --expect-authority-digest <dry-authority> \
+  --expect-old-official-digest <dry-old-official> \
+  --expect-repaired-official-digest <dry-repaired-official> \
+  --expect-plan-digest <dry-plan> \
+  --expect-source-business-digest <dry-source-business> \
+  --expect-post-business-digest <dry-post-business> \
+  --expect-target-preimage-sha256 <dry-target-sha256> \
+  > /absolute/path/reports/official-repair-apply.json
+```
+
+6. 保持停服和 flock inode 不变，用同一冷备和同一组 dry-run 参数执行 `--verify`，随后逐字重跑首次
+   `--apply` 命令模拟输出丢失。两次都必须报告 `already_applied`/`zero_write=true`，且调用前后目标的
+   SHA-256、size、mtime 完全不变。再跑一次 `--scan-all`，要求 `repairable=0, blocked=0` 且全部 valid；
+   Store 严格读取、公开 JSON/CSV、组织者 schema2 export 必须返回相同的全员连续名次。
+
+若 apply 在提交前失败，保持停服并保留目标、冷备和报告，修正原因后从同一 preimage 重新 dry-run；若提交后
+输出或 postcheck 丢失，不能还原冷备或换参数猜测，只能用完全相同命令走已证明的 postimage no-op。只有在仍
+drain、尚未恢复 admission 且明确判定新 release 不可用时，才可把对应代码 release 与迁移前冷备成对回滚。
+一旦恢复接单，禁止自动恢复任何旧冷备。
 
 ### 排行榜重建与上线 No-Go
 

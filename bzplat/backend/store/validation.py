@@ -68,6 +68,32 @@ def _parse_local_time(value: str, label: str) -> datetime:
     return parsed
 
 
+def validate_canonical_naive_timestamp(
+    value: object,
+    label: str,
+    *,
+    allow_none: bool = False,
+) -> str | None:
+    """Return one exact local ISO-seconds timestamp, or reject it.
+
+    Pairing scheduling is compared lexicographically in indexed SQL.  Merely
+    accepting anything understood by ``datetime.fromisoformat`` would therefore
+    let an empty/non-canonical string dispatch early or an arbitrary suffix
+    remain stuck forever.  Writers use one canonical seconds representation so
+    textual order and chronological order stay identical.
+    """
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{label}必须是 ISO 时间字符串")
+    if not isinstance(value, str):
+        raise ValueError(f"{label}必须是 ISO 时间字符串")
+    parsed = _parse_local_time(value, label)
+    if parsed.isoformat(timespec="seconds") != value:
+        raise ValueError(f"{label}必须是规范的 naive ISO 秒级时间")
+    return value
+
+
 def validate_contest_times(
     registration_opens_at: str | None,
     registration_closes_at: str | None,
@@ -86,7 +112,12 @@ def validate_contest_times(
         ("比赛开始时间", starts_at),
     )
     parsed = [
-        (label, _parse_local_time(value, label))
+        (
+            label,
+            _parse_local_time(
+                validate_canonical_naive_timestamp(value, label), label
+            ),
+        )
         for label, value in ordered
         if value is not None
     ]
@@ -102,5 +133,6 @@ __all__ = [
     "exact_nonnegative_int",
     "exact_sqlite_bool",
     "is_authoritative_no_opponent_pairing",
+    "validate_canonical_naive_timestamp",
     "validate_contest_times",
 ]

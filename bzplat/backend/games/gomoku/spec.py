@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE, GomokuSession
 from bzplat.backend.games.gomoku import protocol as proto
@@ -59,9 +59,12 @@ def _progress_from_events(events: list[dict[str, Any]]) -> int:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    _validate_match_params(match_config)
-    # 两个座位各有 900s 累计棋钟；ETA 取最坏棋钟上界。
-    return 1_800
+    cfg = dict(match_config)
+    time_control_id = cfg.pop("time_control_id", None)
+    _validate_match_params(cfg)
+    control = SPEC.resolve_time_control(time_control_id)
+    # 五子棋只注册每方累计模式；两方总钟是严格最坏上界。
+    return control.seconds * 2
 
 
 async def _preflight_check(
@@ -133,9 +136,22 @@ SPEC = GameSpec(
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",
-    summary="15×15；26 种指定开局、三手交换、五手二打；黑方三三/四四/长连禁手；每方累计 15 分钟。",
+    summary="15×15；26 种指定开局、三手交换、五手二打；黑方三三/四四/长连禁手；每方累计 5/15 分钟由冻结时限决定。",
     preflight_check=_preflight_check,
+    time_controls=(
+        TimeControlSpec(
+            id="gomoku_per_side_total_900s_v1",
+            mode="per_side_total",
+            seconds=900,
+        ),
+        TimeControlSpec(
+            id="gomoku_per_side_total_300s_v1",
+            mode="per_side_total",
+            seconds=300,
+        ),
+    ),
+    default_time_control_id="gomoku_per_side_total_900s_v1",
     source_files=("gomoku_judge.py", "forbidden.py", "engine.py", "protocol.py", "result.py"),
-    time_budget_per_side=900.0,
     record_exporter=build_record,
+    contest_source_candidate_kind="protected_seed",
 )

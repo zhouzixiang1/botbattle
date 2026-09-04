@@ -1,6 +1,11 @@
 import { useMemo } from 'react'
 
 import type { RawEvent } from '@/games/base'
+import {
+  parseMatchTimeControl,
+  type TimeControlAppliesTo,
+  type TimeControlMode,
+} from '../../lib/time-controls.ts'
 
 export interface PencilViewModel {
   nDots: number
@@ -24,9 +29,9 @@ export interface PencilViewModel {
   /** 当前 turn 是否要求对方强制让行；非 turn 帧为 false。 */
   mustPass: boolean
   /** 每方已用秒（象棋钟）；null=不限时 */
-  timeUsed: [number, number] | null
+  timeUsed: [number | null, number | null] | null
   /** 每方剩余秒 */
-  timeRemaining: [number, number] | null
+  timeRemaining: [number | null, number | null] | null
   /** 超时方（null=未超时） */
   timeOut: number | null
 }
@@ -79,9 +84,14 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
   let boxOwner: number[][] = emptyBoxOwner(size)
   let extraTurn = false
   let mustPass = false
-  let timeUsed: [number, number] | null = null
-  let timeRemaining: [number, number] | null = null
+  let timeUsed: [number | null, number | null] | null = null
+  let timeRemaining: [number | null, number | null] | null = null
   let timeOut: number | null = null
+  let timeMode: TimeControlMode | null = null
+  let timeAppliesTo: TimeControlAppliesTo | null = null
+  let botOnlySeat: number | null = null
+  let timeSeconds: number | null = null
+  let hasProjectedTimeControl = false
 
   for (const ev of events) {
     const t = String(ev.type || '')
@@ -98,9 +108,33 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       edgeOwner = {}
       extraTurn = false
       mustPass = false
+      hasProjectedTimeControl = ev.time_control !== undefined
+      const timeControl = parseMatchTimeControl(ev.time_control, 'pencil')
+      timeMode = timeControl?.mode ?? null
+      timeAppliesTo = timeControl?.applies_to ?? null
+      botOnlySeat = null
+      timeSeconds = timeControl?.seconds ?? null
+      timeUsed = timeSeconds === null ? null : timeAppliesTo === 'bot_only' ? [null, null] : [0, 0]
+      timeRemaining = timeSeconds === null
+        ? null
+        : timeAppliesTo === 'bot_only'
+          ? [null, null]
+          : [timeSeconds, timeSeconds]
+      timeOut = null
     } else if (t === 'turn') {
       toAct = typeof ev.player === 'number' ? ev.player : toAct
       mustPass = Number(ev.pass_) === 1
+      if (
+        timeMode === 'per_decision'
+        && timeSeconds !== null
+        && (toAct === 0 || toAct === 1)
+        && (timeAppliesTo !== 'bot_only' || botOnlySeat === toAct)
+      ) {
+        if (!timeUsed) timeUsed = timeAppliesTo === 'bot_only' ? [null, null] : [0, 0]
+        if (!timeRemaining) timeRemaining = timeAppliesTo === 'bot_only' ? [null, null] : [timeSeconds, timeSeconds]
+        timeUsed[toAct] = 0
+        timeRemaining[toAct] = timeSeconds
+      }
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
       }
@@ -180,11 +214,23 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'time_used') {
       const seat = Number(ev.seat)
       if (seat !== 0 && seat !== 1) continue
+      // A present-but-invalid frozen projection is not a legacy replay.  Do
+      // not let clock-event budget fields silently reinterpret it.
+      if (hasProjectedTimeControl && timeSeconds === null) continue
       const budget = Math.max(0, Number(ev.budget) || 0)
-      if (!timeUsed) timeUsed = [0, 0]
+      // Historical replays predate match_start.time_control and carried the
+      // fixed budget only on clock events.  Preserve that exact evidence, but
+      // never let it rescue a present-yet-malformed new projection.
+      if (timeSeconds === null && !hasProjectedTimeControl && budget > 0) {
+        timeMode = 'per_side_total'
+        timeAppliesTo = 'both_bots'
+        timeSeconds = budget
+      }
+      if (timeAppliesTo === 'bot_only') botOnlySeat = seat
+      if (!timeUsed) timeUsed = timeAppliesTo === 'bot_only' ? [null, null] : [0, 0]
       // The first clock event belongs to only one player. Initialise the untouched
       // player from the shared budget instead of showing a false 0:00 timeout.
-      if (!timeRemaining) timeRemaining = [budget, budget]
+      if (!timeRemaining) timeRemaining = timeAppliesTo === 'bot_only' ? [null, null] : [budget, budget]
       timeUsed[seat] = Number(ev.used) || 0
       timeRemaining[seat] = Number(ev.remaining) || 0
       toAct = null
@@ -192,9 +238,16 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'time_out') {
       const seat = Number(ev.seat)
       if (seat !== 0 && seat !== 1) continue
+      if (hasProjectedTimeControl && timeSeconds === null) continue
       const budget = Math.max(0, Number(ev.budget) || 0)
-      if (!timeUsed) timeUsed = [0, 0]
-      if (!timeRemaining) timeRemaining = [budget, budget]
+      if (timeSeconds === null && !hasProjectedTimeControl && budget > 0) {
+        timeMode = 'per_side_total'
+        timeAppliesTo = 'both_bots'
+        timeSeconds = budget
+      }
+      if (timeAppliesTo === 'bot_only') botOnlySeat = seat
+      if (!timeUsed) timeUsed = timeAppliesTo === 'bot_only' ? [null, null] : [0, 0]
+      if (!timeRemaining) timeRemaining = timeAppliesTo === 'bot_only' ? [null, null] : [budget, budget]
       timeUsed[seat] = Number(ev.used) || budget
       timeRemaining[seat] = 0
       timeOut = seat

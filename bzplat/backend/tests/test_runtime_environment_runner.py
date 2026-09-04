@@ -436,12 +436,29 @@ def test_mixed_local_and_low_profile_routes_only_docker_seat_to_transport():
         transport = _ProfileTransport()
 
         async def connector():
-            turn = await hub.next_turn("agent-local-a", connection.connection_id)
-            assert turn is not None
-            envelope = json.loads(turn.input)
+            preparation = await hub.next_turn(
+                "agent-local-a", connection.connection_id
+            )
+            assert preparation is not None
+            assert preparation.phase == "prepare"
+            assert preparation.input is None
+            await hub.mark_prepared(
+                "agent-local-a",
+                connection.connection_id,
+                request_id=preparation.request_id,
+                match_id=preparation.match_id,
+                turn=preparation.turn,
+            )
+
+            decision = await hub.next_turn(
+                "agent-local-a", connection.connection_id
+            )
+            assert decision is not None
+            assert decision.phase == "decision"
+            envelope = json.loads(decision.input)
             assert set(envelope) == {"requests", "responses"}
             assert envelope["responses"] == []
-            assert (turn.match_id, turn.seat, turn.turn) == (
+            assert (decision.match_id, decision.seat, decision.turn) == (
                 "match-mixed",
                 0,
                 1,
@@ -449,9 +466,9 @@ def test_mixed_local_and_low_profile_routes_only_docker_seat_to_transport():
             await hub.submit_response(
                 "agent-local-a",
                 connection.connection_id,
-                request_id=turn.request_id,
-                match_id=turn.match_id,
-                turn=turn.turn,
+                request_id=decision.request_id,
+                match_id=decision.match_id,
+                turn=decision.turn,
                 output=ILLEGAL_OPENING_LINE,
             )
 
@@ -483,14 +500,27 @@ def test_two_local_bots_use_referee_without_starting_any_docker_session():
         transport = _ProfileTransport()
 
         async def first_connector():
-            turn = await hub.next_turn("agent-a", first.connection_id)
-            assert turn is not None
+            preparation = await hub.next_turn("agent-a", first.connection_id)
+            assert preparation is not None
+            assert preparation.phase == "prepare"
+            assert preparation.input is None
+            await hub.mark_prepared(
+                "agent-a",
+                first.connection_id,
+                request_id=preparation.request_id,
+                match_id=preparation.match_id,
+                turn=preparation.turn,
+            )
+
+            decision = await hub.next_turn("agent-a", first.connection_id)
+            assert decision is not None
+            assert decision.phase == "decision"
             await hub.submit_response(
                 "agent-a",
                 first.connection_id,
-                request_id=turn.request_id,
-                match_id=turn.match_id,
-                turn=turn.turn,
+                request_id=decision.request_id,
+                match_id=decision.match_id,
+                turn=decision.turn,
                 output=ILLEGAL_OPENING_LINE,
             )
 

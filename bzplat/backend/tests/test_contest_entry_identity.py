@@ -7,9 +7,14 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from bzplat.backend.store import Store
+
+
+_PAIRING_PUBLISHED_AT = "2026-09-03T00:00:00"
 
 
 def _store(tmp_path):
@@ -176,13 +181,17 @@ def test_bind_uses_current_entry_bot_but_history_reads_frozen_pairing(tmp_path):
                 "stage_key": "rr",
                 "entry_a_id": entry_a["id"],
                 "entry_b_id": entry_b["id"],
+                "round_num": 1,
                 "series_index": index,
                 "series_size": 2,
                 "pairing_seed": 8_100 + index,
+                "published_at": _PAIRING_PUBLISHED_AT,
             }
             for index in (1, 2)
         ],
         expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
     )
     for index, pairing in enumerate(pairings, 1):
         s.create_match(
@@ -234,7 +243,24 @@ def test_bind_uses_current_entry_bot_but_history_reads_frozen_pairing(tmp_path):
         format="elf",
         game_id="holdem",
     )["id"]
-    s.update_entry(contest["id"], user_a, bot_id=replacement)
+    # Start from the restored, sealed lifecycle and inject only the imported
+    # roster corruption under test.  Re-seal its exact revision so bind reaches
+    # the entry-vs-frozen-Bot identity guard instead of merely rejecting a stale
+    # lifecycle epoch.
+    with s._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        changed = connection.execute(
+            "UPDATE contest_entries SET bot_id=? "
+            "WHERE contest_id=? AND user_id=? AND bot_id=?",
+            (replacement, contest["id"], user_a, bot_a),
+        )
+        assert changed.rowcount == 1
+        resealed = connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=? AND status='running'",
+            (contest["id"],),
+        )
+        assert resealed.rowcount == 1
     with pytest.raises(ValueError, match="参赛项与冻结 Bot"):
         s.bind_contest_pairing_match(
             contest["id"],
@@ -297,18 +323,79 @@ def test_bot_active_references_detects_pending_match(tmp_path):
 def test_bot_active_references_detects_running_contest(tmp_path):
     """store 层：running 赛事的报名/对阵被检测，finished 的不阻拦。"""
     s = _store(tmp_path)
+    from bzplat.backend.contests.manager import ContestManager
+
     org = s.create_user("orgA", "oa@e.com", "x", role="organizer")["id"]
     u = s.create_user("user2a", "u2a@e.com", "x")["id"]
+    opponent = s.create_user("user2b", "u2b@e.com", "x")["id"]
     b = s.create_bot(u, "bot2a", binary_path="/tmp", format="elf", game_id="holdem")["id"]
-    c = s.create_contest("运行中赛A", organizer_id=org, game_id="holdem",
-                         stages_json='[{"key":"s1","type":"round_robin","scoring":"poker_3_1_0"}]')["id"]
-    s.add_contest_entry(c, u, b)
-    s.add_contest_pairing(c, b, b, stage_idx=0, stage_key="s1")
-    s.update_contest(c, status="running")  # 进行中
+    opponent_bot = s.create_bot(
+        opponent, "bot2b", binary_path="/tmp", format="elf", game_id="holdem"
+    )["id"]
+    c = s.create_contest(
+        "运行中赛A",
+        organizer_id=org,
+        status="published",
+        game_id="holdem",
+        stages_json=(
+            '[{"key":"s1","type":"round_robin",'
+            '"scoring":"poker_3_1_0"}]'
+        ),
+    )["id"]
+    entry = s.add_contest_entry(c, u, b)
+    opponent_entry = s.add_contest_entry(c, opponent, opponent_bot)
+    pairing = s.create_contest_stage_pairings(
+        c,
+        0,
+        [{
+            "entry_a_id": entry["id"],
+            "entry_b_id": opponent_entry["id"],
+            "bot_a_id": b,
+            "bot_b_id": opponent_bot,
+            "round_num": 1,
+            "stage_key": "s1",
+            "published_at": _PAIRING_PUBLISHED_AT,
+        }],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
     refs = s.bot_active_references(b)
     assert refs["pairings"] >= 1, "running 赛事的报名/对阵应被检测到"
-    # finished 后不再阻拦
-    s.update_contest(c, status="finished")
+
+    match_id = "running-reference-terminal"
+    s.create_match(
+        match_id,
+        b,
+        opponent_bot,
+        owner_id=org,
+        contest_id=c,
+        match_type="contest",
+        game_id="holdem",
+        match_config={},
+    )
+    s.bind_contest_pairing_match(
+        c, pairing["id"], match_id, require_execution_admission=False
+    )
+    s.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        result={
+            "rounds_played": 70,
+            "deltas": [100, -100],
+            "normalized_delta": 1,
+        },
+        reason="completed",
+    )
+    assert s.complete_contest_pairing_for_match(c, match_id)["status"] == "completed"
+
+    class _FakeOrch:
+        pass
+
+    finished = asyncio.run(ContestManager(s, _FakeOrch()).finish(c))
+    assert finished["status"] == "finished"
+    assert finished["official_results_ready"] == 1
     refs2 = s.bot_active_references(b)
     assert refs2["matches"] == 0 and refs2["pairings"] == 0, "finished 赛事历史不阻拦"
     s.close()

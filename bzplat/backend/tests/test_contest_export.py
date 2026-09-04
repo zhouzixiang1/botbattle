@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import threading
@@ -14,10 +15,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import bzplat.backend.store.db as store_db_module
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
 from fastapi.testclient import TestClient
+
+
+_PAIRING_PUBLISHED_AT = "2026-09-03T00:00:00"
+
+
+class _NoDispatch:
+    pass
 
 
 def _app(tmp_path):
@@ -43,6 +52,124 @@ def _setup(app, *, require_real_name=True):
     _, org_tok = app.state.auth.authenticate("orgexp", "pw123456")
     _, user_tok = app.state.auth.authenticate("ent1", "pw123456")
     return store, org_tok, user_tok, cid
+
+
+def _finish_export_contest(
+    store: Store,
+    contest_id: int,
+    organizer_id: int,
+    primary_entry: dict,
+    primary_bot: dict,
+    *,
+    label: str,
+    stage_key: str,
+) -> None:
+    """Reach finished through one sealed RR batch and its completed Match."""
+    opponent = store.create_user(
+        f"{label}-opponent",
+        f"{label}-opponent@example.com",
+        "hash",
+        real_name="对手姓名",
+        phone="13900000000",
+        school="对手学校",
+        student_id=f"{label}-student",
+    )
+    opponent_bot = store.create_bot(
+        opponent["id"],
+        f"{label}-opponent-bot",
+        binary_path="/tmp",
+        format="elf",
+        game_id="holdem",
+    )
+    opponent_entry = store.add_contest_entry(
+        contest_id, opponent["id"], opponent_bot["id"]
+    )
+    store.update_contest(contest_id, status="published")
+    pairing = store.create_contest_stage_pairings(
+        contest_id,
+        0,
+        [{
+            "entry_a_id": primary_entry["id"],
+            "entry_b_id": opponent_entry["id"],
+            "bot_a_id": primary_bot["id"],
+            "bot_b_id": opponent_bot["id"],
+            "round_num": 1,
+            "stage_key": stage_key,
+            "published_at": _PAIRING_PUBLISHED_AT,
+        }],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
+    match_id = f"{label}-terminal-match"
+    store.create_match(
+        match_id,
+        primary_bot["id"],
+        opponent_bot["id"],
+        owner_id=organizer_id,
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+        match_config={},
+    )
+    store.bind_contest_pairing_match(
+        contest_id,
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        result={
+            "rounds_played": 70,
+            "deltas": [100, -100],
+            "normalized_delta": 1,
+        },
+        reason="completed",
+    )
+    assert store.complete_contest_pairing_for_match(
+        contest_id, match_id
+    )["status"] == "completed"
+    finished = asyncio.run(
+        ContestManager(store, _NoDispatch()).finish(contest_id)
+    )
+    assert finished["status"] == "finished"
+    assert finished["official_results_ready"] == 1
+    with store._tx() as connection:
+        revision = connection.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+    assert (
+        revision["pairing_topology_revision"]
+        == revision["sealed_pairing_topology_revision"]
+    )
+
+
+def _reseal_finished_export_fixture(store: Store, contest_id: int) -> None:
+    """Re-seal the exact epoch after test-only presentation-field injection."""
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            "SELECT status,pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        assert current is not None and current["status"] == "finished"
+        resealed = connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision=? "
+            "WHERE id=? AND status='finished' "
+            "AND pairing_topology_revision=?",
+            (
+                current["pairing_topology_revision"],
+                contest_id,
+                current["pairing_topology_revision"],
+            ),
+        )
+        assert resealed.rowcount == 1
 
 
 def test_export_organizer_csv_has_realname(tmp_path):
@@ -182,7 +309,12 @@ def test_non_real_name_contest_never_projects_current_pii_for_org_or_admin(tmp_p
             "identity_captured_at", "identity_complete",
         ):
             assert field not in entry
-        assert "cache-control" not in detail.headers
+        assert detail.headers["cache-control"] == "private, no-store, max-age=0"
+        assert detail.headers["pragma"] == "no-cache"
+        assert {
+            value.strip()
+            for value in detail.headers["vary"].split(",")
+        } == {"Authorization", "Cookie"}
 
         admin_entries = (
             client.get(f"/api/admin/contests/{cid}/entries", headers=headers)
@@ -437,9 +569,25 @@ def test_schema2_export_is_readable_stable_safe_and_audited(tmp_path, monkeypatc
     contest = store.create_contest(
         "直观导出赛", organizer_id=organizer["id"], game_id="holdem",
         status="open", require_real_name=1,
-        stages_json='[{"key":"final","type":"round_robin"}]',
+        stages_json=(
+            '[{"key":"final","type":"round_robin",'
+            '"scoring":"poker_3_1_0"}]'
+        ),
     )
     entry = store.add_contest_entry(contest["id"], entrant["id"], bot["id"])
+    _finish_export_contest(
+        store,
+        contest["id"],
+        organizer["id"],
+        entry,
+        bot,
+        label="schema2-export",
+        stage_key="final",
+    )
+
+    # The lifecycle is valid before this test-only injection.  Change only the
+    # display fields exercised below, then seal that exact new revision so the
+    # export is not accidentally passing through a stale-lifecycle fallback.
     store.update_entry(
         contest["id"], entrant["id"], seed=0, group_id="=A组", eliminated=1
     )
@@ -451,9 +599,7 @@ def test_schema2_export_is_readable_stable_safe_and_audited(tmp_path, monkeypatc
         contest["id"], entry["id"], 1, stage_idx=0, points=9.5,
         bot_id=bot["id"], user_id=entrant["id"], awarded="@一等奖",
     )
-    store.update_contest(
-        contest["id"], status="finished", official_results_ready=1
-    )
+    _reseal_finished_export_fixture(store, contest["id"])
     _, token = app.state.auth.authenticate("orgv2", "pw123456")
     audits: list[dict] = []
     monkeypatch.setattr(
@@ -477,7 +623,11 @@ def test_schema2_export_is_readable_stable_safe_and_audited(tmp_path, monkeypatc
     assert response.headers["content-type"] == "text/csv; charset=utf-8"
 
     reader = csv.DictReader(io.StringIO(response.content.decode("utf-8-sig")))
-    row = next(reader)
+    row = next(
+        candidate
+        for candidate in reader
+        if candidate["报名ID(entry_id)"] == str(entry["id"])
+    )
     assert row["报名ID(entry_id)"] == str(entry["id"])
     assert row["用户ID(user_id)"] == str(entrant["id"])
     assert row["用户账号(username)"] == "account-v2"
@@ -511,7 +661,7 @@ def test_schema2_export_is_readable_stable_safe_and_audited(tmp_path, monkeypatc
         "result": "ok",
         "user": "orgv2",
         "target": contest["id"],
-        "detail": "schema=2; rows=1; identity=required; legacy_fallback_rows=0",
+        "detail": "schema=2; rows=2; identity=required; legacy_fallback_rows=0",
     }]
     assert not any(
         private in audits[0]["detail"]
@@ -565,11 +715,16 @@ def test_public_official_results_strip_all_identity_fields(tmp_path, monkeypatch
     entrant = store.get_user_by_username("ent1")
     entry = store.get_entry(cid, entrant["id"])
     bot = store.get_bot(entry["bot_id"])
-    store.upsert_official_result(
-        cid, entry["id"], 1, stage_idx=0, points=3,
-        bot_id=bot["id"], user_id=entrant["id"],
+    contest = store.get_contest(cid)
+    _finish_export_contest(
+        store,
+        cid,
+        contest["organizer_id"],
+        entry,
+        bot,
+        label="public-official",
+        stage_key="s1",
     )
-    store.update_contest(cid, status="finished", official_results_ready=1)
     original = store.list_official_results
 
     def rows_with_private_sentinels(contest_id):

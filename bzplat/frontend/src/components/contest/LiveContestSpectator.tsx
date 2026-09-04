@@ -11,6 +11,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EntityName } from '@/components/ui/overflow-text'
 import { fmtTime } from '@/lib/format'
+import {
+  parseCrossGroupTiebreak,
+  parseRankingCoordinates,
+  type RankingCoordinateMode,
+} from '@/lib/contest-format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
 import type { PublicMatchOutcome } from '@/lib/match-outcome'
 import { cn } from '@/lib/utils'
@@ -64,6 +69,16 @@ export interface LiveContestStanding {
   delta_total?: number
   group_id?: string | null
   rank: number
+  overall_rank?: number | null
+  rank_in_group?: number | null
+  tiebreaks?: {
+    group_rank?: number
+    points_rate?: number
+    opponent_strength?: number
+    normalized_delta_rate?: number
+    technical_loss_rate?: number
+    draw_order?: number
+  } | null
   counts?: {
     unique_opponents?: number
     encounter_groups: number
@@ -84,6 +99,7 @@ interface LiveContestSpectatorProps {
   stageType?: string
   duplicate: boolean
   legacyAggregate?: boolean
+  rankingMode?: RankingCoordinateMode
   snapshot?: boolean
   progress: {
     completed: number
@@ -103,6 +119,8 @@ interface LiveContestSpectatorProps {
   refreshEnabled?: boolean
   onRefresh: () => void
 }
+
+const RANK_RATE = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
 
 function compareSchedule(a: LiveContestPairing, b: LiveContestPairing): number {
   const round = (a.round_num ?? 1) - (b.round_num ?? 1)
@@ -355,6 +373,7 @@ export function LiveContestSpectator({
   stageType,
   duplicate,
   legacyAggregate = false,
+  rankingMode = 'overall',
   snapshot = false,
   progress: progressValue,
   counts,
@@ -393,9 +412,12 @@ export function LiveContestSpectator({
   const progress = progressTotal > 0
     ? Math.min(100, Math.round((progressCompleted / progressTotal) * 100))
     : 0
-  const ranked = [...standings]
-    .sort((a, b) => a.rank - b.rank)
-  const hasGroupedStandings = ranked.some((row) => Boolean(row.group_id))
+  const ranked = [...standings].sort((a, b) => {
+    const aRank = parseRankingCoordinates(a, rankingMode)?.overall_rank ?? Number.MAX_SAFE_INTEGER
+    const bRank = parseRankingCoordinates(b, rankingMode)?.overall_rank ?? Number.MAX_SAFE_INTEGER
+    return aRank - bRank
+  })
+  const hasGroupedStandings = ranked.some((row) => parseRankingCoordinates(row, rankingMode)?.group_id != null)
   const isRest = status === 'rest'
   const isPublished = status === 'published'
   const isFinished = status === 'finished'
@@ -568,18 +590,30 @@ export function LiveContestSpectator({
 
         <section aria-labelledby="live-standings-title" className="min-w-0 border-t px-4 py-4 xl:border-t-0">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 id="live-standings-title" className="text-sm font-semibold text-foreground">{hasGroupedStandings ? '各组前列' : '阶段前列'}</h3>
+            <h3 id="live-standings-title" className="text-sm font-semibold text-foreground">
+              {hasGroupedStandings ? (rankingMode === 'cross_group' ? '总榜与各组前列' : '各组前列') : '阶段前列'}
+            </h3>
             <span className="text-xs text-muted-foreground">{snapshot ? '快照积分' : '实时积分'}</span>
           </div>
+          {hasGroupedStandings && rankingMode === 'cross_group' && (
+            <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+              同时显示总榜与组内名次。跨组依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和冻结抽签序；不跨组使用直接交手。
+            </p>
+          )}
           {ranked.length > 0 ? (
             <ol className="divide-y divide-border">
-              {ranked.map((row) => {
-                const groupLabel = row.group_id
-                  ? `${row.group_id.endsWith('组') ? row.group_id : `${row.group_id}组`} · `
-                  : ''
+              {ranked.map((row, rowIndex) => {
+                const coordinates = parseRankingCoordinates(row, rankingMode)
+                const crossGroup = rankingMode === 'cross_group' ? parseCrossGroupTiebreak(row.tiebreaks) : null
                 return (
-                  <li key={`${row.group_id || 'all'}-${row.rank}-${row.bot_id ?? row.bot_name}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-2 first:pt-0 last:pb-0">
-                    <span className="font-mono text-sm font-semibold tabular-nums text-primary">{groupLabel}{row.rank}</span>
+                  <li key={`${row.bot_id ?? row.bot_name ?? 'standing'}-${rowIndex}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-2 first:pt-0 last:pb-0">
+                    <span className="font-mono text-sm font-semibold tabular-nums text-primary">
+                      {coordinates?.overall_rank != null
+                        ? `总${coordinates.overall_rank}`
+                        : coordinates?.rank_in_group != null
+                          ? `组内${coordinates.rank_in_group}`
+                          : '—'}
+                    </span>
                     <div className="min-w-0">
                       {row.bot_id != null ? (
                         <Link to={`/bot/${row.bot_id}`} className="hover:text-primary">
@@ -594,6 +628,20 @@ export function LiveContestSpectator({
                       )}
                       {(row.owner_display || row.owner_name) && (
                         <p className="truncate text-xs text-muted-foreground">@{row.owner_display || row.owner_name}</p>
+                      )}
+                      {coordinates?.group_id && coordinates.rank_in_group && (
+                        <p className="text-xs font-medium text-foreground">
+                          {coordinates.group_id.endsWith('组') ? coordinates.group_id : `${coordinates.group_id}组`} · 第 {coordinates.rank_in_group} 名
+                        </p>
+                      )}
+                      {crossGroup && (
+                        <p className="text-[11px] leading-relaxed text-muted-foreground">
+                          组内第 {crossGroup.group_rank} 名 · 积分率 {RANK_RATE.format(crossGroup.points_rate * 100)}% ·
+                          {' '}对手强度 {RANK_RATE.format(crossGroup.opponent_strength * 100)}% ·
+                          {' '}每局分差 {RANK_RATE.format(crossGroup.normalized_delta_rate)} ·
+                          {' '}技术负率 {RANK_RATE.format(crossGroup.technical_loss_rate * 100)}% ·
+                          {' '}抽签序 {crossGroup.draw_order}
+                        </p>
                       )}
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         {row.counts?.unique_opponents != null

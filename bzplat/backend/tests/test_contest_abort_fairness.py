@@ -51,10 +51,18 @@ def _user_and_bot(store: Store, suffix: str, *, role: str = "user") -> tuple[dic
 
 
 def _ko_contest(store: Store, organizer: dict, players: list[tuple[dict, dict]]) -> tuple[int, dict]:
+    versions = []
+    for _user, bot in players:
+        version = store.get_current_bot_version(bot["id"])
+        if version is None:
+            version = store.add_bot_version(
+                bot["id"], binary_path=str(bot["binary_path"]), version=1
+            )
+        versions.append(version)
     contest = store.create_contest(
         "公平中止赛",
         organizer["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=json.dumps([{"key": "ko", "type": "single_elimination"}]),
     )
@@ -62,18 +70,31 @@ def _ko_contest(store: Store, organizer: dict, players: list[tuple[dict, dict]])
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in players
     ]
-    pairing = store.add_contest_pairing(
+    pairings = store.create_contest_stage_pairings(
         contest["id"],
-        players[0][1]["id"],
-        players[1][1]["id"],
-        status="pending",
-        stage_idx=0,
-        stage_key="ko",
-        bracket_slot=0,
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
+        0,
+        [
+            {
+                "bot_a_id": players[0][1]["id"],
+                "bot_b_id": players[1][1]["id"],
+                "bot_a_version_id": versions[0]["id"],
+                "bot_b_version_id": versions[1]["id"],
+                "status": "pending",
+                "round_num": 1,
+                "stage_key": "ko",
+                "bracket_slot": 0,
+                "entry_a_id": entries[0]["id"],
+                "entry_b_id": entries[1]["id"],
+                "published_at": "2026-01-01T00:00:00",
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
     )
-    return contest["id"], pairing
+    assert len(pairings) == 1
+    assert store.contest_stage_manifest_is_valid(contest["id"], 0)
+    return contest["id"], pairings[0]
 
 
 def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path):
@@ -96,6 +117,12 @@ def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path)
         contest_id=contest_id,
         match_type="contest",
         game_id="holdem",
+        match_config={
+            "time_control_id": "holdem_per_decision_60s_v1",
+            "duplicate": False,
+            "_bot_a_version_id": pairing["bot_a_version_id"],
+            "_bot_b_version_id": pairing["bot_b_version_id"],
+        },
     )
     store.bind_contest_pairing_match(
         contest_id,
@@ -141,19 +168,14 @@ def test_queue_managed_contest_abort_finalizes_old_job_before_immediate_redispat
     store = Store(str(tmp_path / "queue-admin-abort.db"))
     organizer, bot_a = _user_and_bot(store, "queueadmin", role="organizer")
     user_b, bot_b = _user_and_bot(store, "queueplayer")
-    contest_id, pairing = _ko_contest(
-        store, organizer, [(organizer, bot_a), (user_b, bot_b)]
-    )
-    version_a = store.add_bot_version(
+    store.add_bot_version(
         bot_a["id"], binary_path=str(bot_a["binary_path"])
     )
-    version_b = store.add_bot_version(
+    store.add_bot_version(
         bot_b["id"], binary_path=str(bot_b["binary_path"])
     )
-    pairing = store.update_contest_pairing(
-        pairing["id"],
-        bot_a_version_id=version_a["id"],
-        bot_b_version_id=version_b["id"],
+    contest_id, pairing = _ko_contest(
+        store, organizer, [(organizer, bot_a), (user_b, bot_b)]
     )
 
     class CleanupProbe:
@@ -238,6 +260,12 @@ def test_platform_error_aborted_match_is_not_immediately_redispatched(tmp_path):
         contest_id=contest_id,
         match_type="contest",
         game_id="holdem",
+        match_config={
+            "time_control_id": "holdem_per_decision_60s_v1",
+            "duplicate": False,
+            "_bot_a_version_id": pairing["bot_a_version_id"],
+            "_bot_b_version_id": pairing["bot_b_version_id"],
+        },
     )
     store.bind_contest_pairing_match(
         contest_id,
@@ -345,11 +373,8 @@ def test_frozen_artifact_loss_is_adjudicated_once_before_queueing(tmp_path):
     contest_id, pairing = _ko_contest(
         store, organizer, [(organizer, bot_a), (user_b, bot_b)]
     )
-    store.update_contest_pairing(
-        pairing["id"],
-        bot_a_version_id=version_a["id"],
-        bot_b_version_id=version_b["id"],
-    )
+    assert pairing["bot_a_version_id"] == version_a["id"]
+    assert pairing["bot_b_version_id"] == version_b["id"]
     Path(version_a["binary_path"]).unlink()
     manager = ContestManager(store, _NeverChallenge())  # type: ignore[arg-type]
 

@@ -179,9 +179,10 @@ def test_admin_has_no_contest_template_editor_api(tmp_path):
         "gomoku_rr",
         "gomoku_swiss_ranked",
         "gomoku_swiss_top8_ranked",
-        "gomoku_group_drr_ko",
-        "gomoku_swiss_ko",
-    }
+            "gomoku_group_drr_ko",
+            "gomoku_swiss_ko",
+            "gomoku_seeded_group_drr_final",
+        }
     for template_id in ("gomoku_group_drr_ko", "gomoku_swiss_ko"):
         created = client.post(
             "/api/contests",

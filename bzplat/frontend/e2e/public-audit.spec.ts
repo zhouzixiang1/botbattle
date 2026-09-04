@@ -120,8 +120,21 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
   await expect(page.getByRole('heading', { name: '锦标赛', exact: true })).toBeVisible()
   const contestLink = page.locator('a[href^="#/contests/"]').first()
   await expect(contestLink).toBeVisible()
+  const contestHref = await contestLink.getAttribute('href')
+  const contestId = contestHref?.match(/^#\/contests\/([1-9]\d*)$/)?.[1]
+  expect(contestId, `unexpected public contest href: ${contestHref}`).toBeTruthy()
+  const contestDetailResponse = page.waitForResponse((response) => {
+    const request = response.request()
+    const url = new URL(response.url())
+    return request.method() === 'GET' &&
+      url.pathname === `/api/contests/${contestId}` &&
+      url.search === '?entries_page=1&entries_per_page=20' &&
+      response.status() === 200
+  })
   await contestLink.click()
+  await contestDetailResponse
   await expect(page.getByRole('heading', { name: '锦标赛详情', exact: true })).toBeVisible()
+  await monitor.settle()
 
   await page.goto('/#/this-route-does-not-exist')
   await expect(page).toHaveURL(/\/#\/$/)

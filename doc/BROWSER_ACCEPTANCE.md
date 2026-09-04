@@ -33,7 +33,7 @@
 | Wiki `/wiki` | 读 | 读 | 读 | 读 | INDEX、协议、开发指南、三游戏规则/示例、站内锚点与代码滚动 |
 | 裁判 `/judges` | 读 | 读 | 读 | 读 | 三游戏公开源码、文件切换、长代码局部滚动 |
 | 赛事 `/contests` | 读 | 读 | 操作 | 操作 | 游戏筛选；组织者建赛，空时间保持手动，不生成假时间 |
-| 赛事详情 `/contests/:id` | 读 | 操作 | 操作 | 操作 | 报名/换 Bot/退赛；实名与双导出边界；开放、发布、手动/定时开赛、阶段与正式榜。新建列表精确为 18 个模板（Holdem 7、Gomoku 6、Pencil 5），历史 `holdem_final_ranked` 不出现；建议人数/用途/时长等级只提示，超范围仍可创建发布。详情/确认框显示基础对局、基础计分场、有效 Swiss 轮、基础 ETA、超过 8/24 小时风险与替代模板；Gomoku 13–15/16–20/21+ 分别 7/9/11 轮并在发布后冻结；Holdem/Gomoku KO 显示不封顶两场换座决胜提示。德州逐阶段设置、4 人复式计数、逐场赛果、轮空、积分隔离、演示快照和阶段榜既有断言保持 |
+| 赛事详情 `/contests/:id` | 读 | 操作 | 操作 | 操作 | 报名/换 Bot/退赛；实名与双导出边界；开放、发布、手动/定时开赛、阶段与正式榜。新建列表精确为 20 个模板（Holdem 7、Gomoku 7、Pencil 6），历史 `holdem_final_ranked` 不出现；赛制与时限独立选择，点格棋随机均衡分组与五子棋 22–26 人保护种子正式模板可用。一般建议人数/用途/时长等级只提示，只有保护种子模板人数带严格阻断。详情/确认框显示基础对局、基础计分场、有效 Swiss 轮、冻结时限 ETA、超过 8/24 小时风险与替代模板；Gomoku 13–15/16–20/21+ 分别 7/9/11 轮并在发布后冻结；Holdem/Gomoku KO 显示不封顶两场换座决胜提示。德州逐阶段设置、4 人复式计数、逐场赛果、轮空、积分隔离、演示快照和阶段榜既有断言保持 |
 | 赛事直播 `/contests/:id/live` | 读 | 读 | 读 | 读 | 独立轻量投影只显示阶段进度、真正在局桌台、下一批、最近赛果和组内/全局前列；running 可见时 2 秒，published/rest 与 finished 但正式成绩未就绪时 10 秒单飞轮询，终态停止。德州 K 场即时 3/1/0、复式两场独立赛果与技术终局不误报平局；新 KO 显示决胜组序号、0/1/2 场进度、组分、继续加赛/晋级，历史无 marker 平局仍阻断。不得回退完整详情或逐行请求 match/replay；390/1440 浅深色无根溢出、关键目标至少 44px |
 | 用户 `/user/:name` | 读 | 操作 | 操作 | 操作 | 资料、Bot、关注；长昵称/简介不溢出 |
 | 搜索 `/search`、Cmd+K | 读 | 读 | 读 | 读 | 用户/Bot/对局聚合、筛选、无结果、长关键字 |
@@ -62,7 +62,7 @@
 | U-06 | 普通用户 | 普通终态对局双方 Bot owner 各查看双方 debug；无关用户与真人座位尝试访问；再下载同场公开日志 | owner 同内容、无关用户无面板且不请求私有 API、拒绝不暴露记录存在性；公开日志在所有身份下内容一致且不包含 private debug |
 | U-07 | 未登录/普通用户 | 提交问题、可选多张截图、刷新后追踪、追加回复；提交/回复/上传中登录、退出或切换账号；从通知深链进入站内信 | 身份变化立即中止旧详情和旧写操作并清空旧账号列表，迟到响应不可回填选择/loading；访客多文件上传停止余下文件且不得混入新账号 Authorization，错 token/混合身份均 404；认证反馈与通信详情 no-store/no-referrer |
 | U-08 | 普通用户 | 完成现行五子棋指定开局与黑 5 候选回合，再打开上一竞赛代的三打回放 | 开局页明确“五手二打”、不出现 N 选择器，只发送原 wire 的 `n=2`；黑 5 提交按钮只在精确两个不同形候选时启用，第三点不进入草稿，方向键/Enter 与读屏播报可完成同一任务，390px 触控至少 44px 且零根溢出；历史 `n=3` 在画布/HUD/时间线均显示“三打”并标记“历史竞赛规则”，Console/Network 干净 |
-| O-01 | 组织者 | 三游戏切换与 18 个可新建代码模板，标题/说明/实名/时间边界建赛；跨建议人数继续提交 | game/template 不串线；19 注册/18 可新建目录、建议元数据与自由选择一致；留空时间仍为 `NULL` |
+| O-01 | 组织者 | 三游戏切换与 20 个可新建代码模板，独立选择赛制/时限，标题/说明/实名/时间边界建赛；跨一般建议人数继续提交 | game/template/time-control 不串线；21 注册/20 可新建目录、建议元数据与自由选择一致；保护种子模板严格 22–26 人；留空时间仍为 `NULL` |
 | O-02 | 组织者 | `draft→open→published→running→(rest)→finished` | 报名截止只发布排期；`starts_at=NULL` 不自动开赛 |
 | O-03 | 组织者/管理员 | 公开成绩/组织者 v2 双入口；实名参赛者通过 UI 调用真实 `/register` 本人报名，普通组织者单条/批量代报拒绝，admin 仅以另一赛事保留受审计例外；阶段 Tab、对阵/进度、手动恢复动作 | 本人报名成功且 entry 出现；组织者详情与 v2 同为 `registration_profile` 并具备 `identity_captured_at`，参赛者随后修改资料时原报名快照与采集时间不漂移；真实下载中公开 CSV 零 PII，v2 具备 29 列中英表头、稳定 entry/user/bot ID、展示名与报名实名快照/历史回退来源，并保护公式注入及手机号/学号文本；320px 零根溢出、44px 触控、键盘可达，Chromium/Firefox/WebKit 的 Console/Network 与权限请求一致 |
 | O-04 | 组织者/参赛作者 | 赛事单场终局与整赛终局前后查看 debug | organizer 单场可读；Bot owner 仅在赛事 finished/cancelled 后可读 |
@@ -85,11 +85,12 @@
 | `qa-regression.spec.ts` | 三视口公开页与受保护页访客门禁、U-02～U-04 的核心链路、私有 debug 折叠/纯文本/长文本移动端/无权限零请求、实时通信、协议/二进制/版本/异常终态与权限回归 |
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
 | `contest-games-per-pair.spec.ts` | O-01 的德州普通/复式单循环创建扩展：仅能力模板显示 1–10 档，普通选择每对计分场数，复式选择每对交锋组数并明确每组两场独立 70 手计分；提交严格 `games_per_pair`，模板切换重置、移动端 44px/零根溢出、非能力模板无控件与 Console/Network 隔离 |
-| `contest-stage-series-settings.spec.ts` | O-01 的模板指导元数据与 UI：推荐人数/用途/时长 badge 只提示不阻断、Gomoku 7/9/11 bands、基础对局/计分场/ETA、超过 8/24 小时风险、替代模板与 unbounded 决胜提示；德州 K/附加轮、旧响应兼容、PATCH→publish、发布冻结、390/1440、44px、零根溢出及三浏览器 Console/Network。精确 19 个注册模板/18 个可新建模板由后端 `test_game_templates.py` 单元测试守护。 |
+| `contest-stage-series-settings.spec.ts` | O-01 的模板指导元数据与 UI：推荐人数/用途/时长 badge 只提示不阻断、Gomoku 7/9/11 bands、基础对局/计分场/ETA、超过 8/24 小时风险、替代模板与 unbounded 决胜提示；德州 K/附加轮、旧响应兼容、PATCH→publish、发布冻结、390/1440、44px、零根溢出及三浏览器 Console/Network。精确 21 个注册模板/20 个可新建模板由后端 `test_game_templates.py` 单元测试守护。 |
+| `contest-formats-time-controls.spec.ts` | O-01 的新赛制/时限主链路：空模板稳定初始化、点格棋预赛预设、`group_count` 与可选同游戏导航关联、五子棋保护种子来源的有界搜索/失败/迟到响应、赛事列表筛选竞态、挑战替代时限不计 Rating、人机 Bot-only 提示、390px/44px/零根溢出、棋类冻结时钟 reducer 与三浏览器 Console/Network。来源候选仍由后端在创建事务（Gomoku 还在发布事务）重验，不把前端选项当授权。 |
 | `contest-live-spectator.spec.ts` | 赛事直播独立深链、轻量 `/live` 单一端点、完整轮询状态机、跨赛事迟到响应隔离、离线保留、组内名次、独立计分实时入榜、复式逐场 outcome/技术终局、KO 决胜组进度/组分/继续加赛/历史阻断、三层计数及桌台 `/match/:id` 入口；390/1440 浅深色、44px、零根溢出和 Console/Network 隔离 |
 | `contest-duplicate-outcome.spec.ts` | 赛事详情的桌面赛程、390px 卡片、折叠阶段与发布确认统一使用 outcome：复式 split 显示双方各胜一场而非“平局”，普通真平仍显示平局，技术终局显示已计 1/2 场，缺失/矛盾赛果显示“赛果暂不可用”；同时守护 4 人 6 组/12 场、个人 3 组/6 场、冻结阶段 fail-closed 与 legacy aggregate 只读文案 |
 | `contest-export-identity.spec.ts` | O-03 与 A-02 的赛事导出/名册权限子集：实名参赛者经真实 UI `/register` 本人报名，组织者详情/v2 的 `registration_profile`、`identity_captured_at` 及改资料后快照稳定；普通组织者 UI 与伪造单条/批量 POST 门禁，admin 在独立赛事的受审计例外；公开成绩与组织者 v2 真实下载、29 列及稳定 ID/展示名/实名快照、公式注入与文本数字保护、非实名/公开导出零 PII；320px 零根溢出、44px 触控、键盘下载，同一断言由 Chromium/Firefox/WebKit 执行并监控 Console/Network |
-| `admin-contest-roster-assign.spec.ts` | A-02 的精确名册控制：Admin 赛事页与赛事详情均以“选择参赛用户与 Bot”为主操作，服务端 active 用户搜索与 owner/game/active/runnable Bot 过滤、暂存/换 Bot/移除、显式 entries payload、partial skipped 原位修正，以及需确认的次要全员操作；实名 organizer 仍无代报名入口。390px 零根溢出、44px 操作、键盘开关 Dialog 与 Console/Network/50380 隔离由三浏览器执行 |
+| `admin-contest-roster-assign.spec.ts` | A-02 的精确名册控制：Admin 赛事页与赛事详情均以“选择参赛用户与 Bot”为主操作，服务端 active 用户搜索与 owner/game/active/runnable Bot 过滤、暂存/换 Bot/移除、显式 entries payload、partial skipped 原位修正，以及需确认的次要全员操作；实名 organizer 仍无代报名入口。后续翻页只请求轻量 `/entries`，full/light 各自取消并拒绝迟到覆盖；末页删空或并发缩水回到最后有效页，名册重试不得清除仍存在的详情/正式榜错误。390px 零根溢出、44px 操作、键盘开关 Dialog 与 Console/Network/50380 隔离由三浏览器执行 |
 | `contest-scoring-clarity.spec.ts` | 瑞士轮逐场 3/1/0、真实 W/D/L 与轮空分列、4 人复式 6 组/12 场及个人 3 组/6 场、桌面/移动/折叠赛果不把 null 误报平局、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下宽表的具名横滚区域可聚焦且页面零根溢出 |
 | `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、闲时排位 strict boolean 开关及顶层 `auto_scheduler` 状态、前台优先/单场单候选文案、全来源队列与长文本滚动 |
 | `leaderboard-density.spec.ts` | 四角色共同读取排行榜且逐 context 核对匿名或 username/role；1440/1024/768/390、无 SummaryStrip、长文本、公开排名/计分样本分区、全来源 6 slots / 12 units 队列、上下滚动、滚动中可操作的 Radix tabs、慢响应切游戏清旧列表；普通表头无 page-sticky 属性，前三名与表头零交叠且中心命中自身，移动首项可见、无根横溢出与 Console/Network |

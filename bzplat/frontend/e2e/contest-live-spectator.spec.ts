@@ -137,6 +137,8 @@ function liveSnapshot(overrides: {
   seriesAvailable?: boolean
   unboundedTiebreak?: boolean
   legacyDrawBlocked?: boolean
+  legacyGroup?: boolean
+  formatSnapshot?: boolean
 } = {}) {
   const status = overrides.status ?? 'running'
   return {
@@ -148,6 +150,27 @@ function liveSnapshot(overrides: {
       showcase: overrides.showcase ?? false,
       immutable: overrides.immutable ?? false,
       official_results_ready: overrides.officialResultsReady ?? false,
+      format_snapshot: overrides.formatSnapshot
+        ? {
+            version: 1,
+            algorithm: 'protected_seed_random_balanced_v1',
+            audit_digest: 'a'.repeat(64),
+            group_count: 4,
+            group_size_min: 5,
+            group_size_max: 6,
+            group_sizes: { A: 6, B: 6, C: 5, D: 5 },
+            expected_match_count: 156,
+            source: {
+              contest_id: 77,
+              protected: [1, 2, 3, 4].map((sourceRank) => ({
+                entry_id: sourceRank,
+                user_id: sourceRank + 10,
+                source_entry_id: sourceRank + 20,
+                source_rank: sourceRank,
+              })),
+            },
+          }
+        : undefined,
       starts_at: '2026-08-27T12:00:00+08:00',
       ends_at: status === 'finished' ? '2026-08-27T14:00:00+08:00' : null,
       rest_ends_at: status === 'rest' ? '2026-08-27T13:00:00+08:00' : null,
@@ -162,7 +185,23 @@ function liveSnapshot(overrides: {
         }
       : overrides.legacyDrawBlocked
         ? { index: 0, key: 'ko', label: '单败淘汰', type: 'single_elimination' }
-      : { index: 0, key: 'rr', label: '单循环阶段', type: 'round_robin' },
+      : overrides.formatSnapshot
+        ? {
+            index: 0,
+            key: 'groups',
+            label: '随机均衡分组双循环',
+            type: 'group_double_round_robin',
+            overall_ranking: 'cross_group_fair_v1',
+          }
+      : overrides.legacyGroup
+        ? { index: 0, key: 'groups', label: '历史分组双循环', type: 'group_double_round_robin' }
+      : {
+          index: 0,
+          key: 'groups',
+          label: '随机均衡分组双循环',
+          type: 'group_double_round_robin',
+          overall_ranking: 'cross_group_fair_v1',
+        },
     series: overrides.seriesAvailable === false
       ? null
       : {
@@ -274,8 +313,36 @@ function liveSnapshot(overrides: {
       }),
     ],
     standings: [
-      { rank: 1, bot_id: 101, bot_name: 'river-guard', points: 9, wins: 3, draws: 0, losses: 1, byes: 0, delta_total: 42, group_id: 'A', counts: { unique_opponents: 2, encounter_groups: 2, match_jobs: 2, scoring_games: 4 } },
-      { rank: 1, bot_id: 102, bot_name: 'turn-probe', points: 7, wins: 2, draws: 1, losses: 1, byes: 0, delta_total: 18, group_id: 'B', counts: { unique_opponents: 2, encounter_groups: 2, match_jobs: 2, scoring_games: 4 } },
+      {
+        rank: 1,
+        ...(!overrides.legacyGroup ? { overall_rank: 1, rank_in_group: 1 } : {}),
+        bot_id: 101,
+        bot_name: 'river-guard',
+        points: 9,
+        wins: 3,
+        draws: 0,
+        losses: 1,
+        byes: 0,
+        delta_total: 42,
+        group_id: 'A',
+        tiebreaks: { group_rank: 1, points_rate: 0.75, opponent_strength: 0.625, normalized_delta_rate: 10.5, technical_loss_rate: 0, draw_order: 1 },
+        counts: { unique_opponents: 2, encounter_groups: 2, match_jobs: 2, scoring_games: 4 },
+      },
+      {
+        rank: 2,
+        ...(!overrides.legacyGroup ? { overall_rank: 2, rank_in_group: 1 } : {}),
+        bot_id: 102,
+        bot_name: 'turn-probe',
+        points: 7,
+        wins: 2,
+        draws: 1,
+        losses: 1,
+        byes: 0,
+        delta_total: 18,
+        group_id: 'B',
+        tiebreaks: { group_rank: 1, points_rate: 0.625, opponent_strength: 0.5, normalized_delta_rate: 4.5, technical_loss_rate: 0, draw_order: 2 },
+        counts: { unique_opponents: 2, encounter_groups: 2, match_jobs: 2, scoring_games: 4 },
+      },
     ],
     updated_at: '2026-08-27T12:10:30+08:00',
     generated_at: '2026-08-27T12:10:32+08:00',
@@ -346,8 +413,9 @@ test('running spectator prioritizes live tables and polls only the live projecti
   await expect(page.getByText('本轮积分待结算', { exact: true })).toHaveCount(0)
   await expect(page.getByText(/小分/)).toHaveCount(0)
   await expect(page.getByText('平局', { exact: true })).toHaveCount(0)
-  await expect(page.getByText('A组 · 1', { exact: true })).toBeVisible()
-  await expect(page.getByText('B组 · 1', { exact: true })).toBeVisible()
+  await expect(page.getByText('A组 · 第 1 名', { exact: true })).toBeVisible()
+  await expect(page.getByText('B组 · 第 1 名', { exact: true })).toBeVisible()
+  await expect(page.getByText(/组内第 1 名 · 积分率 75% · 对手强度 62\.5%/)).toBeVisible()
   await expect(page.getByText('面对 2 位对手 · 2 组复式交锋 · 4 场计分 · 3 胜 / 0 平 / 1 负', { exact: true })).toBeVisible()
   await expect(page.getByTestId('contest-live-sync-status')).toHaveText('已自动更新 · 12:10:32')
   await expect(page.getByTestId('contest-live-sync-status')).not.toContainText('2026-08-28')
@@ -370,6 +438,23 @@ test('running spectator prioritizes live tables and polls only the live projecti
   await monitor.expectClean()
 })
 
+test('legacy group standings keep group rank without inventing an overall table', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await installLiveApi(page, liveSnapshot({ legacyGroup: true }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/contests/42/live')
+
+  await expect(page.getByRole('heading', { name: '各组前列' })).toBeVisible()
+  await expect(page.getByText('组内1', { exact: true })).toBeVisible()
+  await expect(page.getByText('组内2', { exact: true })).toBeVisible()
+  await expect(page.getByText('A组 · 第 1 名', { exact: true })).toBeVisible()
+  await expect(page.getByText('B组 · 第 2 名', { exact: true })).toBeVisible()
+  await expect(page.getByText(/组内第 1 名 · 积分率/)).toHaveCount(0)
+  await expect(page.getByText(/总1|总2/)).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
 test('malformed frozen stage stays readable when the live series contract is unavailable', async ({ page }) => {
   const snapshot = liveSnapshot({ seriesAvailable: false })
   snapshot.recent = [pairing({
@@ -388,6 +473,24 @@ test('malformed frozen stage stays readable when the live series contract is una
   await expect(page.getByRole('heading', { name: '秋季德州扑克联赛' })).toBeVisible()
   await expect(page.getByText('赛制配置暂不可用', { exact: true })).toBeVisible()
   await expect(page.getByText('赛果暂不可用', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('bounded group-draw audit is readable and copyable on mobile', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await installLiveApi(page, liveSnapshot({ formatSnapshot: true }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/contests/42/live')
+
+  const audit = page.getByRole('region', { name: '分组抽签审计' })
+  await expect(audit).toContainText('保护种子安全随机均衡分组')
+  await expect(audit).toContainText('A组 6 人 · B组 6 人 · C组 5 人 · D组 5 人')
+  await expect(audit.getByRole('link', { name: '五子棋模拟赛 #77' })).toHaveAttribute('href', '#/contests/77')
+  await expect(audit.getByText('来源第 4 名', { exact: true })).toBeVisible()
+  const digest = audit.getByTitle('a'.repeat(64))
+  await expect(digest).toHaveText('aaaaaaaaaaaa…aaaaaaaa')
+  expect((await audit.getByRole('button', { name: '复制完整抽签审计值' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean()
 })

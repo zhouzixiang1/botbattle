@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 from datetime import datetime
 from typing import Any, Callable
 
@@ -22,9 +23,18 @@ from bzplat.backend.matches.result_contract import (
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.config import (
     EXECUTION_USER_QUEUED_LIMIT,
+    HUMAN_ACTION_RATE_BUCKET_LIMIT,
+    HUMAN_ACTION_RATE_BURST,
+    HUMAN_ACTION_RATE_REFILL_PER_SECOND,
     HUMAN_ACTION_TIMEOUT_SEC,
     HUMAN_MAX_CONSECUTIVE_TIMEOUTS,
+    HUMAN_WS_GLOBAL_LIMIT,
+    HUMAN_WS_PER_MATCH_LIMIT,
+    HUMAN_WS_PER_USER_LIMIT,
     MAX_CONCURRENT_MATCHES,
+    PUBLIC_SSE_GLOBAL_LIMIT,
+    PUBLIC_SSE_PER_IP_LIMIT,
+    PUBLIC_SSE_PER_MATCH_LIMIT,
 )
 from bzplat.backend.runtime.binary_integrity import (
     BinaryIntegrityCacheKey,
@@ -114,6 +124,93 @@ def _frozen_execution_profile_version(
     return raw
 
 
+def _frozen_time_control(spec: Any, match_config: dict[str, Any]) -> Any:
+    """Resolve a Match's exact control; absent is the immutable legacy default."""
+
+    if "time_control_id" not in match_config:
+        return spec.resolve_time_control(None)
+    raw = match_config["time_control_id"]
+    if not isinstance(raw, str):
+        raise ValueError("time_control_id 必须是字符串")
+    return spec.resolve_time_control(raw)
+
+
+def _strict_match_config(raw: Any) -> dict[str, Any]:
+    """Decode one durable execution/Match config without guessing corruption."""
+
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("match_config JSON 损坏") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("match_config 必须是对象")
+    return dict(raw)
+
+
+def _execution_time_control_binding_is_valid(
+    job: dict[str, Any] | None,
+    match: dict[str, Any],
+    spec: Any,
+    *,
+    contest: dict[str, Any] | None = None,
+) -> bool:
+    """Bind request, Match and (when applicable) Contest to one control."""
+
+    if (
+        not isinstance(job, dict)
+        or str(job.get("current_match_id") or "") != str(match.get("id") or "")
+        or str(job.get("game_id") or "") != str(spec.game_id)
+    ):
+        return False
+    try:
+        job_control = _frozen_time_control(
+            spec, _strict_match_config(job.get("match_config"))
+        )
+        match_control = _frozen_time_control(
+            spec, _strict_match_config(match.get("match_config"))
+        )
+    except (TypeError, ValueError):
+        return False
+    if job_control.id != match_control.id:
+        return False
+
+    contest_scoped = (
+        match.get("match_type") == TYPE_CONTEST
+        or match.get("contest_id") is not None
+        or job.get("match_type") == TYPE_CONTEST
+        or job.get("contest_id") is not None
+    )
+    if not contest_scoped:
+        return True
+    match_contest_id = match.get("contest_id")
+    job_contest_id = job.get("contest_id")
+    if (
+        match.get("match_type") != TYPE_CONTEST
+        or job.get("match_type") != TYPE_CONTEST
+        or isinstance(match_contest_id, bool)
+        or not isinstance(match_contest_id, int)
+        or match_contest_id < 1
+        or isinstance(job_contest_id, bool)
+        or not isinstance(job_contest_id, int)
+        or job_contest_id != match_contest_id
+        or not isinstance(contest, dict)
+        or contest.get("id") != match_contest_id
+        or contest.get("game_id") != spec.game_id
+        or "time_control_id" not in contest
+    ):
+        return False
+    try:
+        # A migrated historical NULL means this game's immutable old default;
+        # missing/malformed fields remain corruption and fail closed above.
+        contest_control = spec.resolve_time_control(contest["time_control_id"])
+    except (TypeError, ValueError):
+        return False
+    return contest_control.id == job_control.id
+
+
 def _technical_incident_event(exc: BotTechnicalError) -> dict:
     return {"type": TECHNICAL_INCIDENT_EVENT, **exc.incident()}
 
@@ -193,6 +290,15 @@ def _technical_result_deltas(
     if neutral:
         return 0, 0
     return (-1, 1) if loser_seat == 0 else (1, -1)
+
+
+def _strict_crashed_seat(exc: BotCrashedError) -> int | None:
+    """Accept only the physical seat stamped by the runner boundary."""
+
+    seat = getattr(exc, "crashed_seat", None)
+    if isinstance(seat, bool) or not isinstance(seat, int) or seat not in (0, 1):
+        return None
+    return seat
 
 
 def _bounded_replay_events(events: list[dict]) -> list[dict]:
@@ -280,6 +386,22 @@ class HumanInactive(Exception):
     """
 
 
+class PublicSSELimitError(RuntimeError):
+    """A process-local public event-stream concurrency boundary was reached."""
+
+    def __init__(self, scope: str) -> None:
+        super().__init__("public SSE subscriber limit reached")
+        self.scope = scope
+
+
+class HumanWebSocketLimitError(RuntimeError):
+    """A process-local authenticated human WebSocket boundary was reached."""
+
+    def __init__(self, scope: str) -> None:
+        super().__init__("human WebSocket subscriber limit reached")
+        self.scope = scope
+
+
 class BotVersionUnavailableError(ValueError):
     """A frozen Bot version cannot be resolved to its original runtime.
 
@@ -338,6 +460,32 @@ class MatchOrchestrator:
         # receive no hole cards/turn request; the authenticated human receives
         # only their own cards and decision request.
         self._sse_human_views: dict[asyncio.Queue, tuple[bool, int | None]] = {}
+        # Anonymous HTTP event streams use bounded process-local reservations.
+        # The public route executes on one asyncio loop, so each synchronous
+        # check-and-increment below is atomic with respect to other requests.
+        # Authenticated human WebSockets and internal subscribers intentionally
+        # stay on the existing unmetered path and never enter these registries.
+        self._public_sse_total = 0
+        self._public_sse_by_match: dict[str, int] = {}
+        self._public_sse_by_ip: dict[str, int] = {}
+        self._public_sse_subscriptions: dict[
+            asyncio.Queue, tuple[str, str]
+        ] = {}
+        # Authenticated human-play WebSockets have independent global/match/user
+        # reservations.  A queue key binds exactly one accepted reservation to
+        # unsubscribe(), including terminal and cancellation cleanup paths.
+        self._human_ws_total = 0
+        self._human_ws_by_match: dict[str, int] = {}
+        self._human_ws_by_user: dict[int, int] = {}
+        self._human_ws_subscriptions: dict[
+            asyncio.Queue, tuple[str, int]
+        ] = {}
+        # Action abuse budgets persist across a user's reconnects and are also
+        # shared by peer IP.  Entries are reclaimed only after their allowance
+        # is fully refilled; a hard combined ceiling fails closed instead of
+        # letting authenticated identities grow process memory without bound.
+        self._human_action_rate_by_user: dict[int, tuple[float, float]] = {}
+        self._human_action_rate_by_ip: dict[str, tuple[float, float]] = {}
         # Runner 正在追加的事件列表引用。运行 replay 为崩溃恢复而节流落库，
         # 新订阅必须读取这份完整前缀，不能永久漏掉最近 1–4 条事件。前缀
         # 仍在 subscribe() 按观看者身份经过公开投影与真人底牌脱敏。
@@ -399,6 +547,10 @@ class MatchOrchestrator:
         # the authoritative terminal event; ``_finish_match_task`` removes them
         # immediately after the broadcast.  All other exits still clean eagerly.
         if match_id not in self._admin_aborting:
+            # Detach from future broadcasts, but keep an HTTP subscriber's
+            # active reservation until its StreamingResponse actually exits.
+            # Releasing here would under-count a slow client that still owns
+            # the queue/socket after match-task cleanup.
             for queue in self._sse.pop(match_id, []):
                 self._sse_human_views.pop(queue, None)
             self._active_replay_events.pop(match_id, None)
@@ -611,8 +763,22 @@ class MatchOrchestrator:
             self._admin_abort_handoffs.clear()
         self._human_turns.clear()
         self._human_active_users.clear()
+        for match_id, queues in list(self._sse.items()):
+            for queue in list(queues):
+                self.unsubscribe(match_id, queue)
+        # Defensive convergence for any legacy/inconsistent registry state.
         self._sse.clear()
         self._sse_human_views.clear()
+        self._public_sse_subscriptions.clear()
+        self._public_sse_by_match.clear()
+        self._public_sse_by_ip.clear()
+        self._public_sse_total = 0
+        self._human_ws_subscriptions.clear()
+        self._human_ws_by_match.clear()
+        self._human_ws_by_user.clear()
+        self._human_ws_total = 0
+        self._human_action_rate_by_user.clear()
+        self._human_action_rate_by_ip.clear()
         self._active_replay_events.clear()
 
     def active_execution_task_count(self) -> int:
@@ -657,6 +823,7 @@ class MatchOrchestrator:
         *,
         human_seat: int = 1,
         game_id: str | None = None,
+        time_control_id: str | None = None,
         request_id: str | None = None,
         idempotency_fingerprint: str | None = None,
     ) -> str:
@@ -677,6 +844,7 @@ class MatchOrchestrator:
             raise ValueError(f"指定游戏 {gid} 与 Bot 游戏 {bot.get('game_id')} 不一致")
         if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
             raise ValueError(f"游戏引擎未注册: {gid}")
+        time_control = game_registry.get(gid).resolve_time_control(time_control_id)
 
         bot_seat = 1 - human_seat
         # None 在创建瞬间解析为当前激活版本并落 match_config；runner 排队期间即使
@@ -685,7 +853,7 @@ class MatchOrchestrator:
         bot_version = self._snapshot_bot_version(
             bot_id, None, seat_label=f"座位{bot_seat}"
         )
-        mc: dict[str, Any] = {}
+        mc: dict[str, Any] = {"time_control_id": time_control.id}
         if bot_version is not None:
             mc[
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
@@ -739,6 +907,7 @@ class MatchOrchestrator:
         duplicate: bool = False,
         duplicate_seed: int | None = None,
         match_seed: int | None = None,
+        time_control_id: str | None = None,
         contest_pairing_id: int | None = None,
         request_id: str | None = None,
         idempotency_fingerprint: str | None = None,
@@ -808,6 +977,7 @@ class MatchOrchestrator:
         # __run_match_inner 据此走 run_duplicate（两场独立计分），并落
         # match_seed 供同牌换座复现。
         spec = game_registry.get(gid)
+        time_control = spec.resolve_time_control(time_control_id)
         if duplicate and spec.build_match_plan is None:
             raise ValueError(f"游戏 {gid} 不支持 duplicate 对局")
         if match_seed is not None and (
@@ -821,7 +991,7 @@ class MatchOrchestrator:
             raise ValueError("duplicate 对局不能同时指定普通单场 match_seed")
         if duplicate and EXECUTION_ENV_REMOTE_LOCAL in set(environments):
             raise ValueError("本地 Bot 仅用于单场练习，不能使用复式赛制")
-        mc: dict[str, Any] = {}
+        mc: dict[str, Any] = {"time_control_id": time_control.id}
         if version_a is not None:
             mc["_bot_a_version_id"] = int(version_a["id"])
         if version_b is not None:
@@ -874,6 +1044,20 @@ class MatchOrchestrator:
 
     def _upsert_replay_owned(self, match_id: str, events_json: str) -> None:
         self.store.upsert_replay(match_id, events_json)
+
+    def _reject_invalid_execution_time_control(self, match_id: str) -> None:
+        """Abort a drifted job/Match binding before any Bot session is opened."""
+
+        self._update_match_owned(
+            match_id,
+            status=STATUS_ABORTED,
+            reason="invalid_match_config",
+            winner=None,
+            ended_at=_now(),
+        )
+        terminal_event = _authoritative_error("invalid_match_config")
+        self._safe_flush_terminal_replay(match_id, [], terminal_event)
+        self._broadcast(match_id, terminal_event)
 
     def start_execution_job(self, job: dict) -> None:
         """Start the one attempt atomically prepared by execution_jobs.claim."""
@@ -1150,6 +1334,7 @@ class MatchOrchestrator:
         bot_a_version_id: int | None = None,
         bot_b_version_id: int | None = None,
         duplicate_seed: int | None = None,
+        time_control_id: str | None = None,
         contest_pairing_id: int | None = None,
     ) -> str:
         """复式赛制（duplicate）对局：跑两场同副牌换座的独立计分场。
@@ -1173,6 +1358,7 @@ class MatchOrchestrator:
             bot_b_version_id=bot_b_version_id,
             duplicate=True,
             duplicate_seed=duplicate_seed,
+            time_control_id=time_control_id,
             contest_pairing_id=contest_pairing_id,
         )
 
@@ -1181,58 +1367,276 @@ class MatchOrchestrator:
         match_id: str,
         *,
         human_viewer_seat: int | None = None,
+        human_user_id: int | None = None,
+        public_client_ip: str | None = None,
     ) -> asyncio.Queue:
-        # 统一 detailed + 嵌套 seats（含人类座真人用户名）
-        from bzplat.backend.matches.seat_info import match_for_viewer
+        """Create an event queue after any external-client reservation.
 
-        m = sanitize_public_match(match_for_viewer(self.store, match_id))
-        active_human = bool(
-            m
-            and m.get("match_type") == TYPE_HUMAN
-            and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
-        )
-        active_events = self._active_replay_events.get(match_id)
-        active_status = bool(
-            m and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
-        )
-        if active_events is not None and active_status:
-            snapshot_events = sanitize_public_event_prefix(
-                list(_live_replay_events(active_events)),
-                redact_active_human=active_human,
-                human_viewer_seat=human_viewer_seat,
-            )
-        else:
-            # 终态提交后、runner 收尾前也可能仍有内存引用；此时必须从
-            # Store 读取由权威 match 行合成唯一终局的公开 replay。
-            replay = self.store.get_public_replay(
-                match_id,
-                human_viewer_seat=human_viewer_seat,
-            ) or {}
-            snapshot_events = json.loads(replay.get("events_json") or "[]")
-        snapshot = {
-            "type": "snapshot",
-            "match": m or {},
-            "events": snapshot_events,
-        }
+        ``public_client_ip`` is supplied only by the anonymous SSE route.  Its
+        reservation happens synchronously before snapshot work or queue
+        allocation.  Authenticated human WebSockets instead supply the exact
+        ``human_user_id``.  Both reservations roll back on every failure path.
+        """
+        public_identity: tuple[str, str] | None = None
+        public_registered = False
+        human_identity: tuple[str, int] | None = None
+        human_registered = False
+        q: asyncio.Queue | None = None
+        if public_client_ip is not None and human_user_id is not None:
+            raise ValueError("subscriber cannot use public and human reservations")
+        if public_client_ip is not None:
+            normalized_ip = str(public_client_ip).strip() or "unknown"
+            self._reserve_public_sse(match_id, normalized_ip)
+            public_identity = (match_id, normalized_ip)
+        if human_user_id is not None:
+            if type(human_user_id) is not int or human_user_id < 1:
+                raise ValueError("human_user_id must be a positive integer")
+            normalized_user_id = human_user_id
+            self._reserve_human_websocket(match_id, normalized_user_id)
+            human_identity = (match_id, normalized_user_id)
 
-        # 快照与可见性全部构造成功后再注册队列。否则 DB/JSON 异常会
-        # 留下调用方永远拿不到、也无法 unsubscribe 的孤儿订阅。
-        # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
-        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
-        self._sse_human_views[q] = (active_human, human_viewer_seat)
-        self._sse.setdefault(match_id, []).append(q)
         try:
+            # 统一 detailed + 嵌套 seats（含人类座真人用户名）
+            from bzplat.backend.matches.seat_info import match_for_viewer
+
+            # ``match_for_viewer`` already applies the public Match sanitizer before
+            # the seat-info allow-list.  Running it through the sanitizer a second
+            # time would no longer have the private frozen ``match_config`` and
+            # would therefore reinterpret every alternate clock as the game's
+            # historical default.
+            m = match_for_viewer(self.store, match_id)
+            active_human = bool(
+                m
+                and m.get("match_type") == TYPE_HUMAN
+                and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
+            )
+            active_events = self._active_replay_events.get(match_id)
+            active_status = bool(
+                m and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
+            )
+            if active_events is not None and active_status:
+                snapshot_events = sanitize_public_event_prefix(
+                    list(_live_replay_events(active_events)),
+                    redact_active_human=active_human,
+                    human_viewer_seat=human_viewer_seat,
+                    expected_time_control=(
+                        m.get("time_control")
+                        if isinstance(m, dict)
+                        and isinstance(m.get("time_control"), dict)
+                        else None
+                    ),
+                    expected_game_id=(
+                        m.get("game_id")
+                        if isinstance(m, dict)
+                        and isinstance(m.get("game_id"), str)
+                        else None
+                    ),
+                )
+            else:
+                # 终态提交后、runner 收尾前也可能仍有内存引用；此时必须从
+                # Store 读取由权威 match 行合成唯一终局的公开 replay。
+                replay = self.store.get_public_replay(
+                    match_id,
+                    human_viewer_seat=human_viewer_seat,
+                ) or {}
+                snapshot_events = json.loads(replay.get("events_json") or "[]")
+            snapshot = {
+                "type": "snapshot",
+                "match": m or {},
+                "events": snapshot_events,
+            }
+
+            # 快照与可见性全部构造成功后再注册队列。否则 DB/JSON 异常会
+            # 留下调用方永远拿不到、也无法 unsubscribe 的孤儿订阅。
+            # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
+            q = asyncio.Queue(maxsize=2000)
+            self._sse_human_views[q] = (active_human, human_viewer_seat)
+            self._sse.setdefault(match_id, []).append(q)
+            if public_identity is not None:
+                self._public_sse_subscriptions[q] = public_identity
+                public_registered = True
+            if human_identity is not None:
+                self._human_ws_subscriptions[q] = human_identity
+                human_registered = True
             q.put_nowait(snapshot)
+            return q
         except BaseException:
-            self.unsubscribe(match_id, q)
+            if q is not None:
+                self.unsubscribe(match_id, q)
+            if public_identity is not None and not public_registered:
+                self._release_public_sse(*public_identity)
+            if human_identity is not None and not human_registered:
+                self._release_human_websocket(*human_identity)
             raise
-        return q
+
+    def _reserve_public_sse(self, match_id: str, client_ip: str) -> None:
+        """Atomically reserve one anonymous SSE slot on the owning event loop."""
+        if self._public_sse_total >= PUBLIC_SSE_GLOBAL_LIMIT:
+            raise PublicSSELimitError("global")
+        if self._public_sse_by_match.get(match_id, 0) >= PUBLIC_SSE_PER_MATCH_LIMIT:
+            raise PublicSSELimitError("match")
+        if self._public_sse_by_ip.get(client_ip, 0) >= PUBLIC_SSE_PER_IP_LIMIT:
+            raise PublicSSELimitError("ip")
+        self._public_sse_total += 1
+        self._public_sse_by_match[match_id] = (
+            self._public_sse_by_match.get(match_id, 0) + 1
+        )
+        self._public_sse_by_ip[client_ip] = (
+            self._public_sse_by_ip.get(client_ip, 0) + 1
+        )
+
+    def _release_public_sse(self, match_id: str, client_ip: str) -> None:
+        """Release one exact reservation without allowing negative counters."""
+        self._public_sse_total = max(0, self._public_sse_total - 1)
+        for counts, key in (
+            (self._public_sse_by_match, match_id),
+            (self._public_sse_by_ip, client_ip),
+        ):
+            remaining = counts.get(key, 0) - 1
+            if remaining > 0:
+                counts[key] = remaining
+            else:
+                counts.pop(key, None)
+
+    def _reserve_human_websocket(self, match_id: str, user_id: int) -> None:
+        """Reserve one authenticated human-play slot before queue allocation."""
+        if self._human_ws_total >= HUMAN_WS_GLOBAL_LIMIT:
+            raise HumanWebSocketLimitError("global")
+        if self._human_ws_by_match.get(match_id, 0) >= HUMAN_WS_PER_MATCH_LIMIT:
+            raise HumanWebSocketLimitError("match")
+        if self._human_ws_by_user.get(user_id, 0) >= HUMAN_WS_PER_USER_LIMIT:
+            raise HumanWebSocketLimitError("user")
+        self._human_ws_total += 1
+        self._human_ws_by_match[match_id] = (
+            self._human_ws_by_match.get(match_id, 0) + 1
+        )
+        self._human_ws_by_user[user_id] = (
+            self._human_ws_by_user.get(user_id, 0) + 1
+        )
+
+    def _release_human_websocket(self, match_id: str, user_id: int) -> None:
+        """Release one exact human-play reservation without negative counters."""
+        self._human_ws_total = max(0, self._human_ws_total - 1)
+        for counts, key in (
+            (self._human_ws_by_match, match_id),
+            (self._human_ws_by_user, user_id),
+        ):
+            remaining = counts.get(key, 0) - 1
+            if remaining > 0:
+                counts[key] = remaining
+            else:
+                counts.pop(key, None)
+
+    @staticmethod
+    def _refilled_human_action_tokens(
+        state: tuple[float, float] | None,
+        now: float,
+    ) -> float:
+        if state is None:
+            return float(HUMAN_ACTION_RATE_BURST)
+        tokens, updated_at = state
+        elapsed = max(0.0, now - updated_at)
+        return min(
+            float(HUMAN_ACTION_RATE_BURST),
+            tokens + elapsed * HUMAN_ACTION_RATE_REFILL_PER_SECOND,
+        )
+
+    def _reclaim_refilled_human_action_buckets(self, now: float) -> None:
+        for buckets in (
+            self._human_action_rate_by_user,
+            self._human_action_rate_by_ip,
+        ):
+            for key, state in list(buckets.items()):
+                if self._refilled_human_action_tokens(state, now) >= float(
+                    HUMAN_ACTION_RATE_BURST
+                ):
+                    buckets.pop(key, None)
+
+    def consume_human_action_token(
+        self,
+        user_id: int,
+        client_ip: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Charge one human action frame before JSON or database work.
+
+        The synchronous method is called on the orchestrator's owning event
+        loop, so checking both identities and committing both token states is
+        atomic with respect to every human-play socket in this process.
+        """
+
+        if type(user_id) is not int or user_id < 1:
+            raise ValueError("human action user id must be a positive integer")
+        if (
+            not isinstance(client_ip, str)
+            or not client_ip.strip()
+            or len(client_ip.strip()) > 64
+        ):
+            raise ValueError("human action client IP must be a bounded string")
+        normalized_ip = client_ip.strip()
+        checked_at = time.monotonic() if now is None else float(now)
+
+        new_bucket_count = int(user_id not in self._human_action_rate_by_user)
+        new_bucket_count += int(normalized_ip not in self._human_action_rate_by_ip)
+        current_bucket_count = len(self._human_action_rate_by_user) + len(
+            self._human_action_rate_by_ip
+        )
+        if current_bucket_count + new_bucket_count > HUMAN_ACTION_RATE_BUCKET_LIMIT:
+            self._reclaim_refilled_human_action_buckets(checked_at)
+            current_bucket_count = len(self._human_action_rate_by_user) + len(
+                self._human_action_rate_by_ip
+            )
+            new_bucket_count = int(user_id not in self._human_action_rate_by_user)
+            new_bucket_count += int(
+                normalized_ip not in self._human_action_rate_by_ip
+            )
+            if (
+                current_bucket_count + new_bucket_count
+                > HUMAN_ACTION_RATE_BUCKET_LIMIT
+            ):
+                return False
+
+        user_state = self._human_action_rate_by_user.get(user_id)
+        ip_state = self._human_action_rate_by_ip.get(normalized_ip)
+        user_tokens = self._refilled_human_action_tokens(user_state, checked_at)
+        ip_tokens = self._refilled_human_action_tokens(ip_state, checked_at)
+        if user_tokens < 1.0 or ip_tokens < 1.0:
+            # Refresh only existing identities.  A user that is already over
+            # budget cannot fill the bounded table by rotating peer addresses.
+            if user_state is not None:
+                self._human_action_rate_by_user[user_id] = (
+                    user_tokens,
+                    checked_at,
+                )
+            if ip_state is not None:
+                self._human_action_rate_by_ip[normalized_ip] = (
+                    ip_tokens,
+                    checked_at,
+                )
+            return False
+
+        self._human_action_rate_by_user[user_id] = (
+            user_tokens - 1.0,
+            checked_at,
+        )
+        self._human_action_rate_by_ip[normalized_ip] = (
+            ip_tokens - 1.0,
+            checked_at,
+        )
+        return True
 
     def unsubscribe(self, match_id: str, q: asyncio.Queue) -> None:
         lst = self._sse.get(match_id) or []
         if q in lst:
             lst.remove(q)
         self._sse_human_views.pop(q, None)
+        public_identity = self._public_sse_subscriptions.pop(q, None)
+        if public_identity is not None:
+            self._release_public_sse(*public_identity)
+        human_identity = self._human_ws_subscriptions.pop(q, None)
+        if human_identity is not None:
+            self._release_human_websocket(*human_identity)
         # P1-7 修复：列表空时清 key，防 _sse dict 无界增长（每个曾观看的 match_id 永留空 list）。
         if not lst:
             self._sse.pop(match_id, None)
@@ -1424,6 +1828,26 @@ class MatchOrchestrator:
             self._safe_flush_terminal_replay(match_id, [], terminal_event)
             self._broadcast(match_id, terminal_event)
             return
+        active_job = (
+            self.store.executions.get_by_match(match_id)
+            if execution_scope is not None
+            else None
+        )
+        contest_id = m.get("contest_id")
+        contest_snapshot = (
+            self.store.get_contest(contest_id)
+            if isinstance(contest_id, int) and not isinstance(contest_id, bool)
+            else None
+        )
+        if execution_scope is not None and not _execution_time_control_binding_is_valid(
+            active_job, m, spec, contest=contest_snapshot
+        ):
+            logger.error(
+                "match %s execution request time control drifted from Match",
+                match_id,
+            )
+            self._reject_invalid_execution_time_control(match_id)
+            return
         # Resolve from the pairing's unique match_id rather than trusting the
         # Match's own contest/type fields.  A corrupted linked Match that claims
         # to be a challenge (or clears contest_id) must still fail before any
@@ -1516,7 +1940,9 @@ class MatchOrchestrator:
             try:
                 stored_mc = json.loads(stored_mc)
             except Exception:
-                stored_mc = {}
+                stored_mc = {"time_control_id": None}
+        if not isinstance(stored_mc, dict):
+            stored_mc = {"time_control_id": None}
         environments = (
             str(
                 stored_mc.get("_bot_a_environment")
@@ -1537,6 +1963,7 @@ class MatchOrchestrator:
         )
         frozen_local_agent_public_ids: list[str | None] = [None, None]
         try:
+            time_control = _frozen_time_control(spec, stored_mc)
             execution_profile_version = _frozen_execution_profile_version(
                 stored_mc, environments
             )
@@ -1709,7 +2136,7 @@ class MatchOrchestrator:
                     runtime_modes=(mode_a, mode_b),
                     execution_environments=environments,
                     execution_profile_version=execution_profile_version,
-                    time_budget_per_side=spec.time_budget_per_side,
+                    time_control_id=time_control.id,
                     execution_scope=execution_scope,
                     duplicate=True,
                 )
@@ -1726,7 +2153,7 @@ class MatchOrchestrator:
                     execution_profile_version=execution_profile_version,
                     local_agent_ids=(local_agent_a, local_agent_b),
                     match_id=match_id,
-                    time_budget_per_side=spec.time_budget_per_side,
+                    time_control_id=time_control.id,
                     execution_scope=execution_scope,
                 )
             # 复式：result.legs 中每个 70 手计分场独立判胜并分别计分。
@@ -1894,10 +2321,32 @@ class MatchOrchestrator:
             # Bot 启动崩溃 → 技术判负（completed + winner=对手 + technical_loss=1）。
             # 统一所有对局类型（原仅 contest 走 completed，challenge/ladder/table 走 aborted
             # 无结果无胜者——这是「游戏结束显示已取消而非已完成」的根因）。
-            # 崩溃方从 exc.crashed_seat 取（runner 在 start_session 失败时注解）；
-            # 未注解（游戏内崩溃已由引擎处理产出正常 result，不会到这；bot_a start
-            # 失败未注解→默认 0）。
-            crashed_seat = getattr(exc, "crashed_seat", None) or 0
+            # 崩溃方必须由 runner 的物理座位边界明确注解。缺失/错类型是平台
+            # 不变量故障，绝不能静默猜 seat 0 并把真正故障方判成胜者。
+            crashed_seat = _strict_crashed_seat(exc)
+            if crashed_seat is None:
+                logger.error(
+                    "match %s Bot crash is missing valid seat attribution",
+                    match_id,
+                )
+                if execution_scope is not None:
+                    execution_scope.mark_recovery_pending(
+                        "Bot 崩溃归责缺少有效座位；等待清场后恢复执行任务"
+                    )
+                else:
+                    self._update_match_owned(
+                        match_id,
+                        status=STATUS_ABORTED,
+                        reason="platform_error",
+                        ended_at=_now(),
+                    )
+                    terminal_event = _authoritative_error("platform_error")
+                    persist_debug()
+                    self._safe_flush_terminal_replay(
+                        match_id, events, terminal_event
+                    )
+                    self._broadcast(match_id, terminal_event)
+                return
             winner = 1 - crashed_seat
             ea, eb = _technical_result_deltas(
                 crashed_seat, neutral=neutral_technical_delta
@@ -2280,7 +2729,8 @@ class MatchOrchestrator:
             self._tasks.pop(match_id, None)
             return
         # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。
-        # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
+        # 终态事件已入队；只停止后续 fanout。HTTP 活跃额度必须由响应生成器在
+        # socket 真正结束后释放，否则慢客户端仍连接时会被提前少算。
         for queue in self._sse.pop(match_id, []):
             self._sse_human_views.pop(queue, None)
         self._active_replay_events.pop(match_id, None)
@@ -2347,12 +2797,34 @@ class MatchOrchestrator:
                 self._safe_flush_terminal_replay(match_id, [], terminal_event)
                 self._broadcast(match_id, terminal_event)
                 return
+            active_job = (
+                self.store.executions.get_by_match(match_id)
+                if execution_scope is not None
+                else None
+            )
+            contest_id = m.get("contest_id")
+            contest_snapshot = (
+                self.store.get_contest(contest_id)
+                if isinstance(contest_id, int) and not isinstance(contest_id, bool)
+                else None
+            )
+            if execution_scope is not None and not _execution_time_control_binding_is_valid(
+                active_job, m, spec, contest=contest_snapshot
+            ):
+                logger.error(
+                    "human match %s execution request time control drifted from Match",
+                    match_id,
+                )
+                self._reject_invalid_execution_time_control(match_id)
+                return
             stored_mc = m.get("match_config") or {}
             if isinstance(stored_mc, str):
                 try:
                     stored_mc = json.loads(stored_mc)
                 except Exception:
-                    stored_mc = {}
+                    stored_mc = {"time_control_id": None}
+            if not isinstance(stored_mc, dict):
+                stored_mc = {"time_control_id": None}
             version_id = stored_mc.get(
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
             )
@@ -2377,6 +2849,7 @@ class MatchOrchestrator:
             try:
                 if environments[human_seat] != EXECUTION_ENV_HUMAN:
                     raise ValueError("人类座位的执行环境必须是 human")
+                time_control = _frozen_time_control(spec, stored_mc)
                 execution_profile_version = _frozen_execution_profile_version(
                     stored_mc, environments
                 )
@@ -2488,7 +2961,7 @@ class MatchOrchestrator:
                     runtime_mode=bot_mode,
                     execution_environment=environments[bot_seat],
                     execution_profile_version=execution_profile_version,
-                    time_budget_per_side=spec.time_budget_per_side,
+                    time_control_id=time_control.id,
                     execution_scope=execution_scope,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
@@ -2580,6 +3053,29 @@ class MatchOrchestrator:
                     )
                     self._broadcast(match_id, terminal_event)
             except BotCrashedError as exc:
+                crashed_seat = _strict_crashed_seat(exc)
+                if crashed_seat != bot_seat:
+                    logger.error(
+                        "human match %s Bot crash has invalid seat attribution",
+                        match_id,
+                    )
+                    if execution_scope is not None:
+                        execution_scope.mark_recovery_pending(
+                            "Bot 崩溃归责缺少有效座位；等待清场后恢复执行任务"
+                        )
+                    else:
+                        self.store.update_match(
+                            match_id,
+                            status=STATUS_ABORTED,
+                            reason="platform_error",
+                            ended_at=_now(),
+                        )
+                        terminal_event = _authoritative_error("platform_error")
+                        self._safe_flush_terminal_replay(
+                            match_id, events, terminal_event
+                        )
+                        self._broadcast(match_id, terminal_event)
+                    return
                 # Bot 启动即崩/EOF——快速 abort，广播清晰错误（而非吞成默认动作死磕数小时）
                 logger.warning("human match %s aborted: bot crashed — %s", match_id, exc)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now())

@@ -121,7 +121,7 @@ def test_notification_truth_projection_and_thread_permissions(tmp_path):
             headers=alice_headers,
         )
         assert own.status_code == 200
-        assert own.headers["cache-control"].startswith("no-store")
+        assert own.headers["cache-control"] == "private, no-store, max-age=0"
         assert own.headers["referrer-policy"] == "no-referrer"
         assert own.json()["conversation"]["public_id"] == conversation_public_id
         assert "id" not in own.json()["conversation"]
@@ -134,7 +134,7 @@ def test_notification_truth_projection_and_thread_permissions(tmp_path):
             headers=admin_headers,
         )
         assert admin_thread.status_code == 200
-        assert admin_thread.headers["cache-control"].startswith("no-store")
+        assert admin_thread.headers["cache-control"] == "private, no-store, max-age=0"
         assert admin_thread.headers["referrer-policy"] == "no-referrer"
         marked = client.post(
             f"/api/communications/threads/{conversation_public_id}/read",
@@ -553,11 +553,11 @@ def test_guest_bug_feedback_allowlist_tracking_and_image_magic(tmp_path, monkeyp
             headers=alice_headers,
         )
         assert owned_detail.status_code == 200
-        assert owned_detail.headers["cache-control"].startswith("no-store")
+        assert owned_detail.headers["cache-control"] == "private, no-store, max-age=0"
         assert owned_detail.headers["referrer-policy"] == "no-referrer"
         owned_list = client.get("/api/feedback/bugs", headers=alice_headers)
         assert owned_list.status_code == 200
-        assert owned_list.headers["cache-control"].startswith("no-store")
+        assert owned_list.headers["cache-control"] == "private, no-store, max-age=0"
 
         admin_headers = {"Authorization": f"Bearer {_token(app, 'adminuser')}"}
         replied = client.post(
@@ -592,8 +592,10 @@ def test_feedback_frontend_guards_writes_across_identity_changes():
     api_source = (frontend_root / "api.ts").read_text(encoding="utf-8")
 
     assert "<FeedbackForIdentity key={user?.id ?? 'guest'} user={user} />" in source
-    assert source.count("frozenAuthRequestOptions(controller.signal)") >= 2
-    assert "credentials: authToken ? 'omit' : 'include'" in source
+    assert source.count(
+        "frozenAuthRequestOptions(controller.signal, identity.userId)"
+    ) >= 2
+    assert "credentials: userId === null ? 'omit' : 'include'" in source
     assert "identityEpochRef" in source
     assert "operationControllersRef" in source
     assert "abortIdentityOperations()" in source
@@ -606,7 +608,10 @@ def test_feedback_frontend_guards_writes_across_identity_changes():
     assert "const operation = beginIdentityOperation()" in download_source
     assert "signal: operation.controller.signal" in download_source
     assert download_source.count("operationIsCurrent(operation)") >= 3
-    assert "operation.authToken" in download_source
+    assert "operation.userId" in download_source
+    assert "operation.authToken" not in source
+    assert "headers.set('Authorization'" not in source
+    assert "userToken" not in source
     assert "finishIdentityOperation(operation)" in download_source
     assert "suppressAuth: true" in source
     assert "credentials: 'omit'" in source
@@ -614,16 +619,28 @@ def test_feedback_frontend_guards_writes_across_identity_changes():
     assert "referrerPolicy: 'no-referrer'" in source
     assert "suppressAuth?: boolean" in api_source
     assert "const soft = suppressAuth ||" in api_source
+    assert "currentUserMemory" in api_source
+    assert "currentIdentityGeneration" in api_source
+    assert "currentIdentitySnapshot()" in api_source
+    assert "sentIdentityIsCurrent(" in api_source
+    assert "localStorage.removeItem(legacyKey)" in api_source
+    assert "export const userToken" not in api_source
+    assert "headers.set('Authorization'" not in api_source
 
     assert "<MessagesForIdentity key={user?.id ?? 'guest'} user={user} />" in messages_source
     assert "listRequestRef.current.controller?.abort()" in messages_source
     assert "sendRequestRef.current.controller?.abort()" in messages_source
-    assert "suppressAuth: true" in messages_source
     assert "requestOptions(controller.signal)" in messages_source
+    assert "credentials: 'include'" in messages_source
+    assert "cache: 'no-store'" in messages_source
+    assert "referrerPolicy: 'no-referrer'" in messages_source
 
     assert "attachmentControllersRef" in admin_source
     assert "cancelAttachmentRequests()" in admin_source
     assert "signal: controller.signal" in admin_source
+    assert "credentials: 'include'" in admin_source
+    assert "cache: 'no-store'" in admin_source
+    assert "referrerPolicy: 'no-referrer'" in admin_source
     assert "!selectionMatches('bug', bugPublicId)" in admin_source
 
 

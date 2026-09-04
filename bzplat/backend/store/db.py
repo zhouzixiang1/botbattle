@@ -8,6 +8,8 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -19,11 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
+from bzplat.backend.runtime.binary_integrity import require_binary_file_integrity
 from bzplat.backend.runtime.config import RANKING_MIN_RATED_MATCHES
 
 from .public_contract import (
+    PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS,
     READ_TECHNICAL_INCIDENT_EVENTS,
     canonical_public_completed_reason,
+    canonical_public_error_reason,
     sanitize_public_event,
     sanitize_public_event_prefix,
     sanitize_public_incident,
@@ -35,7 +40,22 @@ from .public_contract import (
 from .schema import (
     CODE_RESET,
     COMMENT_TARGET_TYPES,
+    EMAIL_CODE_MAX_FAILED_ATTEMPTS,
+    CONTEST_ENTRY_PAGE_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_ALL_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_OWNER_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_NAVIGATION_PUBLIC_INDEX_SQL,
+    CONTEST_SOURCE_DEFAULT_PROTECTED_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_ALL_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_OWNER_INDEX_SQL,
+    CONTEST_SOURCE_NAVIGATION_PUBLIC_INDEX_SQL,
+    CONTEST_SOURCE_PROTECTED_INDEX_SQL,
+    CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL,
+    CONTEST_TITLE_EDGE_WHITESPACE_CODEPOINTS,
+    CONTEST_TITLE_MAX_LENGTH,
+    CONTEST_PAIRING_SCHEDULE_INDEX_SQL,
     CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL,
+    CONTEST_PAIRING_SYNC_INDEX_SQL,
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
@@ -47,6 +67,16 @@ from .schema import (
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
     ELIMINATION_TIEBREAK_PAIRED_SWAP,
+    EXECUTION_CLAIM_CONTEST_ORDER_INDEX_SQL,
+    EXECUTION_CLAIM_SOURCE_ORDER_INDEX_SQL,
+    EXECUTION_CANCELLED,
+    EXECUTION_CONTEST_DISPATCH_GAP_INDEX_SQL,
+    EXECUTION_INTERRUPTED,
+    EXECUTION_QUEUED,
+    EXECUTION_RUNNING,
+    EXECUTION_SETTLING,
+    EXECUTION_SOURCE_CONTEST,
+    EXECUTION_STARTING,
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
     LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER,
     LOCAL_AI_MAX_ONLINE_GLOBAL,
@@ -66,6 +96,7 @@ from .schema import (
     TYPE_CONTEST,
     TYPE_HUMAN,
     TYPE_LADDER,
+    validate_contest_title,
     LIKE_TARGET_TYPES,
     MATCH_DEBUG_MAX_BYTES_PER_MATCH,
     MATCH_DEBUG_MAX_BYTES_PER_SEAT,
@@ -74,15 +105,21 @@ from .schema import (
     MATCH_DEBUG_MAX_ENTRY_BYTES,
     VALID_RUNTIME_MODES,
     game_rule_contract,
+    pending_orphan_recovery_reason,
     require_supported_binary_metadata,
+    validate_orphan_recovery_reason,
 )
 from .validation import (
     exact_nonnegative_int,
+    exact_sqlite_bool,
     is_authoritative_no_opponent_pairing,
+    validate_canonical_naive_timestamp,
     validate_contest_times,
 )
 
 DEFAULT_DB_PATH = "botzone.db"
+
+logger = logging.getLogger(__name__)
 
 _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION = 1
 _AUTO_MATCH_POLICY_VERSION = "owner-game-lane-v2"
@@ -205,6 +242,186 @@ def offline_cutover_path_guard(database_path: str | os.PathLike[str]):
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _json_values_exactly_equal(left: Any, right: Any) -> bool:
+    """Compare parsed JSON without Python's bool/int/float aliases."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_values_exactly_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _json_values_exactly_equal(left[key], right[key]) for key in left
+        )
+    return bool(left == right)
+
+
+def _finalize_terminal_replay_tx(
+    conn: sqlite3.Connection,
+    *,
+    match: sqlite3.Row | dict[str, Any],
+    updated_at: str,
+) -> None:
+    """Persist the Match-authoritative terminal without losing a valid prefix.
+
+    Recovery and reconciliation run after the Match terminal transition may
+    already have committed, but they still own making the raw replay durable
+    before a job/pairing can advance. Missing replay rows are created. A
+    parseable JSON array keeps every non-terminal prefix item, while stale
+    terminal markers are replaced from the Match row: completed uses the same
+    canonical builder as the public projection; aborted normalizes only the
+    Match reason through the public allowlist. Corrupt/non-array snapshots
+    cannot be trusted as history, so they become terminal-only and emit a
+    bounded warning that never includes the raw payload.
+    """
+    authoritative = dict(match)
+    match_id = authoritative.get("id")
+    if not isinstance(match_id, str) or not match_id:
+        raise ValueError("terminal replay Match id 无效")
+    status = authoritative.get("status")
+    if status not in {STATUS_COMPLETED, STATUS_ABORTED}:
+        raise ValueError("terminal replay Match 尚未终态")
+    replay = conn.execute(
+        "SELECT events_json FROM match_replays WHERE match_id=?",
+        (match_id,),
+    ).fetchone()
+    events: list[Any] = []
+    rebuild_issue: str | None = None
+    if replay is not None:
+        raw_events = replay["events_json"]
+        if not isinstance(raw_events, str):
+            rebuild_issue = "invalid_type"
+        else:
+            try:
+                parsed = json.loads(raw_events)
+            except (TypeError, ValueError):
+                rebuild_issue = "invalid_json"
+            else:
+                if not isinstance(parsed, list):
+                    rebuild_issue = "non_array"
+                else:
+                    try:
+                        json.dumps(parsed, allow_nan=False)
+                    except (TypeError, ValueError):
+                        rebuild_issue = "non_standard_json"
+                    else:
+                        events = parsed
+    prefix = [
+        event
+        for event in events
+        if not (
+            isinstance(event, dict)
+            and event.get("type") in {"match_end", "error"}
+        )
+    ]
+    if status == STATUS_COMPLETED:
+        # Import lazily: ``matches.__init__`` exposes the orchestrator, whose
+        # game registry reaches the Store while the package graph is loading.
+        from bzplat.backend.matches.result_contract import canonical_deltas
+
+        raw_result = authoritative.get("result")
+        if isinstance(raw_result, str):
+            try:
+                raw_result = json.loads(raw_result)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("completed Match result deltas 无效") from exc
+        if not isinstance(raw_result, dict):
+            raise ValueError("completed Match result deltas 无效")
+        try:
+            strict_deltas = canonical_deltas(raw_result.get("deltas"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("completed Match result deltas 无效") from exc
+        strict_match = dict(authoritative)
+        strict_match["result"] = {"deltas": strict_deltas}
+        # The read-side projection deliberately tolerates legacy damage.  The
+        # write-side gate may reuse its public shape only after validating the
+        # authoritative Match result, and must never offer stale replay events
+        # as a fallback source for deltas.
+        terminal = _canonical_public_match_end(strict_match, [])
+    else:
+        terminal = {
+            "type": "error",
+            "reason": canonical_public_error_reason(authoritative.get("reason")),
+        }
+    canonical_events = [*prefix, terminal]
+    if (
+        rebuild_issue is None
+        and replay is not None
+        and _json_values_exactly_equal(events, canonical_events)
+    ):
+        return
+    events_json = json.dumps(
+        canonical_events,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    conn.execute(
+        "INSERT INTO match_replays(match_id,events_json,updated_at) "
+        "VALUES(?,?,?) ON CONFLICT(match_id) DO UPDATE SET "
+        "events_json=excluded.events_json,updated_at=excluded.updated_at",
+        (match_id, events_json, updated_at),
+    )
+    if rebuild_issue is not None:
+        logger.warning(
+            "recovery_replay_rebuilt match_id=%s status=%s reason=%s issue=%s",
+            match_id,
+            status,
+            terminal["reason"],
+            rebuild_issue,
+        )
+
+
+def _match_recovery_affiliation_tx(
+    conn: sqlite3.Connection,
+    *,
+    match_id: str,
+    direct_contest_id: Any,
+) -> tuple[str, int | None]:
+    """Classify one Match from every durable contest reference in this tx.
+
+    ``match_type`` is intentionally absent because legacy rows can drift there.
+    A Match is genuinely unaffiliated only when both its direct ``contest_id``
+    and every ``contest_pairings.match_id`` reference are absent. All references
+    must collapse to one active, non-showcase contest id; terminal, showcase,
+    dangling or conflicting identities are immutable and fail closed.
+    """
+    contest_ids: set[int] = set()
+    if direct_contest_id is not None:
+        if type(direct_contest_id) is not int or direct_contest_id <= 0:
+            return "blocked", None
+        contest_ids.add(direct_contest_id)
+    pairing_rows = conn.execute(
+        "SELECT DISTINCT contest_id FROM contest_pairings WHERE match_id=?",
+        (match_id,),
+    ).fetchall()
+    for pairing_row in pairing_rows:
+        pairing_contest_id = pairing_row["contest_id"]
+        if type(pairing_contest_id) is not int or pairing_contest_id <= 0:
+            return "blocked", None
+        contest_ids.add(pairing_contest_id)
+    if not contest_ids:
+        return "unaffiliated", None
+    if len(contest_ids) != 1:
+        return "blocked", None
+    contest_id = next(iter(contest_ids))
+    contest = conn.execute(
+        "SELECT status,showcase_key FROM contests WHERE id=?",
+        (contest_id,),
+    ).fetchone()
+    if (
+        contest is None
+        or contest["status"]
+        not in {CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST}
+        or contest["showcase_key"] is not None
+    ):
+        return "blocked", contest_id
+    return "active", contest_id
 
 
 _CONTEST_IDENTITY_PROFILE_FIELDS = (
@@ -354,12 +571,1005 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+_STAGE_DECISION_CONTEST_TOKEN_FIELDS = (
+    "id",
+    "status",
+    "game_id",
+    "template_id",
+    "stages_json",
+    "current_stage_idx",
+    "format_snapshot_json",
+    "source_contest_id",
+    "published_stage_pairing_count",
+    "pairing_topology_revision",
+    "sealed_pairing_topology_revision",
+)
+_STAGE_DECISION_ENTRY_TOKEN_FIELDS = (
+    "id",
+    "contest_id",
+    "user_id",
+    "bot_id",
+    "registered_at",
+    "seed",
+    "group_id",
+    "eliminated",
+)
+_STAGE_DECISION_PAIRING_TOKEN_FIELDS = (
+    "id",
+    "contest_id",
+    "round_num",
+    "entry_a_id",
+    "entry_b_id",
+    "_raw_entry_a_id",
+    "_raw_entry_b_id",
+    "_entry_a_user_id",
+    "_entry_b_user_id",
+    "bot_a_id",
+    "bot_b_id",
+    "_pairing_bot_a_owner_id",
+    "_pairing_bot_b_owner_id",
+    "bot_a_version_id",
+    "bot_b_version_id",
+    "pairing_seed",
+    "published_at",
+    "scheduled_at",
+    "match_id",
+    "status",
+    "stage_idx",
+    "stage_key",
+    "group_id",
+    "bracket_slot",
+    "color_first",
+    "series_index",
+    "series_size",
+    "tiebreak_group",
+    "tiebreak_game",
+    "_explicit_series_marker",
+    "_match_id",
+    "match_status",
+    "match_winner",
+    "_match_contest_id",
+    "_match_game_id",
+    "_match_type",
+    "_match_bot_a_id",
+    "_match_bot_b_id",
+    "_match_reason",
+    "_match_technical_loss",
+    "_match_result_json",
+    "_match_config_json",
+    "_match_created_at",
+    "started_at",
+    "ended_at",
+)
+
+# Exact durable columns consumed when a manager certifies a pre-manifest
+# published stage-zero batch.  The expected rows come from one Store snapshot;
+# comparing this complete persisted projection under ``BEGIN IMMEDIATE`` keeps
+# a concurrent row replacement from borrowing the manager's topology proof.
+_PUBLISHED_PAIRING_SEAL_FIELDS = (
+    "id",
+    "contest_id",
+    "round_num",
+    "entry_a_id",
+    "entry_b_id",
+    "bot_a_id",
+    "bot_b_id",
+    "bot_a_version_id",
+    "bot_b_version_id",
+    "pairing_seed",
+    "published_at",
+    "scheduled_at",
+    "match_id",
+    "status",
+    "stage_idx",
+    "stage_key",
+    "group_id",
+    "bracket_slot",
+    "color_first",
+    "series_index",
+    "series_size",
+    "tiebreak_group",
+    "tiebreak_game",
+)
+
+
+def _validate_pairing_publication_times(
+    pairing_rows: list[dict[str, Any]],
+    *,
+    require_published_at: bool,
+) -> None:
+    """Validate every textual pairing time before a publication write.
+
+    ``scheduled_at`` is compared lexicographically by the dispatcher, so all
+    writers must preserve the same exact naive ISO-seconds representation.
+    Formal publication batches also require a durable ``published_at`` value;
+    the generic low-level single-row helper keeps NULL only for historical
+    corruption fixtures and validates any supplied value.
+    """
+    if not isinstance(pairing_rows, list):
+        raise ValueError("赛事对阵批次必须是列表")
+    for source in pairing_rows:
+        if not isinstance(source, dict):
+            raise ValueError("赛事对阵批次行类型无效")
+        validate_canonical_naive_timestamp(
+            source.get("published_at"),
+            "赛事对阵发布时间",
+            allow_none=not require_published_at,
+        )
+        validate_canonical_naive_timestamp(
+            source.get("scheduled_at"),
+            "赛事对阵计划时间",
+            allow_none=True,
+        )
+
+
+def _stage_decision_token_value(value: Any) -> list[str]:
+    """Encode SQLite values without aliases between NULL/text/numeric types."""
+    if value is None:
+        return ["null", ""]
+    if isinstance(value, bool):
+        return ["bool", "1" if value else "0"]
+    if isinstance(value, int):
+        return ["int", str(value)]
+    if isinstance(value, float):
+        return ["float", value.hex()]
+    if isinstance(value, bytes):
+        return ["blob", value.hex()]
+    if isinstance(value, str):
+        return ["text-utf8", value.encode("utf-8", "surrogatepass").hex()]
+    raise ValueError("阶段决策输入包含不可编码的持久值")
+
+
+def _stage_decision_input_token(
+    contest: dict[str, Any],
+    entries: list[dict[str, Any]],
+    pairings: list[dict[str, Any]],
+) -> str:
+    """Hash one typed, row-bounded ranking-input projection."""
+
+    def encoded_row(row: dict[str, Any], fields: tuple[str, ...]) -> list[Any]:
+        return [
+            [field, _stage_decision_token_value(row.get(field))]
+            for field in fields
+        ]
+
+    payload = [
+        ["contest", encoded_row(contest, _STAGE_DECISION_CONTEST_TOKEN_FIELDS)],
+        [
+            "entries",
+            [
+                encoded_row(entry, _STAGE_DECISION_ENTRY_TOKEN_FIELDS)
+                for entry in entries
+            ],
+        ],
+        [
+            "pairings",
+            [
+                encoded_row(pairing, _STAGE_DECISION_PAIRING_TOKEN_FIELDS)
+                for pairing in pairings
+            ],
+        ],
+    ]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_expected_contest_entries_tx(
+    connection: sqlite3.Connection,
+    contest_id: int,
+    expected_entries: list[dict[str, Any]],
+) -> tuple[set[int], dict[int, int | None]]:
+    """CAS one exact roster snapshot and return its active entry identities."""
+    if not isinstance(expected_entries, list):
+        raise ValueError("赛事结果冻结名册快照类型无效")
+    expected_by_id: dict[int, tuple[Any, ...]] = {}
+    expected_bots: dict[int, int | None] = {}
+    seen_users: set[int] = set()
+    seen_bots: set[int] = set()
+    for entry in expected_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("赛事结果冻结名册行类型无效")
+        entry_id = exact_nonnegative_int(entry.get("id"))
+        user_id = exact_nonnegative_int(entry.get("user_id"))
+        raw_bot_id = entry.get("bot_id")
+        bot_id = (
+            exact_nonnegative_int(raw_bot_id)
+            if raw_bot_id is not None
+            else None
+        )
+        seed = exact_nonnegative_int(entry.get("seed", 0))
+        group_id = entry.get("group_id", "")
+        eliminated = exact_sqlite_bool(entry.get("eliminated", 0))
+        if (
+            entry_id is None
+            or entry_id < 1
+            or user_id is None
+            or user_id < 1
+            or (raw_bot_id is not None and (bot_id is None or bot_id < 1))
+            or seed is None
+            or not isinstance(group_id, str)
+            or group_id != group_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+            or eliminated is None
+            or entry_id in expected_by_id
+            or user_id in seen_users
+            or (bot_id is not None and bot_id in seen_bots)
+        ):
+            raise ValueError("赛事结果冻结名册身份或状态无效")
+        expected_by_id[entry_id] = (
+            user_id,
+            bot_id,
+            seed,
+            group_id,
+            int(eliminated),
+        )
+        expected_bots[entry_id] = bot_id
+        seen_users.add(user_id)
+        if bot_id is not None:
+            seen_bots.add(bot_id)
+
+    durable_rows = connection.execute(
+        "SELECT id,user_id,bot_id,seed,group_id,eliminated "
+        "FROM contest_entries WHERE contest_id=? ORDER BY id",
+        (contest_id,),
+    ).fetchall()
+    durable_by_id = {
+        row["id"]: (
+            row["user_id"],
+            row["bot_id"],
+            row["seed"],
+            row["group_id"],
+            row["eliminated"],
+        )
+        for row in durable_rows
+    }
+    if durable_by_id != expected_by_id:
+        raise ValueError("赛事结果冻结名册已变化或持久值损坏")
+    return (
+        {
+            entry_id
+            for entry_id, values in expected_by_id.items()
+            if values[-1] == 0
+        },
+        expected_bots,
+    )
+
+
+def _normalize_stage_result_batch(
+    contest_id: int,
+    stage_idx: int,
+    result_rows: list[dict[str, Any]],
+    *,
+    expected_entry_ids: set[int] | None = None,
+    expected_entry_bots: dict[int, int | None] | None = None,
+    expected_stage_groups: dict[int, str] | None = None,
+) -> list[tuple[Any, ...]]:
+    """Normalize a stage batch; strict mode proves one complete new snapshot."""
+    normalized: list[tuple[Any, ...]] = []
+    seen_entries: set[int] = set()
+    strict_coordinates: list[tuple[str, int, int | None]] = []
+    for raw in result_rows:
+        if not isinstance(raw, dict):
+            raise ValueError("阶段结果行类型无效")
+        entry_id = raw.get("entry_id")
+        bot_id = raw.get("bot_id")
+        stage_key = raw.get("stage_key", "")
+        group_id = raw.get("group_id", "")
+        rank_in_group = raw.get("rank_in_group")
+        payload_json = raw.get("payload_json", "{}")
+        if (
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            or entry_id in seen_entries
+            or (
+                bot_id is not None
+                and (
+                    isinstance(bot_id, bool)
+                    or not isinstance(bot_id, int)
+                    or bot_id < 1
+                )
+            )
+            or not isinstance(stage_key, str)
+            or not isinstance(group_id, str)
+            or group_id != group_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+            or isinstance(rank_in_group, bool)
+            or not isinstance(rank_in_group, int)
+            or rank_in_group < 1
+            or not isinstance(payload_json, str)
+        ):
+            raise ValueError("阶段结果行坐标无效")
+        if expected_entry_ids is not None:
+            points = raw.get("points", 0)
+            wins = exact_nonnegative_int(raw.get("wins", 0))
+            draws = exact_nonnegative_int(raw.get("draws", 0))
+            losses = exact_nonnegative_int(raw.get("losses", 0))
+            delta_total = raw.get("delta_total", 0)
+            try:
+                payload = json.loads(
+                    payload_json,
+                    parse_constant=lambda value: (_ for _ in ()).throw(
+                        ValueError(f"非法 JSON 常量: {value}")
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("阶段结果破同分载荷损坏") from exc
+            tiebreaks = (
+                sanitize_public_contest_tiebreaks(payload.get("tiebreaks"))
+                if isinstance(payload, dict)
+                else None
+            )
+            overall_rank = (
+                exact_nonnegative_int(payload.get("overall_rank"))
+                if isinstance(payload, dict) and "overall_rank" in payload
+                else None
+            )
+            if (
+                entry_id not in expected_entry_ids
+                or expected_entry_bots is None
+                or expected_entry_bots.get(entry_id) != bot_id
+                or (
+                    expected_stage_groups is not None
+                    and expected_stage_groups.get(entry_id) != group_id
+                )
+                or isinstance(points, bool)
+                or not isinstance(points, (int, float))
+                or not math.isfinite(points)
+                or wins is None
+                or draws is None
+                or losses is None
+                or isinstance(delta_total, bool)
+                or not isinstance(delta_total, int)
+                or tiebreaks is None
+                or tiebreaks["points"] != points
+                or (group_id != "" and (overall_rank is None or overall_rank < 1))
+                or (group_id == "" and overall_rank is not None)
+            ):
+                raise ValueError("阶段结果批次身份、积分或破同分明细无效")
+            strict_coordinates.append((group_id, rank_in_group, overall_rank))
+        seen_entries.add(entry_id)
+        normalized.append(
+            (
+                contest_id,
+                stage_idx,
+                stage_key,
+                entry_id,
+                bot_id,
+                raw.get("points", 0),
+                raw.get("wins", 0),
+                raw.get("draws", 0),
+                raw.get("losses", 0),
+                raw.get("delta_total", 0),
+                group_id,
+                rank_in_group,
+                payload_json,
+            )
+        )
+
+    if expected_entry_ids is not None:
+        if seen_entries != expected_entry_ids:
+            raise ValueError("阶段结果批次未精确覆盖权威参赛 cohort")
+        if expected_stage_groups is not None and (
+            set(expected_stage_groups) != expected_entry_ids
+            or any(
+                not isinstance(group_id, str)
+                or not group_id
+                or group_id != group_id.strip()
+                or any(
+                    ord(char) < 32 or ord(char) == 127
+                    for char in group_id
+                )
+                for group_id in expected_stage_groups.values()
+            )
+        ):
+            raise ValueError("阶段结果权威分组映射无效")
+        grouped = [bool(group_id) for group_id, _rank, _overall in strict_coordinates]
+        if any(grouped) and not all(grouped):
+            raise ValueError("阶段结果不能混合分组与非分组坐标")
+        if all(grouped) and grouped:
+            ranks_by_group: dict[str, list[int]] = {}
+            overall_ranks: set[int] = set()
+            for group_id, rank_in_group, overall_rank in strict_coordinates:
+                assert overall_rank is not None
+                ranks_by_group.setdefault(group_id, []).append(rank_in_group)
+                if overall_rank in overall_ranks:
+                    raise ValueError("阶段结果全局名次重复")
+                overall_ranks.add(overall_rank)
+            if any(
+                sorted(ranks) != list(range(1, len(ranks) + 1))
+                for ranks in ranks_by_group.values()
+            ) or overall_ranks != set(range(1, len(expected_entry_ids) + 1)):
+                raise ValueError("阶段结果分组或全局名次不连续")
+        elif {
+            rank_in_group
+            for _group_id, rank_in_group, _overall in strict_coordinates
+        } != set(range(1, len(expected_entry_ids) + 1)):
+            raise ValueError("阶段结果名次必须从 1 连续且唯一")
+    return normalized
+
+
+def _replace_stage_result_batch_tx(
+    connection: sqlite3.Connection,
+    contest_id: int,
+    stage_idx: int,
+    normalized: list[tuple[Any, ...]],
+) -> None:
+    connection.execute(
+        "DELETE FROM contest_stage_results WHERE contest_id=? AND stage_idx=?",
+        (contest_id, stage_idx),
+    )
+    for values in normalized:
+        connection.execute(
+            "INSERT INTO contest_stage_results"
+            "(contest_id, stage_idx, stage_key, entry_id, bot_id, points, wins, "
+            "draws, losses, delta_total, group_id, rank_in_group, payload_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            values,
+        )
+
+
+def _insert_stage_result_batch_tx(
+    connection: sqlite3.Connection,
+    normalized: list[tuple[Any, ...]],
+) -> None:
+    """Install one previously absent immutable stage-decision batch."""
+    for values in normalized:
+        connection.execute(
+            "INSERT INTO contest_stage_results"
+            "(contest_id, stage_idx, stage_key, entry_id, bot_id, points, wins, "
+            "draws, losses, delta_total, group_id, rank_in_group, payload_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            values,
+        )
+
+
+def _stage_result_recovery_rows(
+    rows: list[sqlite3.Row] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project private persisted rank coordinates from already-read rows."""
+    snapshots: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        payload = _loads_json(row.pop("payload_json", None), default={})
+        if not isinstance(payload, dict):
+            payload = {}
+        row["tiebreaks"] = sanitize_public_contest_tiebreaks(
+            payload.get("tiebreaks")
+        )
+        overall_rank = payload.get("overall_rank")
+        row["overall_rank"] = (
+            overall_rank
+            if isinstance(overall_rank, int)
+            and not isinstance(overall_rank, bool)
+            and overall_rank >= 1
+            else None
+        )
+        snapshots.append(row)
+    return snapshots
+
+
+def _parse_stable_group_id(group_id: object) -> str:
+    if (
+        not isinstance(group_id, str)
+        or not group_id
+        or group_id != group_id.strip()
+        or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+    ):
+        raise ValueError("分组标识无效")
+    return group_id
+
+
+def _parse_official_group_coordinates(
+    group_id: object, rank_in_group: object
+) -> tuple[str, int | None]:
+    """Parse the inseparable group coordinates on one official result row.
+
+    Historical/non-group rows have exactly ``('', None)``.  A grouped row must
+    carry both a canonical, non-empty label and an exact 1-based integer rank.
+    In particular, bool/float/string coercions and half-populated coordinates
+    fail closed at every Store write/read boundary.
+    """
+    if group_id == "":
+        if rank_in_group is not None:
+            raise ValueError("正式名次分组坐标必须同时为空或同时存在")
+        return "", None
+    group_id = _parse_stable_group_id(group_id)
+    if (
+        isinstance(rank_in_group, bool)
+        or not isinstance(rank_in_group, int)
+        or rank_in_group < 1
+    ):
+        raise ValueError("正式名次组内名次必须是正整数")
+    return group_id, rank_in_group
+
+
+def _validate_complete_official_group_coordinates(
+    rows: list[dict[str, Any] | sqlite3.Row],
+    *,
+    expected_entry_groups: dict[int, object] | None = None,
+) -> None:
+    """Validate the complete group-coordinate set of a source official table.
+
+    A non-group or historical final is represented by ``('', None)`` on every
+    row, regardless of any earlier group still stored on its roster entry.  If
+    any official row is grouped, every row must instead be grouped, ranks must
+    be exactly ``1..N`` within each group, and an available frozen roster must
+    bind every official entry to the same group.  This source-only full-table
+    gate deliberately does not reinterpret non-group finals from roster data.
+    """
+    parsed: list[tuple[dict[str, Any], str, int | None]] = []
+    for raw in rows:
+        if isinstance(raw, sqlite3.Row):
+            row = dict(raw)
+        elif isinstance(raw, dict):
+            row = raw
+        else:
+            raise ValueError("来源正式榜行类型无效")
+        group_id, rank_in_group = _parse_official_group_coordinates(
+            row.get("group_id"), row.get("rank_in_group")
+        )
+        parsed.append((row, group_id, rank_in_group))
+
+    if expected_entry_groups is not None:
+        expected_entry_ids: set[int] = set()
+        for entry_id in expected_entry_groups:
+            if (
+                isinstance(entry_id, bool)
+                or not isinstance(entry_id, int)
+                or entry_id < 1
+            ):
+                raise ValueError("来源正式榜名册 entry_id 无效")
+            expected_entry_ids.add(entry_id)
+        actual_entry_ids: set[int] = set()
+        for row, _group_id, _rank_in_group in parsed:
+            entry_id = row.get("entry_id")
+            if (
+                isinstance(entry_id, bool)
+                or not isinstance(entry_id, int)
+                or entry_id < 1
+                or entry_id in actual_entry_ids
+            ):
+                raise ValueError("来源正式榜 entry_id 无效或重复")
+            actual_entry_ids.add(entry_id)
+        if actual_entry_ids != expected_entry_ids:
+            raise ValueError("来源正式榜与名册成员不一致")
+
+    grouped_flags = [group_id != "" for _row_data, group_id, _rank in parsed]
+    if not any(grouped_flags):
+        return
+    if not all(grouped_flags):
+        raise ValueError("来源正式榜不能混合分组与非分组坐标")
+
+    ranks_by_group: dict[str, list[int]] = {}
+    for row, group_id, rank_in_group in parsed:
+        if rank_in_group is None:  # defensive: grouped rows are inseparable
+            raise ValueError("来源正式榜分组坐标不完整")
+        ranks_by_group.setdefault(group_id, []).append(rank_in_group)
+        if (
+            expected_entry_groups is not None
+            and expected_entry_groups[row["entry_id"]] != group_id
+        ):
+            raise ValueError("来源正式榜分组与冻结名册不一致")
+    for ranks in ranks_by_group.values():
+        if sorted(ranks) != list(range(1, len(ranks) + 1)):
+            raise ValueError("来源正式榜组内名次必须从 1 连续且唯一")
+
+
 # 旧 contest pairing / stage snapshot 可能先于 entry 身份列存在。只在同一赛事中
 # 一个 bot_id 唯一对应一个报名项时，读边界才可恢复 entry_id；0/多条保持未知。
 _UNIQUE_CONTEST_ENTRY_SQL = (
     "(SELECT contest_id,bot_id,MIN(id) AS entry_id FROM contest_entries "
     "WHERE bot_id IS NOT NULL GROUP BY contest_id,bot_id HAVING COUNT(*)=1)"
 )
+
+_RESERVED_RANDOM_GROUP_TEMPLATES = frozenset(
+    {"pencil_group_drr", "gomoku_seeded_group_drr_final"}
+)
+_RESERVED_RANDOM_GROUP_OFFICIAL_STAGE_CONTRACTS = {
+    # (terminal/current stage, allowed authority stages in the merged table)
+    "pencil_group_drr": (0, frozenset({0})),
+    "gomoku_seeded_group_drr_final": (1, frozenset({0, 1})),
+}
+
+
+def _decode_official_tiebreaks(raw: object) -> dict[str, Any]:
+    """Decode one persisted tie-break object without accepting JSON constants."""
+    if not isinstance(raw, str):
+        raise ValueError("正式名次破同分数据类型无效")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"非法 JSON 常量: {value}")
+
+    try:
+        decoded = json.loads(raw, parse_constant=reject_constant)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("正式名次破同分数据损坏") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("正式名次破同分数据必须是对象")
+    return decoded
+
+
+def _validate_complete_official_results(
+    rows: list[dict[str, Any] | sqlite3.Row],
+    *,
+    contest_id: int,
+    contest: dict[str, Any],
+    roster_rows: list[dict[str, Any] | sqlite3.Row],
+    stage_entry_ids: dict[int, set[int]] | None = None,
+    legacy_entry_groups: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate and normalize one complete ready official-result table.
+
+    The official table is one roster-wide authority, not a collection of
+    independently plausible rows.  This gate is shared by the atomic writer
+    and every ready-table reader so JSON and CSV cannot disagree about damaged
+    ranks, identities, group coordinates or tie-break chains.
+
+    Historical ungrouped rows may legitimately carry an empty/partial tie
+    object.  They stay readable as ``tiebreaks=None``; grouped rows are a new
+    contract and therefore require the complete bounded base projection.
+    """
+    if (
+        isinstance(contest_id, bool)
+        or not isinstance(contest_id, int)
+        or contest_id < 1
+        or contest.get("id") != contest_id
+    ):
+        raise ValueError("正式名次赛事身份无效")
+
+    roster_by_id: dict[int, dict[str, Any]] = {}
+    roster_users: set[int] = set()
+    for raw in roster_rows:
+        roster = dict(raw) if isinstance(raw, sqlite3.Row) else raw
+        if not isinstance(roster, dict):
+            raise ValueError("正式名次名册行类型无效")
+        entry_id = exact_nonnegative_int(roster.get("id"))
+        user_id = exact_nonnegative_int(roster.get("user_id"))
+        bot_id = roster.get("bot_id")
+        parsed_bot_id = (
+            exact_nonnegative_int(bot_id) if bot_id is not None else None
+        )
+        if (
+            entry_id is None
+            or entry_id < 1
+            or user_id is None
+            or user_id < 1
+            or (
+                bot_id is not None
+                and (parsed_bot_id is None or parsed_bot_id < 1)
+            )
+            or entry_id in roster_by_id
+            or user_id in roster_users
+        ):
+            raise ValueError("正式名次冻结名册身份损坏")
+        roster_by_id[entry_id] = dict(roster)
+        roster_users.add(user_id)
+    if not roster_by_id:
+        # A historical zero-participant contest has one legitimate complete
+        # table: the exactly empty table.  Any persisted row would invent a
+        # member outside the frozen roster.  Non-empty rosters continue through
+        # the roster-wide 1..N completeness checks below.
+        if rows:
+            raise ValueError("空名册正式名次必须精确为空")
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen_entries: set[int] = set()
+    seen_ranks: set[int] = set()
+    for raw in rows:
+        row = dict(raw) if isinstance(raw, sqlite3.Row) else raw
+        if not isinstance(row, dict):
+            raise ValueError("正式名次行类型无效")
+        entry_id = exact_nonnegative_int(row.get("entry_id"))
+        rank = exact_nonnegative_int(row.get("rank"))
+        stage_idx = exact_nonnegative_int(row.get("stage_idx"))
+        row_contest_id = exact_nonnegative_int(row.get("contest_id"))
+        user_id = exact_nonnegative_int(row.get("user_id"))
+        bot_id = row.get("bot_id")
+        parsed_bot_id = (
+            exact_nonnegative_int(bot_id) if bot_id is not None else None
+        )
+        points = row.get("points")
+        if (
+            entry_id is None
+            or entry_id < 1
+            or rank is None
+            or rank < 1
+            or stage_idx is None
+            or row_contest_id != contest_id
+            or user_id is None
+            or user_id < 1
+            or (
+                bot_id is not None
+                and (parsed_bot_id is None or parsed_bot_id < 1)
+            )
+            or isinstance(points, bool)
+            or not isinstance(points, (int, float))
+            or not math.isfinite(points)
+            or entry_id in seen_entries
+            or rank in seen_ranks
+        ):
+            raise ValueError("正式名次身份、阶段、名次或积分无效")
+        roster = roster_by_id.get(entry_id)
+        if (
+            roster is None
+            or roster.get("user_id") != user_id
+            or roster.get("bot_id") != bot_id
+        ):
+            raise ValueError("正式名次与冻结名册身份不一致")
+        group_id, rank_in_group = _parse_official_group_coordinates(
+            row.get("group_id"), row.get("rank_in_group")
+        )
+        awarded = row.get("awarded")
+        if not isinstance(awarded, str):
+            raise ValueError("正式名次奖项字段类型无效")
+        decoded_tiebreaks = _decode_official_tiebreaks(
+            row.get("tiebreaks_json")
+        )
+        public_tiebreaks = sanitize_public_contest_tiebreaks(decoded_tiebreaks)
+        cross_present = any(
+            key in decoded_tiebreaks
+            for key in PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS
+        )
+        if group_id:
+            if public_tiebreaks is None:
+                raise ValueError("分组正式名次缺少完整破同分数据")
+            if public_tiebreaks["points"] != points:
+                raise ValueError("正式名次积分与破同分积分矛盾")
+            if (
+                cross_present
+                and public_tiebreaks.get("group_rank") != rank_in_group
+            ):
+                raise ValueError("跨组破同分组内名次与正式坐标矛盾")
+        elif cross_present:
+            raise ValueError("非分组正式名次不能携带跨组破同分数据")
+        elif (
+            public_tiebreaks is not None
+            and public_tiebreaks["points"] != points
+        ):
+            raise ValueError("正式名次积分与破同分积分矛盾")
+
+        normalized_row = dict(row)
+        normalized_row["group_id"] = group_id
+        normalized_row["rank_in_group"] = rank_in_group
+        normalized_row["tiebreaks"] = public_tiebreaks
+        normalized.append(normalized_row)
+        seen_entries.add(entry_id)
+        seen_ranks.add(rank)
+
+    expected_entries = set(roster_by_id)
+    if seen_entries != expected_entries:
+        raise ValueError("正式名次与冻结名册成员不一致")
+    if seen_ranks != set(range(1, len(expected_entries) + 1)):
+        raise ValueError("正式名次必须从 1 连续且唯一")
+
+    expected_entry_groups = {
+        entry_id: roster.get("group_id")
+        for entry_id, roster in roster_by_id.items()
+    }
+    roster_grouped = [bool(group_id) for group_id in expected_entry_groups.values()]
+    result_grouped = [bool(row.get("group_id")) for row in normalized]
+    if (
+        result_grouped
+        and all(result_grouped)
+        and not any(roster_grouped)
+    ):
+        if (
+            legacy_entry_groups is None
+            or set(legacy_entry_groups) != expected_entries
+        ):
+            raise ValueError("传统分组正式名次缺少完整外部组权威")
+        expected_entry_groups = dict(legacy_entry_groups)
+    _validate_complete_official_group_coordinates(
+        normalized,
+        expected_entry_groups=expected_entry_groups,
+    )
+
+    if contest.get("template_id") in _RESERVED_RANDOM_GROUP_TEMPLATES:
+        from bzplat.backend.contests.ranking import with_official_result_provenance
+        from bzplat.backend.contests.validation import (
+            validated_random_group_format_snapshot,
+        )
+
+        snapshot = validated_random_group_format_snapshot(contest)
+        if snapshot is None:
+            raise ValueError("随机分组赛事冻结快照损坏")
+        stage_contract = _RESERVED_RANDOM_GROUP_OFFICIAL_STAGE_CONTRACTS.get(
+            contest.get("template_id")
+        )
+        if stage_contract is None:
+            raise ValueError("随机分组正式名次阶段契约缺失")
+        expected_current_stage, allowed_source_stages = stage_contract
+        current_stage_idx = exact_nonnegative_int(contest.get("current_stage_idx"))
+        if current_stage_idx != expected_current_stage or any(
+            row.get("stage_idx") != expected_current_stage for row in normalized
+        ):
+            raise ValueError("随机分组正式名次阶段坐标损坏")
+        snapshot_groups: dict[int, str] = {}
+        for group_id, entry_ids in snapshot["groups"].items():
+            for entry_id in entry_ids:
+                snapshot_groups[entry_id] = group_id
+        if set(snapshot_groups) != expected_entries or any(
+            expected_entry_groups[entry_id] != group_id
+            for entry_id, group_id in snapshot_groups.items()
+        ):
+            raise ValueError("随机分组正式名次与冻结抽签不一致")
+        draw_position = {
+            entry_id: index
+            for index, entry_id in enumerate(snapshot["draw_order"], start=1)
+        }
+        provenance = with_official_result_provenance(
+            contest,
+            normalized,
+            stage_entry_ids=stage_entry_ids or {},
+        )
+        if len(provenance) != len(normalized):
+            raise ValueError("随机分组正式名次来源阶段损坏")
+        for row in provenance:
+            source_stage = exact_nonnegative_int(row.get("source_stage"))
+            if source_stage is None or source_stage not in allowed_source_stages:
+                raise ValueError("随机分组正式名次来源阶段损坏")
+            if source_stage != 0:
+                continue
+            tiebreaks = row.get("tiebreaks")
+            if not isinstance(tiebreaks, dict) or not all(
+                key in tiebreaks
+                for key in PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS
+            ):
+                raise ValueError("随机分组正式名次缺少完整跨组破同分链")
+            if (
+                tiebreaks["group_rank"] != row.get("rank_in_group")
+                or tiebreaks["draw_order"]
+                != draw_position.get(row.get("entry_id"))
+            ):
+                raise ValueError("随机分组跨组破同分链与冻结抽签矛盾")
+
+    normalized.sort(key=lambda row: row["rank"])
+    return normalized
+
+
+def _official_result_validation_context_tx(
+    connection: sqlite3.Connection, contest_id: int
+) -> tuple[
+    dict[str, Any],
+    list[sqlite3.Row],
+    dict[int, set[int]],
+    dict[int, str] | None,
+]:
+    """Read every authority used by the ready-table validator in one tx."""
+    contest = _contest_row(
+        connection.execute(
+            "SELECT * FROM contests WHERE id=?", (contest_id,)
+        ).fetchone()
+    )
+    if contest is None:
+        raise ValueError("赛事不存在")
+    roster_rows = connection.execute(
+        "SELECT id,user_id,bot_id,group_id,seed FROM contest_entries "
+        "WHERE contest_id=? ORDER BY id",
+        (contest_id,),
+    ).fetchall()
+    stage_entry_ids: dict[int, set[int]] = {}
+    stage_groups: dict[int, dict[int, str]] = {}
+    invalid_group_stage: set[int] = set()
+    stage_rows = connection.execute(
+        "SELECT result.stage_idx,COALESCE(result.entry_id,legacy.entry_id) "
+        "AS entry_id,result.group_id FROM contest_stage_results result "
+        f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy "
+        "ON result.entry_id IS NULL AND result.bot_id=legacy.bot_id "
+        "AND result.contest_id=legacy.contest_id "
+        "WHERE result.contest_id=?",
+        (contest_id,),
+    ).fetchall()
+    for row in stage_rows:
+        stage_idx = exact_nonnegative_int(row["stage_idx"])
+        entry_id = exact_nonnegative_int(row["entry_id"])
+        if stage_idx is None or entry_id is None or entry_id < 1:
+            raise ValueError("赛事阶段成员快照损坏")
+        stage_entry_ids.setdefault(stage_idx, set()).add(entry_id)
+        group_id = row["group_id"]
+        if group_id:
+            if (
+                not isinstance(group_id, str)
+                or group_id != group_id.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+                or entry_id in stage_groups.setdefault(stage_idx, {})
+            ):
+                invalid_group_stage.add(stage_idx)
+            else:
+                stage_groups[stage_idx][entry_id] = group_id
+
+    roster_entry_ids = {int(row["id"]) for row in roster_rows}
+    candidates = [
+        groups
+        for snapshot_stage, groups in stage_groups.items()
+        if snapshot_stage not in invalid_group_stage
+        and set(groups) == roster_entry_ids
+    ]
+    legacy_entry_groups: dict[int, str] | None = None
+    if candidates and all(candidate == candidates[0] for candidate in candidates):
+        legacy_entry_groups = dict(candidates[0])
+    return contest, roster_rows, stage_entry_ids, legacy_entry_groups
+
+
+def _normalize_official_result_input(
+    contest_id: int, result_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not isinstance(result_rows, list):
+        raise ValueError("正式名次批次类型无效")
+    normalized_input: list[dict[str, Any]] = []
+    for raw in result_rows:
+        if not isinstance(raw, dict):
+            raise ValueError("正式名次行类型无效")
+        if "contest_id" in raw and raw.get("contest_id") != contest_id:
+            raise ValueError("正式名次赛事身份矛盾")
+        stage_idx = exact_nonnegative_int(raw.get("stage_idx", 0))
+        if stage_idx is None:
+            raise ValueError("正式名次阶段坐标必须是非负整数")
+        group_id, rank_in_group = _parse_official_group_coordinates(
+            raw.get("group_id", ""), raw.get("rank_in_group")
+        )
+        normalized_input.append(
+            {
+                **raw,
+                "contest_id": contest_id,
+                "stage_idx": stage_idx,
+                "points": raw.get("points", 0),
+                "group_id": group_id,
+                "rank_in_group": rank_in_group,
+                "tiebreaks_json": raw.get("tiebreaks_json", "{}"),
+                "awarded": raw.get("awarded", ""),
+            }
+        )
+    return normalized_input
+
+
+def _replace_official_result_batch_tx(
+    connection: sqlite3.Connection,
+    contest_id: int,
+    result_rows: list[dict[str, Any]],
+) -> None:
+    contest, roster_rows, stage_entry_ids, legacy_entry_groups = (
+        _official_result_validation_context_tx(connection, contest_id)
+    )
+    normalized = _validate_complete_official_results(
+        _normalize_official_result_input(contest_id, result_rows),
+        contest_id=contest_id,
+        contest=contest,
+        roster_rows=roster_rows,
+        stage_entry_ids=stage_entry_ids,
+        legacy_entry_groups=legacy_entry_groups,
+    )
+    connection.execute(
+        "DELETE FROM contest_official_results WHERE contest_id=?",
+        (contest_id,),
+    )
+    for row in normalized:
+        connection.execute(
+            "INSERT INTO contest_official_results"
+            "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
+            "group_id, rank_in_group, tiebreaks_json, awarded) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                contest_id,
+                row["entry_id"],
+                row["stage_idx"],
+                row["rank"],
+                row["points"],
+                row.get("bot_id"),
+                row.get("user_id"),
+                row["group_id"],
+                row["rank_in_group"],
+                row["tiebreaks_json"],
+                row["awarded"],
+            ),
+        )
 
 
 def _contest_identity_projection_sql(
@@ -495,7 +1705,7 @@ def _require_live_contest_bot_tx(
 
 def _require_current_runnable_contest_bot_tx(
     conn: sqlite3.Connection, bot_id: int
-) -> None:
+) -> int | None:
     """Validate the current executable Bot mirror at the roster write point."""
     _require_live_contest_bot_tx(conn, bot_id)
     bot = conn.execute(
@@ -519,7 +1729,7 @@ def _require_current_runnable_contest_bot_tx(
             (int(bot_id),),
         ).fetchone() is not None:
             raise ValueError("Bot 当前不可运行，不能加入赛事")
-        return
+        return None
     version = conn.execute(
         "SELECT * FROM bot_versions WHERE bot_id=? AND version=?",
         (int(bot_id), current_version),
@@ -535,6 +1745,10 @@ def _require_current_runnable_contest_bot_tx(
         or str(version["arch"] or "") != SUPPORTED_BINARY_ARCH
     ):
         raise ValueError("Bot 当前不可运行，不能加入赛事")
+    version_id = exact_nonnegative_int(version["id"])
+    if version_id is None or version_id < 1:  # pragma: no cover - PK invariant
+        raise ValueError("Bot 当前版本身份损坏，不能加入赛事")
+    return version_id
 
 
 def _require_contest_bot_binding_tx(
@@ -652,6 +1866,11 @@ def _contest_row(row: sqlite3.Row | None) -> dict | None:
     if result is not None:
         result.pop("hands_per_match", None)
         result.pop("match_config_json", None)
+        # Internal manifest-integrity watermarks are never part of the manager
+        # or REST contest model.  Store/claim read them directly in one SQLite
+        # transaction when validating topology.
+        result.pop("pairing_topology_revision", None)
+        result.pop("sealed_pairing_topology_revision", None)
     return result
 
 
@@ -740,13 +1959,26 @@ def _sanitize_public_replay_events(
         and match.get("match_type") == TYPE_HUMAN
         and match.get("status") in {STATUS_PENDING, STATUS_RUNNING}
     )
+    authoritative = sanitize_public_match(match)
+    expected_time_control = (
+        authoritative.get("time_control")
+        if isinstance(authoritative, dict)
+        and isinstance(authoritative.get("time_control"), dict)
+        else None
+    )
     sanitized = sanitize_public_event_prefix(
         events,
         redact_active_human=redact_active_human,
         human_viewer_seat=human_viewer_seat,
+        expected_time_control=expected_time_control,
+        expected_game_id=(
+            authoritative.get("game_id")
+            if isinstance(authoritative, dict)
+            and isinstance(authoritative.get("game_id"), str)
+            else None
+        ),
     )
 
-    authoritative = sanitize_public_match(match)
     if authoritative is not None:
         status = authoritative.get("status")
         if status == STATUS_COMPLETED:
@@ -1183,27 +2415,39 @@ def _paginate(
     *,
     page: int = 1,
     per_page: int = 50,
+    count_query: str | None = None,
 ) -> tuple[list[dict], int]:
     """通用分页 helper：返回 (rows, total)。
 
-    ``base_query`` 是不含 LIMIT/OFFSET 的 SELECT（不含 ORDER BY 时在 COUNT 里自动裁剪）。
+    ``base_query`` 是不含 LIMIT/OFFSET 的 SELECT。默认从它派生 COUNT；
+    多表读模型可传入等价的 ``count_query``，避免 COUNT 重放无关 JOIN。
     自动算 total + 加 LIMIT/OFFSET。page 从 1 开始。
     """
-    page = max(1, int(page))
-    per_page = max(1, min(200, int(per_page)))  # 上限 200 防滥用
+    if (
+        isinstance(page, bool)
+        or not isinstance(page, int)
+        or page < 1
+        or isinstance(per_page, bool)
+        or not isinstance(per_page, int)
+        or not 1 <= per_page <= 200
+    ):
+        raise ValueError("分页参数无效")
+    if page - 1 > ((2**63 - 1) // per_page):
+        raise ValueError("分页偏移超出数据库边界")
     offset = (page - 1) * per_page
-    # total：把 SELECT ... 改成 SELECT COUNT(*)。粗略：取 FROM 之前替换。
-    count_query = base_query
-    # 简单启发：去掉 SELECT ... 到 FROM 之间的列，替换为 COUNT(*)
-    from_idx = count_query.upper().find(" FROM ")
-    if from_idx > 0:
-        count_query = "SELECT COUNT(*)" + count_query[from_idx:]
-    else:
-        count_query = f"SELECT COUNT(*) FROM ({count_query})"
-    # 去掉 ORDER BY（COUNT 不需要，且可能引用别名报错）
-    ob_idx = count_query.upper().rfind(" ORDER BY ")
-    if ob_idx > 0:
-        count_query = count_query[:ob_idx]
+    if count_query is None:
+        # total：把 SELECT ... 改成 SELECT COUNT(*)。粗略：取 FROM 之前替换。
+        count_query = base_query
+        # 简单启发：去掉 SELECT ... 到 FROM 之间的列，替换为 COUNT(*)
+        from_idx = count_query.upper().find(" FROM ")
+        if from_idx > 0:
+            count_query = "SELECT COUNT(*)" + count_query[from_idx:]
+        else:
+            count_query = f"SELECT COUNT(*) FROM ({count_query})"
+        # 去掉 ORDER BY（COUNT 不需要，且可能引用别名报错）
+        ob_idx = count_query.upper().rfind(" ORDER BY ")
+        if ob_idx > 0:
+            count_query = count_query[:ob_idx]
     total = int(c.execute(count_query, params).fetchone()[0])
     rows = [
         _row(r) for r in c.execute(
@@ -1395,6 +2639,130 @@ def _pairing_series_batch(
     return normalized
 
 
+def _contest_entry_advancement_batch(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strictly normalize one complete, compare-and-swap entry transition.
+
+    Stage advancement is computed outside SQLite so pairing generation remains a
+    pure operation.  Every roster identity and every field that influenced that
+    computation is therefore carried back as an expected value.  The Store later
+    compares this *complete* batch with the durable roster under ``BEGIN
+    IMMEDIATE`` before applying any mutation.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("赛事晋级名册批次不能为空")
+    required = {
+        "id",
+        "user_id",
+        "expected_bot_id",
+        "expected_group_id",
+        "expected_seed",
+        "expected_eliminated",
+        "seed",
+        "eliminated",
+    }
+    normalized: list[dict[str, Any]] = []
+    entry_ids: set[int] = set()
+    user_ids: set[int] = set()
+    for source in rows:
+        if not isinstance(source, dict) or set(source) != required:
+            raise ValueError("赛事晋级名册批次字段不完整")
+        entry_id = exact_nonnegative_int(source["id"])
+        user_id = exact_nonnegative_int(source["user_id"])
+        bot_id = exact_nonnegative_int(source["expected_bot_id"])
+        expected_seed = exact_nonnegative_int(source["expected_seed"])
+        seed = exact_nonnegative_int(source["seed"])
+        expected_eliminated = exact_sqlite_bool(source["expected_eliminated"])
+        eliminated = exact_sqlite_bool(source["eliminated"])
+        group_id = source["expected_group_id"]
+        if (
+            entry_id is None
+            or entry_id < 1
+            or user_id is None
+            or user_id < 1
+            or bot_id is None
+            or bot_id < 1
+            or expected_seed is None
+            or seed is None
+            or expected_eliminated is None
+            or eliminated is None
+            or not isinstance(group_id, str)
+            or group_id != group_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+        ):
+            raise ValueError("赛事晋级名册批次包含非法类型或坐标")
+        if entry_id in entry_ids or user_id in user_ids:
+            raise ValueError("赛事晋级名册批次包含重复身份")
+        entry_ids.add(entry_id)
+        user_ids.add(user_id)
+        normalized.append(
+            {
+                "id": entry_id,
+                "user_id": user_id,
+                "expected_bot_id": bot_id,
+                "expected_group_id": group_id,
+                "expected_seed": expected_seed,
+                "expected_eliminated": int(expected_eliminated),
+                "seed": seed,
+                "eliminated": int(eliminated),
+            }
+        )
+    return normalized
+
+
+def _apply_contest_entry_advancement_tx(
+    connection: sqlite3.Connection,
+    contest_id: int,
+    rows: list[dict[str, Any]],
+) -> None:
+    """CAS and apply a complete normalized roster transition in one tx."""
+    stored = connection.execute(
+        "SELECT id,user_id,bot_id,group_id,seed,eliminated "
+        "FROM contest_entries WHERE contest_id=? ORDER BY id",
+        (contest_id,),
+    ).fetchall()
+    if len(stored) != len(rows):
+        raise ValueError("赛事晋级期间名册已变化")
+    expected_by_id = {row["id"]: row for row in rows}
+    if len(expected_by_id) != len(stored):
+        raise ValueError("赛事晋级名册批次不完整")
+    for durable in stored:
+        expected = expected_by_id.get(durable["id"])
+        if (
+            expected is None
+            or durable["user_id"] != expected["user_id"]
+            or durable["bot_id"] != expected["expected_bot_id"]
+            or durable["group_id"] != expected["expected_group_id"]
+            or exact_nonnegative_int(durable["seed"])
+            != expected["expected_seed"]
+            or exact_sqlite_bool(durable["eliminated"])
+            is None
+            or int(durable["eliminated"])
+            != expected["expected_eliminated"]
+        ):
+            raise ValueError("赛事晋级期间名册身份或状态已变化")
+    for expected in rows:
+        changed = connection.execute(
+            "UPDATE contest_entries SET seed=?,eliminated=? "
+            "WHERE id=? AND contest_id=? AND user_id=? AND bot_id IS ? "
+            "AND group_id=? AND seed=? AND eliminated=?",
+            (
+                expected["seed"],
+                expected["eliminated"],
+                expected["id"],
+                contest_id,
+                expected["user_id"],
+                expected["expected_bot_id"],
+                expected["expected_group_id"],
+                expected["expected_seed"],
+                expected["expected_eliminated"],
+            ),
+        )
+        if changed.rowcount != 1:
+            raise ValueError("赛事晋级名册 CAS 已失效")
+
+
 # 每游戏对局表的建表模板（全面解耦 PR3：matches 拆三表，结构一致）。
 # {suffix} = 注册 game_id；game_id 本身必须由 Store 创建入口显式写入。
 _CREATE_MATCHES_TABLE_SQL = """
@@ -1440,6 +2808,43 @@ def _registered_game_id(game_id: Any) -> str:
     return gid
 
 
+def _validate_contest_source_tx(
+    conn: sqlite3.Connection,
+    source_contest_id: Any,
+    *,
+    game_id: str,
+    contest_id: int | None = None,
+    source_owner_id: int | None = None,
+    include_all_hidden: bool = False,
+) -> int:
+    """Validate one navigation/source edge at its SQLite write boundary."""
+    source_id = exact_nonnegative_int(source_contest_id)
+    if source_id is None or source_id < 1:
+        raise ValueError("关联赛事 ID 必须是正整数")
+    if contest_id is not None and source_id == contest_id:
+        raise ValueError("赛事不能关联自身")
+    if not isinstance(include_all_hidden, bool):
+        raise ValueError("关联赛事隐藏态权限无效")
+    source = conn.execute(
+        "SELECT id,game_id,status,organizer_id FROM contests WHERE id=?", (source_id,)
+    ).fetchone()
+    if source is None:
+        raise ValueError("关联赛事不存在")
+    if _registered_game_id(source["game_id"]) != _registered_game_id(game_id):
+        raise ValueError("关联赛事必须与当前赛事使用同一游戏")
+    if source["status"] in (CONTEST_DRAFT, CONTEST_CANCELLED) and not include_all_hidden:
+        owner_id = exact_nonnegative_int(source_owner_id)
+        source_organizer_id = exact_nonnegative_int(source["organizer_id"])
+        if (
+            owner_id is None
+            or owner_id < 1
+            or source_organizer_id is None
+            or source_organizer_id != owner_id
+        ):
+            raise ValueError("关联赛事不存在或不可见")
+    return source_id
+
+
 def _matches_table(game_id: str) -> str:
     """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
     gid = _registered_game_id(game_id)
@@ -1475,6 +2880,19 @@ def _all_game_ids() -> frozenset[str]:
     from bzplat.backend.games import registry as _reg
 
     return _reg.all_ids()
+
+
+def _resolved_time_control_id(game_id: str, value: object) -> str:
+    """Resolve one persisted control without guessing malformed values.
+
+    ``None`` is the only legacy form and maps to the registered game default.
+    Delayed import keeps the Store usable while the game registry is loading.
+    """
+    from bzplat.backend.games import registry as _reg
+
+    if value is not None and not isinstance(value, str):
+        raise ValueError("时限快照必须是稳定 ID 或历史缺省值")
+    return _reg.get(_registered_game_id(game_id)).resolve_time_control(value).id
 
 
 def _canonical_digest(value: Any) -> str:
@@ -1890,6 +3308,228 @@ def _ensure_trigger(
         raise RuntimeError(f"trigger verification failed after install: {name}")
 
 
+def _ensure_strict_trigger(
+    conn: sqlite3.Connection,
+    name: str,
+    create_sql: str,
+) -> None:
+    """Install a missing trigger, but reject any same-name schema drift."""
+    desired = _normalize_schema_sql(create_sql)
+    objects = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type",
+        (name,),
+    ).fetchall()
+    if not objects:
+        _ensure_trigger(conn, name, create_sql)
+        return
+    if (
+        len(objects) != 1
+        or str(objects[0][0]) != "trigger"
+        or _normalize_schema_sql(str(objects[0][1] or "")) != desired
+    ):
+        raise RuntimeError(f"canonical trigger definition mismatch: {name}")
+
+
+def _ensure_strict_index(
+    conn: sqlite3.Connection,
+    name: str,
+    create_sql: str,
+) -> None:
+    """Install one missing canonical index and reject same-name drift."""
+    desired = _normalize_schema_sql(create_sql)
+    objects = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type", (name,)
+    ).fetchall()
+    if not objects:
+        conn.execute(create_sql)
+        objects = conn.execute(
+            "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type", (name,)
+        ).fetchall()
+    if (
+        len(objects) != 1
+        or str(objects[0][0]) != "index"
+        or _normalize_schema_sql(str(objects[0][1] or "")) != desired
+    ):
+        raise RuntimeError(f"canonical index definition mismatch: {name}")
+
+
+def _contest_source_gram_insert_sql(alias: str) -> str:
+    title = f"{alias}.title"
+    return (
+        "INSERT OR IGNORE INTO contest_source_search_grams("
+        "contest_id,gram_len,gram,game_id,created_at,organizer_id,"
+        "is_nonshowcase,is_protected,is_nav_public,is_nav_hidden) "
+        "WITH RECURSIVE positions(pos) AS (SELECT 1 UNION ALL SELECT pos+1 "
+        f"FROM positions WHERE pos<length({title})) "
+        f"SELECT {alias}.id,shape.gram_len,substr({title},pos,shape.gram_len),"
+        f"{alias}.game_id,{alias}.created_at,{alias}.organizer_id,"
+        f"CASE WHEN {alias}.showcase_key IS NULL THEN 1 ELSE 0 END,"
+        f"CASE WHEN {alias}.showcase_key IS NULL AND {alias}.status='finished' "
+        f"AND typeof({alias}.official_results_ready)='integer' "
+        f"AND {alias}.official_results_ready=1 THEN 1 ELSE 0 END,"
+        f"CASE WHEN {alias}.showcase_key IS NULL AND {alias}.status NOT IN "
+        f"('draft','cancelled') THEN 1 ELSE 0 END,"
+        f"CASE WHEN {alias}.showcase_key IS NULL AND {alias}.status IN "
+        f"('draft','cancelled') THEN 1 ELSE 0 END "
+        "FROM positions JOIN (SELECT 1 AS gram_len UNION ALL SELECT 2 "
+        "UNION ALL SELECT 3) shape "
+        f"WHERE pos+shape.gram_len-1<=length({title})"
+    )
+
+
+_CONTEST_TITLE_EDGE_WHITESPACE_SQL = ",".join(
+    f"char({codepoint})" for codepoint in CONTEST_TITLE_EDGE_WHITESPACE_CODEPOINTS
+)
+
+
+def _install_contest_title_schema(conn: sqlite3.Connection) -> None:
+    """Reject unbounded legacy titles, then guard every future raw write."""
+    edge_whitespace_sql = _CONTEST_TITLE_EDGE_WHITESPACE_SQL
+    invalid = conn.execute(
+        "SELECT id FROM contests WHERE typeof(title)<>'text' OR length(title)<1 "
+        "OR length(title)>? OR substr(title,1,1) IN ("
+        + edge_whitespace_sql
+        + ") OR substr(title,-1,1) IN ("
+        + edge_whitespace_sql
+        + ") OR instr(title,char(0))>0 "
+        "OR title GLOB '*['||char(1)||'-'||char(31)||char(127)||'-'||"
+        "char(159)||']*' LIMIT 1",
+        (CONTEST_TITLE_MAX_LENGTH,),
+    ).fetchone()
+    if invalid is not None:
+        raise RuntimeError("legacy contest title violates canonical bounds")
+    invalid_sql = (
+        "typeof(NEW.title)<>'text' OR length(NEW.title)<1 OR "
+        f"length(NEW.title)>{CONTEST_TITLE_MAX_LENGTH} OR "
+        f"substr(NEW.title,1,1) IN ({edge_whitespace_sql}) OR "
+        f"substr(NEW.title,-1,1) IN ({edge_whitespace_sql}) OR "
+        "instr(NEW.title,char(0))>0 OR "
+        "NEW.title GLOB '*['||char(1)||'-'||char(31)||char(127)||'-'||"
+        "char(159)||']*'"
+    )
+    for name, event in (
+        ("trg_contest_title_guard_insert", "INSERT ON contests"),
+        ("trg_contest_title_guard_update", "UPDATE OF title ON contests"),
+    ):
+        _ensure_strict_trigger(
+            conn,
+            name,
+            f"CREATE TRIGGER {name} BEFORE {event} WHEN {invalid_sql} "
+            "BEGIN SELECT RAISE(ABORT,'contest title invalid'); END",
+        )
+
+
+def _install_contest_source_search_schema(conn: sqlite3.Connection) -> None:
+    """Install and certify bounded source-candidate search projections."""
+    table_rows = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type",
+        ("contest_source_search_grams",),
+    ).fetchall()
+    if len(table_rows) != 1 or str(table_rows[0][0]) != "table":
+        raise RuntimeError("contest source search table definition mismatch")
+    table_definition = _normalize_schema_sql(str(table_rows[0][1] or ""))
+    canonical_definition = _normalize_schema_sql(
+        CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL
+    )
+    if table_definition != canonical_definition:
+        raise RuntimeError("contest source search table definition mismatch")
+
+    indexes = (
+        ("idx_contests_source_protected", CONTEST_SOURCE_PROTECTED_INDEX_SQL),
+        (
+            "idx_contests_source_navigation_all",
+            CONTEST_SOURCE_NAVIGATION_ALL_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_navigation_public",
+            CONTEST_SOURCE_NAVIGATION_PUBLIC_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_navigation_owner",
+            CONTEST_SOURCE_NAVIGATION_OWNER_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_default_protected",
+            CONTEST_SOURCE_DEFAULT_PROTECTED_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_default_navigation_all",
+            CONTEST_SOURCE_DEFAULT_NAVIGATION_ALL_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_default_navigation_public",
+            CONTEST_SOURCE_DEFAULT_NAVIGATION_PUBLIC_INDEX_SQL,
+        ),
+        (
+            "idx_contests_source_default_navigation_owner",
+            CONTEST_SOURCE_DEFAULT_NAVIGATION_OWNER_INDEX_SQL,
+        ),
+    )
+    for name, sql in indexes:
+        _ensure_strict_index(conn, name, sql)
+
+    insert_name = "trg_contest_source_search_insert"
+    _ensure_strict_trigger(
+        conn,
+        insert_name,
+        f"CREATE TRIGGER {insert_name} AFTER INSERT ON contests BEGIN "
+        + _contest_source_gram_insert_sql("NEW")
+        + "; END",
+    )
+    delete_name = "trg_contest_source_search_delete"
+    _ensure_strict_trigger(
+        conn,
+        delete_name,
+        f"CREATE TRIGGER {delete_name} AFTER DELETE ON contests BEGIN "
+        "DELETE FROM contest_source_search_grams WHERE contest_id=OLD.id; END",
+    )
+    update_name = "trg_contest_source_search_update"
+    _ensure_strict_trigger(
+        conn,
+        update_name,
+        f"CREATE TRIGGER {update_name} AFTER UPDATE OF title,game_id,created_at,"
+        "organizer_id,status,official_results_ready,showcase_key ON contests BEGIN "
+        "DELETE FROM contest_source_search_grams WHERE contest_id=OLD.id; "
+        + _contest_source_gram_insert_sql("NEW")
+        + "; END",
+    )
+
+    # A legacy database first sees an empty projection. Backfill per title so
+    # work is proportional to actual title bytes/code points rather than
+    # MAX(title length) multiplied by all contests.
+    missing = conn.execute(
+        "SELECT 1 FROM contests c WHERE length(c.title)>0 AND NOT EXISTS("
+        "SELECT 1 FROM contest_source_search_grams g WHERE g.contest_id=c.id) "
+        "LIMIT 1"
+    ).fetchone()
+    if missing:
+        conn.execute(
+            "INSERT OR IGNORE INTO contest_source_search_grams("
+            "contest_id,gram_len,gram,game_id,created_at,organizer_id,"
+            "is_nonshowcase,is_protected,is_nav_public,is_nav_hidden) "
+            "WITH RECURSIVE positions(contest_id,pos) AS ("
+            "SELECT id,1 FROM contests UNION ALL SELECT positions.contest_id,pos+1 "
+            "FROM positions JOIN contests source ON source.id=positions.contest_id "
+            "WHERE pos<length(source.title)) "
+            "SELECT c.id,shape.gram_len,substr(c.title,positions.pos,shape.gram_len),"
+            "c.game_id,c.created_at,c.organizer_id,"
+            "CASE WHEN c.showcase_key IS NULL THEN 1 ELSE 0 END,"
+            "CASE WHEN c.showcase_key IS NULL AND c.status='finished' "
+            "AND typeof(c.official_results_ready)='integer' "
+            "AND c.official_results_ready=1 THEN 1 ELSE 0 END,"
+            "CASE WHEN c.showcase_key IS NULL AND c.status NOT IN "
+            "('draft','cancelled') THEN 1 ELSE 0 END,"
+            "CASE WHEN c.showcase_key IS NULL AND c.status IN "
+            "('draft','cancelled') THEN 1 ELSE 0 END "
+            "FROM positions JOIN contests c ON c.id=positions.contest_id "
+            "JOIN (SELECT 1 AS gram_len UNION ALL SELECT 2 UNION ALL SELECT 3) shape "
+            "WHERE positions.pos+shape.gram_len-1<=length(c.title) "
+            "AND NOT EXISTS(SELECT 1 FROM contest_source_search_grams existing "
+            "WHERE existing.contest_id=c.id)"
+        )
+
+
+
 def _install_bot_owner_delete_triggers(conn: sqlite3.Connection) -> None:
     """Give upgraded databases the same tombstone invariant as fresh schema.
 
@@ -2002,6 +3642,275 @@ def _install_contest_live_state_bot_trigger(conn: sqlite3.Connection) -> None:
         "BEGIN SELECT RAISE(ABORT, "
         "'live contest pairing cannot reference owner-deleted Bot'); END",
     )
+
+
+_CONTEST_PAIRING_REVISION_TRIGGER_NAMES = (
+    "trg_contest_pairing_topology_insert",
+    "trg_contest_pairing_topology_delete",
+    "trg_contest_pairing_topology_update",
+    "trg_contest_pairing_topology_stage_cursor",
+    "trg_contest_pairing_topology_manifest",
+)
+_CONTEST_LIFECYCLE_REVISION_TRIGGER_NAMES = (
+    "trg_contest_lifecycle_revision_update",
+    "trg_contest_entries_lifecycle_revision_insert",
+    "trg_contest_entries_lifecycle_revision_delete",
+    "trg_contest_entries_lifecycle_revision_update",
+    "trg_contest_stage_results_lifecycle_revision_insert",
+    "trg_contest_stage_results_lifecycle_revision_delete",
+    "trg_contest_stage_results_lifecycle_revision_update",
+)
+
+
+def _install_contest_pairing_topology_triggers(
+    conn: sqlite3.Connection,
+) -> None:
+    """Keep sealed pairing manifests cheap to validate at claim time.
+
+    Cardinality scans and active-job anti-joins are appropriate at publication,
+    append and terminal boundaries, but doing them for every claim makes a full
+    round robin quadratic in the already-quadratic number of matches.  These
+    triggers turn every topology mutation into one durable revision write and
+    reject any newly-created contest job whose pairing reference is already an
+    orphan.  Pairing identity and tournament coordinates advance the revision;
+    ordinary progress fields (status, match_id and scheduled_at) deliberately
+    do not.
+    """
+
+    insert_name = _CONTEST_PAIRING_REVISION_TRIGGER_NAMES[0]
+    _ensure_strict_trigger(
+        conn,
+        insert_name,
+        f"CREATE TRIGGER {insert_name} AFTER INSERT ON contest_pairings "
+        "BEGIN UPDATE contests SET pairing_topology_revision="
+        "pairing_topology_revision+1 WHERE id=NEW.contest_id; END",
+    )
+    delete_name = _CONTEST_PAIRING_REVISION_TRIGGER_NAMES[1]
+    _ensure_strict_trigger(
+        conn,
+        delete_name,
+        f"CREATE TRIGGER {delete_name} AFTER DELETE ON contest_pairings "
+        "BEGIN UPDATE contests SET pairing_topology_revision="
+        "pairing_topology_revision+1 WHERE id=OLD.contest_id; END",
+    )
+    update_name = _CONTEST_PAIRING_REVISION_TRIGGER_NAMES[2]
+    _ensure_strict_trigger(
+        conn,
+        update_name,
+        f"CREATE TRIGGER {update_name} "
+        "AFTER UPDATE OF id,contest_id,round_num,entry_a_id,entry_b_id,"
+        "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,stage_idx,"
+        "stage_key,group_id,bracket_slot,color_first,series_index,series_size,"
+        "tiebreak_group,tiebreak_game,pairing_seed,published_at "
+        "ON contest_pairings "
+        "WHEN OLD.id IS NOT NEW.id OR OLD.contest_id IS NOT NEW.contest_id "
+        "OR OLD.round_num IS NOT NEW.round_num "
+        "OR OLD.entry_a_id IS NOT NEW.entry_a_id "
+        "OR OLD.entry_b_id IS NOT NEW.entry_b_id "
+        "OR OLD.bot_a_id IS NOT NEW.bot_a_id "
+        "OR OLD.bot_b_id IS NOT NEW.bot_b_id "
+        "OR OLD.bot_a_version_id IS NOT NEW.bot_a_version_id "
+        "OR OLD.bot_b_version_id IS NOT NEW.bot_b_version_id "
+        "OR OLD.stage_idx IS NOT NEW.stage_idx "
+        "OR OLD.stage_key IS NOT NEW.stage_key "
+        "OR OLD.group_id IS NOT NEW.group_id "
+        "OR OLD.bracket_slot IS NOT NEW.bracket_slot "
+        "OR OLD.color_first IS NOT NEW.color_first "
+        "OR OLD.series_index IS NOT NEW.series_index "
+        "OR OLD.series_size IS NOT NEW.series_size "
+        "OR OLD.tiebreak_group IS NOT NEW.tiebreak_group "
+        "OR OLD.tiebreak_game IS NOT NEW.tiebreak_game "
+        "OR OLD.pairing_seed IS NOT NEW.pairing_seed "
+        "OR OLD.published_at IS NOT NEW.published_at "
+        "BEGIN UPDATE contests SET pairing_topology_revision="
+        "pairing_topology_revision+1 "
+        "WHERE id=OLD.contest_id OR id=NEW.contest_id; END",
+    )
+    cursor_name = _CONTEST_PAIRING_REVISION_TRIGGER_NAMES[3]
+    _ensure_strict_trigger(
+        conn,
+        cursor_name,
+        f"CREATE TRIGGER {cursor_name} "
+        "AFTER UPDATE OF current_stage_idx ON contests "
+        "WHEN OLD.current_stage_idx IS NOT NEW.current_stage_idx "
+        "BEGIN UPDATE contests SET pairing_topology_revision="
+        "pairing_topology_revision+1 WHERE id=NEW.id; END",
+    )
+    manifest_name = _CONTEST_PAIRING_REVISION_TRIGGER_NAMES[4]
+    _ensure_strict_trigger(
+        conn,
+        manifest_name,
+        f"CREATE TRIGGER {manifest_name} "
+        "AFTER UPDATE OF published_stage_pairing_count ON contests "
+        "WHEN OLD.published_stage_pairing_count "
+        "IS NOT NEW.published_stage_pairing_count "
+        "BEGIN UPDATE contests SET pairing_topology_revision="
+        "pairing_topology_revision+1 WHERE id=NEW.id; END",
+    )
+
+    invalid_contest_ref = (
+        "NEW.source='contest' AND (NEW.contest_id IS NULL "
+        "OR NEW.contest_pairing_id IS NULL OR NOT EXISTS("
+        "SELECT 1 FROM contest_pairings pairing "
+        "JOIN contests contest ON contest.id=pairing.contest_id "
+        "WHERE pairing.id=NEW.contest_pairing_id "
+        "AND pairing.contest_id=NEW.contest_id "
+        "AND typeof(contest.current_stage_idx)='integer' "
+        "AND contest.current_stage_idx>=0 "
+        "AND pairing.stage_idx=contest.current_stage_idx))"
+    )
+    job_insert_name = "trg_execution_contest_pairing_ref_insert"
+    _ensure_strict_trigger(
+        conn,
+        job_insert_name,
+        f"CREATE TRIGGER {job_insert_name} BEFORE INSERT ON execution_jobs "
+        f"WHEN {invalid_contest_ref} "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'contest execution job must reference its contest pairing'); END",
+    )
+    job_update_name = "trg_execution_contest_pairing_ref_update"
+    _ensure_strict_trigger(
+        conn,
+        job_update_name,
+        f"CREATE TRIGGER {job_update_name} "
+        "BEFORE UPDATE OF source,contest_id,contest_pairing_id ON execution_jobs "
+        f"WHEN {invalid_contest_ref} "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'contest execution job must reference its contest pairing'); END",
+    )
+
+
+def _install_contest_lifecycle_revision_triggers(
+    conn: sqlite3.Connection,
+) -> None:
+    """Extend the pairing revision into a complete lifecycle decision epoch.
+
+    The seal is consumed as one proof for the current stage graph, roster,
+    frozen format and persisted ranking decision.  Every mutation of those
+    inputs therefore advances the same monotonic revision.  Progress-only
+    fields (pairing status/match binding, entry dispatch timestamps and PII
+    snapshots), rest scheduling and the downstream official-results readiness
+    projection remain outside the epoch.
+    """
+
+    definitions = (
+        (
+            "trg_contest_lifecycle_revision_update",
+            "CREATE TRIGGER trg_contest_lifecycle_revision_update "
+            "AFTER UPDATE OF game_id,template_id,stages_json,format_snapshot_json,"
+            "source_contest_id,status "
+            "ON contests WHEN OLD.game_id IS NOT NEW.game_id "
+            "OR OLD.template_id IS NOT NEW.template_id "
+            "OR OLD.stages_json IS NOT NEW.stages_json "
+            "OR OLD.format_snapshot_json IS NOT NEW.format_snapshot_json "
+            "OR OLD.source_contest_id IS NOT NEW.source_contest_id "
+            "OR (OLD.status IS NOT NEW.status AND ("
+            "OLD.status IN ('rest','finished') "
+            "OR NEW.status IN ('rest','finished'))) "
+            "BEGIN UPDATE contests SET pairing_topology_revision="
+            "pairing_topology_revision+1 WHERE id=NEW.id; END",
+        ),
+        (
+            "trg_contest_entries_lifecycle_revision_insert",
+            "CREATE TRIGGER trg_contest_entries_lifecycle_revision_insert "
+            "AFTER INSERT ON contest_entries BEGIN UPDATE contests SET "
+            "pairing_topology_revision=pairing_topology_revision+1 "
+            "WHERE id=NEW.contest_id; END",
+        ),
+        (
+            "trg_contest_entries_lifecycle_revision_delete",
+            "CREATE TRIGGER trg_contest_entries_lifecycle_revision_delete "
+            "AFTER DELETE ON contest_entries BEGIN UPDATE contests SET "
+            "pairing_topology_revision=pairing_topology_revision+1 "
+            "WHERE id=OLD.contest_id; END",
+        ),
+        (
+            "trg_contest_entries_lifecycle_revision_update",
+            "CREATE TRIGGER trg_contest_entries_lifecycle_revision_update "
+            "AFTER UPDATE OF id,contest_id,user_id,bot_id,group_id,seed,eliminated "
+            "ON contest_entries WHEN OLD.id IS NOT NEW.id "
+            "OR OLD.contest_id IS NOT NEW.contest_id "
+            "OR OLD.user_id IS NOT NEW.user_id "
+            "OR OLD.bot_id IS NOT NEW.bot_id "
+            "OR OLD.group_id IS NOT NEW.group_id "
+            "OR OLD.seed IS NOT NEW.seed "
+            "OR OLD.eliminated IS NOT NEW.eliminated "
+            "BEGIN UPDATE contests SET pairing_topology_revision="
+            "pairing_topology_revision+1 "
+            "WHERE id=OLD.contest_id OR id=NEW.contest_id; END",
+        ),
+        (
+            "trg_contest_stage_results_lifecycle_revision_insert",
+            "CREATE TRIGGER trg_contest_stage_results_lifecycle_revision_insert "
+            "AFTER INSERT ON contest_stage_results BEGIN UPDATE contests SET "
+            "pairing_topology_revision=pairing_topology_revision+1 "
+            "WHERE id=NEW.contest_id; END",
+        ),
+        (
+            "trg_contest_stage_results_lifecycle_revision_delete",
+            "CREATE TRIGGER trg_contest_stage_results_lifecycle_revision_delete "
+            "AFTER DELETE ON contest_stage_results BEGIN UPDATE contests SET "
+            "pairing_topology_revision=pairing_topology_revision+1 "
+            "WHERE id=OLD.contest_id; END",
+        ),
+        (
+            "trg_contest_stage_results_lifecycle_revision_update",
+            "CREATE TRIGGER trg_contest_stage_results_lifecycle_revision_update "
+            "AFTER UPDATE OF id,contest_id,stage_idx,stage_key,entry_id,bot_id,"
+            "points,wins,draws,losses,delta_total,group_id,rank_in_group,payload_json "
+            "ON contest_stage_results WHEN OLD.id IS NOT NEW.id "
+            "OR OLD.contest_id IS NOT NEW.contest_id "
+            "OR OLD.stage_idx IS NOT NEW.stage_idx "
+            "OR OLD.stage_key IS NOT NEW.stage_key "
+            "OR OLD.entry_id IS NOT NEW.entry_id "
+            "OR OLD.bot_id IS NOT NEW.bot_id "
+            "OR OLD.points IS NOT NEW.points "
+            "OR OLD.wins IS NOT NEW.wins "
+            "OR OLD.draws IS NOT NEW.draws "
+            "OR OLD.losses IS NOT NEW.losses "
+            "OR OLD.delta_total IS NOT NEW.delta_total "
+            "OR OLD.group_id IS NOT NEW.group_id "
+            "OR OLD.rank_in_group IS NOT NEW.rank_in_group "
+            "OR OLD.payload_json IS NOT NEW.payload_json "
+            "BEGIN UPDATE contests SET pairing_topology_revision="
+            "pairing_topology_revision+1 "
+            "WHERE id=OLD.contest_id OR id=NEW.contest_id; END",
+        ),
+    )
+    if (
+        tuple(name for name, _sql in definitions)
+        != _CONTEST_LIFECYCLE_REVISION_TRIGGER_NAMES
+    ):
+        raise RuntimeError("contest lifecycle trigger registry drift")
+    for name, sql in definitions:
+        _ensure_strict_trigger(conn, name, sql)
+
+
+def _invalidate_contest_seals_for_incomplete_lifecycle_epoch(
+    conn: sqlite3.Connection,
+) -> None:
+    """Invalidate old seals before installing any missing epoch trigger.
+
+    Trigger membership is versioned fail-closed.  A same-name definition
+    mismatch is rejected later by ``_ensure_strict_trigger``; because both
+    helpers run in the surrounding migration transaction, that failure rolls
+    this invalidation and every partial trigger installation back together.
+    """
+    existing = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        ).fetchall()
+    }
+    required = {
+        *_CONTEST_PAIRING_REVISION_TRIGGER_NAMES,
+        *_CONTEST_LIFECYCLE_REVISION_TRIGGER_NAMES,
+    }
+    if not required.issubset(existing):
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision=NULL "
+            "WHERE sealed_pairing_topology_revision IS NOT NULL"
+        )
 
 
 def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
@@ -2934,6 +4843,15 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "ON notifications(communication_message_public_id) "
             "WHERE communication_message_public_id IS NOT NULL"
         )
+    if "email_codes" in tables:
+        _add_col(
+            conn,
+            "email_codes",
+            "failed_attempts",
+            "INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (typeof(failed_attempts)='integer' AND failed_attempts "
+            f"BETWEEN 0 AND {EMAIL_CODE_MAX_FAILED_ATTEMPTS})",
+        )
     if "messages" in tables:
         _add_col(conn, "messages", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
     if "execution_control" in tables:
@@ -3072,7 +4990,15 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
     ).fetchone()
     sql_text = (create_sql[0] or "") if create_sql else ""
     cols = _table_cols(conn, "contests")
-
+    pairing_topology_columns = {
+        "pairing_topology_revision",
+        "sealed_pairing_topology_revision",
+    }
+    present_pairing_topology_columns = pairing_topology_columns.intersection(cols)
+    if present_pairing_topology_columns and (
+        present_pairing_topology_columns != pairing_topology_columns
+    ):
+        raise RuntimeError("contest pairing topology revision schema is partial")
     for col, decl in (
         ("game_id", "TEXT NOT NULL DEFAULT 'holdem'"),
         ("stages_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -3081,6 +5007,26 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         ("rest_ends_at", "TEXT"),
         ("phase", "TEXT NOT NULL DEFAULT 'standalone'"),  # P2 预赛/决赛
         ("source_contest_id", "INTEGER"),
+        ("time_control_id", "TEXT"),
+        ("format_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"),
+        (
+            "published_stage_pairing_count",
+            "INTEGER CHECK (published_stage_pairing_count IS NULL "
+            "OR (typeof(published_stage_pairing_count)='integer' "
+            "AND published_stage_pairing_count >= 0))",
+        ),
+        (
+            "pairing_topology_revision",
+            "INTEGER NOT NULL DEFAULT 0 CHECK ("
+            "typeof(pairing_topology_revision)='integer' "
+            "AND pairing_topology_revision >= 0)",
+        ),
+        (
+            "sealed_pairing_topology_revision",
+            "INTEGER CHECK (sealed_pairing_topology_revision IS NULL "
+            "OR (typeof(sealed_pairing_topology_revision)='integer' "
+            "AND sealed_pairing_topology_revision >= 0))",
+        ),
         ("official_results_ready", "INTEGER NOT NULL DEFAULT 0"),
         ("require_real_name", "INTEGER NOT NULL DEFAULT 0"),
     ):
@@ -3106,6 +5052,17 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
                 current_stage_idx INTEGER NOT NULL DEFAULT 0,
                 template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
                 rest_ends_at TEXT,
+                published_stage_pairing_count INTEGER CHECK (
+                    published_stage_pairing_count IS NULL OR (
+                        typeof(published_stage_pairing_count)='integer'
+                        AND published_stage_pairing_count>=0)),
+                pairing_topology_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+                    typeof(pairing_topology_revision)='integer'
+                    AND pairing_topology_revision>=0),
+                sealed_pairing_topology_revision INTEGER CHECK (
+                    sealed_pairing_topology_revision IS NULL OR (
+                        typeof(sealed_pairing_topology_revision)='integer'
+                        AND sealed_pairing_topology_revision>=0)),
                 CONSTRAINT chk_contest_status CHECK (
                     status IN ('draft','open','running','rest','finished','cancelled'))
             )
@@ -3116,7 +5073,8 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "registration_opens_at", "registration_closes_at", "starts_at",
             "ends_at", "created_at",
             "game_id", "stages_json", "current_stage_idx", "template_id",
-            "rest_ends_at",
+            "rest_ends_at", "published_stage_pairing_count",
+            "pairing_topology_revision", "sealed_pairing_topology_revision",
         ]
         present = [c for c in all_cols if c in cols]
         conn.execute(
@@ -3154,6 +5112,19 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
                 rest_ends_at TEXT,
                 phase TEXT NOT NULL DEFAULT 'standalone',
                 source_contest_id INTEGER,
+                time_control_id TEXT,
+                format_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                published_stage_pairing_count INTEGER CHECK (
+                    published_stage_pairing_count IS NULL OR (
+                        typeof(published_stage_pairing_count)='integer'
+                        AND published_stage_pairing_count>=0)),
+                pairing_topology_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+                    typeof(pairing_topology_revision)='integer'
+                    AND pairing_topology_revision>=0),
+                sealed_pairing_topology_revision INTEGER CHECK (
+                    sealed_pairing_topology_revision IS NULL OR (
+                        typeof(sealed_pairing_topology_revision)='integer'
+                        AND sealed_pairing_topology_revision>=0)),
                 official_results_ready INTEGER NOT NULL DEFAULT 0,
                 require_real_name INTEGER NOT NULL DEFAULT 0,
                 CONSTRAINT chk_contest_status CHECK (
@@ -3166,7 +5137,9 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "registration_opens_at", "registration_closes_at", "starts_at",
             "ends_at", "created_at", "game_id",
             "stages_json", "current_stage_idx", "template_id", "rest_ends_at",
-            "phase", "source_contest_id",
+            "phase", "source_contest_id", "time_control_id", "format_snapshot_json",
+            "published_stage_pairing_count", "pairing_topology_revision",
+            "sealed_pairing_topology_revision",
             "official_results_ready", "require_real_name",
         ]
         present = [c for c in all_cols if c in cols]
@@ -3181,14 +5154,49 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id)"
         )
 
-    # Long-lived customer-demo contests are explicit immutable snapshots.  Add
-    # this only after every legacy contests-table rebuild above, otherwise an old
-    # CHECK migration could immediately drop the newly added column again.
+    # Reassert post-rebuild columns only after every legacy contests-table
+    # replacement above.  Old databases cannot carry a trustworthy publication
+    # manifest, so the nullable column is intentionally added without backfill;
+    # the manager must strictly validate before sealing it.
+    _add_col(
+        conn,
+        "contests",
+        "published_stage_pairing_count",
+        "INTEGER CHECK (published_stage_pairing_count IS NULL "
+        "OR (typeof(published_stage_pairing_count)='integer' "
+        "AND published_stage_pairing_count >= 0))",
+    )
+    _add_col(
+        conn,
+        "contests",
+        "pairing_topology_revision",
+        "INTEGER NOT NULL DEFAULT 0 CHECK ("
+        "typeof(pairing_topology_revision)='integer' "
+        "AND pairing_topology_revision >= 0)",
+    )
+    _add_col(
+        conn,
+        "contests",
+        "sealed_pairing_topology_revision",
+        "INTEGER CHECK (sealed_pairing_topology_revision IS NULL "
+        "OR (typeof(sealed_pairing_topology_revision)='integer' "
+        "AND sealed_pairing_topology_revision >= 0))",
+    )
+    # Long-lived customer-demo contests are explicit immutable snapshots.
     _add_col(conn, "contests", "showcase_key", "TEXT")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_contests_showcase_key "
         "ON contests(showcase_key) WHERE showcase_key IS NOT NULL"
     )
+
+    if "contest_official_results" in tables:
+        _add_col(
+            conn,
+            "contest_official_results",
+            "group_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _add_col(conn, "contest_official_results", "rank_in_group", "INTEGER")
 
     if "contest_entries" in tables:
         for col, decl in (
@@ -3641,6 +5649,24 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_contest_entries_contest_user "
             "ON contest_entries(contest_id, user_id)"
         )
+        conn.execute(
+            CONTEST_ENTRY_PAGE_INDEX_SQL.replace(
+                "CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1
+            )
+        )
+        entry_page_index = conn.execute(
+            "SELECT type,sql FROM sqlite_master WHERE name=?",
+            ("idx_contest_entries_page_order",),
+        ).fetchall()
+        if (
+            len(entry_page_index) != 1
+            or str(entry_page_index[0]["type"]) != "index"
+            or _normalize_schema_sql(str(entry_page_index[0]["sql"] or ""))
+            != _normalize_schema_sql(CONTEST_ENTRY_PAGE_INDEX_SQL)
+        ):
+            raise RuntimeError(
+                "contest entry page index definition mismatch"
+            )
 
     # ── 跨游戏中性持久化列收敛 ─────────────────────────────
     # SQLite 删列与 FK/PK 变更统一用「新表→全量拷贝→换名」，
@@ -4126,6 +6152,11 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
 
     # ── contest_pairings 轮次冻结列（预赛/决赛 P1：版本/seed/发布闸门）────────
     if "contest_pairings" in _tables_after:
+        # Some legacy FK/identity rebuilds above intentionally reconstruct the
+        # narrow historical table and can drop columns added earlier in this
+        # same migration pass.  Reassert scheduler columns at the final index
+        # boundary so first-open upgrades do not require a second reopen.
+        _add_col(conn, "contest_pairings", "scheduled_at", "TEXT")
         _add_col(conn, "contest_pairings", "bot_a_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
@@ -4190,6 +6221,45 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             raise RuntimeError(
                 "contest pairing seed lookup index definition mismatch"
             )
+        # The scheduler must be able to reject an unfinished stage and locate
+        # due work from the indexed prefix without materialising an O(n^2)
+        # round-robin schedule on every tick.
+        conn.execute(
+            CONTEST_PAIRING_SCHEDULE_INDEX_SQL.replace(
+                "CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1
+            )
+        )
+        schedule_index = conn.execute(
+            "SELECT type,sql FROM sqlite_master WHERE name=?",
+            ("idx_contest_pairings_schedule",),
+        ).fetchall()
+        if (
+            len(schedule_index) != 1
+            or str(schedule_index[0]["type"]) != "index"
+            or _normalize_schema_sql(str(schedule_index[0]["sql"] or ""))
+            != _normalize_schema_sql(CONTEST_PAIRING_SCHEDULE_INDEX_SQL)
+        ):
+            raise RuntimeError(
+                "contest pairing schedule index definition mismatch"
+            )
+        conn.execute(
+            CONTEST_PAIRING_SYNC_INDEX_SQL.replace(
+                "CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1
+            )
+        )
+        sync_index = conn.execute(
+            "SELECT type,sql FROM sqlite_master WHERE name=?",
+            ("idx_contest_pairings_completion_sync",),
+        ).fetchall()
+        if (
+            len(sync_index) != 1
+            or str(sync_index[0]["type"]) != "index"
+            or _normalize_schema_sql(str(sync_index[0]["sql"] or ""))
+            != _normalize_schema_sql(CONTEST_PAIRING_SYNC_INDEX_SQL)
+        ):
+            raise RuntimeError(
+                "contest pairing completion sync index definition mismatch"
+            )
         duplicate_coordinate = conn.execute(
             "SELECT contest_id,stage_idx,round_num,bracket_slot,"
             "tiebreak_group,tiebreak_game,COUNT(*) AS n "
@@ -4231,6 +6301,34 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "INTEGER NOT NULL DEFAULT 0 CHECK (failure_count>=0)",
         )
         _add_col(conn, "execution_jobs", "next_attempt_at", "TEXT")
+        for index_name, index_sql in (
+            (
+                "idx_execution_jobs_claim_source_order",
+                EXECUTION_CLAIM_SOURCE_ORDER_INDEX_SQL,
+            ),
+            (
+                "idx_execution_jobs_claim_contest_order",
+                EXECUTION_CLAIM_CONTEST_ORDER_INDEX_SQL,
+            ),
+            (
+                "idx_execution_jobs_contest_dispatch_gap",
+                EXECUTION_CONTEST_DISPATCH_GAP_INDEX_SQL,
+            ),
+        ):
+            conn.execute(
+                index_sql.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            )
+            index_row = conn.execute(
+                "SELECT type,sql FROM sqlite_master WHERE name=?",
+                (index_name,),
+            ).fetchall()
+            if (
+                len(index_row) != 1
+                or str(index_row[0]["type"]) != "index"
+                or _normalize_schema_sql(str(index_row[0]["sql"] or ""))
+                != _normalize_schema_sql(index_sql)
+            ):
+                raise RuntimeError(f"execution queue index definition mismatch: {index_name}")
     if "auto_match_control" in tables_now:
         old_switch = conn.execute(
             "SELECT enabled FROM auto_match_control WHERE singleton=1"
@@ -4519,6 +6617,13 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
+    if {
+        "contests",
+        "contest_entries",
+        "contest_pairings",
+        "contest_stage_results",
+    } <= current_tables:
+        _invalidate_contest_seals_for_incomplete_lifecycle_epoch(conn)
     if "bots" in current_tables:
         _install_bot_owner_delete_triggers(conn)
         if "contest_entries" in current_tables:
@@ -4529,6 +6634,16 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "contest_pairings",
         } <= current_tables:
             _install_contest_live_state_bot_trigger(conn)
+    if {"contests", "contest_pairings", "execution_jobs"} <= current_tables:
+        _install_contest_title_schema(conn)
+        _install_contest_source_search_schema(conn)
+        _install_contest_pairing_topology_triggers(conn)
+    if {
+        "contests",
+        "contest_entries",
+        "contest_stage_results",
+    } <= current_tables:
+        _install_contest_lifecycle_revision_triggers(conn)
     _install_rated_overlap_triggers(conn)
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
@@ -4970,6 +7085,57 @@ class Store:
                 c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
             )
 
+    @staticmethod
+    def _revoke_local_ai_agents_tx(
+        c: sqlite3.Connection,
+        *,
+        scope_column: str,
+        scope_id: int,
+        reason: str,
+    ) -> list[dict[str, Any]]:
+        """Revoke one exact active-agent postimage inside the caller's write tx."""
+
+        if scope_column not in {"bot_id", "owner_id"}:
+            raise ValueError("invalid Local-AI revocation scope")
+        if not c.in_transaction:
+            raise RuntimeError("Local-AI revocation requires an active transaction")
+        active_rows = c.execute(
+            "SELECT id,public_id,owner_id,bot_id FROM local_ai_agents "
+            f"WHERE {scope_column}=? AND status='active' ORDER BY id",
+            (int(scope_id),),
+        ).fetchall()
+        if active_rows:
+            agent_ids = [int(row["id"]) for row in active_rows]
+            marks = ",".join("?" for _ in agent_ids)
+            now = _now()
+            changed = c.execute(
+                "UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                f"disconnected_at=?,updated_at=? WHERE id IN ({marks}) "
+                "AND status='active'",
+                (now, now, *agent_ids),
+            )
+            if changed.rowcount != len(agent_ids):  # pragma: no cover - write lock invariant
+                raise RuntimeError(
+                    "Local-AI revocation postimage changed inside write transaction"
+                )
+            c.execute(
+                "UPDATE local_ai_leases SET status='released',released_at=?,"
+                f"terminal_reason=? WHERE agent_id IN ({marks}) AND status='active'",
+                (now, str(reason)[:200], *agent_ids),
+            )
+        # Freeze every newly revoked identity and its immutable authorization
+        # scope before commit.  The process-local service retains unfinished
+        # items for retry; historical revoked rows never enter request work.
+        return [
+            {
+                "public_id": str(row["public_id"]),
+                "owner_id": int(row["owner_id"]),
+                "bot_id": int(row["bot_id"]),
+            }
+            for row in active_rows
+        ]
+
     def update_user(self, user_id: int, **fields: Any) -> dict | None:
         allowed = {
             "password_hash",
@@ -4989,33 +7155,44 @@ class Store:
             "school",
             "student_id",
         }
+        if "is_active" in fields:
+            raw_active = fields["is_active"]
+            if isinstance(raw_active, bool):
+                fields["is_active"] = int(raw_active)
+            elif type(raw_active) is not int or raw_active not in (0, 1):
+                raise ValueError("is_active 必须是布尔值或整数 0/1")
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
             disabling = "is_active" in fields and not bool(fields["is_active"])
+            revoked_targets: list[dict[str, Any]] = []
             if disabling:
                 c.execute("BEGIN IMMEDIATE")
             if sets:
                 vals.append(user_id)
                 c.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", vals)
             if disabling:
-                now = _now()
-                c.execute(
-                    "UPDATE local_ai_agents SET status='revoked',"
-                    "connection_generation=connection_generation+1,connected_at=NULL,"
-                    "disconnected_at=?,updated_at=? WHERE owner_id=? "
-                    "AND status='active'",
-                    (now, now, int(user_id)),
+                # Account disable is a revocation boundary.  Delete every
+                # bearer in the same write transaction as the user flag and
+                # Local-AI teardown so a dormant token cannot revive after a
+                # later re-enable and no partial revocation can commit.
+                c.execute("DELETE FROM sessions WHERE user_id=?", (int(user_id),))
+                revoked_targets = self._revoke_local_ai_agents_tx(
+                    c,
+                    scope_column="owner_id",
+                    scope_id=int(user_id),
+                    reason="owner_disabled",
                 )
-                c.execute(
-                    "UPDATE local_ai_leases SET status='released',released_at=?,"
-                    "terminal_reason='owner_disabled' WHERE status='active' "
-                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE owner_id=?)",
-                    (now, int(user_id)),
-                )
-            return _row(
+            result = _row(
                 c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             )
+            if result is not None and disabling:
+                result["_revoked_local_ai_targets"] = revoked_targets
+                result["_local_ai_revocation_scope"] = {
+                    "kind": "owner",
+                    "id": int(user_id),
+                }
+            return result
 
     def list_users(
         self, *, role: str | None = None, active_only: bool = False,
@@ -5049,7 +7226,7 @@ class Store:
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
-                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
+                return {"items": rows, "page": page, "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     def search_users(self, q: str, *, limit: int = 20) -> list[dict]:
@@ -5088,6 +7265,45 @@ class Store:
                 (token, user_id, expires_at, _now(), ip_addr, user_agent),
             )
 
+    def add_session_if_user_active(
+        self,
+        token: str,
+        user_id: int,
+        expires_at: str,
+        *,
+        expected_password_hash: str,
+        ip_addr: str = "",
+        user_agent: str = "",
+    ) -> bool:
+        """Issue a session only for the exact active credential just verified.
+
+        The immediate transaction is the other half of ``update_user``'s
+        disable/revoke and password-rotation boundaries.  Whichever writer wins
+        first either creates a token that the subsequent mutation deletes, or
+        observes a disabled user / changed password hash and creates nothing.
+        """
+
+        if not isinstance(expected_password_hash, str) or not expected_password_hash:
+            raise ValueError("expected_password_hash 必须是非空字符串")
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            issued = c.execute(
+                "INSERT INTO sessions(token,user_id,expires_at,created_at,ip_addr,user_agent) "
+                "SELECT ?,id,?,?,?,? FROM users WHERE id=? AND is_active=1 "
+                "AND password_hash=?",
+                (
+                    token,
+                    expires_at,
+                    _now(),
+                    ip_addr,
+                    user_agent,
+                    user_id,
+                    expected_password_hash,
+                ),
+            )
+            return issued.rowcount == 1
+
     def get_session(self, token: str) -> dict | None:
         with self._tx() as c:
             return _row(
@@ -5105,6 +7321,30 @@ class Store:
             return c.execute(
                 "DELETE FROM sessions WHERE user_id=?", (user_id,)
             ).rowcount
+
+    def rotate_password_if_current(
+        self,
+        user_id: int,
+        *,
+        expected_password_hash: str,
+        password_hash: str,
+    ) -> bool:
+        """CAS the active user's password and revoke sessions atomically."""
+        if not isinstance(expected_password_hash, str) or not expected_password_hash:
+            raise ValueError("expected_password_hash 必须是非空字符串")
+        if not isinstance(password_hash, str) or not password_hash:
+            raise ValueError("password_hash 必须是非空字符串")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            updated = c.execute(
+                "UPDATE users SET password_hash=? "
+                "WHERE id=? AND is_active=1 AND password_hash=?",
+                (password_hash, int(user_id), expected_password_hash),
+            )
+            if updated.rowcount != 1:
+                return False
+            c.execute("DELETE FROM sessions WHERE user_id=?", (int(user_id),))
+            return True
 
     # 兼容别名
     delete_user_sessions = delete_sessions_for_user
@@ -5177,16 +7417,17 @@ class Store:
         """原子消费一次性凭据、更新密码并撤销该用户的全部会话。
 
         邮箱验证码与历史迁移兼容的重置 token 二选一。返回 ``ok``、``invalid`` 或
-        ``expired``；``invalid`` 同时涵盖不存在、已使用和最终 CAS 竞争失败。
-        凭据 CAS、密码更新与 session 删除共享同一个 ``BEGIN IMMEDIATE``
-        事务，后两步异常时凭据消费也会随事务回滚。
+        ``expired``；``invalid`` 同时涵盖不存在、已使用、失败预算耗尽和最终 CAS
+        竞争失败。验证码错误计数、凭据 CAS、密码更新与 session 删除共享同一个
+        ``BEGIN IMMEDIATE`` 事务，既能跨进程/重启限次，后续步骤异常时也不会留下
+        半提交。
         """
         email_selected = email_code_id is not None or email_code is not None
         token_selected = reset_token is not None
         if email_selected == token_selected:
             raise ValueError("邮箱验证码和重置 token 必须且只能提供一种")
-        if email_selected and (email_code_id is None or email_code is None):
-            raise ValueError("邮箱验证码 id 与 code 必须同时提供")
+        if email_selected and email_code is None:
+            raise ValueError("邮箱验证码 code 必须提供")
 
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -5194,12 +7435,58 @@ class Store:
             checked_at = datetime.now()
             expiry_cutoff = checked_at.isoformat(timespec="microseconds")
             if email_selected:
-                credential = c.execute(
-                    "SELECT user_id, expires_at, used_at FROM email_codes "
-                    "WHERE id=? AND user_id=? AND purpose=? AND code=?",
-                    (email_code_id, user_id, CODE_RESET, email_code),
-                ).fetchone()
+                if email_code_id is None:
+                    # Always bind attempts to the newest credential, including
+                    # an already-consumed/exhausted one.  Falling back to an
+                    # older still-unused row would multiply the brute-force
+                    # budget whenever a user requested another code.
+                    credential = c.execute(
+                        "SELECT id,user_id,code,expires_at,used_at,failed_attempts "
+                        "FROM email_codes WHERE user_id=? AND purpose=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (user_id, CODE_RESET),
+                    ).fetchone()
+                else:
+                    credential = c.execute(
+                        "SELECT id,user_id,code,expires_at,used_at,failed_attempts "
+                        "FROM email_codes WHERE id=? AND user_id=? AND purpose=?",
+                        (email_code_id, user_id, CODE_RESET),
+                    ).fetchone()
                 if not credential or credential["used_at"] is not None:
+                    return "invalid"
+                failed_attempts = credential["failed_attempts"]
+                if (
+                    type(failed_attempts) is not int
+                    or failed_attempts < 0
+                    or failed_attempts >= EMAIL_CODE_MAX_FAILED_ATTEMPTS
+                ):
+                    return "invalid"
+                submitted_code = email_code if isinstance(email_code, str) else ""
+                stored_code = credential["code"]
+                code_matches = (
+                    isinstance(stored_code, str)
+                    and secrets.compare_digest(stored_code, submitted_code)
+                )
+                if not code_matches:
+                    failed_at = _now()
+                    failed = c.execute(
+                        "UPDATE email_codes SET "
+                        "failed_attempts=failed_attempts+1,"
+                        "used_at=CASE WHEN failed_attempts+1>=? THEN ? ELSE used_at END "
+                        "WHERE id=? AND user_id=? AND purpose=? AND used_at IS NULL "
+                        "AND failed_attempts=? AND failed_attempts<?",
+                        (
+                            EMAIL_CODE_MAX_FAILED_ATTEMPTS,
+                            failed_at,
+                            credential["id"],
+                            user_id,
+                            CODE_RESET,
+                            failed_attempts,
+                            EMAIL_CODE_MAX_FAILED_ATTEMPTS,
+                        ),
+                    )
+                    if failed.rowcount != 1:
+                        return "invalid"
                     return "invalid"
                 try:
                     expired = (
@@ -5212,14 +7499,16 @@ class Store:
                     return "expired"
                 consume = c.execute(
                     "UPDATE email_codes SET used_at=? "
-                    "WHERE id=? AND user_id=? AND purpose=? AND code=? "
-                    "AND used_at IS NULL AND expires_at>=?",
+                    "WHERE id=? AND user_id=? AND purpose=? AND code=? AND used_at IS NULL "
+                    "AND failed_attempts=? AND failed_attempts<? AND expires_at>=?",
                     (
                         used_at,
-                        email_code_id,
+                        credential["id"],
                         user_id,
                         CODE_RESET,
-                        email_code,
+                        submitted_code,
+                        failed_attempts,
+                        EMAIL_CODE_MAX_FAILED_ATTEMPTS,
                         expiry_cutoff,
                     ),
                 )
@@ -6461,14 +8750,14 @@ class Store:
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
             projection_guard: _RatingProjectionMutationGuard | None = None
+            revoked_targets: list[dict[str, Any]] = []
             # Active/inactive is the ordinary reversible leaderboard visibility
             # mutation.  Identity/game changes remain fail-closed and can only be
             # reconciled by the offline rebuild workflow.
-            if "is_active" in fields and not {
-                "game_id", "format", "os", "arch"
-            }.intersection(fields):
+            if "is_active" in fields:
                 c.execute("BEGIN IMMEDIATE")
-                projection_guard = self._rating_projection_mutation_guard_tx(c)
+                if not {"game_id", "format", "os", "arch"}.intersection(fields):
+                    projection_guard = self._rating_projection_mutation_guard_tx(c)
             disabling = "is_active" in fields and not bool(fields["is_active"])
             if sets:
                 if "updated_at" not in fields:
@@ -6477,24 +8766,24 @@ class Store:
                 vals.append(bot_id)
                 c.execute(f"UPDATE bots SET {','.join(sets)} WHERE id=?", vals)
             if disabling:
-                now = _now()
-                c.execute(
-                    "UPDATE local_ai_agents SET status='revoked',"
-                    "connection_generation=connection_generation+1,connected_at=NULL,"
-                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
-                    (now, now, int(bot_id)),
-                )
-                c.execute(
-                    "UPDATE local_ai_leases SET status='released',released_at=?,"
-                    "terminal_reason='bot_disabled' WHERE status='active' "
-                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
-                    (now, int(bot_id)),
+                revoked_targets = self._revoke_local_ai_agents_tx(
+                    c,
+                    scope_column="bot_id",
+                    scope_id=int(bot_id),
+                    reason="bot_disabled",
                 )
             if projection_guard is not None:
                 self._advance_rating_projection_state_tx(c, projection_guard)
-            return _row(
+            result = _row(
                 c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone()
             )
+            if result is not None and disabling:
+                result["_revoked_local_ai_targets"] = revoked_targets
+                result["_local_ai_revocation_scope"] = {
+                    "kind": "bot",
+                    "id": int(bot_id),
+                }
+            return result
 
     def update_admin_bot(self, bot_id: int, **fields: Any) -> dict | None:
         """Apply an admin edit without racing owner deletion into a 500.
@@ -6521,6 +8810,7 @@ class Store:
         clean = {key: value for key, value in fields.items() if key in allowed}
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            revoked_targets: list[dict[str, Any]] = []
             bot = c.execute(
                 "SELECT * FROM bots WHERE id=?", (int(bot_id),)
             ).fetchone()
@@ -6545,26 +8835,28 @@ class Store:
                     (*clean.values(), int(bot_id)),
                 )
             if "is_active" in clean and not bool(clean["is_active"]):
-                now = _now()
-                c.execute(
-                    "UPDATE local_ai_agents SET status='revoked',"
-                    "connection_generation=connection_generation+1,connected_at=NULL,"
-                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
-                    (now, now, int(bot_id)),
-                )
-                c.execute(
-                    "UPDATE local_ai_leases SET status='released',released_at=?,"
-                    "terminal_reason='bot_disabled' WHERE status='active' "
-                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
-                    (now, int(bot_id)),
+                revoked_targets = self._revoke_local_ai_agents_tx(
+                    c,
+                    scope_column="bot_id",
+                    scope_id=int(bot_id),
+                    reason="bot_disabled",
                 )
             if projection_guard is not None:
                 self._advance_rating_projection_state_tx(c, projection_guard)
-            return _row(
+            result = _row(
                 c.execute(
                     "SELECT * FROM bots WHERE id=?", (int(bot_id),)
                 ).fetchone()
             )
+            if result is not None and "is_active" in clean and not bool(
+                clean["is_active"]
+            ):
+                result["_revoked_local_ai_targets"] = revoked_targets
+                result["_local_ai_revocation_scope"] = {
+                    "kind": "bot",
+                    "id": int(bot_id),
+                }
+            return result
 
     def update_owned_bot(
         self, owner_id: int, bot_id: int, **fields: Any
@@ -6576,6 +8868,7 @@ class Store:
         vals = [value for key, value in fields.items() if key in allowed]
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            revoked_targets: list[dict[str, Any]] = []
             bot = c.execute(
                 "SELECT * FROM bots WHERE id=?", (int(bot_id),)
             ).fetchone()
@@ -6604,24 +8897,26 @@ class Store:
                 if changed.rowcount != 1:
                     raise BotDeletedError("Bot 已删除，不能再修改")
             if "is_active" in fields and not bool(fields["is_active"]):
-                now = _now()
-                c.execute(
-                    "UPDATE local_ai_agents SET status='revoked',"
-                    "connection_generation=connection_generation+1,connected_at=NULL,"
-                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
-                    (now, now, int(bot_id)),
-                )
-                c.execute(
-                    "UPDATE local_ai_leases SET status='released',released_at=?,"
-                    "terminal_reason='bot_disabled' WHERE status='active' "
-                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
-                    (now, int(bot_id)),
+                revoked_targets = self._revoke_local_ai_agents_tx(
+                    c,
+                    scope_column="bot_id",
+                    scope_id=int(bot_id),
+                    reason="bot_disabled",
                 )
             if projection_guard is not None:
                 self._advance_rating_projection_state_tx(c, projection_guard)
-            return _row(
+            result = _row(
                 c.execute("SELECT * FROM bots WHERE id=?", (int(bot_id),)).fetchone()
             )
+            if result is not None and "is_active" in fields and not bool(
+                fields["is_active"]
+            ):
+                result["_revoked_local_ai_targets"] = revoked_targets
+                result["_local_ai_revocation_scope"] = {
+                    "kind": "bot",
+                    "id": int(bot_id),
+                }
+            return result
 
     def publish_uploaded_bot(self, owner_id: int, bot_id: int) -> dict:
         """Atomically publish a staged first version and fill an empty rank slot.
@@ -7361,7 +9656,7 @@ class Store:
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
-                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
+                return {"items": rows, "page": page, "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── bot_versions ──────────────────────────────────────────
@@ -11500,123 +13795,145 @@ class Store:
                 total += int(row[0]) if row else 0
             return total
 
-    def recover_orphan_matches(self) -> int:
-        """启动时清理孤儿对局：把残留的 status=running（无对应内存协程）标 aborted。
+    def recover_orphan_matches(self, *, interruption_reason: str) -> int:
+        """恢复时清理孤儿对局并持久化调用方提供的精确恢复来源。
 
-        服务非正常退出后，DB 里 running 记录的内存 Task/Future 已丢失（尤其
-        人类对局的 _human_turns），不清理会永久卡 running、泄漏并发与活跃用户计数。
-        遍历三张 per-game 表清理。返回受影响行数。
+        进程重新启动或同进程执行环境恢复前都会先终止旧 Task/Future（尤其
+        人类对局的 _human_turns）；这些无对应内存协程的 running 记录不清理会
+        永久卡住并发与活跃用户计数。遍历三张 per-game 表清理，返回受影响行数。
 
-        同时清理孤儿 pending 赛事对局：
-        - 所有非 contest pending（challenge/table/ladder/human 等）：进程重启后
-          已无对应内存 Task/Future，统一标 ``orphan_pending_after_restart`` aborted；
-        - contest_id=NULL AND match_type='contest' AND status='pending'（e2e 残留等无主）；
-        - contest 已终态（finished/cancelled）但仍 pending 的赛事对局（排期积压后赛事已结束，
-          这些 pending 永不会被打，也会污染公开运行状态）。
+        同时清理孤儿 pending 对局：
+        - 同时没有 contest_id 与 pairing 引用的非 contest pending
+          （challenge/table/ladder/human 等）：恢复边界后已无对应内存
+          Task/Future，按同一来源映射为对应 pending reason 后 aborted；
+        - contest_id=NULL、无 pairing 引用且 match_type='contest' 的 pending
+          （e2e 残留等无主）；
 
         活跃赛事的 pending contest match 不在本方法粗暴标 aborted：已绑定/
         未绑定的两阶段派发中断由 ``reset_dead_contest_pairings`` 精确删除并重派。
+        finished/cancelled 的 Match、pairing 与 replay 是不可变历史，即使旧数据仍
+        残留 pending/running 绑定也不得由应用恢复重写。
         """
-        from bzplat.backend.store.schema import STATUS_ABORTED
-
+        interruption_reason = validate_orphan_recovery_reason(
+            interruption_reason
+        )
+        pending_interruption_reason = pending_orphan_recovery_reason(
+            interruption_reason
+        )
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             n = 0
+
+            def abort_rows(
+                table: str,
+                rows: list[sqlite3.Row],
+                *,
+                expected_status: str,
+                reason: str,
+            ) -> int:
+                terminal_at = _now()
+                for match_row in rows:
+                    match_id = str(match_row["id"])
+                    changed = c.execute(
+                        f"UPDATE {table} SET status=?,reason=?,ended_at=? "
+                        "WHERE id=? AND status=?",
+                        (
+                            STATUS_ABORTED,
+                            reason,
+                            terminal_at,
+                            match_id,
+                            expected_status,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise RuntimeError(
+                            "orphan recovery Match CAS failed"
+                        )
+                    terminal_match = c.execute(
+                        f"SELECT * FROM {table} WHERE id=?", (match_id,)
+                    ).fetchone()
+                    if terminal_match is None:
+                        raise RuntimeError("orphan recovery Match disappeared")
+                    _finalize_terminal_replay_tx(
+                        c,
+                        match=terminal_match,
+                        updated_at=terminal_at,
+                    )
+                return len(rows)
+
             for gid in _all_game_ids():
                 tbl = _matches_table(gid)
-                row = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} WHERE status=? "
-                    "AND (contest_id IS NULL OR contest_id NOT IN ("
-                    "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
-                    "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
+                running_candidates = c.execute(
+                    f"SELECT m.id,m.contest_id FROM {tbl} m WHERE m.status=? "
+                    "AND m.id NOT IN (SELECT current_match_id FROM execution_jobs "
                     "WHERE current_match_id IS NOT NULL AND status IN "
                     "('starting','running','settling'))",
                     (STATUS_RUNNING,),
-                ).fetchone()
-                cnt = int(row[0]) if row else 0
-                if cnt:
-                    c.execute(
-                        f"UPDATE {tbl} SET status=?, reason='orphan_after_restart', "
-                        "ended_at=datetime('now') WHERE status=? "
-                        "AND (contest_id IS NULL OR contest_id NOT IN ("
-                        "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
-                        "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
-                        "WHERE current_match_id IS NOT NULL AND status IN "
-                        "('starting','running','settling'))",
-                        (STATUS_ABORTED, STATUS_RUNNING),
-                    )
-                    n += cnt
-                # 非赛事 pending 也依赖上一进程的内存 task/future；重启后
-                # 不可能继续。contest pending 必须留给后续 pairing 对账精确恢复。
-                non_contest_pending = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} "
-                    "WHERE status=? AND match_type<>? "
+                ).fetchall()
+                running_rows = [
+                    row
+                    for row in running_candidates
+                    if _match_recovery_affiliation_tx(
+                        c,
+                        match_id=str(row["id"]),
+                        direct_contest_id=row["contest_id"],
+                    )[0]
+                    in {"unaffiliated", "active"}
+                ]
+                n += abort_rows(
+                    tbl,
+                    running_rows,
+                    expected_status=STATUS_RUNNING,
+                    reason=interruption_reason,
+                )
+                # 真正没有 contest_id / pairing 引用的 pending 依赖恢复前的内存
+                # task/future，恢复后不可能继续。match_type 只选择稳定审计 reason，
+                # 不参与归属；任何赛事关联都留给 pairing 对账按 contest.status 恢复。
+                pending_candidates = c.execute(
+                    f"SELECT id,contest_id,match_type FROM {tbl} WHERE status=? "
                     "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
                     "WHERE current_match_id IS NOT NULL AND status IN "
                     "('starting','running','settling'))",
-                    (STATUS_PENDING, TYPE_CONTEST),
-                ).fetchone()
-                pending_count = int(non_contest_pending[0]) if non_contest_pending else 0
-                if pending_count:
-                    c.execute(
-                        f"UPDATE {tbl} SET status=?, "
-                        "reason='orphan_pending_after_restart', ended_at=? "
-                        "WHERE status=? AND match_type<>? "
-                        "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
-                        "WHERE current_match_id IS NOT NULL AND status IN "
-                        "('starting','running','settling'))",
-                        (
-                            STATUS_ABORTED,
-                            _now(),
-                            STATUS_PENDING,
-                            TYPE_CONTEST,
-                        ),
-                    )
-                    n += pending_count
-                # 清理孤儿 pending 赛事对局（无 contest 归属的 type=contest pending）
-                row2 = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} "
-                    f"WHERE status=? AND match_type=? "
-                    f"AND contest_id IS NULL",
-                    (STATUS_PENDING, TYPE_CONTEST),
-                ).fetchone()
-                cnt2 = int(row2[0]) if row2 else 0
-                if cnt2:
-                    c.execute(
-                        f"UPDATE {tbl} SET status=?, reason='orphan_pending_no_contest', "
-                        "ended_at=datetime('now') "
-                        f"WHERE status=? AND match_type=? "
-                        f"AND contest_id IS NULL",
-                        (STATUS_ABORTED, STATUS_PENDING, TYPE_CONTEST),
-                    )
-                    n += cnt2
-                # 清理已终态赛事的残留 pending 对局（赛事 finished/cancelled 但 match 仍 pending）
-                row3 = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} m "
-                    f"WHERE m.status=? AND m.contest_id IS NOT NULL "
-                    f"AND m.contest_id IN (SELECT id FROM contests "
-                    f"WHERE status IN (?,?) AND showcase_key IS NULL)",
-                    (STATUS_PENDING, CONTEST_FINISHED, CONTEST_CANCELLED),
-                ).fetchone()
-                cnt3 = int(row3[0]) if row3 else 0
-                if cnt3:
-                    c.execute(
-                        f"UPDATE {tbl} SET status=?, reason='contest_ended_pending_orphan', "
-                        "ended_at=datetime('now') "
-                        f"WHERE status=? AND contest_id IS NOT NULL "
-                        f"AND contest_id IN (SELECT id FROM contests "
-                        f"WHERE status IN (?,?) AND showcase_key IS NULL)",
-                        (
-                            STATUS_ABORTED,
-                            STATUS_PENDING,
-                            CONTEST_FINISHED,
-                            CONTEST_CANCELLED,
-                        ),
-                    )
-                    n += cnt3
+                    (STATUS_PENDING,),
+                ).fetchall()
+                unaffiliated_pending = [
+                    row
+                    for row in pending_candidates
+                    if _match_recovery_affiliation_tx(
+                        c,
+                        match_id=str(row["id"]),
+                        direct_contest_id=row["contest_id"],
+                    )[0]
+                    == "unaffiliated"
+                ]
+                non_contest_pending = [
+                    row
+                    for row in unaffiliated_pending
+                    if row["match_type"] != TYPE_CONTEST
+                ]
+                n += abort_rows(
+                    tbl,
+                    non_contest_pending,
+                    expected_status=STATUS_PENDING,
+                    reason=pending_interruption_reason,
+                )
+                no_contest_pending = [
+                    row
+                    for row in unaffiliated_pending
+                    if row["match_type"] == TYPE_CONTEST
+                ]
+                n += abort_rows(
+                    tbl,
+                    no_contest_pending,
+                    expected_status=STATUS_PENDING,
+                    reason="orphan_pending_no_contest",
+                )
             return n
 
-    def reset_dead_contest_pairings(self) -> int:
-        """启动对账辅助：清理两阶段派发中断留下的死状态。
+    def reset_dead_contest_pairings(
+        self, *, interruption_reason: str
+    ) -> int:
+        """恢复对账辅助：清理两阶段派发中断留下的死状态。
 
         1. prepare match 已插入，但进程在 bind pairing 前退出：活跃赛事中会留下
            没有任何 pairing 引用的 pending contest match。这类幽灵对局必须连同
@@ -11625,14 +13942,19 @@ class Store:
            completed（aborted/orphan/pending 或不存在）：复位为 pending +
            match_id=NULL，供 ContestManager.maybe_finish/_dispatch_pending 重派。
 
-        completed 的 pairing 不动（保留真实比赛结果，防误伤）。
+        completed 的 pairing 不复位（保留真实比赛结果，防误伤），但 completed/
+        aborted Match 都会先从 Match 权威行补齐唯一 replay 终局，避免恢复后日志
+        永久停在未完成状态。
         对应 recover_orphan_matches 把 running match 标 aborted 后的赛事善后——
         那些赛事 pairing 仍指 aborted match（_stage_done 不通过 pairing 状态判，而是
         读 match.status，但 _dispatch_pending 只挑 status=pending 且无 match_id 的重派，
         所以 status=running+match_id=aborted 的死 pairing 永远不会被重派 → 赛事卡死）。
         返回重置行数。
         """
-        # pairing bind 已提交、runner 尚未 start 时进程可能退出：该 match 仍 pending。
+        interruption_reason = validate_orphan_recovery_reason(
+            interruption_reason
+        )
+        # pairing bind 已提交、runner 尚未 start 时恢复边界可能中断：该 match 仍 pending。
         # 解绑它时必须在同一事务删除物理 match + index + replay，否则随后重派会留下
         # ghost pending match，阻塞 force-finish 并重复占用数据。
         with self._tx() as c:
@@ -11645,23 +13967,37 @@ class Store:
             )
             status_marks = ",".join("?" for _ in active_statuses)
             # prepare 成功、bind 前硬崩：match 的 contest_id 已写入，但没有
-            # pairing.match_id 指向它。这里只在启动对账入口调用，内存中已无
+            # pairing.match_id 指向它。这里只在恢复对账入口调用，内存中已无
             # 可能继续 bind 的 prepared map，因此删除是唯一可恢复收敛。
             for gid in _all_game_ids():
                 table = _matches_table(gid)
                 ghosts = c.execute(
-                    f"SELECT m.id FROM {table} m "
+                    f"SELECT m.id,m.contest_id FROM {table} m "
                     "JOIN contests contest ON contest.id=m.contest_id "
-                    "WHERE m.status=? AND m.match_type=? "
+                    "WHERE m.status=? "
                     f"AND contest.status IN ({status_marks}) "
                     "AND contest.showcase_key IS NULL "
                     "AND NOT EXISTS ("
                     "SELECT 1 FROM contest_pairings pairing WHERE pairing.match_id=m.id"
-                    ")",
-                    (STATUS_PENDING, TYPE_CONTEST, *active_statuses),
+                    ") AND NOT EXISTS("
+                    "SELECT 1 FROM execution_jobs job WHERE job.current_match_id=m.id "
+                    "AND job.status IN ('starting','running','settling'))",
+                    (STATUS_PENDING, *active_statuses),
                 ).fetchall()
                 for ghost in ghosts:
                     match_id = str(ghost["id"])
+                    affiliation, authority_contest_id = (
+                        _match_recovery_affiliation_tx(
+                            c,
+                            match_id=match_id,
+                            direct_contest_id=ghost["contest_id"],
+                        )
+                    )
+                    if (
+                        affiliation != "active"
+                        or authority_contest_id != ghost["contest_id"]
+                    ):
+                        continue
                     _delete_social_target(c, "match", match_id)
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
@@ -11673,11 +14009,16 @@ class Store:
                     recovered += 1
 
             pairings = c.execute(
-                "SELECT pairing.id, pairing.match_id FROM contest_pairings pairing "
+                "SELECT pairing.id,pairing.match_id,pairing.contest_id "
+                "FROM contest_pairings pairing "
                 "JOIN contests contest ON contest.id=pairing.contest_id "
                 "WHERE pairing.status=? AND pairing.match_id IS NOT NULL "
-                "AND contest.showcase_key IS NULL",
-                (STATUS_RUNNING,),
+                f"AND contest.status IN ({status_marks}) "
+                "AND contest.showcase_key IS NULL "
+                "AND NOT EXISTS(SELECT 1 FROM execution_jobs job "
+                "WHERE job.current_match_id=pairing.match_id "
+                "AND job.status IN ('starting','running','settling'))",
+                (STATUS_RUNNING, *active_statuses),
             ).fetchall()
             for pairing in pairings:
                 match_id = str(pairing["match_id"])
@@ -11687,10 +14028,33 @@ class Store:
                 table = _matches_table(indexed["game_id"]) if indexed else None
                 match = (
                     c.execute(
-                        f"SELECT status FROM {table} WHERE id=?", (match_id,)
+                        f"SELECT * FROM {table} WHERE id=?", (match_id,)
                     ).fetchone()
                     if table else None
                 )
+                affiliation, authority_contest_id = (
+                    _match_recovery_affiliation_tx(
+                        c,
+                        match_id=match_id,
+                        direct_contest_id=(
+                            match["contest_id"] if match is not None else None
+                        ),
+                    )
+                )
+                if (
+                    affiliation != "active"
+                    or authority_contest_id != pairing["contest_id"]
+                ):
+                    continue
+                if match and match["status"] in {
+                    STATUS_COMPLETED,
+                    STATUS_ABORTED,
+                }:
+                    _finalize_terminal_replay_tx(
+                        c,
+                        match=match,
+                        updated_at=_now(),
+                    )
                 if match and match["status"] == STATUS_COMPLETED:
                     continue
                 cur = c.execute(
@@ -11713,10 +14077,33 @@ class Store:
                         (match_id,),
                     )
                 elif match["status"] == STATUS_RUNNING:
-                    c.execute(
-                        f"UPDATE {table} SET status=?, reason='orphan_after_restart', "
+                    terminal_at = _now()
+                    changed = c.execute(
+                        f"UPDATE {table} SET status=?, reason=?, "
                         "ended_at=? WHERE id=? AND status=?",
-                        (STATUS_ABORTED, _now(), match_id, STATUS_RUNNING),
+                        (
+                            STATUS_ABORTED,
+                            interruption_reason,
+                            terminal_at,
+                            match_id,
+                            STATUS_RUNNING,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise RuntimeError(
+                            "contest recovery Match CAS failed"
+                        )
+                    terminal_match = c.execute(
+                        f"SELECT * FROM {table} WHERE id=?", (match_id,)
+                    ).fetchone()
+                    if terminal_match is None:
+                        raise RuntimeError(
+                            "contest recovery Match disappeared"
+                        )
+                    _finalize_terminal_replay_tx(
+                        c,
+                        match=terminal_match,
+                        updated_at=terminal_at,
                     )
             return recovered
 
@@ -12424,16 +14811,39 @@ class Store:
         current_stage_idx: int = 0,
         phase: str = "standalone",
         source_contest_id: int | None = None,
+        # Low-level fixture/repair callers preserve their historical ability to
+        # model foreign references.  Product paths always pass an explicit ACL
+        # decision from ContestManager.
+        source_contest_include_all_hidden: bool = True,
+        time_control_id: str | None = None,
         require_real_name: int = 0,
     ) -> dict:
+        title = validate_contest_title(title)
         validate_contest_times(
             registration_opens_at, registration_closes_at, starts_at
+        )
+        validate_canonical_naive_timestamp(
+            ends_at, "赛事结束时间", allow_none=True
         )
         current_stage_idx = exact_nonnegative_int(current_stage_idx)
         if current_stage_idx is None:
             raise ValueError("赛事当前阶段必须是非负整数")
         gid = _registered_game_id(game_id)
+        if not isinstance(source_contest_include_all_hidden, bool):
+            raise ValueError("关联赛事隐藏态权限无效")
         with self._tx() as c:
+            if source_contest_id is not None:
+                # Reserve the writer before validating the target so a
+                # concurrent deletion cannot create a dangling edge between
+                # this SELECT and the INSERT.
+                c.execute("BEGIN IMMEDIATE")
+                source_contest_id = _validate_contest_source_tx(
+                    c,
+                    source_contest_id,
+                    game_id=gid,
+                    source_owner_id=organizer_id,
+                    include_all_hidden=source_contest_include_all_hidden,
+                )
             contract = _active_game_contract_tx(c, gid)
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
@@ -12442,8 +14852,8 @@ class Store:
                 "rating_pool_id, "
                 "stages_json, "
                 "current_stage_idx, template_id, phase, "
-                "source_contest_id, require_real_name) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source_contest_id, time_control_id, require_real_name) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -12463,6 +14873,7 @@ class Store:
                     template_id,
                     phase,
                     source_contest_id,
+                    time_control_id,
                     require_real_name,
                 ),
             )
@@ -12538,6 +14949,14 @@ class Store:
         if removed_rule_fields:
             names = ", ".join(sorted(removed_rule_fields))
             raise ValueError(f"赛事规则字段已移除: {names}")
+        frozen_format_fields = {
+            "time_control_id",
+            "format_snapshot_json",
+        }.intersection(fields)
+        if frozen_format_fields:
+            raise ValueError(
+                "赛事时限与抽签快照只能通过零进度 CAS 或发布事务修改"
+            )
         allowed = {
             "title",
             "description",
@@ -12557,6 +14976,8 @@ class Store:
             "require_real_name",
         }
         clean = {k: v for k, v in fields.items() if k in allowed}
+        if "title" in clean:
+            clean["title"] = validate_contest_title(clean["title"])
         if "current_stage_idx" in clean:
             stage_idx = exact_nonnegative_int(clean["current_stage_idx"])
             if stage_idx is None:
@@ -12567,21 +14988,45 @@ class Store:
             if ready not in (0, 1):
                 raise ValueError("正式名次就绪标记必须是 0 或 1")
             clean["official_results_ready"] = ready
-        sets = [f"{k}=?" for k in clean]
-        vals = list(clean.values())
+        for key, label in (
+            ("ends_at", "赛事结束时间"),
+            ("rest_ends_at", "赛事休息结束时间"),
+        ):
+            if key in clean:
+                clean[key] = validate_canonical_naive_timestamp(
+                    clean[key], label, allow_none=True
+                )
         with self._tx() as c:
             # ``require_real_name`` controls whether private PII may be read.
             # Status transitions also re-check every referenced Bot before a
             # draft contest can become live.  Serialize either mutation before
             # the first SELECT so both guards share the writer linearization
             # point with concurrent entry insertion and owner deletion.
-            if "status" in clean or "require_real_name" in clean:
+            if (
+                "status" in clean
+                or "require_real_name" in clean
+                or "source_contest_id" in clean
+                or "game_id" in clean
+            ):
                 c.execute("BEGIN IMMEDIATE")
             current = c.execute(
                 "SELECT * FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
             if not current:
                 return None
+            candidate_source_id = clean.get(
+                "source_contest_id", current["source_contest_id"]
+            )
+            if candidate_source_id is not None and (
+                "source_contest_id" in clean or "game_id" in clean
+            ):
+                clean["source_contest_id"] = _validate_contest_source_tx(
+                    c,
+                    candidate_source_id,
+                    game_id=clean.get("game_id", current["game_id"]),
+                    contest_id=contest_id,
+                    source_owner_id=current["organizer_id"],
+                )
             if (
                 "require_real_name" in clean
                 and int(clean["require_real_name"] or 0)
@@ -12609,6 +15054,13 @@ class Store:
             if clean.get("status"):
                 cur_status = current["status"]
                 new_status = clean["status"]
+                if (
+                    new_status != cur_status
+                    and new_status in (CONTEST_REST, CONTEST_FINISHED)
+                ):
+                    raise ValueError(
+                        "rest/finished 只能通过赛事决策专用原子事务进入"
+                    )
                 # 终态不可变（finished/cancelled 是终态，不允许再改）
                 if cur_status in (CONTEST_FINISHED, CONTEST_CANCELLED) and new_status != cur_status:
                     raise ValueError(
@@ -12628,6 +15080,26 @@ class Store:
                     CONTEST_REST,
                 ):
                     _require_contest_without_owner_deleted_bot_tx(c, contest_id)
+                if (
+                    new_status in (CONTEST_REST, CONTEST_FINISHED)
+                    and new_status != cur_status
+                    and current["published_stage_pairing_count"] is not None
+                ):
+                    current_stage_idx = exact_nonnegative_int(
+                        current["current_stage_idx"]
+                    )
+                    if current_stage_idx is None or not (
+                        self._contest_stage_manifest_is_valid_tx(
+                            c,
+                            contest_id,
+                            current_stage_idx,
+                            include_terminal_orphans=True,
+                            require_manifest=True,
+                        )
+                    ):
+                        raise ValueError("赛事当前阶段对阵批次完整性校验失败")
+            sets = [f"{key}=?" for key in clean]
+            vals = list(clean.values())
             if sets:
                 vals.append(contest_id)
                 c.execute(
@@ -12646,6 +15118,9 @@ class Store:
         expected_status: str,
         expected_stages_json: str,
         stages_json: str,
+        expected_time_control_id: str | None = None,
+        time_control_id: str | None = None,
+        update_time_control: bool = False,
     ) -> dict:
         """Replace one draft/open stage snapshot behind a zero-progress CAS gate.
 
@@ -12670,8 +15145,28 @@ class Store:
             if (
                 str(current["status"]) != expected_status
                 or str(current["stages_json"] or "[]") != expected_stages_json
+                or (
+                    update_time_control
+                    and current["time_control_id"] != expected_time_control_id
+                )
             ):
-                raise ValueError("赛事系列设置已被并发修改，请刷新后重试")
+                raise ValueError("赛事设置已被并发修改，请刷新后重试")
+            if update_time_control:
+                if not isinstance(time_control_id, str) or not time_control_id:
+                    raise ValueError("时限快照必须是稳定 ID")
+                resolved_target = _resolved_time_control_id(
+                    str(current["game_id"]), time_control_id
+                )
+                if resolved_target != time_control_id:
+                    raise ValueError("时限快照必须是稳定 ID")
+                if current["time_control_id"] is None:
+                    legacy_default = _resolved_time_control_id(
+                        str(current["game_id"]), None
+                    )
+                    if time_control_id != legacy_default:
+                        raise ValueError(
+                            "历史赛事时限只能补齐为该游戏的旧默认值"
+                        )
             if (
                 exact_nonnegative_int(current["current_stage_idx"]) != 0
                 or exact_nonnegative_int(current["official_results_ready"]) != 0
@@ -12713,17 +15208,595 @@ class Store:
                 raise ValueError(
                     "赛事已生成赛程、执行任务、对局或结果，不能修改系列设置"
                 )
-            changed = c.execute(
-                "UPDATE contests SET stages_json=? "
-                "WHERE id=? AND status=? AND stages_json=?",
-                (stages_json, contest_id, expected_status, expected_stages_json),
-            )
+            if update_time_control:
+                changed = c.execute(
+                    "UPDATE contests SET stages_json=?,time_control_id=? "
+                    "WHERE id=? AND status=? AND stages_json=? "
+                    "AND time_control_id IS ?",
+                    (
+                        stages_json,
+                        time_control_id,
+                        contest_id,
+                        expected_status,
+                        expected_stages_json,
+                        expected_time_control_id,
+                    ),
+                )
+            else:
+                changed = c.execute(
+                    "UPDATE contests SET stages_json=? "
+                    "WHERE id=? AND status=? AND stages_json=?",
+                    (stages_json, contest_id, expected_status, expected_stages_json),
+                )
             if changed.rowcount != 1:
-                raise ValueError("赛事系列设置已被并发修改，请刷新后重试")
+                raise ValueError("赛事设置已被并发修改，请刷新后重试")
             return _contest_row(
                 c.execute(
                     "SELECT * FROM contests WHERE id=?", (contest_id,)
                 ).fetchone()
+            )
+
+    def freeze_initial_group_contest(
+        self,
+        contest_id: int,
+        *,
+        expected_status: str,
+        expected_stages_json: str,
+        expected_time_control_id: str | None,
+        stages_json: str,
+        format_snapshot_json: str,
+        entry_rows: list[dict[str, Any]],
+        pairing_rows: list[dict[str, Any]],
+        registration_opens_at: str,
+        registration_closes_at: str,
+        starts_at: str | None,
+    ) -> dict:
+        """Atomically freeze draw, roster, versions and the first DRR schedule."""
+        if not entry_rows or not pairing_rows:
+            raise ValueError("分组发布快照与首阶段赛程不能为空")
+        validate_contest_times(
+            registration_opens_at, registration_closes_at, starts_at
+        )
+        _validate_pairing_publication_times(
+            pairing_rows, require_published_at=True
+        )
+        if expected_time_control_id is not None and (
+            not isinstance(expected_time_control_id, str)
+            or not expected_time_control_id
+        ):
+            raise ValueError("分组发布的预期时限 ID 无效")
+        try:
+            snapshot = json.loads(format_snapshot_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("分组抽签快照不是有效 JSON") from exc
+        if not isinstance(snapshot, dict):
+            raise ValueError("分组抽签快照必须是对象")
+        allowed_snapshot_keys = {
+            "version", "algorithm", "group_count", "group_sizes", "draw_order",
+            "groups", "source", "expected_match_count", "audit_nonce",
+            "audit_digest",
+        }
+        if set(snapshot) - allowed_snapshot_keys:
+            raise ValueError("分组抽签快照包含未知字段")
+        audit = snapshot.get("audit_digest")
+        audit_nonce = snapshot.get("audit_nonce")
+        unsigned_snapshot = {
+            key: value for key, value in snapshot.items() if key != "audit_digest"
+        }
+        expected_audit = hashlib.sha256(
+            json.dumps(
+                unsigned_snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            isinstance(snapshot.get("version"), bool)
+            or snapshot.get("version") != 1
+            or snapshot.get("algorithm") not in {
+                "secure_random_balanced_v1",
+                "protected_seed_random_balanced_v1",
+            }
+            or not isinstance(audit, str)
+            or audit != expected_audit
+            or not isinstance(audit_nonce, str)
+            or len(audit_nonce) != 64
+            or any(char not in "0123456789abcdef" for char in audit_nonce)
+        ):
+            raise ValueError("分组抽签快照版本或审计值无效")
+        normalized_series = _pairing_series_batch(pairing_rows)
+        columns = (
+            "contest_id", "round_num", "entry_a_id", "entry_b_id",
+            "bot_a_id", "bot_b_id", "bot_a_version_id", "bot_b_version_id",
+            "pairing_seed", "published_at", "scheduled_at", "match_id", "status",
+            "stage_idx", "stage_key", "group_id", "bracket_slot", "color_first",
+            "series_index", "series_size", "tiebreak_group", "tiebreak_game",
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            if (
+                contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN)
+                or contest["status"] != expected_status
+                or str(contest["stages_json"] or "[]") != expected_stages_json
+                or contest["time_control_id"] != expected_time_control_id
+                or exact_nonnegative_int(contest["current_stage_idx"]) != 0
+                or exact_sqlite_bool(contest["official_results_ready"]) is not False
+                or contest["format_snapshot_json"] != "{}"
+                or contest["template_id"] not in {
+                    "pencil_group_drr", "gomoku_seeded_group_drr_final",
+                }
+            ):
+                raise ValueError("赛事发布快照已变化，请刷新后重试")
+            if any(
+                c.execute(query, (contest_id,)).fetchone()
+                for query in (
+                    "SELECT 1 FROM contest_pairings WHERE contest_id=? LIMIT 1",
+                    "SELECT 1 FROM execution_jobs WHERE contest_id=? LIMIT 1",
+                    "SELECT 1 FROM contest_stage_results WHERE contest_id=? LIMIT 1",
+                    "SELECT 1 FROM contest_official_results WHERE contest_id=? LIMIT 1",
+                )
+            ):
+                raise ValueError("赛事已有持久进度，拒绝重新抽签")
+            if any(
+                c.execute(
+                    f"SELECT 1 FROM matches_{game_id} WHERE contest_id=? LIMIT 1",
+                    (contest_id,),
+                ).fetchone()
+                for game_id in sorted(_all_game_ids())
+            ):
+                raise ValueError("赛事已有持久对局，拒绝重新抽签")
+
+            stored_entries = c.execute(
+                "SELECT * FROM contest_entries WHERE contest_id=? ORDER BY registered_at,id",
+                (contest_id,),
+            ).fetchall()
+            expected_identity = {
+                (int(row["id"]), int(row["user_id"]), row["bot_id"])
+                for row in stored_entries
+            }
+            if any(
+                not isinstance(row, dict)
+                or any(
+                    isinstance(row.get(key), bool)
+                    or not isinstance(row.get(key), int)
+                    or row[key] < 1
+                    for key in ("id", "user_id", "bot_id")
+                )
+                for row in entry_rows
+            ):
+                raise ValueError("抽签名册身份字段无效")
+            supplied_identity = {
+                (row["id"], row["user_id"], row["bot_id"])
+                for row in entry_rows
+            }
+            if expected_identity != supplied_identity or len(stored_entries) != len(entry_rows):
+                raise ValueError("抽签期间报名名册已变化")
+
+            groups = snapshot.get("groups")
+            draw_order = snapshot.get("draw_order")
+            group_sizes = snapshot.get("group_sizes")
+            group_count = snapshot.get("group_count")
+            if (
+                isinstance(group_count, bool)
+                or not isinstance(group_count, int)
+                or group_count < 2
+                or not isinstance(groups, dict)
+                or len(groups) != group_count
+                or not isinstance(group_sizes, dict)
+                or set(group_sizes) != set(groups)
+                or any(
+                    isinstance(size, bool)
+                    or not isinstance(size, int)
+                    or size < 2
+                    for size in group_sizes.values()
+                )
+                or not isinstance(draw_order, list)
+                or len(draw_order) != len(entry_rows)
+            ):
+                raise ValueError("分组抽签快照拓扑无效")
+            try:
+                frozen_stages = json.loads(stages_json)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("分组阶段快照损坏") from exc
+            stage_zero = (
+                frozen_stages[0]
+                if isinstance(frozen_stages, list)
+                and frozen_stages
+                and isinstance(frozen_stages[0], dict)
+                else None
+            )
+            if (
+                not stage_zero
+                or stage_zero.get("type") != "group_double_round_robin"
+                or stage_zero.get("group_count") != group_count
+            ):
+                raise ValueError("分组阶段与抽签快照拓扑不一致")
+            expected_algorithm = (
+                "protected_seed_random_balanced_v1"
+                if contest["template_id"] == "gomoku_seeded_group_drr_final"
+                else "secure_random_balanced_v1"
+            )
+            if snapshot["algorithm"] != expected_algorithm:
+                raise ValueError("分组模板与抽签算法不一致")
+            all_entry_ids = {int(row["id"]) for row in stored_entries}
+            if (
+                any(isinstance(value, bool) or not isinstance(value, int) for value in draw_order)
+                or len(set(draw_order)) != len(draw_order)
+                or set(draw_order) != all_entry_ids
+            ):
+                raise ValueError("分组抽签顺序不完整")
+            entry_group: dict[int, str] = {}
+            for group_id, members in groups.items():
+                try:
+                    group_id = _parse_stable_group_id(group_id)
+                except ValueError as exc:
+                    raise ValueError("分组快照成员或人数无效") from exc
+                if (
+                    not isinstance(members, list)
+                    or len(members) < 2
+                    or group_sizes.get(group_id) != len(members)
+                ):
+                    raise ValueError("分组快照成员或人数无效")
+                for entry_id in members:
+                    if (
+                        isinstance(entry_id, bool)
+                        or not isinstance(entry_id, int)
+                        or entry_id not in all_entry_ids
+                        or entry_id in entry_group
+                    ):
+                        raise ValueError("分组快照存在重复或未知参赛者")
+                    entry_group[entry_id] = group_id
+            if set(entry_group) != all_entry_ids or max(group_sizes.values()) - min(group_sizes.values()) > 1:
+                raise ValueError("分组快照不完整或不均衡")
+
+            entry_by_id = {int(row["id"]): row for row in stored_entries}
+            supplied_by_id = {int(row["id"]): row for row in entry_rows}
+            # Read the complete roster and every current immutable version in
+            # two set-based queries.  Pairing count is quadratic for DRR, but
+            # Bot identity/version/artifact validation must remain linear in
+            # the number of entrants and share this transaction's write lock.
+            bot_rows = {
+                int(row["id"]): dict(row)
+                for row in c.execute(
+                    "SELECT DISTINCT b.* FROM contest_entries e "
+                    "JOIN bots b ON b.id=e.bot_id WHERE e.contest_id=?",
+                    (contest_id,),
+                ).fetchall()
+            }
+            current_version_rows = {
+                int(row["bot_id"]): dict(row)
+                for row in c.execute(
+                    "SELECT DISTINCT v.* FROM contest_entries e "
+                    "JOIN bots b ON b.id=e.bot_id "
+                    "JOIN bot_versions v ON v.bot_id=b.id "
+                    "AND v.version=b.current_version "
+                    "WHERE e.contest_id=?",
+                    (contest_id,),
+                ).fetchall()
+            }
+            version_by_bot: dict[int, int | None] = {}
+            integrity_cache: set[Any] = set()
+            for seed, entry_id in enumerate(draw_order, start=1):
+                supplied = supplied_by_id[entry_id]
+                supplied_seed = supplied.get("seed")
+                if (
+                    supplied.get("group_id") != entry_group[entry_id]
+                    or isinstance(supplied_seed, bool)
+                    or not isinstance(supplied_seed, int)
+                    or supplied_seed != seed
+                ):
+                    raise ValueError("分组快照与报名冻结字段不一致")
+                bot_id = int(entry_by_id[entry_id]["bot_id"])
+                bot = bot_rows.get(bot_id)
+                if (
+                    not bot
+                    or int(bot["owner_id"]) != int(entry_by_id[entry_id]["user_id"])
+                    or int(bot["is_active"]) != 1
+                    or bot["game_id"] != contest["game_id"]
+                ):
+                    raise ValueError("发布时 Bot 身份或可用性已变化")
+                current_version = exact_nonnegative_int(bot.get("current_version"))
+                version = current_version_rows.get(bot_id)
+                if current_version is None or (
+                    current_version == 0 and version is not None
+                ) or (
+                    current_version > 0
+                    and (
+                        version is None
+                        or int(version.get("version") or 0) != current_version
+                    )
+                ):
+                    raise ValueError("Bot 当前版本在发布期间已变化")
+                runtime = version or bot
+                try:
+                    require_supported_binary_metadata(
+                        str(runtime.get("format") or ""),
+                        str(runtime.get("os") or ""),
+                        str(runtime.get("arch") or ""),
+                    )
+                    path = str(runtime.get("binary_path") or "").strip()
+                    if not path:
+                        raise ValueError("version_unavailable")
+                    require_binary_file_integrity(
+                        runtime, path, cache=integrity_cache
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    raise ValueError("发布时 Bot 冻结版本文件不可用") from exc
+                version_by_bot[bot_id] = (
+                    int(version["id"]) if version is not None else None
+                )
+
+            encounter_rows: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
+            for source in pairing_rows:
+                if source.get("stage_idx", 0) not in (0, None):
+                    raise ValueError("首阶段抽签只能写入 stage_idx=0")
+                first = source.get("entry_a_id")
+                second = source.get("entry_b_id")
+                group_id = source.get("group_id")
+                if (
+                    isinstance(first, bool)
+                    or not isinstance(first, int)
+                    or isinstance(second, bool)
+                    or not isinstance(second, int)
+                    or first == second
+                    or entry_group.get(first) != group_id
+                    or entry_group.get(second) != group_id
+                    or source.get("bot_a_id") != entry_by_id[first]["bot_id"]
+                    or source.get("bot_b_id") != entry_by_id[second]["bot_id"]
+                ):
+                    raise ValueError("首阶段对阵与冻结分组不一致")
+                pair = tuple(sorted((first, second)))
+                encounter_rows.setdefault((str(group_id), *pair), []).append((first, second))
+                for bot_key, version_key in (
+                    ("bot_a_id", "bot_a_version_id"),
+                    ("bot_b_id", "bot_b_version_id"),
+                ):
+                    bot_id = source.get(bot_key)
+                    if (
+                        isinstance(bot_id, bool)
+                        or not isinstance(bot_id, int)
+                        or bot_id not in version_by_bot
+                        or source.get(version_key) != version_by_bot[bot_id]
+                    ):
+                        raise ValueError("Bot 当前版本在发布期间已变化")
+            expected_pairs = sum(size * (size - 1) // 2 for size in group_sizes.values())
+            if len(encounter_rows) != expected_pairs or len(pairing_rows) != expected_pairs * 2:
+                raise ValueError("首阶段分组双循环赛程不完整")
+            for orientations in encounter_rows.values():
+                if len(orientations) != 2 or orientations[0] != tuple(reversed(orientations[1])):
+                    raise ValueError("首阶段每对选手必须换边各赛一局")
+
+            source_snapshot = snapshot.get("source")
+            if contest["template_id"] == "gomoku_seeded_group_drr_final":
+                if len(entry_rows) not in {22, 23, 24, 25, 26}:
+                    raise ValueError("保护种子赛事仅允许 22–26 人")
+                if not isinstance(source_snapshot, dict) or set(source_snapshot) != {"contest_id", "protected"}:
+                    raise ValueError("保护种子来源快照无效")
+                if source_snapshot.get("contest_id") != contest["source_contest_id"]:
+                    raise ValueError("保护种子来源已变化")
+                source_contest_id = exact_nonnegative_int(
+                    contest["source_contest_id"]
+                )
+                try:
+                    if source_contest_id is None or source_contest_id < 1:
+                        raise ValueError("保护种子来源身份无效")
+                    (
+                        source,
+                        source_entry_rows,
+                        source_stage_entry_ids,
+                        source_legacy_entry_groups,
+                    ) = (
+                        _official_result_validation_context_tx(
+                            c, source_contest_id
+                        )
+                    )
+                    if (
+                        source["game_id"] != contest["game_id"]
+                        or source["status"] != CONTEST_FINISHED
+                        or exact_sqlite_bool(
+                            source["official_results_ready"]
+                        )
+                        is not True
+                    ):
+                        raise ValueError("保护种子来源状态无效")
+                    persisted_official = c.execute(
+                        "SELECT * FROM contest_official_results "
+                        "WHERE contest_id=? ORDER BY rank",
+                        (source_contest_id,),
+                    ).fetchall()
+                    official = _validate_complete_official_results(
+                        persisted_official,
+                        contest_id=source_contest_id,
+                        contest=source,
+                        roster_rows=source_entry_rows,
+                        stage_entry_ids=source_stage_entry_ids,
+                        legacy_entry_groups=source_legacy_entry_groups,
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "保护种子来源正式榜已变化或损坏"
+                    ) from exc
+                protected_rows = source_snapshot.get("protected")
+                if not isinstance(protected_rows, list) or any(
+                    not isinstance(row, dict)
+                    or set(row) != {"entry_id", "user_id", "source_entry_id", "source_rank"}
+                    or any(
+                        isinstance(row.get(key), bool)
+                        or not isinstance(row.get(key), int)
+                        or row[key] < 1
+                        for key in (
+                            "entry_id",
+                            "user_id",
+                            "source_entry_id",
+                            "source_rank",
+                        )
+                    )
+                    or row["entry_id"] not in all_entry_ids
+                    for row in protected_rows
+                ):
+                    raise ValueError("保护种子来源冻结不一致")
+                expected_protected_count = 4 if len(entry_rows) <= 24 else 5
+                # The manager prepares a candidate draw outside SQLite, but the
+                # source official table may be replaced by another process before
+                # this transaction acquires its write lock.  Recompute the exact
+                # first N *currently registered* source finishers here rather than
+                # merely checking that the stale selected tuples still exist.
+                # This closes the gap where an absent source entrant and a lower
+                # registered entrant exchange ranks while all stale protected
+                # tuples remain individually valid.
+                target_entry_by_user = {
+                    int(row["user_id"]): int(row["id"])
+                    for row in stored_entries
+                }
+                expected_protected: list[dict[str, int]] = []
+                for source_row in official:
+                    target_entry_id = target_entry_by_user.get(
+                        int(source_row["user_id"])
+                    )
+                    if target_entry_id is None:
+                        continue
+                    expected_protected.append(
+                        {
+                            "entry_id": target_entry_id,
+                            "user_id": int(source_row["user_id"]),
+                            "source_entry_id": int(source_row["entry_id"]),
+                            "source_rank": int(source_row["rank"]),
+                        }
+                    )
+                    if len(expected_protected) == expected_protected_count:
+                        break
+                if (
+                    len(expected_protected) != expected_protected_count
+                    or protected_rows != expected_protected
+                ):
+                    raise ValueError("保护种子来源冻结不一致")
+                protected_groups = {
+                    entry_group[row["entry_id"]]
+                    for row in protected_rows
+                    if isinstance(row, dict)
+                    and isinstance(row.get("entry_id"), int)
+                    and not isinstance(row.get("entry_id"), bool)
+                    and row["entry_id"] in entry_group
+                }
+                if (
+                    len(protected_rows) != expected_protected_count
+                    or group_count != expected_protected_count
+                    or len(protected_groups) != expected_protected_count
+                    or [row["source_rank"] for row in protected_rows]
+                    != sorted(row["source_rank"] for row in protected_rows)
+                    or any(
+                        supplied_by_id[row["entry_id"]].get("user_id")
+                        != row["user_id"]
+                        for row in protected_rows
+                    )
+                ):
+                    raise ValueError("保护种子数量、顺延顺序或分组不一致")
+                expected_totals = {22: 156, 23: 166, 24: 176, 25: 190, 26: 200}
+                final_scope = (
+                    frozen_stages[1].get("ranking_scope")
+                    if isinstance(frozen_stages, list)
+                    and len(frozen_stages) == 2
+                    and isinstance(frozen_stages[1], dict)
+                    else None
+                )
+                frozen_total = snapshot.get("expected_match_count")
+                if (
+                    isinstance(final_scope, bool)
+                    or not isinstance(final_scope, int)
+                    or final_scope != expected_protected_count * 2
+                    or frozen_total != expected_totals[len(entry_rows)]
+                    or len(pairing_rows) + final_scope * (final_scope - 1)
+                    != frozen_total
+                ):
+                    raise ValueError("保护种子人数带或总赛程快照不一致")
+            elif source_snapshot is not None or "expected_match_count" in snapshot:
+                raise ValueError("普通随机分组快照不得携带保护种子数据")
+
+            entry_updates = [
+                (source["group_id"], source["seed"], entry_id, contest_id)
+                for entry_id, source in supplied_by_id.items()
+            ]
+            updated_entries = c.executemany(
+                "UPDATE contest_entries SET group_id=?,seed=?,eliminated=0 "
+                "WHERE id=? AND contest_id=?",
+                entry_updates,
+            )
+            if updated_entries.rowcount != len(entry_updates):
+                raise ValueError("抽签期间报名名册已变化")
+            changed = c.execute(
+                "UPDATE contests SET status=?,registration_opens_at=?,"
+                "registration_closes_at=?,starts_at=?,stages_json=?,"
+                "format_snapshot_json=?,published_stage_pairing_count=?,"
+                "current_stage_idx=0,rest_ends_at=NULL "
+                "WHERE id=? AND status=? AND stages_json=? "
+                "AND time_control_id IS ?",
+                (
+                    CONTEST_PUBLISHED,
+                    registration_opens_at,
+                    registration_closes_at,
+                    starts_at,
+                    stages_json,
+                    format_snapshot_json,
+                    len(pairing_rows),
+                    contest_id,
+                    expected_status,
+                    expected_stages_json,
+                    expected_time_control_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事发布快照已变化，请刷新后重试")
+            placeholders = ",".join("?" for _ in columns)
+            pairing_values: list[tuple[Any, ...]] = []
+            for source, (series_index, series_size) in zip(pairing_rows, normalized_series):
+                row = {
+                    "contest_id": contest_id,
+                    "round_num": source.get("round_num", 1),
+                    "entry_a_id": source.get("entry_a_id"),
+                    "entry_b_id": source.get("entry_b_id"),
+                    "bot_a_id": source.get("bot_a_id"),
+                    "bot_b_id": source.get("bot_b_id"),
+                    "bot_a_version_id": source.get("bot_a_version_id"),
+                    "bot_b_version_id": source.get("bot_b_version_id"),
+                    "pairing_seed": source.get("pairing_seed"),
+                    "published_at": source.get("published_at"),
+                    "scheduled_at": source.get("scheduled_at"),
+                    "match_id": None,
+                    "status": source.get("status") or STATUS_PENDING,
+                    "stage_idx": 0,
+                    "stage_key": source.get("stage_key") or "",
+                    "group_id": source.get("group_id") or "",
+                    "bracket_slot": source.get("bracket_slot"),
+                    "color_first": 0,
+                    "series_index": series_index,
+                    "series_size": series_size,
+                    "tiebreak_group": source.get("tiebreak_group", 0),
+                    "tiebreak_game": source.get("tiebreak_game", 0),
+                }
+                pairing_values.append(tuple(row[column] for column in columns))
+            inserted_pairings = c.executemany(
+                f"INSERT INTO contest_pairings({','.join(columns)}) VALUES({placeholders})",
+                pairing_values,
+            )
+            if inserted_pairings.rowcount != len(pairing_values):
+                raise RuntimeError("首阶段对阵批次未完整写入")
+            sealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=0 AND published_stage_pairing_count=?",
+                (contest_id, CONTEST_PUBLISHED, len(pairing_values)),
+            )
+            if sealed.rowcount != 1:
+                raise ValueError("首阶段对阵拓扑冻结 CAS 已失效")
+            return _contest_row(
+                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
             )
 
     def update_published_contest_schedule(
@@ -12742,25 +15815,57 @@ class Store:
         admin 改 ``starts_at`` 不会留下“赛事新时间 + 对阵旧时间”的半状态，
         也不会覆盖另一个进程刚刚派发的真实对局。
         """
-        allowed = {"title", "starts_at"}
+        allowed = {
+            "title",
+            "registration_opens_at",
+            "registration_closes_at",
+            "starts_at",
+            "rest_ends_at",
+        }
         unknown = set(fields).difference(allowed)
         if unknown:
             raise ValueError(
                 f"published 赛事不能修改字段: {', '.join(sorted(unknown))}"
             )
+        fields = dict(fields)
+        if "title" in fields:
+            fields["title"] = validate_contest_title(fields["title"])
+        for key in (
+            "registration_opens_at",
+            "registration_closes_at",
+            "starts_at",
+            "rest_ends_at",
+        ):
+            if key in fields:
+                validate_canonical_naive_timestamp(
+                    fields[key], f"赛事 {key}", allow_none=True
+                )
         stage_idx = exact_nonnegative_int(stage_idx)
         if stage_idx is None:
             raise ValueError("赛事阶段坐标必须是非负整数")
-        plans = sorted(
-            (
-                int(row["id"]),
-                int(row.get("round_num") or 1),
-                row.get("scheduled_at"),
+        if not isinstance(pending_pairing_schedules, list):
+            raise ValueError("published 对阵重排计划必须是数组")
+        plans: list[tuple[int, int, Any]] = []
+        for row in pending_pairing_schedules:
+            if not isinstance(row, dict):
+                raise ValueError("published 对阵重排计划行类型无效")
+            pairing_id = exact_nonnegative_int(row.get("id"))
+            round_num = exact_nonnegative_int(row.get("round_num"))
+            if (
+                pairing_id is None
+                or pairing_id < 1
+                or round_num is None
+                or round_num < 1
+            ):
+                raise ValueError("published 对阵重排计划坐标无效")
+            plans.append((pairing_id, round_num, row.get("scheduled_at")))
+        for _pairing_id, _round_num, scheduled_at in plans:
+            validate_canonical_naive_timestamp(
+                scheduled_at, "赛事对阵计划时间", allow_none=True
             )
-            for row in pending_pairing_schedules
-        )
         if len({pairing_id for pairing_id, _round, _schedule in plans}) != len(plans):
             raise ValueError("published 对阵重排计划包含重复 ID")
+        plans.sort(key=lambda plan: (plan[0], plan[1]))
 
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -12773,6 +15878,14 @@ class Store:
                 raise ValueError("仅排期已发布赛事可以重排待开赛对局")
             if exact_nonnegative_int(current["current_stage_idx"]) != stage_idx:
                 raise ValueError("赛事当前阶段已变化，拒绝重排")
+            if not self._contest_stage_manifest_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                include_terminal_orphans=True,
+                require_manifest=True,
+            ):
+                raise ValueError("published 对阵 manifest 或 lifecycle seal 已变化")
             if c.execute(
                 "SELECT 1 FROM contest_pairings "
                 "WHERE contest_id=? AND match_id IS NOT NULL LIMIT 1",
@@ -12780,15 +15893,43 @@ class Store:
             ).fetchone():
                 raise ValueError("赛事已有对局被派发，不能修改比赛开始时间")
 
-            pending = c.execute(
-                "SELECT id, round_num FROM contest_pairings "
-                "WHERE contest_id=? AND stage_idx=? AND status=? "
-                "AND match_id IS NULL ORDER BY id",
-                (contest_id, stage_idx, STATUS_PENDING),
+            batch = c.execute(
+                "SELECT id,round_num,status,match_id,entry_b_id,bot_b_id "
+                "FROM contest_pairings WHERE contest_id=? AND stage_idx=? "
+                "ORDER BY id",
+                (contest_id, stage_idx),
             ).fetchall()
-            current_shape = sorted(
-                (int(row["id"]), int(row["round_num"] or 1)) for row in pending
+            manifest_count = exact_nonnegative_int(
+                current["published_stage_pairing_count"]
             )
+            if manifest_count is None or len(batch) != manifest_count:
+                raise ValueError("published 当前阶段不是完整对阵批次")
+            current_shape: list[tuple[int, int]] = []
+            for row in batch:
+                pairing_id = exact_nonnegative_int(row["id"])
+                round_num = exact_nonnegative_int(row["round_num"])
+                if (
+                    pairing_id is None
+                    or pairing_id < 1
+                    or round_num is None
+                    or round_num < 1
+                ):
+                    raise ValueError("published 当前阶段对阵坐标损坏")
+                if row["status"] == STATUS_PENDING and row["match_id"] is None:
+                    current_shape.append((pairing_id, round_num))
+                    continue
+                if (
+                    row["status"] == STATUS_COMPLETED
+                    and row["match_id"] is None
+                    and row["entry_b_id"] is None
+                    and row["bot_b_id"] is None
+                ):
+                    # Swiss/KO odd rosters persist deterministic no-match byes
+                    # inside the same manifest.  They are immutable completion
+                    # artifacts, not schedules to rewrite.
+                    continue
+                raise ValueError("published 当前阶段含非 pending 或非轮空对阵")
+            current_shape.sort()
             expected_shape = [
                 (pairing_id, round_num)
                 for pairing_id, round_num, _schedule in plans
@@ -12797,8 +15938,12 @@ class Store:
                 raise ValueError("published 对阵在重排期间已变化，拒绝覆盖")
 
             validate_contest_times(
-                current["registration_opens_at"],
-                current["registration_closes_at"],
+                fields.get(
+                    "registration_opens_at", current["registration_opens_at"]
+                ),
+                fields.get(
+                    "registration_closes_at", current["registration_closes_at"]
+                ),
                 fields.get("starts_at", current["starts_at"]),
             )
             if fields:
@@ -12875,7 +16020,18 @@ class Store:
                     params.append(hidden_owner_id)
             sql += " ORDER BY created_at DESC"
             if page is not None:
-                pp = max(1, min(200, int(per_page)))
+                if (
+                    isinstance(page, bool)
+                    or not isinstance(page, int)
+                    or page < 1
+                    or isinstance(per_page, bool)
+                    or not isinstance(per_page, int)
+                    or not 1 <= per_page <= 200
+                ):
+                    raise ValueError("赛事分页参数无效")
+                pp = per_page
+                if page - 1 > ((2**63 - 1) // pp):
+                    raise ValueError("赛事分页偏移超出数据库边界")
                 rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
                 rows = [
                     row
@@ -12888,6 +16044,235 @@ class Store:
                 for raw in c.execute(sql, params)
                 if (row := _contest_row(raw)) is not None
             ]
+
+    def list_contest_source_candidates(
+        self,
+        *,
+        game_id: str,
+        query: str | None = None,
+        limit: int = 50,
+        source_kind: str = "protected_seed",
+        hidden_owner_id: int | None = None,
+        include_all_hidden: bool = False,
+    ) -> dict[str, Any]:
+        """Return one bounded source search without COUNT/OFFSET.
+
+        Protected-seed sources require completed official results.  Navigation
+        sources only require an existing same-game contest, while preserving
+        the normal hidden-contest visibility boundary for organizers.
+        """
+        if (
+            not isinstance(game_id, str)
+            or not game_id
+            or game_id != game_id.strip()
+            or game_id not in _all_game_ids()
+        ):
+            raise ValueError("来源赛事游戏无效")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 50
+        ):
+            raise ValueError("来源赛事候选数量无效")
+        if source_kind not in {"protected_seed", "navigation"}:
+            raise ValueError("来源赛事候选类型无效")
+        if not isinstance(include_all_hidden, bool):
+            raise ValueError("来源赛事隐藏态权限无效")
+        owner_id: int | None = None
+        if source_kind == "navigation" and not include_all_hidden:
+            owner_id = exact_nonnegative_int(hidden_owner_id)
+            if owner_id is None or owner_id < 1:
+                raise ValueError("来源赛事隐藏态所有者无效")
+        if query is not None and not isinstance(query, str):
+            raise ValueError("来源赛事搜索词类型无效")
+        normalized_query = query.strip() if isinstance(query, str) else ""
+        if len(query or "") > 100 or any(
+            ord(char) < 32 or ord(char) == 127 for char in (query or "")
+        ):
+            raise ValueError("来源赛事搜索词无效")
+
+        eligibility: str
+        default_index: str
+        search_index: str
+        search_hint: str
+        if source_kind == "protected_seed":
+            eligibility = (
+                "showcase_key IS NULL AND status='finished' "
+                "AND typeof(official_results_ready)='integer' "
+                "AND official_results_ready=1"
+            )
+            default_index = "idx_contests_source_default_protected"
+            search_index = "idx_contests_source_protected"
+            search_hint = "grams.is_protected=1"
+        elif include_all_hidden:
+            eligibility = "showcase_key IS NULL"
+            default_index = "idx_contests_source_default_navigation_all"
+            search_index = "idx_contests_source_navigation_all"
+            search_hint = "grams.is_nonshowcase=1"
+        else:
+            # Organizer navigation is expressed as two disjoint indexed ranges
+            # below.  Parameterizing the hidden enum literals would prevent
+            # SQLite from proving the partial-index predicate.
+            eligibility = ""
+            default_index = ""
+            search_index = ""
+            search_hint = ""
+
+        exact_id: int | None = None
+        escaped_query: str | None = None
+        anchor: str | None = None
+        anchor_len: int | None = None
+        if normalized_query:
+            if normalized_query.isascii() and normalized_query.isdecimal():
+                exact_id = int(normalized_query)
+                if exact_id < 1 or exact_id > 2**63 - 1:
+                    return {"items": [], "has_more": False}
+            else:
+                escaped_query = (
+                    normalized_query.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                anchor_len = min(3, len(normalized_query))
+                # A long query commonly starts with a generic tournament word.
+                # Anchor on its trailing trigram so an absent specific suffix
+                # can prove an empty result without walking the common prefix.
+                anchor = normalized_query[-anchor_len:]
+
+        def branch_sql(
+            *,
+            branch_eligibility: str,
+            branch_default_index: str,
+            branch_search_index: str,
+            branch_search_hint: str,
+            branch_params: list[Any],
+            branch_search_params: list[Any],
+            branch_limit: bool,
+        ) -> tuple[str, list[Any]]:
+            params = list(branch_params)
+            if exact_id is not None:
+                sql = (
+                    "SELECT id,title,created_at FROM contests WHERE id=? AND "
+                    + branch_eligibility
+                )
+                return sql, [exact_id, *params]
+            if anchor is not None and anchor_len is not None:
+                sql = (
+                    "SELECT c.id,c.title,grams.created_at "
+                    "FROM contest_source_search_grams grams INDEXED BY "
+                    + branch_search_index
+                    + " CROSS JOIN contests c WHERE "
+                    + branch_search_hint
+                    + " AND grams.gram_len=? AND grams.gram=? "
+                    "AND grams.game_id=? AND c.id=grams.contest_id "
+                    "AND c.created_at=grams.created_at AND "
+                    + branch_eligibility.replace(
+                        "showcase_key", "c.showcase_key"
+                    ).replace("status", "c.status").replace(
+                        "official_results_ready", "c.official_results_ready"
+                    ).replace("organizer_id", "c.organizer_id").replace(
+                        "game_id", "c.game_id"
+                    )
+                    + " AND c.title LIKE ? ESCAPE '\\'"
+                )
+                params = [
+                    *branch_search_params,
+                    anchor_len,
+                    anchor,
+                    game_id,
+                    *params,
+                    f"%{escaped_query}%",
+                ]
+            else:
+                sql = (
+                    "SELECT id,title,created_at FROM contests INDEXED BY "
+                    + branch_default_index
+                    + " "
+                    "WHERE " + branch_eligibility
+                )
+            sql += (
+                " ORDER BY grams.created_at DESC,grams.contest_id DESC"
+                if anchor is not None
+                else " ORDER BY created_at DESC,id DESC"
+            )
+            if branch_limit:
+                sql += " LIMIT ?"
+                params.append(limit + 1)
+            return sql, params
+
+        if source_kind == "navigation" and not include_all_hidden:
+            public_sql, public_params = branch_sql(
+                branch_eligibility=(
+                    "game_id=? AND showcase_key IS NULL "
+                    "AND status NOT IN ('draft','cancelled')"
+                ),
+                branch_default_index=(
+                    "idx_contests_source_default_navigation_public"
+                ),
+                branch_search_index="idx_contests_source_navigation_public",
+                branch_search_hint="grams.is_nav_public=1",
+                branch_params=[game_id],
+                branch_search_params=[],
+                branch_limit=True,
+            )
+            owner_sql, owner_params = branch_sql(
+                branch_eligibility=(
+                    "organizer_id=? AND game_id=? AND showcase_key IS NULL "
+                    "AND status IN ('draft','cancelled')"
+                ),
+                branch_default_index=(
+                    "idx_contests_source_default_navigation_owner"
+                ),
+                branch_search_index="idx_contests_source_navigation_owner",
+                branch_search_hint="grams.is_nav_hidden=1 AND grams.organizer_id=?",
+                branch_params=[owner_id, game_id],
+                branch_search_params=[owner_id],
+                branch_limit=True,
+            )
+            with self._tx() as c:
+                # A deferred transaction pins the public and owner ranges to
+                # one read snapshot without blocking a concurrent WAL writer.
+                # Otherwise an open -> draft transition between these two
+                # SELECTs can return the same contest from both branches and
+                # manufacture a false ``has_more`` result at the page limit.
+                c.execute("BEGIN")
+                public_rows = [dict(row) for row in c.execute(public_sql, public_params)]
+                owner_rows = [dict(row) for row in c.execute(owner_sql, owner_params)]
+            raw_rows = sorted(
+                [*public_rows, *owner_rows],
+                key=lambda row: (str(row["created_at"]), int(row["id"])),
+                reverse=True,
+            )[: limit + 1]
+        else:
+            sql, params = branch_sql(
+                branch_eligibility="game_id=? AND " + eligibility,
+                branch_default_index=default_index,
+                branch_search_index=search_index,
+                branch_search_hint=search_hint,
+                branch_params=[game_id],
+                branch_search_params=[],
+                branch_limit=True,
+            )
+            with self._tx() as c:
+                raw_rows = c.execute(sql, params).fetchall()
+
+        has_more = len(raw_rows) > limit
+        items: list[dict[str, Any]] = []
+        for raw in raw_rows[:limit]:
+            row = dict(raw)
+            contest_id = exact_nonnegative_int(row.get("id"))
+            title = row.get("title")
+            if (
+                contest_id is None
+                or contest_id < 1
+                or not isinstance(title, str)
+                or not title
+                or title != title.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in title)
+            ):
+                raise ValueError("来源赛事候选数据损坏")
+            items.append({"id": contest_id, "title": title})
+        return {"items": items, "has_more": has_more}
 
     # ── contest_entries ───────────────────────────────────────
 
@@ -13095,6 +16480,17 @@ class Store:
         with self._tx() as c:
             if "bot_id" in fields:
                 c.execute("BEGIN IMMEDIATE")
+                contest = c.execute(
+                    "SELECT status FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+                if contest is not None and contest["status"] in (
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                ):
+                    raise ValueError(
+                        "已发布或进行中赛事换 Bot 必须走原子重封入口"
+                    )
                 _require_live_contest_bot_tx(c, int(fields["bot_id"]))
             if sets:
                 vals.extend([contest_id, user_id])
@@ -13109,6 +16505,308 @@ class Store:
                     (contest_id, user_id),
                 ).fetchone()
             )
+
+    def swap_contest_entry_bot_and_reseal(
+        self,
+        contest_id: int,
+        user_id: int,
+        bot_id: int,
+        *,
+        expected_status: str,
+        expected_current_stage_idx: int,
+        expected_old_bot_id: int | None,
+        expected_entries: list[dict[str, Any]],
+        expected_revision: int | None,
+        expected_game_id: str,
+        expected_bot_current_version: int,
+        expected_stage_groups: dict[int, str] | None = None,
+        dispatched_at: str,
+    ) -> dict:
+        """Atomically swap one roster Bot and preserve a trustworthy seal.
+
+        ``published`` updates every not-yet-bound current pairing together with
+        its frozen executable version.  ``rest`` deliberately leaves the
+        completed historical stage untouched; its immutable decision may still
+        name the old Bot and is validated before the roster mutation.
+        """
+        stage_idx = exact_nonnegative_int(expected_current_stage_idx)
+        normalized_bot_id = exact_nonnegative_int(bot_id)
+        normalized_user_id = exact_nonnegative_int(user_id)
+        normalized_old_bot_id = (
+            exact_nonnegative_int(expected_old_bot_id)
+            if expected_old_bot_id is not None
+            else None
+        )
+        normalized_revision = (
+            exact_nonnegative_int(expected_revision)
+            if expected_revision is not None
+            else None
+        )
+        normalized_bot_current_version = exact_nonnegative_int(
+            expected_bot_current_version
+        )
+        if (
+            stage_idx is None
+            or normalized_bot_id is None
+            or normalized_bot_id < 1
+            or normalized_user_id is None
+            or normalized_user_id < 1
+            or (
+                expected_old_bot_id is not None
+                and (
+                    normalized_old_bot_id is None
+                    or normalized_old_bot_id < 1
+                )
+            )
+            or expected_status
+            not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_REST)
+            or not isinstance(expected_game_id, str)
+            or not expected_game_id
+            or normalized_bot_current_version is None
+            or not isinstance(dispatched_at, str)
+            or not dispatched_at
+        ):
+            raise ValueError("赛事换 Bot CAS 坐标无效")
+        sealed_status = expected_status in (CONTEST_PUBLISHED, CONTEST_REST)
+        if sealed_status and normalized_revision is None:
+            raise ValueError("已发布赛事换 Bot 缺少 lifecycle revision")
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != expected_status
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != stage_idx
+                or contest["game_id"] != expected_game_id
+            ):
+                raise ValueError("赛事换 Bot 状态、阶段游标或游戏已变化")
+
+            _validate_expected_contest_entries_tx(
+                c, contest_id, expected_entries
+            )
+            entry = c.execute(
+                "SELECT * FROM contest_entries WHERE contest_id=? AND user_id=?",
+                (contest_id, normalized_user_id),
+            ).fetchone()
+            if (
+                entry is None
+                or entry["bot_id"] != normalized_old_bot_id
+            ):
+                raise ValueError("赛事换 Bot 名册身份已变化")
+            if c.execute(
+                "SELECT 1 FROM contest_entries WHERE contest_id=? "
+                "AND id<>? AND bot_id=? LIMIT 1",
+                (contest_id, int(entry["id"]), normalized_bot_id),
+            ).fetchone():
+                raise ValueError("同一赛事不能重复派遣同一个 Bot")
+
+            _require_active_contest_user_tx(c, normalized_user_id)
+            _require_current_runnable_contest_bot_tx(c, normalized_bot_id)
+            _require_contest_bot_binding_tx(
+                c,
+                contest_game_id=str(contest["game_id"]),
+                user_id=normalized_user_id,
+                bot_id=normalized_bot_id,
+            )
+
+            if sealed_status:
+                revision = exact_nonnegative_int(
+                    contest["pairing_topology_revision"]
+                )
+                sealed = exact_nonnegative_int(
+                    contest["sealed_pairing_topology_revision"]
+                )
+                if (
+                    revision is None
+                    or revision != normalized_revision
+                    or sealed != revision
+                    or not self._contest_stage_manifest_is_valid_tx(
+                        c,
+                        contest_id,
+                        stage_idx,
+                        include_terminal_orphans=True,
+                        require_manifest=True,
+                    )
+                ):
+                    raise ValueError("赛事换 Bot lifecycle seal 已变化")
+                if c.execute(
+                    "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx>? LIMIT 1",
+                    (contest_id, stage_idx),
+                ).fetchone():
+                    raise ValueError("赛事存在未来阶段对阵，拒绝换 Bot")
+                if expected_status == CONTEST_REST:
+                    stages = _loads_json(contest["stages_json"], default=None)
+                    if (
+                        not isinstance(stages, list)
+                        or any(not isinstance(item, dict) for item in stages)
+                        or stage_idx >= len(stages)
+                        or stages[stage_idx].get(
+                            "allow_bot_swap_in_rest", True
+                        )
+                        is not True
+                    ):
+                        raise ValueError("本阶段休息不允许换 Bot")
+                    self._strict_stage_decision_tx(
+                        c,
+                        contest_id,
+                        stage_idx,
+                        expected_entries=expected_entries,
+                        expected_stage_groups=expected_stage_groups,
+                        allow_snapshot_bots=True,
+                    )
+                if c.execute(
+                    "SELECT 1 FROM execution_jobs WHERE contest_id=? "
+                    "AND status IN (?,?,?,?) LIMIT 1",
+                    (
+                        contest_id,
+                        EXECUTION_QUEUED,
+                        EXECUTION_STARTING,
+                        EXECUTION_RUNNING,
+                        EXECUTION_SETTLING,
+                    ),
+                ).fetchone():
+                    raise ValueError("赛事仍有 active 执行请求，不能换 Bot")
+
+            bot = c.execute(
+                "SELECT owner_id,game_id,current_version FROM bots WHERE id=?",
+                (normalized_bot_id,),
+            ).fetchone()
+            assert bot is not None  # runnable guard above owns missing-row errors
+            current_version = exact_nonnegative_int(bot["current_version"])
+            if (
+                bot["owner_id"] != normalized_user_id
+                or bot["game_id"] != expected_game_id
+                or current_version is None
+                or current_version != normalized_bot_current_version
+            ):
+                raise ValueError("Bot owner、游戏或当前版本已变化")
+            version_id: int | None = None
+            if current_version:
+                version = c.execute(
+                    "SELECT id FROM bot_versions WHERE bot_id=? AND version=?",
+                    (normalized_bot_id, current_version),
+                ).fetchone()
+                if version is None:
+                    raise ValueError("Bot 当前可执行版本不存在")
+                version_id = int(version["id"])
+
+            if expected_status == CONTEST_PUBLISHED:
+                current_pairings = c.execute(
+                    "SELECT * FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx=? "
+                    "ORDER BY id",
+                    (contest_id, stage_idx),
+                ).fetchall()
+                stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
+                for pairing in current_pairings:
+                    if pairing["match_id"] is not None or (
+                        pairing["status"] != STATUS_PENDING
+                        and not (
+                            pairing["status"] == STATUS_COMPLETED
+                            and is_authoritative_no_opponent_pairing(
+                                stage_type, dict(pairing)
+                            )
+                        )
+                    ):
+                        raise ValueError("赛事当前轮已开始，不能更换 Bot")
+                affected = [
+                    pairing
+                    for pairing in current_pairings
+                    if entry["id"]
+                    in (pairing["entry_a_id"], pairing["entry_b_id"])
+                ]
+                for pairing in affected:
+                    side_bot = (
+                        pairing["bot_a_id"]
+                        if pairing["entry_a_id"] == entry["id"]
+                        else pairing["bot_b_id"]
+                    )
+                    if side_bot != normalized_old_bot_id:
+                        raise ValueError("赛事已发布对阵与冻结名册 Bot 不一致")
+                c.execute(
+                    "UPDATE contest_pairings SET bot_a_id=?,bot_a_version_id=? "
+                    "WHERE contest_id=? AND stage_idx=? AND entry_a_id=? "
+                    "AND match_id IS NULL",
+                    (
+                        normalized_bot_id,
+                        version_id,
+                        contest_id,
+                        stage_idx,
+                        int(entry["id"]),
+                    ),
+                )
+                c.execute(
+                    "UPDATE contest_pairings SET bot_b_id=?,bot_b_version_id=? "
+                    "WHERE contest_id=? AND stage_idx=? AND entry_b_id=? "
+                    "AND match_id IS NULL",
+                    (
+                        normalized_bot_id,
+                        version_id,
+                        contest_id,
+                        stage_idx,
+                        int(entry["id"]),
+                    ),
+                )
+
+            changed = c.execute(
+                "UPDATE contest_entries SET bot_id=?,dispatched_at=? "
+                "WHERE id=? AND contest_id=? AND user_id=? AND bot_id IS ?",
+                (
+                    normalized_bot_id,
+                    dispatched_at,
+                    int(entry["id"]),
+                    contest_id,
+                    normalized_user_id,
+                    normalized_old_bot_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事换 Bot 名册 CAS 已变化")
+
+            if sealed_status:
+                resealed = c.execute(
+                    "UPDATE contests SET sealed_pairing_topology_revision="
+                    "pairing_topology_revision WHERE id=? AND status=? "
+                    "AND current_stage_idx=? "
+                    "AND sealed_pairing_topology_revision=?",
+                    (
+                        contest_id,
+                        expected_status,
+                        stage_idx,
+                        normalized_revision,
+                    ),
+                )
+                if resealed.rowcount != 1:
+                    raise ValueError("赛事换 Bot 后 lifecycle 重封 CAS 失败")
+            updated = c.execute(
+                "SELECT * FROM contest_entries WHERE id=?", (int(entry["id"]),)
+            ).fetchone()
+            if updated is None:  # pragma: no cover - same transaction
+                raise RuntimeError("赛事换 Bot 后名册行消失")
+            return _row(updated)
+
+    def apply_contest_entry_advancement(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        entry_updates: list[dict[str, Any]],
+        *,
+        expected_status: str,
+        expected_current_stage_idx: int,
+    ) -> list[dict]:
+        """Reject advancement detached from its immutable stage decision.
+
+        Production advancement is part of ``create_contest_stage_pairings`` or
+        the terminal decision transaction.  Keeping a public standalone writer
+        would allow a caller to change the active cohort without atomically
+        moving the stage cursor and pairing batch.
+        """
+        raise ValueError("赛事晋级只能通过跨阶段专用原子事务推进")
 
     def list_entries(self, contest_id: int) -> list[dict]:
         with self._tx() as c:
@@ -13184,6 +16882,12 @@ class Store:
             raise ValueError("多场赛事对阵必须通过原子批次接口写入")
         if tiebreak_group:
             raise ValueError("淘汰决胜组必须通过专用原子追加接口写入")
+        validate_canonical_naive_timestamp(
+            published_at, "赛事对阵发布时间", allow_none=True
+        )
+        validate_canonical_naive_timestamp(
+            scheduled_at, "赛事对阵计划时间", allow_none=True
+        )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             _require_live_contest_pairing_bots_tx(
@@ -13306,7 +17010,9 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status,current_stage_idx,stages_json FROM contests WHERE id=?",
+                "SELECT status,current_stage_idx,stages_json,"
+                "published_stage_pairing_count,pairing_topology_revision,"
+                "sealed_pairing_topology_revision FROM contests WHERE id=?",
                 (int(contest_id),),
             ).fetchone()
             if not contest or contest["status"] not in (
@@ -13335,6 +17041,14 @@ class Store:
                 for field in frozen_fields
             ):
                 raise ValueError("赛事对阵身份、版本或坐标已变化")
+            if not self._contest_stage_manifest_is_valid_tx(
+                c,
+                int(contest_id),
+                stage_idx,
+                include_terminal_orphans=True,
+                require_manifest=True,
+            ):
+                raise ValueError("赛事 active 对阵批次完整性校验失败")
 
             try:
                 stages = json.loads(contest["stages_json"])
@@ -13476,13 +17190,43 @@ class Store:
             games_per_pair = exact_nonnegative_int(stage.get("games_per_pair"))
             if games_per_pair is None or games_per_pair < 1:
                 raise ValueError("历史多场阶段 games_per_pair 损坏")
+            raw_manifest = contest["published_stage_pairing_count"]
+            reseal = raw_manifest is not None
+            if not reseal and contest["status"] == CONTEST_PUBLISHED:
+                raise ValueError("published 对阵批次未冻结，拒绝补写 seed")
+            before_revision: int | None = None
+            before_sealed: int | None = None
+            manifest_count: int | None = None
+            if reseal:
+                if not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    int(contest_id),
+                    stage_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                ):
+                    raise ValueError("赛事 active 对阵批次完整性校验失败")
+                manifest_count = exact_nonnegative_int(raw_manifest)
+                before_revision = exact_nonnegative_int(
+                    contest["pairing_topology_revision"]
+                )
+                before_sealed = exact_nonnegative_int(
+                    contest["sealed_pairing_topology_revision"]
+                )
+                if (
+                    manifest_count is None
+                    or before_revision is None
+                    or before_sealed != before_revision
+                ):
+                    raise ValueError("赛事对阵拓扑冻结损坏")
             active = c.execute(
-                "SELECT 1 FROM execution_jobs WHERE contest_pairing_id=? "
+                "SELECT 1 FROM execution_jobs WHERE source='contest' "
+                "AND contest_id=? "
                 "AND status IN ('queued','starting','running','settling') LIMIT 1",
-                (pairing_id,),
+                (int(contest_id),),
             ).fetchone()
             if active:
-                raise ValueError("赛事对阵已有 active 执行请求，拒绝补写 seed")
+                raise ValueError("赛事已有 active 执行请求，拒绝补写 seed")
 
             allocated: int | None = None
             for _ in range(16):
@@ -13509,6 +17253,27 @@ class Store:
             )
             if changed.rowcount != 1:
                 raise ValueError("赛事对阵 seed CAS 已失效")
+            if reseal:
+                assert before_revision is not None
+                assert before_sealed is not None
+                assert manifest_count is not None
+                resealed = c.execute(
+                    "UPDATE contests SET sealed_pairing_topology_revision="
+                    "pairing_topology_revision WHERE id=? AND status=? "
+                    "AND current_stage_idx=? AND published_stage_pairing_count=? "
+                    "AND pairing_topology_revision=? "
+                    "AND sealed_pairing_topology_revision=?",
+                    (
+                        int(contest_id),
+                        contest["status"],
+                        stage_idx,
+                        manifest_count,
+                        before_revision + 1,
+                        before_sealed,
+                    ),
+                )
+                if resealed.rowcount != 1:
+                    raise ValueError("赛事对阵 seed 补写拓扑冻结 CAS 已失效")
             return _row(
                 c.execute(
                     "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
@@ -13522,7 +17287,11 @@ class Store:
         pairing_rows: list[dict[str, Any]],
         *,
         expected_current_stage_idx: int,
+        expected_status: str | None = None,
         activate_running: bool = False,
+        entry_updates: list[dict[str, Any]] | None = None,
+        source_decision_revision: int | None = None,
+        source_stage_groups: dict[int, str] | None = None,
     ) -> list[dict]:
         """Atomically persist one complete stage pairing batch and its state move.
 
@@ -13536,15 +17305,46 @@ class Store:
         stage while the contest still points at the previous stage.  That exact
         shape is safe to replace inside this transaction.  Rows with a bound match
         or any other progress are rejected rather than silently overwritten.
+
+        When ``entry_updates`` is supplied, it must describe the complete roster
+        CAS used to compute the next-stage pairings.  The entry mutations, every
+        pairing INSERT and the contest status/cursor transition then share this
+        same transaction; a crash can no longer leave a half-eliminated roster.
         """
         if not pairing_rows:
             raise ValueError("赛事阶段对阵批次不能为空")
+        _validate_pairing_publication_times(
+            pairing_rows, require_published_at=True
+        )
         stage_idx = exact_nonnegative_int(stage_idx)
         expected_current_stage_idx = exact_nonnegative_int(
             expected_current_stage_idx
         )
         if stage_idx is None or expected_current_stage_idx is None:
             raise ValueError("赛事阶段坐标必须是非负整数")
+        if expected_status is not None and (
+            not isinstance(expected_status, str) or not expected_status
+        ):
+            raise ValueError("赛事阶段状态 CAS 无效")
+        normalized_entry_updates = (
+            _contest_entry_advancement_batch(entry_updates)
+            if entry_updates is not None
+            else None
+        )
+        if normalized_entry_updates is not None and (
+            stage_idx != expected_current_stage_idx + 1 or not activate_running
+        ):
+            raise ValueError("晋级名册只能与紧邻下一阶段的运行切换同批提交")
+        normalized_source_revision = (
+            exact_nonnegative_int(source_decision_revision)
+            if source_decision_revision is not None
+            else None
+        )
+        if (
+            source_decision_revision is not None
+            and normalized_source_revision is None
+        ):
+            raise ValueError("来源阶段决策 revision 无效")
         columns = (
             "contest_id",
             "round_num",
@@ -13574,7 +17374,9 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status, current_stage_idx, stages_json "
+                "SELECT status,current_stage_idx,stages_json,"
+                "published_stage_pairing_count,pairing_topology_revision,"
+                "sealed_pairing_topology_revision "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -13582,12 +17384,116 @@ class Store:
                 raise ValueError("赛事不存在")
             if contest["status"] in (CONTEST_FINISHED, CONTEST_CANCELLED):
                 raise ValueError("终态赛事不能生成新阶段对阵")
+            if expected_status is not None and contest["status"] != expected_status:
+                raise ValueError("赛事状态已变化，拒绝生成新阶段对阵")
             current_idx = exact_nonnegative_int(contest["current_stage_idx"])
             if current_idx is None or current_idx != expected_current_stage_idx:
                 raise ValueError("赛事当前阶段已变化，拒绝重复生成对阵")
             if stage_idx not in (current_idx, current_idx + 1):
                 raise ValueError("赛事阶段只能生成当前阶段或紧邻的下一阶段")
+            if stage_idx == current_idx + 1:
+                if (
+                    normalized_entry_updates is None
+                    or normalized_source_revision is None
+                ):
+                    raise ValueError("跨阶段切换缺少完整名册或来源决策")
+                current_revision = exact_nonnegative_int(
+                    contest["pairing_topology_revision"]
+                )
+                sealed_revision = exact_nonnegative_int(
+                    contest["sealed_pairing_topology_revision"]
+                )
+                if (
+                    current_revision != normalized_source_revision
+                    or sealed_revision != normalized_source_revision
+                ):
+                    raise ValueError("跨阶段来源决策 revision 已变化")
+                source_entries = [
+                    {
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "bot_id": row["expected_bot_id"],
+                        "seed": row["expected_seed"],
+                        "group_id": row["expected_group_id"],
+                        "eliminated": row["expected_eliminated"],
+                    }
+                    for row in normalized_entry_updates
+                ]
+                self._strict_stage_decision_tx(
+                    c,
+                    contest_id,
+                    current_idx,
+                    expected_entries=source_entries,
+                    expected_stage_groups=source_stage_groups,
+                    allow_snapshot_bots=(contest["status"] == CONTEST_REST),
+                )
+            manifest_enabled = (
+                contest["published_stage_pairing_count"] is not None
+            )
+            install_initial_manifest = bool(
+                not manifest_enabled
+                and stage_idx == current_idx
+                and contest["status"] == CONTEST_PUBLISHED
+            )
+            if (
+                not manifest_enabled
+                and not install_initial_manifest
+            ):
+                raise ValueError("active 当前阶段缺少冻结对阵批次")
+            if (
+                manifest_enabled
+                and contest["status"] != CONTEST_PUBLISHED
+                and not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    contest_id,
+                    current_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                )
+            ):
+                raise ValueError("赛事当前阶段对阵批次完整性校验失败，拒绝推进")
             stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
+
+            if normalized_entry_updates is not None:
+                transition_entries = {
+                    row["id"]: row for row in normalized_entry_updates
+                }
+                active_entry_ids = {
+                    entry_id
+                    for entry_id, row in transition_entries.items()
+                    if row["eliminated"] == 0
+                }
+                paired_entry_ids: set[int] = set()
+                for source in pairing_rows:
+                    first = source.get("entry_a_id")
+                    second = source.get("entry_b_id")
+                    first_bot = source.get("bot_a_id")
+                    second_bot = source.get("bot_b_id")
+                    if (
+                        isinstance(first, bool)
+                        or not isinstance(first, int)
+                        or first not in active_entry_ids
+                        or first_bot
+                        != transition_entries[first]["expected_bot_id"]
+                    ):
+                        raise ValueError("下一阶段对阵与晋级名册身份不一致")
+                    paired_entry_ids.add(first)
+                    if second is None:
+                        if second_bot is not None:
+                            raise ValueError("下一阶段轮空对阵的 Bot 身份不一致")
+                    elif (
+                        isinstance(second, bool)
+                        or not isinstance(second, int)
+                        or second not in active_entry_ids
+                        or second == first
+                        or second_bot
+                        != transition_entries[second]["expected_bot_id"]
+                    ):
+                        raise ValueError("下一阶段对阵与晋级名册身份不一致")
+                    else:
+                        paired_entry_ids.add(second)
+                if paired_entry_ids != active_entry_ids:
+                    raise ValueError("下一阶段对阵未完整覆盖晋级名册")
 
             existing = c.execute(
                 "SELECT id, entry_b_id, bot_b_id, match_id, status "
@@ -13614,6 +17520,11 @@ class Store:
                 c.execute(
                     "DELETE FROM contest_pairings WHERE contest_id=? AND stage_idx=?",
                     (contest_id, stage_idx),
+                )
+
+            if normalized_entry_updates is not None:
+                _apply_contest_entry_advancement_tx(
+                    c, contest_id, normalized_entry_updates
                 )
 
             inserted: list[dict] = []
@@ -13659,17 +17570,105 @@ class Store:
                     )
                 )
 
+            if (
+                stage_idx == current_idx
+                and (
+                    contest["status"] == CONTEST_PUBLISHED
+                    or install_initial_manifest
+                )
+            ):
+                manifest_where = (
+                    " AND published_stage_pairing_count IS NULL"
+                    if install_initial_manifest
+                    else ""
+                )
+                sealed = c.execute(
+                    "UPDATE contests SET published_stage_pairing_count=? "
+                    "WHERE id=? AND status=? AND current_stage_idx=?"
+                    + manifest_where,
+                    (
+                        len(inserted),
+                        contest_id,
+                        contest["status"],
+                        stage_idx,
+                    ),
+                )
+                if sealed.rowcount != 1:
+                    raise ValueError("published 对阵批次计数冻结 CAS 已失效")
+
             if activate_running:
-                c.execute(
-                    "UPDATE contests SET status=?, current_stage_idx=?, "
-                    "rest_ends_at=NULL WHERE id=?",
-                    (CONTEST_RUNNING, stage_idx, contest_id),
-                )
+                if expected_status is None:
+                    changed = c.execute(
+                        "UPDATE contests SET status=?, current_stage_idx=?, "
+                        "rest_ends_at=NULL WHERE id=? AND current_stage_idx=?",
+                        (CONTEST_RUNNING, stage_idx, contest_id, current_idx),
+                    )
+                else:
+                    changed = c.execute(
+                        "UPDATE contests SET status=?, current_stage_idx=?, "
+                        "rest_ends_at=NULL WHERE id=? AND current_stage_idx=? "
+                        "AND status=?",
+                        (
+                            CONTEST_RUNNING,
+                            stage_idx,
+                            contest_id,
+                            current_idx,
+                            expected_status,
+                        ),
+                    )
+                if changed.rowcount != 1:
+                    raise ValueError("赛事阶段切换 CAS 已失效")
             elif stage_idx != current_idx:
-                c.execute(
-                    "UPDATE contests SET current_stage_idx=? WHERE id=?",
-                    (stage_idx, contest_id),
+                if expected_status is None:
+                    changed = c.execute(
+                        "UPDATE contests SET current_stage_idx=? "
+                        "WHERE id=? AND current_stage_idx=?",
+                        (stage_idx, contest_id, current_idx),
+                    )
+                else:
+                    changed = c.execute(
+                        "UPDATE contests SET current_stage_idx=? "
+                        "WHERE id=? AND current_stage_idx=? AND status=?",
+                        (stage_idx, contest_id, current_idx, expected_status),
+                    )
+                if changed.rowcount != 1:
+                    raise ValueError("赛事阶段切换 CAS 已失效")
+            if contest["status"] != CONTEST_PUBLISHED and manifest_enabled:
+                moved_manifest = c.execute(
+                    "UPDATE contests SET published_stage_pairing_count=? "
+                    "WHERE id=? AND current_stage_idx=? "
+                    "AND status IN (?,?,?)",
+                    (
+                        len(inserted),
+                        contest_id,
+                        stage_idx,
+                        CONTEST_RUNNING,
+                        CONTEST_REST,
+                        CONTEST_PUBLISHED,
+                    ),
                 )
+                if moved_manifest.rowcount != 1:
+                    raise ValueError("赛事阶段批次计数迁移 CAS 已失效")
+            if (
+                (
+                    contest["status"] == CONTEST_PUBLISHED
+                    and stage_idx == current_idx
+                )
+                or install_initial_manifest
+                or (
+                    contest["status"] != CONTEST_PUBLISHED
+                    and manifest_enabled
+                )
+            ):
+                sealed_topology = c.execute(
+                    "UPDATE contests SET sealed_pairing_topology_revision="
+                    "pairing_topology_revision WHERE id=? "
+                    "AND current_stage_idx=? "
+                    "AND published_stage_pairing_count=?",
+                    (contest_id, stage_idx, len(inserted)),
+                )
+                if sealed_topology.rowcount != 1:
+                    raise ValueError("赛事阶段对阵拓扑冻结 CAS 已失效")
             return inserted
 
     def append_contest_round_pairings(
@@ -13691,6 +17690,9 @@ class Store:
         """
         if not pairing_rows:
             raise ValueError("赛事轮次对阵批次不能为空")
+        _validate_pairing_publication_times(
+            pairing_rows, require_published_at=True
+        )
         stage_idx = exact_nonnegative_int(stage_idx)
         expected_current_stage_idx = exact_nonnegative_int(
             expected_current_stage_idx
@@ -13734,7 +17736,8 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                "SELECT status,current_stage_idx,published_stage_pairing_count "
+                "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
             if not contest:
@@ -13748,6 +17751,16 @@ class Store:
                 raise ValueError("赛事当前阶段已变化，拒绝追加轮次")
             if stage_idx != expected_current_stage_idx:
                 raise ValueError("只能向赛事当前阶段追加轮次")
+            raw_manifest = contest["published_stage_pairing_count"]
+            manifest_enabled = raw_manifest is not None
+            if not manifest_enabled or not self._contest_stage_manifest_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                include_terminal_orphans=True,
+                require_manifest=True,
+            ):
+                raise ValueError("赛事当前阶段对阵批次完整性校验失败，拒绝追加轮次")
 
             round_state = c.execute(
                 "SELECT MAX(round_num) AS max_round FROM contest_pairings "
@@ -13812,6 +17825,37 @@ class Store:
                         ).fetchone()
                     )
                 )
+            if manifest_enabled:
+                frozen_count = exact_nonnegative_int(raw_manifest)
+                if frozen_count is None:
+                    raise ValueError("赛事动态轮次批次计数损坏")
+                changed = c.execute(
+                    "UPDATE contests SET published_stage_pairing_count=? "
+                    "WHERE id=? AND status=? AND current_stage_idx=? "
+                    "AND published_stage_pairing_count=?",
+                    (
+                        frozen_count + len(inserted),
+                        contest_id,
+                        CONTEST_RUNNING,
+                        stage_idx,
+                        frozen_count,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("赛事动态轮次批次计数 CAS 已失效")
+                sealed = c.execute(
+                    "UPDATE contests SET sealed_pairing_topology_revision="
+                    "pairing_topology_revision WHERE id=? AND status=? "
+                    "AND current_stage_idx=? AND published_stage_pairing_count=?",
+                    (
+                        contest_id,
+                        CONTEST_RUNNING,
+                        stage_idx,
+                        frozen_count + len(inserted),
+                    ),
+                )
+                if sealed.rowcount != 1:
+                    raise ValueError("赛事动态轮次对阵拓扑冻结 CAS 已失效")
             return inserted
 
     def append_contest_elimination_tiebreak_pairings(
@@ -13851,6 +17895,9 @@ class Store:
         target_group = previous_group + 1
         if len(pairing_rows) != 2:
             raise ValueError("淘汰决胜组必须恰好包含两场换边对局")
+        _validate_pairing_publication_times(
+            pairing_rows, require_published_at=True
+        )
         normalized_series = _pairing_series_batch(
             pairing_rows, allow_elimination_tiebreak=True
         )
@@ -13892,7 +17939,8 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status,current_stage_idx,stages_json,game_id "
+                "SELECT status,current_stage_idx,stages_json,game_id,"
+                "published_stage_pairing_count "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -13904,6 +17952,18 @@ class Store:
                 or stage_idx != expected_current_stage_idx
             ):
                 raise ValueError("赛事当前阶段已变化，拒绝追加淘汰决胜组")
+            raw_manifest = contest["published_stage_pairing_count"]
+            manifest_enabled = raw_manifest is not None
+            if not manifest_enabled or not self._contest_stage_manifest_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                include_terminal_orphans=True,
+                require_manifest=True,
+            ):
+                raise ValueError(
+                    "赛事当前阶段对阵批次完整性校验失败，拒绝追加淘汰决胜组"
+                )
             stages = _loads_json(contest["stages_json"], default=[])
             frozen_stage = (
                 stages[stage_idx]
@@ -14221,6 +18281,37 @@ class Store:
                         ).fetchone()
                     )
                 )
+            if manifest_enabled:
+                frozen_count = exact_nonnegative_int(raw_manifest)
+                if frozen_count is None:
+                    raise ValueError("赛事淘汰决胜批次计数损坏")
+                changed = c.execute(
+                    "UPDATE contests SET published_stage_pairing_count=? "
+                    "WHERE id=? AND status=? AND current_stage_idx=? "
+                    "AND published_stage_pairing_count=?",
+                    (
+                        frozen_count + len(inserted),
+                        contest_id,
+                        CONTEST_RUNNING,
+                        stage_idx,
+                        frozen_count,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("赛事淘汰决胜批次计数 CAS 已失效")
+                sealed = c.execute(
+                    "UPDATE contests SET sealed_pairing_topology_revision="
+                    "pairing_topology_revision WHERE id=? AND status=? "
+                    "AND current_stage_idx=? AND published_stage_pairing_count=?",
+                    (
+                        contest_id,
+                        CONTEST_RUNNING,
+                        stage_idx,
+                        frozen_count + len(inserted),
+                    ),
+                )
+                if sealed.rowcount != 1:
+                    raise ValueError("赛事淘汰决胜对阵拓扑冻结 CAS 已失效")
             return inserted
 
     def list_pairings(
@@ -14272,6 +18363,850 @@ class Store:
             ]
 
     list_contest_pairings = list_pairings
+
+    def published_stage_has_valid_active_batch(
+        self, contest_id: int, stage_idx: int
+    ) -> bool:
+        """Validate the sealed published batch when durable jobs already exist.
+
+        Return ``False`` only when there is no non-terminal request and strict
+        recovery may therefore validate/rebuild the batch.  With active work,
+        the publication manifest and current indexed cardinality must agree;
+        an orphan/cross-stage request also fails closed.  No pairing rows are
+        materialised into Python on this scheduler fast path.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
+        with self._tx() as c:
+            c.execute("BEGIN")
+            contest = c.execute(
+                "SELECT status,current_stage_idx,published_stage_pairing_count,"
+                "pairing_topology_revision,sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != CONTEST_PUBLISHED
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != stage_idx
+            ):
+                return False
+            active_params = (
+                EXECUTION_SOURCE_CONTEST,
+                contest_id,
+                EXECUTION_QUEUED,
+                EXECUTION_STARTING,
+                EXECUTION_RUNNING,
+                EXECUTION_SETTLING,
+            )
+            active = c.execute(
+                "SELECT 1 FROM execution_jobs WHERE source=? AND contest_id=? "
+                "AND status IN (?,?,?,?) LIMIT 1",
+                active_params,
+            ).fetchone()
+            if active is None:
+                return False
+            frozen_count = exact_nonnegative_int(
+                contest["published_stage_pairing_count"]
+            )
+            if frozen_count is None:
+                raise ValueError("published 赛事存在 active 请求但缺少批次计数冻结")
+            current_revision = exact_nonnegative_int(
+                contest["pairing_topology_revision"]
+            )
+            sealed_revision = exact_nonnegative_int(
+                contest["sealed_pairing_topology_revision"]
+            )
+            if (
+                current_revision is None
+                or sealed_revision is None
+                or current_revision != sealed_revision
+            ):
+                raise ValueError("published 赛事 active 对阵批次完整性校验失败")
+            return True
+
+    def seal_published_stage_pairing_count(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_count: int,
+        expected_existing_ids: list[int],
+    ) -> None:
+        """Seal one strictly validated legacy published batch behind a CAS."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_count = exact_nonnegative_int(expected_count)
+        ids = sorted({int(pairing_id) for pairing_id in expected_existing_ids})
+        if (
+            stage_idx is None
+            or expected_count is None
+            or len(ids) != expected_count
+        ):
+            raise ValueError("published 对阵批次计数冻结参数无效")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status,current_stage_idx,published_stage_pairing_count "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != CONTEST_PUBLISHED
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != stage_idx
+            ):
+                raise ValueError("published 赛事状态已变化，拒绝冻结批次计数")
+            current_manifest = contest["published_stage_pairing_count"]
+            if current_manifest is not None and (
+                exact_nonnegative_int(current_manifest) != expected_count
+            ):
+                raise ValueError("published 对阵批次计数冻结已损坏")
+            if c.execute(
+                "SELECT 1 FROM execution_jobs WHERE source=? AND contest_id=? "
+                "AND status IN (?,?,?,?) LIMIT 1",
+                (
+                    EXECUTION_SOURCE_CONTEST,
+                    contest_id,
+                    EXECUTION_QUEUED,
+                    EXECUTION_STARTING,
+                    EXECUTION_RUNNING,
+                    EXECUTION_SETTLING,
+                ),
+            ).fetchone():
+                raise ValueError("published 赛事已有 active 请求，拒绝补写批次计数")
+            current_ids = [
+                int(row["id"])
+                for row in c.execute(
+                    "SELECT id FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx=? ORDER BY id",
+                    (contest_id, stage_idx),
+                )
+            ]
+            if current_ids != ids:
+                raise ValueError("published 对阵在批次计数冻结期间已变化")
+            changed = c.execute(
+                "UPDATE contests SET published_stage_pairing_count=? "
+                "WHERE id=? AND status=? AND current_stage_idx=?",
+                (expected_count, contest_id, CONTEST_PUBLISHED, stage_idx),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("published 对阵批次计数冻结 CAS 已失效")
+            sealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND published_stage_pairing_count=?",
+                (contest_id, CONTEST_PUBLISHED, stage_idx, expected_count),
+            )
+            if sealed.rowcount != 1:
+                raise ValueError("published 对阵拓扑冻结 CAS 已失效")
+
+    def seal_canonical_published_stage_pairing_batch(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_revision: int,
+        expected_pairing_rows: list[dict[str, Any]],
+        expected_entries: list[dict[str, Any]],
+    ) -> None:
+        """Install only a manifest+seal for one exact canonical legacy batch.
+
+        This is the production recovery boundary used by the contest manager.
+        Unlike the low-level count sealer retained for migration/corruption
+        fixtures, it never creates, deletes or updates pairing rows.  The
+        manager proves the generated topology; this transaction then proves the
+        exact persisted rows, roster, ownership, game, runnable current Bot
+        versions and publication coordinates still match that proof before
+        installing the manifest and final lifecycle seal.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_revision = exact_nonnegative_int(expected_revision)
+        if (
+            stage_idx != 0
+            or expected_revision is None
+            or not isinstance(expected_pairing_rows, list)
+            or not isinstance(expected_entries, list)
+        ):
+            raise ValueError("published 规范批次冻结参数无效")
+
+        expected_by_id: dict[int, tuple[Any, ...]] = {}
+        for source in expected_pairing_rows:
+            if not isinstance(source, dict):
+                raise ValueError("published 规范批次行类型无效")
+            pairing_id = exact_nonnegative_int(source.get("id"))
+            if pairing_id is None or pairing_id < 1 or pairing_id in expected_by_id:
+                raise ValueError("published 规范批次 pairing 身份无效")
+            try:
+                expected_by_id[pairing_id] = tuple(
+                    source[field] for field in _PUBLISHED_PAIRING_SEAL_FIELDS
+                )
+            except KeyError as exc:
+                raise ValueError("published 规范批次字段不完整") from exc
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            revision = exact_nonnegative_int(
+                contest["pairing_topology_revision"] if contest else None
+            )
+            if (
+                contest is None
+                or contest["status"] != CONTEST_PUBLISHED
+                or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+                or contest["published_stage_pairing_count"] is not None
+                or contest["sealed_pairing_topology_revision"] is not None
+                or revision != expected_revision
+            ):
+                raise ValueError("published 规范批次状态、游标或 revision 已变化")
+
+            active_entry_ids, expected_entry_bots = (
+                _validate_expected_contest_entries_tx(
+                    c, contest_id, expected_entries
+                )
+            )
+            if active_entry_ids != set(expected_entry_bots):
+                raise ValueError("published 首阶段冻结名册含已淘汰成员")
+            durable_entries = {
+                int(row["id"]): row
+                for row in c.execute(
+                    "SELECT id,user_id,bot_id FROM contest_entries "
+                    "WHERE contest_id=? ORDER BY id",
+                    (contest_id,),
+                ).fetchall()
+            }
+            bot_rows = {
+                int(row["id"]): dict(row)
+                for row in c.execute(
+                    "SELECT DISTINCT b.* FROM contest_entries e "
+                    "JOIN bots b ON b.id=e.bot_id WHERE e.contest_id=?",
+                    (contest_id,),
+                ).fetchall()
+            }
+            current_version_rows = {
+                int(row["bot_id"]): dict(row)
+                for row in c.execute(
+                    "SELECT DISTINCT v.* FROM contest_entries e "
+                    "JOIN bots b ON b.id=e.bot_id "
+                    "JOIN bot_versions v ON v.bot_id=b.id "
+                    "AND v.version=b.current_version "
+                    "WHERE e.contest_id=?",
+                    (contest_id,),
+                ).fetchall()
+            }
+            current_versions: dict[int, int | None] = {}
+            integrity_cache: set[Any] = set()
+            for entry_id, entry in durable_entries.items():
+                user_id = exact_nonnegative_int(entry["user_id"])
+                bot_id = exact_nonnegative_int(entry["bot_id"])
+                if (
+                    user_id is None
+                    or user_id < 1
+                    or bot_id is None
+                    or bot_id < 1
+                    or expected_entry_bots.get(entry_id) != bot_id
+                ):
+                    raise ValueError("published 规范批次名册身份损坏")
+                _require_active_contest_user_tx(c, user_id)
+                _require_contest_bot_binding_tx(
+                    c,
+                    contest_game_id=str(contest["game_id"]),
+                    user_id=user_id,
+                    bot_id=bot_id,
+                )
+                current_version_id = _require_current_runnable_contest_bot_tx(
+                    c, bot_id
+                )
+                runtime = current_version_rows.get(bot_id) or bot_rows.get(bot_id)
+                try:
+                    if runtime is None:
+                        raise ValueError("version_unavailable")
+                    require_supported_binary_metadata(
+                        str(runtime.get("format") or ""),
+                        str(runtime.get("os") or ""),
+                        str(runtime.get("arch") or ""),
+                    )
+                    path = str(runtime.get("binary_path") or "").strip()
+                    if not path:
+                        raise ValueError("version_unavailable")
+                    require_binary_file_integrity(
+                        runtime, path, cache=integrity_cache
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "published 规范批次 Bot 冻结版本文件不可用"
+                    ) from exc
+                current_versions[bot_id] = current_version_id
+
+            rows = c.execute(
+                "SELECT * FROM contest_pairings WHERE contest_id=? "
+                "AND stage_idx=? ORDER BY id",
+                (contest_id, stage_idx),
+            ).fetchall()
+            durable_by_id = {
+                int(row["id"]): tuple(
+                    row[field] for field in _PUBLISHED_PAIRING_SEAL_FIELDS
+                )
+                for row in rows
+            }
+            if durable_by_id != expected_by_id:
+                raise ValueError("published 对阵在规范冻结期间已变化")
+
+            stages = _loads_json(contest["stages_json"], default=[])
+            if (
+                not isinstance(stages, list)
+                or not stages
+                or not isinstance(stages[0], dict)
+            ):
+                raise ValueError("published 冻结阶段配置损坏")
+            stage = stages[0]
+            stage_type = stage.get("type")
+            series_stage = "games_per_pair" in stage
+            normalized_rows = [dict(row) for row in rows]
+            _pairing_series_batch(normalized_rows)
+            if series_stage:
+                playable_seeds = [
+                    _pairing_seed_field(row, required=True)
+                    for row in normalized_rows
+                    if row.get("entry_b_id") is not None
+                ]
+                if len(playable_seeds) != len(set(playable_seeds)):
+                    raise ValueError("published 多场批次 pairing_seed 必须唯一")
+            elif any(row.get("pairing_seed") is not None for row in normalized_rows):
+                raise ValueError("published 普通批次不得带私有 pairing_seed")
+
+            seen_participants: set[int] = set()
+            for row in normalized_rows:
+                entry_a_id = exact_nonnegative_int(row.get("entry_a_id"))
+                raw_entry_b_id = row.get("entry_b_id")
+                entry_b_id = (
+                    exact_nonnegative_int(raw_entry_b_id)
+                    if raw_entry_b_id is not None
+                    else None
+                )
+                published_at = validate_canonical_naive_timestamp(
+                    row.get("published_at"), "赛事对阵发布时间"
+                )
+                validate_canonical_naive_timestamp(
+                    row.get("scheduled_at"),
+                    "赛事对阵计划时间",
+                    allow_none=True,
+                )
+                if (
+                    row.get("contest_id") != contest_id
+                    or exact_nonnegative_int(row.get("stage_idx")) != stage_idx
+                    or entry_a_id is None
+                    or entry_a_id not in active_entry_ids
+                    or (
+                        raw_entry_b_id is not None
+                        and (
+                            entry_b_id is None
+                            or entry_b_id not in active_entry_ids
+                            or entry_b_id == entry_a_id
+                        )
+                    )
+                    or row.get("match_id") is not None
+                ):
+                    raise ValueError("published 规范批次身份或发布坐标损坏")
+                entry_a = durable_entries[entry_a_id]
+                bot_a_id = exact_nonnegative_int(row.get("bot_a_id"))
+                if (
+                    bot_a_id is None
+                    or bot_a_id != entry_a["bot_id"]
+                ):
+                    raise ValueError("published 规范批次 A 座身份损坏")
+                seen_participants.add(entry_a_id)
+                if entry_b_id is None:
+                    if (
+                        row.get("bot_b_id") is not None
+                        or row.get("bot_a_version_id") is not None
+                        or row.get("bot_b_version_id") is not None
+                        or row.get("status") != STATUS_COMPLETED
+                        or not is_authoritative_no_opponent_pairing(
+                            stage_type, row
+                        )
+                    ):
+                        raise ValueError("published 规范轮空行损坏")
+                    continue
+                entry_b = durable_entries[entry_b_id]
+                bot_b_id = exact_nonnegative_int(row.get("bot_b_id"))
+                if (
+                    bot_b_id is None
+                    or bot_b_id != entry_b["bot_id"]
+                    or row.get("status") != STATUS_PENDING
+                    or row.get("bot_a_version_id")
+                    != current_versions.get(bot_a_id)
+                    or row.get("bot_b_version_id")
+                    != current_versions.get(bot_b_id)
+                ):
+                    raise ValueError("published 规范批次 Bot 版本或状态损坏")
+                seen_participants.update((entry_a_id, entry_b_id))
+            if seen_participants != active_entry_ids:
+                raise ValueError("published 规范批次未覆盖完整冻结名册")
+
+            if c.execute(
+                "SELECT 1 FROM execution_jobs WHERE source=? AND contest_id=? "
+                "AND status IN (?,?,?,?) LIMIT 1",
+                (
+                    EXECUTION_SOURCE_CONTEST,
+                    contest_id,
+                    EXECUTION_QUEUED,
+                    EXECUTION_STARTING,
+                    EXECUTION_RUNNING,
+                    EXECUTION_SETTLING,
+                ),
+            ).fetchone() or any(
+                c.execute(
+                    f"SELECT 1 FROM {_matches_table(game_id)} WHERE contest_id=? "
+                    "AND status IN (?,?) LIMIT 1",
+                    (contest_id, STATUS_PENDING, STATUS_RUNNING),
+                ).fetchone()
+                for game_id in sorted(_all_game_ids())
+            ):
+                raise ValueError("published 赛事已有 active 请求或对局")
+
+            changed = c.execute(
+                "UPDATE contests SET published_stage_pairing_count=? "
+                "WHERE id=? AND status=? AND current_stage_idx=? "
+                "AND published_stage_pairing_count IS NULL "
+                "AND sealed_pairing_topology_revision IS NULL "
+                "AND pairing_topology_revision=?",
+                (
+                    len(rows),
+                    contest_id,
+                    CONTEST_PUBLISHED,
+                    stage_idx,
+                    expected_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("published 规范批次 manifest CAS 已失效")
+            after = c.execute(
+                "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            after_revision = exact_nonnegative_int(
+                after["pairing_topology_revision"] if after else None
+            )
+            if (
+                after_revision is None
+                or after_revision <= expected_revision
+                or (after and after["sealed_pairing_topology_revision"] is not None)
+            ):
+                raise ValueError("published 规范批次 lifecycle revision 漂移")
+            sealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND published_stage_pairing_count=? "
+                "AND pairing_topology_revision=? "
+                "AND sealed_pairing_topology_revision IS NULL",
+                (
+                    contest_id,
+                    CONTEST_PUBLISHED,
+                    stage_idx,
+                    len(rows),
+                    after_revision,
+                ),
+            )
+            if sealed.rowcount != 1:
+                raise ValueError("published 规范批次 topology seal CAS 已失效")
+
+    @staticmethod
+    def _cancel_queued_contest_batch_tx(
+        c: sqlite3.Connection, contest_id: int
+    ) -> int:
+        """Fail closed every not-yet-claimed job for one damaged batch."""
+        terminal = _now()
+        changed = c.execute(
+            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+            "terminal_reason='contest_pairing_batch_changed',"
+            "last_error='contest_pairing_batch_changed',next_attempt_at=NULL,"
+            "terminal_at=? WHERE source='contest' AND contest_id=? "
+            "AND status='queued'",
+            (terminal, int(contest_id)),
+        )
+        return int(changed.rowcount)
+
+    def list_dispatchable_contest_pairings(
+        self,
+        contest_id: int,
+        *,
+        stage_idx: int,
+        due_at: str,
+    ) -> list[dict]:
+        """Return only due pairings that have no active execution request.
+
+        A queue-backed contest leaves the pairing ``pending`` and unbound until
+        claim creates the Match.  The active execution-job exclusion is
+        therefore part of the scheduler read contract, not merely enqueue
+        idempotency: repeated ticks must not re-read Bot versions or hash the
+        same artifacts while that durable job is already queued.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            raise ValueError("赛事阶段坐标必须是非负整数")
+        if not isinstance(due_at, str) or not due_at:
+            raise ValueError("赛事调度时点无效")
+        invalid_batch = False
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._contest_stage_manifest_revision_is_valid_tx(
+                c, contest_id, stage_idx, require_manifest=True
+            ):
+                self._cancel_queued_contest_batch_tx(c, contest_id)
+                invalid_batch = True
+                raw_rows: list[sqlite3.Row] = []
+            else:
+                raw_rows = []
+            sql = (
+                "SELECT p.*, legacy_a.entry_id AS _effective_entry_a_id, "
+                "legacy_b.entry_id AS _effective_entry_b_id, "
+                "p.entry_a_id AS _raw_entry_a_id, "
+                "p.entry_b_id AS _raw_entry_b_id, "
+                + _contest_pairing_explicit_series_marker_sql()
+                + " AS _explicit_series_marker, "
+                "ea.user_id AS _entry_a_user_id, "
+                "eb.user_id AS _entry_b_user_id, "
+                "ba.owner_id AS _pairing_bot_a_owner_id, "
+                "bb.owner_id AS _pairing_bot_b_owner_id "
+                "FROM contest_pairings p "
+                "LEFT JOIN contests pairing_contest "
+                "ON pairing_contest.id=p.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
+                "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
+                "AND p.contest_id=legacy_a.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
+                "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
+                "AND p.contest_id=legacy_b.contest_id "
+                "LEFT JOIN contest_entries ea "
+                "ON ea.id=COALESCE(p.entry_a_id,legacy_a.entry_id) "
+                "AND ea.contest_id=p.contest_id "
+                "LEFT JOIN contest_entries eb "
+                "ON eb.id=COALESCE(p.entry_b_id,legacy_b.entry_id) "
+                "AND eb.contest_id=p.contest_id "
+                "LEFT JOIN bots ba ON ba.id=p.bot_a_id "
+                "LEFT JOIN bots bb ON bb.id=p.bot_b_id "
+                "WHERE p.contest_id=? AND p.stage_idx=? "
+                "AND p.status=? AND p.match_id IS NULL "
+                "AND (p.scheduled_at IS NULL OR p.scheduled_at<=?) "
+                "AND NOT EXISTS (SELECT 1 FROM execution_jobs j "
+                "WHERE j.contest_pairing_id=p.id "
+                "AND j.status IN ('queued','starting','running','settling')) "
+                "ORDER BY p.stage_idx,p.round_num,p.id"
+            )
+            if not invalid_batch:
+                raw_rows = c.execute(
+                    sql,
+                    (contest_id, stage_idx, STATUS_PENDING, due_at),
+                ).fetchall()
+        if invalid_batch:
+            raise ValueError("赛事 active 对阵批次完整性校验失败")
+        return [
+                _apply_effective_entry_ids(
+                    _row(row),
+                    ("entry_a_id", "_effective_entry_a_id"),
+                    ("entry_b_id", "_effective_entry_b_id"),
+                )
+                for row in raw_rows
+            ]
+
+    def contest_stage_has_dispatch_gap(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        due_at: str,
+    ) -> bool:
+        """Return whether a previously covered stage lost an active request.
+
+        The hot negative case starts from the narrow cancelled/interrupted job
+        ranges.  It never anti-joins from every still-pending pairing, so a
+        fully queued 100-player double round robin remains an indexed O(1)
+        scheduler probe.  A positive result deliberately falls back to the
+        strict dispatchable-pairing reader for repair.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            return True
+        if not isinstance(due_at, str) or not due_at:
+            return True
+        invalid_batch = False
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._contest_stage_manifest_revision_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                require_manifest=True,
+            ):
+                self._cancel_queued_contest_batch_tx(c, contest_id)
+                invalid_batch = True
+                has_gap = False
+            else:
+                has_gap = bool(
+                c.execute(
+                    "SELECT 1 FROM execution_jobs j INDEXED BY "
+                    "idx_execution_jobs_contest_dispatch_gap "
+                    "JOIN contest_pairings p ON p.id=j.contest_pairing_id "
+                    "WHERE j.source=? AND j.contest_id=? "
+                    "AND j.status IN (?,?) AND p.contest_id=? "
+                    "AND p.stage_idx=? AND p.status=? AND p.match_id IS NULL "
+                    "AND (p.scheduled_at IS NULL OR p.scheduled_at<=?) "
+                    "AND NOT EXISTS (SELECT 1 FROM execution_jobs active "
+                    "WHERE active.contest_pairing_id=p.id AND active.status IN "
+                    "(?,?,?,?)) LIMIT 1",
+                    (
+                        EXECUTION_SOURCE_CONTEST,
+                        contest_id,
+                        EXECUTION_CANCELLED,
+                        EXECUTION_INTERRUPTED,
+                        contest_id,
+                        stage_idx,
+                        STATUS_PENDING,
+                        due_at,
+                        EXECUTION_QUEUED,
+                        EXECUTION_STARTING,
+                        EXECUTION_RUNNING,
+                        EXECUTION_SETTLING,
+                    ),
+                ).fetchone()
+                )
+        if invalid_batch:
+            raise ValueError("赛事 active 对阵批次完整性校验失败")
+        return has_gap
+
+    def contest_stage_has_future_pending_pairings(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        due_at: str,
+    ) -> bool:
+        """Keep a coverage cache open while a staged start time is in future."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None or not isinstance(due_at, str) or not due_at:
+            return True
+        with self._tx() as c:
+            return bool(
+                c.execute(
+                    "SELECT 1 FROM contest_pairings INDEXED BY "
+                    "idx_contest_pairings_schedule WHERE contest_id=? "
+                    "AND stage_idx=? AND status=? AND scheduled_at>? "
+                    "AND match_id IS NULL LIMIT 1",
+                    (contest_id, stage_idx, STATUS_PENDING, due_at),
+                ).fetchone()
+            )
+
+    def contest_stage_has_incomplete_pairings(
+        self, contest_id: int, stage_idx: int
+    ) -> bool:
+        """Index-backed negative gate before strict terminal-stage parsing."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            return True
+        with self._tx() as c:
+            return bool(
+                c.execute(
+                    "SELECT EXISTS(SELECT 1 FROM contest_pairings "
+                    "WHERE contest_id=? AND stage_idx=? AND status<>? LIMIT 1)",
+                    (contest_id, stage_idx, STATUS_COMPLETED),
+                ).fetchone()[0]
+            )
+
+    def list_contest_pairings_needing_completion_sync(
+        self, contest_id: int, stage_idx: int
+    ) -> list[dict[str, Any]]:
+        """Return only bound, not-yet-mirrored rows for completion repair."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            return []
+        with self._tx() as c:
+            exists = c.execute(
+                "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                "AND stage_idx=? AND status<>? AND match_id IS NOT NULL LIMIT 1",
+                (contest_id, stage_idx, STATUS_COMPLETED),
+            ).fetchone()
+            if exists is None:
+                return []
+            return [
+                _row(row)
+                for row in c.execute(
+                    "SELECT id,match_id FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx=? AND status<>? AND match_id IS NOT NULL "
+                    "ORDER BY id",
+                    (contest_id, stage_idx, STATUS_COMPLETED),
+                )
+            ]
+
+    def _contest_stage_manifest_revision_is_valid_tx(
+        self,
+        c: sqlite3.Connection,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        require_manifest: bool = False,
+    ) -> bool:
+        """Validate one current-stage seal without scanning its pairing batch."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            return False
+        contest = c.execute(
+            "SELECT status,current_stage_idx,published_stage_pairing_count,"
+            "pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        if (
+            contest is None
+            or contest["status"]
+            not in (CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST)
+            or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+        ):
+            return False
+        raw_manifest = contest["published_stage_pairing_count"]
+        if raw_manifest is None:
+            return False
+        if exact_nonnegative_int(raw_manifest) is None:
+            return False
+        current_revision = exact_nonnegative_int(
+            contest["pairing_topology_revision"]
+        )
+        sealed_revision = exact_nonnegative_int(
+            contest["sealed_pairing_topology_revision"]
+        )
+        return bool(
+            current_revision is not None
+            and sealed_revision is not None
+            and current_revision == sealed_revision
+        )
+
+    def _contest_stage_manifest_is_valid_tx(
+        self,
+        c: sqlite3.Connection,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        include_terminal_orphans: bool = False,
+        require_manifest: bool = False,
+    ) -> bool:
+        """Validate the sealed current-stage cardinality in one DB snapshot.
+
+        Fresh publication freezes ``published_stage_pairing_count`` and every
+        subsequent stage/round append moves that seal in the same transaction.
+        Historical ``NULL`` manifests remain readable, but no active execution
+        or lifecycle writer may use them as authority.  Missing manifests are
+        therefore rejected regardless of the compatibility keyword.
+
+        Claim paths only inspect active job orphans.  Terminal/advancement gates
+        additionally reject a terminal job whose pairing disappeared, closing
+        same-cardinality delete+replace corruption without treating intact jobs
+        from earlier stages as current-stage orphans.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None:
+            return False
+        contest = c.execute(
+            "SELECT status,current_stage_idx,published_stage_pairing_count,"
+            "pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest_id,),
+        ).fetchone()
+        if (
+            contest is None
+            or contest["status"]
+            not in (CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST)
+            or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+        ):
+            return False
+        raw_manifest = contest["published_stage_pairing_count"]
+        if raw_manifest is None:
+            return False
+        frozen_count = exact_nonnegative_int(raw_manifest)
+        if frozen_count is None:
+            return False
+        current_revision = exact_nonnegative_int(
+            contest["pairing_topology_revision"]
+        )
+        sealed_revision = exact_nonnegative_int(
+            contest["sealed_pairing_topology_revision"]
+        )
+        if (
+            current_revision is None
+            or sealed_revision is None
+            or current_revision != sealed_revision
+        ):
+            return False
+        actual_count = int(
+            c.execute(
+                "SELECT COUNT(*) FROM contest_pairings "
+                "INDEXED BY idx_contest_pairings_schedule "
+                "WHERE contest_id=? AND stage_idx=?",
+                (contest_id, stage_idx),
+            ).fetchone()[0]
+        )
+        if actual_count != frozen_count:
+            return False
+        active_statuses = (
+            EXECUTION_QUEUED,
+            EXECUTION_STARTING,
+            EXECUTION_RUNNING,
+            EXECUTION_SETTLING,
+        )
+        if include_terminal_orphans:
+            orphan = c.execute(
+                "SELECT 1 FROM execution_jobs j "
+                "LEFT JOIN contest_pairings p ON p.id=j.contest_pairing_id "
+                "WHERE j.source=? AND j.contest_id=? AND (p.id IS NULL OR ("
+                "j.status IN (?,?,?,?) AND (p.contest_id<>? OR p.stage_idx<>?))) "
+                "LIMIT 1",
+                (
+                    EXECUTION_SOURCE_CONTEST,
+                    contest_id,
+                    *active_statuses,
+                    contest_id,
+                    stage_idx,
+                ),
+            ).fetchone()
+        else:
+            orphan = c.execute(
+                "SELECT 1 FROM execution_jobs j "
+                "LEFT JOIN contest_pairings p ON p.id=j.contest_pairing_id "
+                "WHERE j.source=? AND j.contest_id=? "
+                "AND j.status IN (?,?,?,?) "
+                "AND (p.id IS NULL OR p.contest_id<>? OR p.stage_idx<>?) LIMIT 1",
+                (
+                    EXECUTION_SOURCE_CONTEST,
+                    contest_id,
+                    *active_statuses,
+                    contest_id,
+                    stage_idx,
+                ),
+            ).fetchone()
+        return orphan is None
+
+    def contest_stage_manifest_is_valid(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        include_terminal_orphans: bool = False,
+        require_manifest: bool = False,
+    ) -> bool:
+        """Read-only wrapper for lifecycle gates outside a Store transaction."""
+        with self._tx() as c:
+            c.execute("BEGIN")
+            return self._contest_stage_manifest_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                include_terminal_orphans=include_terminal_orphans,
+                require_manifest=require_manifest,
+            )
 
     def get_contest_pairing_for_match(self, match_id: str) -> dict | None:
         """Return the unique frozen contest pairing linked to one Match.
@@ -14366,6 +19301,9 @@ class Store:
         stage_idx = exact_nonnegative_int(stage_idx)
         if stage_idx is None:
             raise ValueError("赛事阶段坐标必须是非负整数")
+        _validate_pairing_publication_times(
+            pairing_rows, require_published_at=True
+        )
         expected_ids = sorted({int(pairing_id) for pairing_id in expected_existing_ids})
         normalized_series = _pairing_series_batch(pairing_rows)
         columns = (
@@ -14495,6 +19433,21 @@ class Store:
                         ).fetchone()
                     )
                 )
+            sealed = c.execute(
+                "UPDATE contests SET published_stage_pairing_count=? "
+                "WHERE id=? AND status=? AND current_stage_idx=?",
+                (len(inserted), contest_id, CONTEST_PUBLISHED, stage_idx),
+            )
+            if sealed.rowcount != 1:
+                raise ValueError("published 对阵恢复计数冻结 CAS 已失效")
+            sealed_topology = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND published_stage_pairing_count=?",
+                (contest_id, CONTEST_PUBLISHED, stage_idx, len(inserted)),
+            )
+            if sealed_topology.rowcount != 1:
+                raise ValueError("published 对阵恢复拓扑冻结 CAS 已失效")
             return inserted
 
     def _contest_bracket_tx(
@@ -14615,11 +19568,24 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN")
-            contest = _row(
-                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
-            )
+            contest_sql = "SELECT contests.*"
+            if current_stage_only:
+                contest_sql += (
+                    ", EXISTS(SELECT 1 FROM contest_pairings future "
+                    "WHERE future.contest_id=contests.id "
+                    "AND future.stage_idx>contests.current_stage_idx) "
+                    "AS _has_future_pairings, "
+                    "(SELECT COUNT(*) FROM contest_pairings current_rows "
+                    "WHERE current_rows.contest_id=contests.id "
+                    "AND current_rows.stage_idx=contests.current_stage_idx) "
+                    "AS _current_pairing_count"
+                )
+            contest_sql += " FROM contests WHERE contests.id=?"
+            contest = _row(c.execute(contest_sql, (contest_id,)).fetchone())
             if contest is None:
                 return None
+            has_future_pairings = bool(contest.pop("_has_future_pairings", 0))
+            current_pairing_count = contest.pop("_current_pairing_count", None)
             include_entry_identity = bool(
                 include_entry_identity
                 and int(contest.get("require_real_name") or 0)
@@ -14643,6 +19609,38 @@ class Store:
                     and raw_current_stage >= 0
                     else -1
                 )
+                # Active polling uses the compact lifecycle-chain seal and
+                # therefore reads only the current graph.  Finished legacy
+                # rows with no trustworthy seal need a bounded slow path: load
+                # every reached stage in this same SQLite snapshot so a fully
+                # proven predecessor contradiction cannot be downgraded to
+                # "unknown" merely because live omitted its pairings.
+                revision = exact_nonnegative_int(
+                    contest.get("pairing_topology_revision")
+                )
+                sealed_revision = exact_nonnegative_int(
+                    contest.get("sealed_pairing_topology_revision")
+                )
+                manifest_count = exact_nonnegative_int(
+                    contest.get("published_stage_pairing_count")
+                )
+                compact_chain_seal = bool(
+                    revision is not None
+                    and sealed_revision is not None
+                    and revision == sealed_revision
+                    and manifest_count is not None
+                    and exact_nonnegative_int(current_pairing_count)
+                    == manifest_count
+                )
+                load_all_pairings = bool(
+                    contest.get("status") == CONTEST_FINISHED
+                    and stage_idx > 0
+                    and not compact_chain_seal
+                )
+                if load_all_pairings:
+                    stage_idx = None
+            else:
+                load_all_pairings = False
             pairings = self._contest_bracket_tx(
                 c,
                 contest_id,
@@ -14723,21 +19721,147 @@ class Store:
                 "pairings": pairings,
                 "entries": entries,
                 "stage_results": stage_results,
+                "has_future_pairings": has_future_pairings,
+                "pairings_include_history": load_all_pairings,
             }
 
     def contest_live_snapshot(self, contest_id: int) -> dict[str, Any] | None:
         """Return one transactionally consistent, replay-free live projection input.
 
-        The fixed three SELECTs are independent of pairing count: contest state,
-        current-stage pairings joined with compact Match results, then the frozen
-        roster needed for standings.  Explicit ``BEGIN`` makes those reads one
+        The fixed four SELECTs are independent of pairing count: contest state,
+        current-stage pairings joined with compact Match results, the frozen
+        roster, and compact prior-stage ranking snapshots needed to prove the
+        current advancement cohort. Explicit ``BEGIN`` makes those reads one
         SQLite snapshot even when another process advances a stage concurrently.
         """
         return self.contest_projection_snapshot(
             contest_id,
             current_stage_only=True,
             include_entries=True,
+            include_stage_results=True,
         )
+
+    def contest_entries_page_snapshot(
+        self,
+        contest_id: int,
+        *,
+        page: int,
+        per_page: int,
+        viewer_user_id: int | None,
+        viewer_is_admin: bool,
+    ) -> dict[str, Any] | None:
+        """Read roster visibility, PII gate, count and page in one snapshot.
+
+        This is the authority boundary for the lightweight public endpoint.  A
+        separate contest read followed by a second roster transaction lets an
+        organizer/status change revoke access between those reads while the old
+        decision still authorizes newer PII.  Explicit ``BEGIN`` fixes one
+        SQLite snapshot before any ACL decision or roster column is selected.
+        """
+        if isinstance(contest_id, bool) or not isinstance(contest_id, int):
+            raise ValueError("赛事 ID 无效")
+        if not isinstance(viewer_is_admin, bool):
+            raise ValueError("赛事名册管理员标记无效")
+        normalized_viewer_id: int | None = None
+        if viewer_user_id is not None:
+            normalized_viewer_id = exact_nonnegative_int(viewer_user_id)
+            if normalized_viewer_id is None or normalized_viewer_id < 1:
+                raise ValueError("赛事名册查看者无效")
+        if viewer_is_admin and normalized_viewer_id is None:
+            raise ValueError("赛事名册管理员缺少用户身份")
+        # _paginate performs the same strict type/range checks before executing
+        # either COUNT or page SQL.  Validate here as well so a hidden contest
+        # cannot turn invalid parameters into a misleading 404.
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or isinstance(per_page, bool)
+            or not isinstance(per_page, int)
+            or not 1 <= per_page <= 200
+        ):
+            raise ValueError("分页参数无效")
+
+        with self._tx() as c:
+            c.execute("BEGIN")
+            contest_row = c.execute(
+                "SELECT id,status,organizer_id,require_real_name "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if contest_row is None:
+                return None
+            contest = dict(contest_row)
+            status = contest.get("status")
+            organizer_id = exact_nonnegative_int(contest.get("organizer_id"))
+            if (
+                status not in {
+                    CONTEST_DRAFT,
+                    CONTEST_OPEN,
+                    CONTEST_PUBLISHED,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    CONTEST_FINISHED,
+                    CONTEST_CANCELLED,
+                }
+                or organizer_id is None
+                or organizer_id < 1
+            ):
+                raise ValueError("赛事名册可见性数据损坏")
+            is_organizer = bool(
+                viewer_is_admin
+                or (
+                    normalized_viewer_id is not None
+                    and normalized_viewer_id == organizer_id
+                )
+            )
+            if status in {CONTEST_DRAFT, CONTEST_CANCELLED} and not is_organizer:
+                return None
+            identity_flag = exact_sqlite_bool(contest.get("require_real_name"))
+            if identity_flag is None:
+                raise ValueError("赛事实名标记损坏")
+            include_identity = bool(is_organizer and identity_flag)
+
+            identity_columns = ""
+            identity_join = ""
+            if include_identity:
+                gate = "contest_gate.require_real_name=1"
+                identity_columns = ", " + _contest_identity_projection_sql(
+                    gate_sql=gate
+                )
+                identity_join = (
+                    "JOIN contests contest_gate ON contest_gate.id=e.contest_id "
+                )
+            sql = (
+                "SELECT e.id,e.user_id,e.bot_id,e.registered_at,e.group_id,"
+                "e.seed,e.eliminated,b.name AS bot_name,"
+                "b.display_name AS bot_display,u.username AS owner_name,"
+                "u.display_name AS owner_display"
+                + identity_columns
+                + " FROM contest_entries e "
+                + identity_join
+                + "LEFT JOIN bots b ON e.bot_id=b.id "
+                "LEFT JOIN users u ON e.user_id=u.id "
+                "WHERE e.contest_id=? ORDER BY e.seed,e.registered_at,e.id"
+            )
+            rows, total = _paginate(
+                c,
+                sql,
+                (contest_id,),
+                page=page,
+                per_page=per_page,
+                count_query=(
+                    "SELECT COUNT(*) FROM contest_entries WHERE contest_id=?"
+                ),
+            )
+            return {
+                "contest": contest,
+                "items": rows,
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "include_identity": include_identity,
+            }
 
     def contest_entries_named(
         self,
@@ -14779,7 +19903,7 @@ class Store:
                 + identity_join
                 + "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
-                "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at"
+                "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at, e.id"
             )
             params = (contest_id,)
 
@@ -14799,7 +19923,16 @@ class Store:
 
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
-                rows, total = _paginate(c, sql, params, page=page, per_page=pp)
+                rows, total = _paginate(
+                    c,
+                    sql,
+                    params,
+                    page=page,
+                    per_page=pp,
+                    count_query=(
+                        "SELECT COUNT(*) FROM contest_entries WHERE contest_id=?"
+                    ),
+                )
                 if include_identity:
                     rows = [finalize_identity(row) for row in rows]
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
@@ -14856,6 +19989,7 @@ class Store:
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
         immutable = {
             "pairing_seed",
+            "published_at",
             "series_index",
             "series_size",
             "tiebreak_group",
@@ -14868,6 +20002,12 @@ class Store:
             if stage_idx is None:
                 raise ValueError("赛事阶段坐标必须是非负整数")
             fields["stage_idx"] = stage_idx
+        if "scheduled_at" in fields:
+            fields["scheduled_at"] = validate_canonical_naive_timestamp(
+                fields["scheduled_at"],
+                "赛事对阵计划时间",
+                allow_none=True,
+            )
         allowed = {
             "match_id",
             "status",
@@ -14878,7 +20018,6 @@ class Store:
             "bot_b_id",
             "bot_a_version_id",
             "bot_b_version_id",
-            "published_at",
             "scheduled_at",
             "stage_idx",
             "stage_key",
@@ -14920,7 +20059,7 @@ class Store:
 
     update_contest_pairing = update_pairing
 
-    def adjudicate_unavailable_contest_pairing(
+    def _adjudicate_unavailable_contest_pairing(
         self,
         contest_id: int,
         pairing_id: int,
@@ -14929,10 +20068,11 @@ class Store:
         game_id: str,
         winner: int,
         result: dict[str, Any],
+        time_control_id: str,
         duplicate: bool = False,
         activate_running: bool = False,
         require_execution_admission: bool = True,
-    ) -> dict:
+    ) -> dict | None:
         """Atomically persist one pre-execution technical contest result.
 
         This is intentionally narrower than the normal execution path.  The
@@ -14951,6 +20091,10 @@ class Store:
             raise ValueError("技术赛果 winner 必须为 0 或 1")
         if not isinstance(duplicate, bool):
             raise ValueError("技术赛果 duplicate 必须为布尔值")
+        if not isinstance(time_control_id, str) or not time_control_id:
+            raise ValueError("技术赛果必须冻结有效时限 ID")
+        if _resolved_time_control_id(gid, time_control_id) != time_control_id:
+            raise ValueError("技术赛果必须冻结 canonical 时限 ID")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             contract = _active_game_contract_tx(c, gid)
@@ -14959,7 +20103,7 @@ class Store:
             )
             contest = c.execute(
                 "SELECT status,organizer_id,game_id,ruleset_version,protocol_version,"
-                "rating_pool_id,stages_json,current_stage_idx "
+                "rating_pool_id,stages_json,current_stage_idx,time_control_id "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -14975,6 +20119,14 @@ class Store:
                 or contest["rating_pool_id"] != contract["rating_pool_id"]
             ):
                 raise ValueError("赛事规则版本已退役，不能生成新赛果")
+            try:
+                expected_time_control_id = _resolved_time_control_id(
+                    gid, contest["time_control_id"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("赛事时限快照损坏") from exc
+            if expected_time_control_id != time_control_id:
+                raise ValueError("技术赛果时限与赛事冻结值不一致")
             pairing = c.execute(
                 "SELECT * FROM contest_pairings WHERE id=? AND contest_id=? "
                 "AND status=? AND match_id IS NULL",
@@ -14989,6 +20141,17 @@ class Store:
                 != pairing_stage_idx
             ):
                 raise ValueError("赛事当前阶段已变化，不能写入技术赛果")
+            if not self._contest_stage_manifest_revision_is_valid_tx(
+                c,
+                contest_id,
+                pairing_stage_idx,
+                require_manifest=True,
+            ):
+                self._cancel_queued_contest_batch_tx(c, contest_id)
+                # Returning from inside _tx is intentional: the context exits
+                # normally and commits the whole-batch cancellation, while the
+                # public wrapper raises only after that transaction is closed.
+                return None
             explicit_marker = _contest_stage_has_explicit_series_marker(
                 contest["stages_json"], pairing_stage_idx
             )
@@ -15010,7 +20173,7 @@ class Store:
                 raise ValueError("技术赛果 Bot 不存在或游戏/协议不一致")
             for suffix, bot_id in (("a", bot_a_id), ("b", bot_b_id)):
                 entry_id = pairing[f"entry_{suffix}_id"]
-                if entry_id is None and explicit_marker:
+                if entry_id is None:
                     raise ValueError("技术赛果缺少冻结参赛项身份")
                 if entry_id is not None:
                     entry = c.execute(
@@ -15034,6 +20197,7 @@ class Store:
                 "_rating_eligible": False,
                 "_rating_reason": "contest",
                 "duplicate": duplicate,
+                "time_control_id": time_control_id,
             }
             for suffix in ("a", "b"):
                 version_id = pairing[f"bot_{suffix}_version_id"]
@@ -15082,6 +20246,17 @@ class Store:
                 "VALUES(?,?,?)",
                 (match_id, "[]", created_at),
             )
+            authoritative_match = c.execute(
+                f"SELECT * FROM {table} WHERE id=?",
+                (match_id,),
+            ).fetchone()
+            if authoritative_match is None:
+                raise RuntimeError("技术赛果 Match 写入后消失")
+            _finalize_terminal_replay_tx(
+                c,
+                match=authoritative_match,
+                updated_at=created_at,
+            )
             changed = c.execute(
                 "UPDATE contest_pairings SET match_id=?,status=? "
                 "WHERE id=? AND contest_id=? AND status=? AND match_id IS NULL",
@@ -15114,6 +20289,36 @@ class Store:
                 ).fetchone()
             )
 
+    def adjudicate_unavailable_contest_pairing(
+        self,
+        contest_id: int,
+        pairing_id: int,
+        match_id: str,
+        *,
+        game_id: str,
+        winner: int,
+        result: dict[str, Any],
+        time_control_id: str,
+        duplicate: bool = False,
+        activate_running: bool = False,
+        require_execution_admission: bool = True,
+    ) -> dict:
+        result_row = self._adjudicate_unavailable_contest_pairing(
+            contest_id,
+            pairing_id,
+            match_id,
+            game_id=game_id,
+            winner=winner,
+            result=result,
+            time_control_id=time_control_id,
+            duplicate=duplicate,
+            activate_running=activate_running,
+            require_execution_admission=require_execution_admission,
+        )
+        if result_row is None:
+            raise ValueError("赛事 active 对阵批次完整性校验失败")
+        return result_row
+
     def bind_contest_pairing_match(
         self,
         contest_id: int,
@@ -15135,7 +20340,8 @@ class Store:
                 c, maintenance_only=not require_execution_admission
             )
             contest = c.execute(
-                "SELECT status,game_id,stages_json,current_stage_idx "
+                "SELECT status,game_id,stages_json,current_stage_idx,time_control_id,"
+                "pairing_topology_revision,sealed_pairing_topology_revision "
                 "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
@@ -15173,6 +20379,31 @@ class Store:
                 or match["bot_b_id"] != pairing["bot_b_id"]
             ):
                 raise ValueError("对局与赛事对阵身份不一致")
+            try:
+                frozen_match_config = json.loads(match["match_config"] or "{}")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("对局时限快照损坏") from exc
+            if not isinstance(frozen_match_config, dict):
+                raise ValueError("对局时限快照损坏")
+            try:
+                expected_time_control_id = _resolved_time_control_id(
+                    str(contest["game_id"]), contest["time_control_id"]
+                )
+                match_time_control_id = _resolved_time_control_id(
+                    str(match["game_id"]),
+                    frozen_match_config.get("time_control_id"),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("对局或赛事时限快照损坏") from exc
+            if (
+                match_time_control_id != expected_time_control_id
+                or (
+                    contest["time_control_id"] is not None
+                    and frozen_match_config.get("time_control_id")
+                    != contest["time_control_id"]
+                )
+            ):
+                raise ValueError("对局时限与赛事冻结值不一致")
             pairing_stage_idx = exact_nonnegative_int(pairing["stage_idx"])
             if (
                 pairing_stage_idx is None
@@ -15180,6 +20411,13 @@ class Store:
                 != pairing_stage_idx
             ):
                 raise ValueError("赛事当前阶段已变化，不能绑定对局")
+            if not self._contest_stage_manifest_revision_is_valid_tx(
+                c,
+                contest_id,
+                pairing_stage_idx,
+                require_manifest=True,
+            ):
+                raise ValueError("赛事 active 对阵批次完整性校验失败")
             explicit_marker = _contest_stage_has_explicit_series_marker(
                 contest["stages_json"], pairing_stage_idx
             )
@@ -15188,12 +20426,7 @@ class Store:
             for suffix in ("a", "b"):
                 entry_id = pairing[f"entry_{suffix}_id"]
                 if entry_id is None:
-                    # Pre-entry legacy pairings remain readable/bindable.  All
-                    # current lifecycle writers freeze entry ids and are checked
-                    # below before their Match can become authoritative.
-                    if explicit_marker:
-                        raise ValueError("对局缺少冻结参赛项身份")
-                    continue
+                    raise ValueError("对局缺少冻结参赛项身份")
                 entry = c.execute(
                     "SELECT contest_id,bot_id FROM contest_entries WHERE id=?",
                     (entry_id,),
@@ -15239,11 +20472,19 @@ class Store:
                 )
                 if cur.rowcount != 1:
                     raise ValueError("赛事已不处于 published 状态")
-            return _row(
+            bound = _row(
                 c.execute(
                     "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
                 ).fetchone()
             )
+            # Compensation runs in a later transaction if starting the
+            # prepared Match fails.  Return the exact lifecycle epoch proven by
+            # this bind so unbind cannot detach a Match after roster/topology
+            # authority changed in between.
+            bound["_bound_pairing_topology_revision"] = exact_nonnegative_int(
+                contest["pairing_topology_revision"]
+            )
+            return bound
 
     def complete_contest_pairing_for_match(
         self, contest_id: int, match_id: str
@@ -15257,11 +20498,19 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] in (CONTEST_FINISHED, CONTEST_CANCELLED)
+            ):
+                return None
             table = self._match_table_of(c, match_id)
             if not table:
                 return None
             match = c.execute(
-                f"SELECT status, contest_id FROM {table} WHERE id=?", (match_id,)
+                f"SELECT * FROM {table} WHERE id=?", (match_id,)
             ).fetchone()
             if (
                 not match
@@ -15281,6 +20530,11 @@ class Store:
                     f"match {match_id} 绑定了 {len(pairings)} 个赛事对阵"
                 )
             pairing = pairings[0]
+            _finalize_terminal_replay_tx(
+                c,
+                match=match,
+                updated_at=_now(),
+            )
             c.execute(
                 "UPDATE contest_pairings SET status=? "
                 "WHERE id=? AND contest_id=? AND match_id=?",
@@ -15312,7 +20566,6 @@ class Store:
                 or contest["status"] not in (
                     CONTEST_RUNNING,
                     CONTEST_REST,
-                    CONTEST_FINISHED,
                 )
             ):
                 return None
@@ -15340,15 +20593,18 @@ class Store:
                 ):
                     continue
                 try:
-                    parsed = datetime.fromisoformat(str(match["started_at"]))
-                except ValueError:
+                    actual = validate_canonical_naive_timestamp(
+                        match["started_at"], "赛事对局开始时间"
+                    )
+                    parsed = datetime.fromisoformat(actual)
+                except (TypeError, ValueError):
                     logger.error(
                         "contest %s match %s has invalid started_at",
                         contest_id,
                         match_id,
                     )
                     continue
-                candidates.append((parsed, str(match["started_at"])))
+                candidates.append((parsed, actual))
 
             if not candidates:
                 return None
@@ -15357,22 +20613,27 @@ class Store:
             closes = contest["registration_closes_at"]
             ends = contest["ends_at"]
             try:
-                if closes and datetime.fromisoformat(str(closes)) > actual_dt:
+                closes = validate_canonical_naive_timestamp(
+                    closes, "赛事报名截止时间", allow_none=True
+                )
+                ends = validate_canonical_naive_timestamp(
+                    ends, "赛事结束时间", allow_none=True
+                )
+                if closes and datetime.fromisoformat(closes) > actual_dt:
                     return None
-                if ends and actual_dt > datetime.fromisoformat(str(ends)):
+                if ends and actual_dt > datetime.fromisoformat(ends):
                     return None
-            except ValueError:
+            except (TypeError, ValueError):
                 return None
             cur = c.execute(
                 "UPDATE contests SET starts_at=? "
                 "WHERE id=? AND starts_at IS NULL "
-                "AND status IN (?,?,?)",
+                "AND status IN (?,?)",
                 (
                     actual,
                     contest_id,
                     CONTEST_RUNNING,
                     CONTEST_REST,
-                    CONTEST_FINISHED,
                 ),
             )
             return actual if cur.rowcount == 1 else None
@@ -15383,10 +20644,59 @@ class Store:
         pairing_id: int,
         match_id: str,
         *,
+        expected_pairing_topology_revision: int,
         restore_published: bool = False,
     ) -> bool:
-        """prepared match 启动失败时精确撤销刚完成的 pairing 绑定。"""
+        """prepared Match 启动失败时按冻结 epoch 撤销绑定。
+
+        ``False`` means compensation authority was lost.  The caller must
+        retain the prepared Match in that case because it may still be the
+        durable pairing authority after a concurrent lifecycle mutation.
+        """
+        expected_revision = exact_nonnegative_int(
+            expected_pairing_topology_revision
+        )
+        if expected_revision is None:
+            return False
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status,current_stage_idx,pairing_topology_revision,"
+                "sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            pairing = c.execute(
+                "SELECT stage_idx,status,match_id FROM contest_pairings "
+                "WHERE id=? AND contest_id=?",
+                (pairing_id, contest_id),
+            ).fetchone()
+            stage_idx = exact_nonnegative_int(
+                pairing["stage_idx"] if pairing else None
+            )
+            if (
+                contest is None
+                or pairing is None
+                or contest["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING)
+                or stage_idx is None
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != stage_idx
+                or pairing["status"] != STATUS_RUNNING
+                or pairing["match_id"] != match_id
+                or exact_nonnegative_int(contest["pairing_topology_revision"])
+                != expected_revision
+                or exact_nonnegative_int(
+                    contest["sealed_pairing_topology_revision"]
+                )
+                != expected_revision
+                or not self._contest_stage_manifest_revision_is_valid_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    require_manifest=True,
+                )
+            ):
+                return False
             cur = c.execute(
                 "UPDATE contest_pairings SET match_id=NULL, status='pending' "
                 "WHERE id=? AND contest_id=? AND match_id=? AND status='running'",
@@ -15421,11 +20731,20 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"]
+                not in (CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST)
+            ):
+                return None
             table = self._match_table_of(c, match_id)
             if not table:
                 return None
             match = c.execute(
-                f"SELECT status, contest_id FROM {table} WHERE id=?", (match_id,)
+                f"SELECT * FROM {table} WHERE id=?", (match_id,)
             ).fetchone()
             if (
                 not match
@@ -15440,6 +20759,11 @@ class Store:
             ).fetchone()
             if not pairing:
                 return None
+            _finalize_terminal_replay_tx(
+                c,
+                match=match,
+                updated_at=_now(),
+            )
             cur = c.execute(
                 "UPDATE contest_pairings SET match_id=NULL, status=? "
                 "WHERE id=? AND contest_id=? AND match_id=?",
@@ -15487,6 +20811,669 @@ class Store:
                     wins, draws, losses, delta_total, group_id, rank_in_group,
                     payload_json,
                 ),
+            )
+
+    def _strict_stage_decision_tx(
+        self,
+        c: sqlite3.Connection,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_entries: list[dict[str, Any]],
+        expected_stage_groups: dict[int, str] | None,
+        allow_snapshot_bots: bool,
+    ) -> tuple[list[sqlite3.Row], set[int], dict[int, int | None]]:
+        """Validate one complete immutable decision in the caller's transaction."""
+        expected_entry_ids, expected_entry_bots = (
+            _validate_expected_contest_entries_tx(c, contest_id, expected_entries)
+        )
+        rows = c.execute(
+            "SELECT * FROM contest_stage_results "
+            "WHERE contest_id=? AND stage_idx=? ORDER BY entry_id",
+            (contest_id, stage_idx),
+        ).fetchall()
+        decision_bots = (
+            {
+                int(row["entry_id"]): row["bot_id"]
+                for row in rows
+                if isinstance(row["entry_id"], int)
+                and not isinstance(row["entry_id"], bool)
+            }
+            if allow_snapshot_bots
+            else expected_entry_bots
+        )
+        _normalize_stage_result_batch(
+            contest_id,
+            stage_idx,
+            [dict(row) for row in rows],
+            expected_entry_ids=expected_entry_ids,
+            expected_entry_bots=decision_bots,
+            expected_stage_groups=expected_stage_groups,
+        )
+        return rows, expected_entry_ids, expected_entry_bots
+
+    def _stage_decision_input_projection_tx(
+        self,
+        c: sqlite3.Connection,
+        contest_id: int,
+        stage_idx: int,
+    ) -> tuple[dict[str, Any], str]:
+        """Read and hash every current-stage ranking input in one DB snapshot."""
+        contest = _row(
+            c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
+        )
+        if contest is None:
+            raise ValueError("赛事不存在，无法读取阶段决策输入")
+        entries = [
+            _row(row)
+            for row in c.execute(
+                "SELECT * FROM contest_entries WHERE contest_id=? "
+                "ORDER BY registered_at,id",
+                (contest_id,),
+            ).fetchall()
+        ]
+        pairings = self._contest_bracket_tx(
+            c,
+            contest_id,
+            _registered_game_id(contest.get("game_id")),
+            stage_idx=stage_idx,
+            include_result=True,
+        )
+        projection = {
+            "contest": contest,
+            "entries": entries,
+            "pairings": pairings,
+        }
+        return projection, _stage_decision_input_token(contest, entries, pairings)
+
+    def contest_stage_decision_input_snapshot(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_status: str,
+    ) -> dict[str, Any] | None:
+        """Return one immutable candidate projection and its content token.
+
+        Match terminal fields and pairing match bindings deliberately do not
+        advance the lifecycle revision.  The typed content token binds the
+        ranking replay to those exact bytes; the install transaction recomputes
+        it before accepting any candidate.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None or expected_status not in (CONTEST_RUNNING, CONTEST_REST):
+            return None
+        with self._tx() as c:
+            c.execute("BEGIN")
+            projection, token = self._stage_decision_input_projection_tx(
+                c, contest_id, stage_idx
+            )
+            contest = projection["contest"]
+            if (
+                contest.get("status") != expected_status
+                or exact_nonnegative_int(contest.get("current_stage_idx"))
+                != stage_idx
+                or not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                )
+                or c.execute(
+                    "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+                    "AND stage_idx>? LIMIT 1",
+                    (contest_id, stage_idx),
+                ).fetchone()
+                or c.execute(
+                    "SELECT 1 FROM contest_stage_results WHERE contest_id=? "
+                    "AND stage_idx>? LIMIT 1",
+                    (contest_id, stage_idx),
+                ).fetchone()
+            ):
+                return None
+            revision = exact_nonnegative_int(
+                contest.get("pairing_topology_revision")
+            )
+            sealed = exact_nonnegative_int(
+                contest.get("sealed_pairing_topology_revision")
+            )
+            if revision is None or sealed != revision:
+                return None
+            return {
+                **projection,
+                "decision_input_token": token,
+                "decision_revision": revision,
+            }
+
+    def _require_stage_decision_inputs_settled_tx(
+        self,
+        c: sqlite3.Connection,
+        contest: sqlite3.Row,
+        contest_id: int,
+        stage_idx: int,
+        expected_entry_ids: set[int],
+    ) -> None:
+        """Prove the candidate decision reads one settled bound current graph."""
+        if c.execute(
+            "SELECT 1 FROM contest_pairings WHERE contest_id=? "
+            "AND stage_idx>? LIMIT 1",
+            (contest_id, stage_idx),
+        ).fetchone() or c.execute(
+            "SELECT 1 FROM contest_stage_results WHERE contest_id=? "
+            "AND stage_idx>? LIMIT 1",
+            (contest_id, stage_idx),
+        ).fetchone():
+            raise ValueError("赛事存在未来阶段 artifact，拒绝固化阶段决策")
+
+        stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
+        table = _matches_table(_registered_game_id(contest["game_id"]))
+        pairings = c.execute(
+            "SELECT p.*,m.id AS _bound_match_id,m.status AS _bound_match_status,"
+            "m.contest_id AS _bound_match_contest_id,"
+            "m.bot_a_id AS _bound_bot_a_id,m.bot_b_id AS _bound_bot_b_id "
+            f"FROM contest_pairings p LEFT JOIN {table} m ON m.id=p.match_id "
+            "WHERE p.contest_id=? AND p.stage_idx=? ORDER BY p.id",
+            (contest_id, stage_idx),
+        ).fetchall()
+        if not pairings and len(expected_entry_ids) > 1:
+            raise ValueError("非空赛事阶段缺少已裁决对阵")
+        if not pairings:
+            return
+        participants: set[int] = set()
+        for raw in pairings:
+            pairing = dict(raw)
+            entry_a_id = exact_nonnegative_int(pairing.get("entry_a_id"))
+            raw_entry_b_id = pairing.get("entry_b_id")
+            entry_b_id = (
+                exact_nonnegative_int(raw_entry_b_id)
+                if raw_entry_b_id is not None
+                else None
+            )
+            if (
+                entry_a_id is None
+                or entry_a_id < 1
+                or entry_a_id not in expected_entry_ids
+                or (
+                    raw_entry_b_id is not None
+                    and (
+                        entry_b_id is None
+                        or entry_b_id < 1
+                        or entry_b_id not in expected_entry_ids
+                        or entry_b_id == entry_a_id
+                    )
+                )
+            ):
+                raise ValueError("阶段决策对阵成员与权威 cohort 不一致")
+            participants.add(entry_a_id)
+            if entry_b_id is None:
+                if (
+                    pairing.get("match_id") is not None
+                    or pairing.get("status") != STATUS_COMPLETED
+                    or not is_authoritative_no_opponent_pairing(
+                        stage_type, pairing
+                    )
+                ):
+                    raise ValueError("阶段决策轮空对阵未权威裁决")
+                continue
+            participants.add(entry_b_id)
+            if (
+                not isinstance(pairing.get("match_id"), str)
+                or not pairing["match_id"]
+                or pairing.get("_bound_match_id") != pairing.get("match_id")
+                or pairing.get("_bound_match_status") != STATUS_COMPLETED
+                or pairing.get("_bound_match_contest_id") != contest_id
+                or pairing.get("_bound_bot_a_id") != pairing.get("bot_a_id")
+                or pairing.get("_bound_bot_b_id") != pairing.get("bot_b_id")
+            ):
+                raise ValueError("阶段决策对阵未绑定同赛事完整赛果")
+        if participants != expected_entry_ids:
+            raise ValueError("阶段决策对阵未精确覆盖权威 cohort")
+
+    def _require_all_reached_pairings_settled_tx(
+        self,
+        c: sqlite3.Connection,
+        contest: sqlite3.Row,
+        contest_id: int,
+        current_stage_idx: int,
+    ) -> None:
+        """Recheck every reached pairing's terminal Match binding in one tx.
+
+        Pairing progress/bind fields and Match terminal fields intentionally do
+        not advance the lifecycle-chain revision.  Manager-side topology proof
+        plus a revision CAS therefore protects structural drift, while this
+        writer-lock check closes the remaining race for completed/status/bind
+        inputs before a legacy finished contest is promoted to ready.
+        """
+        current_stage_idx = exact_nonnegative_int(current_stage_idx)
+        if current_stage_idx is None:
+            raise ValueError("赛事终态恢复阶段游标损坏")
+        stages = _loads_json(contest["stages_json"], default=[])
+        if (
+            not isinstance(stages, list)
+            or current_stage_idx >= len(stages)
+            or any(not isinstance(stage, dict) for stage in stages)
+        ):
+            raise ValueError("赛事终态恢复阶段配置损坏")
+        game_id = _registered_game_id(contest["game_id"])
+        table = _matches_table(game_id)
+        pairings = c.execute(
+            "SELECT p.*,m.id AS _bound_match_id,"
+            "m.status AS _bound_match_status,"
+            "m.contest_id AS _bound_match_contest_id,"
+            "m.game_id AS _bound_match_game_id,"
+            "m.match_type AS _bound_match_type,"
+            "m.bot_a_id AS _bound_bot_a_id,m.bot_b_id AS _bound_bot_b_id "
+            f"FROM contest_pairings p LEFT JOIN {table} m ON m.id=p.match_id "
+            "WHERE p.contest_id=? AND p.stage_idx<=? "
+            "ORDER BY p.stage_idx,p.id",
+            (contest_id, current_stage_idx),
+        ).fetchall()
+        for raw in pairings:
+            pairing = dict(raw)
+            pairing_stage_idx = exact_nonnegative_int(pairing.get("stage_idx"))
+            if (
+                pairing_stage_idx is None
+                or pairing_stage_idx > current_stage_idx
+                or pairing_stage_idx >= len(stages)
+            ):
+                raise ValueError("赛事终态恢复对阵阶段坐标损坏")
+            stage_type = stages[pairing_stage_idx].get("type")
+            entry_a_id = exact_nonnegative_int(pairing.get("entry_a_id"))
+            raw_entry_b_id = pairing.get("entry_b_id")
+            entry_b_id = (
+                exact_nonnegative_int(raw_entry_b_id)
+                if raw_entry_b_id is not None
+                else None
+            )
+            if entry_a_id is None or entry_a_id < 1:
+                raise ValueError("赛事终态恢复对阵成员身份损坏")
+            if entry_b_id is None:
+                if not is_authoritative_no_opponent_pairing(stage_type, pairing):
+                    raise ValueError("赛事终态恢复轮空对阵未权威裁决")
+                continue
+            bot_a_id = exact_nonnegative_int(pairing.get("bot_a_id"))
+            bot_b_id = exact_nonnegative_int(pairing.get("bot_b_id"))
+            if (
+                entry_b_id < 1
+                or entry_b_id == entry_a_id
+                or bot_a_id is None
+                or bot_a_id < 1
+                or bot_b_id is None
+                or bot_b_id < 1
+                or not isinstance(pairing.get("match_id"), str)
+                or not pairing["match_id"]
+                or pairing.get("status") != STATUS_COMPLETED
+                or pairing.get("_bound_match_id") != pairing.get("match_id")
+                or pairing.get("_bound_match_status") != STATUS_COMPLETED
+                or pairing.get("_bound_match_contest_id") != contest_id
+                or pairing.get("_bound_match_game_id") != game_id
+                or pairing.get("_bound_match_type") != TYPE_CONTEST
+                or pairing.get("_bound_bot_a_id") != bot_a_id
+                or pairing.get("_bound_bot_b_id") != bot_b_id
+            ):
+                raise ValueError("赛事终态恢复存在未裁决或错误绑定对阵")
+
+        # A pending/running Match owned by the contest but no longer reachable
+        # from a pairing is also progress, not a recoverable terminal state.
+        for candidate_game_id in sorted(_all_game_ids()):
+            candidate_table = _matches_table(candidate_game_id)
+            if c.execute(
+                f"SELECT 1 FROM {candidate_table} WHERE contest_id=? "
+                "AND status IN (?,?) LIMIT 1",
+                (contest_id, STATUS_PENDING, STATUS_RUNNING),
+            ).fetchone():
+                raise ValueError("赛事终态恢复仍存在 active 或孤立对局")
+
+    def contest_stage_decision_revision(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_status: str,
+    ) -> int | None:
+        """Return one sealed current decision-input revision, or fail closed."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        if stage_idx is None or expected_status not in (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+            CONTEST_REST,
+        ):
+            return None
+        with self._tx() as c:
+            c.execute("BEGIN")
+            contest = c.execute(
+                "SELECT status,current_stage_idx,pairing_topology_revision,"
+                "sealed_pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != expected_status
+                or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+                or not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                )
+            ):
+                return None
+            revision = exact_nonnegative_int(contest["pairing_topology_revision"])
+            sealed = exact_nonnegative_int(
+                contest["sealed_pairing_topology_revision"]
+            )
+            return revision if revision is not None and revision == sealed else None
+
+    def install_contest_stage_results_if_absent(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        result_rows: list[dict[str, Any]] | None,
+        *,
+        expected_revision: int | None,
+        expected_input_token: str | None = None,
+        expected_status: str,
+        expected_entries: list[dict[str, Any]],
+        expected_stage_groups: dict[int, str] | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Install one decision once, or return the exact durable winner.
+
+        Existing rows are never deleted, updated, or recomputed. A partial or
+        malformed existing batch rejects the lifecycle transition. A candidate
+        is accepted only against the exact sealed revision observed before Match
+        replay; its row-trigger revision bump is resealed before commit.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        normalized_expected_revision = (
+            exact_nonnegative_int(expected_revision)
+            if expected_revision is not None
+            else None
+        )
+        if (
+            stage_idx is None
+            or expected_status not in (CONTEST_RUNNING, CONTEST_REST)
+            or (result_rows is not None and not isinstance(result_rows, list))
+            or (
+                expected_revision is not None
+                and normalized_expected_revision is None
+            )
+            or (
+                result_rows is not None
+                and (
+                    not isinstance(expected_input_token, str)
+                    or len(expected_input_token) != 64
+                    or any(
+                        char not in "0123456789abcdef"
+                        for char in expected_input_token
+                    )
+                )
+            )
+        ):
+            raise ValueError("阶段决策安装坐标无效")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != expected_status
+                or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+                or not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                )
+            ):
+                raise ValueError("阶段决策赛事状态、游标或拓扑冻结已变化")
+            revision = exact_nonnegative_int(contest["pairing_topology_revision"])
+            sealed = exact_nonnegative_int(
+                contest["sealed_pairing_topology_revision"]
+            )
+            if revision is None or sealed != revision:
+                raise ValueError("阶段决策生命周期 revision 未冻结")
+
+            existing_rows = c.execute(
+                "SELECT * FROM contest_stage_results "
+                "WHERE contest_id=? AND stage_idx=? ORDER BY entry_id",
+                (contest_id, stage_idx),
+            ).fetchall()
+            if existing_rows:
+                rows, _ids, _bots = self._strict_stage_decision_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    expected_entries=expected_entries,
+                    expected_stage_groups=expected_stage_groups,
+                    allow_snapshot_bots=(expected_status == CONTEST_REST),
+                )
+                return _stage_result_recovery_rows(rows), revision
+            if result_rows is None:
+                raise ValueError("阶段决策不存在，拒绝无候选重放")
+            if normalized_expected_revision is None or revision != normalized_expected_revision:
+                raise ValueError("阶段决策输入 revision 已变化")
+            _current_projection, current_input_token = (
+                self._stage_decision_input_projection_tx(
+                    c, contest_id, stage_idx
+                )
+            )
+            if current_input_token != expected_input_token:
+                raise ValueError("阶段决策排名输入已变化")
+            expected_entry_ids, expected_entry_bots = (
+                _validate_expected_contest_entries_tx(
+                    c, contest_id, expected_entries
+                )
+            )
+            self._require_stage_decision_inputs_settled_tx(
+                c, contest, contest_id, stage_idx, expected_entry_ids
+            )
+            normalized = _normalize_stage_result_batch(
+                contest_id,
+                stage_idx,
+                result_rows,
+                expected_entry_ids=expected_entry_ids,
+                expected_entry_bots=expected_entry_bots,
+                expected_stage_groups=expected_stage_groups,
+            )
+            _insert_stage_result_batch_tx(c, normalized)
+            after = c.execute(
+                "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            after_revision = exact_nonnegative_int(
+                after["pairing_topology_revision"] if after else None
+            )
+            if (
+                after_revision is None
+                or exact_nonnegative_int(
+                    after["sealed_pairing_topology_revision"] if after else None
+                )
+                != revision
+            ):
+                raise ValueError("阶段决策安装期间 lifecycle revision 漂移")
+            resealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND pairing_topology_revision=? "
+                "AND sealed_pairing_topology_revision=?",
+                (
+                    contest_id,
+                    expected_status,
+                    stage_idx,
+                    after_revision,
+                    revision,
+                ),
+            )
+            if resealed.rowcount != 1:
+                raise ValueError("阶段决策安装后拓扑重封 CAS 失败")
+            installed_rows = c.execute(
+                "SELECT * FROM contest_stage_results "
+                "WHERE contest_id=? AND stage_idx=? ORDER BY entry_id",
+                (contest_id, stage_idx),
+            ).fetchall()
+            return _stage_result_recovery_rows(installed_rows), after_revision
+
+    def enter_contest_rest_from_decision(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        expected_revision: int,
+        expected_status: str,
+        expected_entries: list[dict[str, Any]],
+        expected_stage_groups: dict[int, str] | None,
+        rest_ends_at: str,
+    ) -> dict[str, Any]:
+        """Consume one immutable decision and enter rest with a strict CAS."""
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_revision = exact_nonnegative_int(expected_revision)
+        rest_ends_at = validate_canonical_naive_timestamp(
+            rest_ends_at, "赛事休息结束时间"
+        )
+        if (
+            stage_idx is None
+            or expected_revision is None
+            or expected_status != CONTEST_RUNNING
+        ):
+            raise ValueError("赛事休息转换坐标无效")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            revision = exact_nonnegative_int(
+                contest["pairing_topology_revision"] if contest else None
+            )
+            sealed = exact_nonnegative_int(
+                contest["sealed_pairing_topology_revision"] if contest else None
+            )
+            if (
+                contest is None
+                or contest["status"] != expected_status
+                or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+                or revision != expected_revision
+                or sealed != expected_revision
+                or not self._contest_stage_manifest_is_valid_tx(
+                    c,
+                    contest_id,
+                    stage_idx,
+                    include_terminal_orphans=True,
+                    require_manifest=True,
+                )
+            ):
+                raise ValueError("赛事休息转换 CAS 已失效")
+            self._strict_stage_decision_tx(
+                c,
+                contest_id,
+                stage_idx,
+                expected_entries=expected_entries,
+                expected_stage_groups=expected_stage_groups,
+                allow_snapshot_bots=False,
+            )
+            changed = c.execute(
+                "UPDATE contests SET status=?,rest_ends_at=? WHERE id=? "
+                "AND status=? AND current_stage_idx=? "
+                "AND pairing_topology_revision=? "
+                "AND sealed_pairing_topology_revision=?",
+                (
+                    CONTEST_REST,
+                    rest_ends_at,
+                    contest_id,
+                    expected_status,
+                    stage_idx,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事休息转换 CAS 失败")
+            after = c.execute(
+                "SELECT pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            after_revision = exact_nonnegative_int(
+                after["pairing_topology_revision"] if after else None
+            )
+            if after_revision is None:
+                raise ValueError("赛事休息转换 revision 损坏")
+            resealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND pairing_topology_revision=?",
+                (contest_id, CONTEST_REST, stage_idx, after_revision),
+            )
+            if resealed.rowcount != 1:
+                raise ValueError("赛事休息转换重封 CAS 失败")
+            result = _contest_row(
+                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
+            )
+            if result is None:
+                raise ValueError("赛事休息转换后记录丢失")
+            return result
+
+    def replace_stage_results(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        result_rows: list[dict[str, Any]],
+        *,
+        expected_entries: list[dict[str, Any]] | None = None,
+        expected_stage_groups: dict[int, str] | None = None,
+    ) -> None:
+        """Atomically replace one complete stage-ranking snapshot.
+
+        Stage completion consumes this as one logical artifact.  Per-row
+        commits can leave a prefix that later appears to be a smaller complete
+        cohort, so validation, deletion, and every insert share one immediate
+        transaction.  An empty legitimate cohort also clears stale rows.
+        """
+        if (
+            isinstance(contest_id, bool)
+            or not isinstance(contest_id, int)
+            or contest_id < 1
+            or isinstance(stage_idx, bool)
+            or not isinstance(stage_idx, int)
+            or stage_idx < 0
+            or not isinstance(result_rows, list)
+        ):
+            raise ValueError("阶段结果批次坐标无效")
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            expected_entry_ids: set[int] | None = None
+            expected_entry_bots: dict[int, int | None] | None = None
+            if expected_entries is not None:
+                contest = c.execute(
+                    "SELECT status,current_stage_idx FROM contests WHERE id=?",
+                    (contest_id,),
+                ).fetchone()
+                if (
+                    contest is None
+                    or contest["status"] not in (CONTEST_RUNNING, CONTEST_REST)
+                    or exact_nonnegative_int(contest["current_stage_idx"])
+                    != stage_idx
+                ):
+                    raise ValueError("阶段结果赛事状态或游标已变化")
+                expected_entry_ids, expected_entry_bots = (
+                    _validate_expected_contest_entries_tx(
+                        c, contest_id, expected_entries
+                    )
+                )
+            normalized = _normalize_stage_result_batch(
+                contest_id,
+                stage_idx,
+                result_rows,
+                expected_entry_ids=expected_entry_ids,
+                expected_entry_bots=expected_entry_bots,
+                expected_stage_groups=expected_stage_groups,
+            )
+            _replace_stage_result_batch_tx(
+                c, contest_id, stage_idx, normalized
             )
 
     def list_stage_results(
@@ -15542,10 +21529,29 @@ class Store:
             row["tiebreaks"] = sanitize_public_contest_tiebreaks(
                 payload.get("tiebreaks")
             )
+            overall_rank = payload.get("overall_rank")
+            row["overall_rank"] = (
+                overall_rank
+                if isinstance(overall_rank, int)
+                and not isinstance(overall_rank, bool)
+                and overall_rank >= 1
+                else None
+            )
             snapshots.append(row)
         return snapshots
 
     # ── contest_official_results（P2 全员正式名次）─────────────
+
+    @staticmethod
+    def validate_complete_official_group_coordinates(
+        rows: list[dict[str, Any] | sqlite3.Row],
+        *,
+        expected_entry_groups: dict[int, object] | None = None,
+    ) -> None:
+        """Apply the shared full-table source-coordinate validation contract."""
+        _validate_complete_official_group_coordinates(
+            rows, expected_entry_groups=expected_entry_groups
+        )
 
     def replace_official_results(
         self,
@@ -15561,38 +21567,290 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not c.execute(
-                "SELECT 1 FROM contests WHERE id=?", (contest_id,)
-            ).fetchone():
-                raise ValueError("赛事不存在")
-            c.execute(
-                "DELETE FROM contest_official_results WHERE contest_id=?",
-                (contest_id,),
-            )
-            for row in result_rows:
-                stage_idx = exact_nonnegative_int(row.get("stage_idx", 0))
-                if stage_idx is None:
-                    raise ValueError("正式名次阶段坐标必须是非负整数")
-                c.execute(
-                    "INSERT INTO contest_official_results"
-                    "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
-                    "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        contest_id,
-                        row["entry_id"],
-                        stage_idx,
-                        row["rank"],
-                        row.get("points") or 0,
-                        row.get("bot_id"),
-                        row.get("user_id"),
-                        row.get("tiebreaks_json") or "{}",
-                        row.get("awarded") or "",
-                    ),
-                )
+            _replace_official_result_batch_tx(c, contest_id, result_rows)
             c.execute(
                 "UPDATE contests SET official_results_ready=1 WHERE id=?",
                 (contest_id,),
             )
+
+    def recover_finished_contest_official_results(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        official_result_rows: list[dict[str, Any]],
+        expected_revision: int,
+        expected_entries: list[dict[str, Any]],
+        expected_stage_groups: dict[int, str] | None,
+    ) -> dict[str, Any]:
+        """Publish a legacy finished/unready table from one exact decision.
+
+        New terminal transitions commit the stage decision, official table and
+        finished status atomically, so this path exists only for historical
+        crash recovery.  A terminal status is not authority by itself: the
+        current manifest, lifecycle revision, full roster, settled binding and
+        immutable stage-result batch are revalidated under the same
+        ``BEGIN IMMEDIATE`` that installs the official table and ready flag.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_revision = exact_nonnegative_int(expected_revision)
+        if (
+            stage_idx is None
+            or expected_revision is None
+            or not isinstance(official_result_rows, list)
+            or not isinstance(expected_entries, list)
+        ):
+            raise ValueError("赛事终态恢复批次坐标无效")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            revision = exact_nonnegative_int(
+                contest["pairing_topology_revision"] if contest else None
+            )
+            sealed = exact_nonnegative_int(
+                contest["sealed_pairing_topology_revision"] if contest else None
+            )
+            manifest = exact_nonnegative_int(
+                contest["published_stage_pairing_count"] if contest else None
+            )
+            if (
+                contest is None
+                or contest["status"] != CONTEST_FINISHED
+                or exact_nonnegative_int(contest["current_stage_idx"]) != stage_idx
+                or exact_sqlite_bool(contest["official_results_ready"]) is not False
+                or revision != expected_revision
+                or sealed != expected_revision
+                or manifest is None
+            ):
+                raise ValueError("赛事终态恢复状态、游标或拓扑冻结已变化")
+            current_count = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM contest_pairings "
+                    "WHERE contest_id=? AND stage_idx=?",
+                    (contest_id, stage_idx),
+                ).fetchone()[0]
+            )
+            if current_count != manifest:
+                raise ValueError("赛事终态恢复对阵批次计数不一致")
+            if c.execute(
+                "SELECT 1 FROM execution_jobs WHERE source=? AND contest_id=? "
+                "AND status IN (?,?,?,?) LIMIT 1",
+                (
+                    EXECUTION_SOURCE_CONTEST,
+                    contest_id,
+                    EXECUTION_QUEUED,
+                    EXECUTION_STARTING,
+                    EXECUTION_RUNNING,
+                    EXECUTION_SETTLING,
+                ),
+            ).fetchone():
+                raise ValueError("赛事终态恢复仍存在 active 执行请求")
+
+            _rows, expected_entry_ids, _bots = self._strict_stage_decision_tx(
+                c,
+                contest_id,
+                stage_idx,
+                expected_entries=expected_entries,
+                expected_stage_groups=expected_stage_groups,
+                # A Bot may be replaced while the contest rests after this
+                # decision.  The official batch is rebound to the current
+                # roster, while the immutable stage row keeps who played it.
+                allow_snapshot_bots=True,
+            )
+            self._require_stage_decision_inputs_settled_tx(
+                c, contest, contest_id, stage_idx, expected_entry_ids
+            )
+            self._require_all_reached_pairings_settled_tx(
+                c, contest, contest_id, stage_idx
+            )
+            _replace_official_result_batch_tx(
+                c, contest_id, official_result_rows
+            )
+            changed = c.execute(
+                "UPDATE contests SET official_results_ready=1 "
+                "WHERE id=? AND status=? AND current_stage_idx=? "
+                "AND official_results_ready=0 "
+                "AND pairing_topology_revision=? "
+                "AND sealed_pairing_topology_revision=?",
+                (
+                    contest_id,
+                    CONTEST_FINISHED,
+                    stage_idx,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("赛事终态恢复 ready CAS 已失效")
+            after = c.execute(
+                "SELECT pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            after_revision = exact_nonnegative_int(
+                after["pairing_topology_revision"] if after else None
+            )
+            if after_revision is None:
+                raise ValueError("赛事终态恢复 lifecycle revision 损坏")
+            resealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND official_results_ready=1 "
+                "AND pairing_topology_revision=?",
+                (
+                    contest_id,
+                    CONTEST_FINISHED,
+                    stage_idx,
+                    after_revision,
+                ),
+            )
+            if resealed.rowcount != 1:
+                raise ValueError("赛事终态恢复重封 CAS 已失效")
+            result = _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+            )
+            if result is None:  # pragma: no cover - same transaction invariant
+                raise ValueError("赛事终态恢复后记录丢失")
+            return result
+
+    def finish_contest_with_results(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        stage_result_rows: list[dict[str, Any]] | None,
+        official_result_rows: list[dict[str, Any]],
+        expected_decision_revision: int,
+        expected_status: str,
+        expected_entries: list[dict[str, Any]],
+        expected_stage_groups: dict[int, str] | None,
+        entry_updates: list[dict[str, Any]] | None = None,
+        ends_at: str,
+    ) -> dict[str, Any]:
+        """Atomically publish the terminal stage, official table and status.
+
+        The completed stage decision is always installed before this transaction
+        and consumed in place (entrants may have changed Bot during a rest
+        window). ``entry_updates`` is reserved for a legitimate zero/one-person
+        next-stage shortcut: its complete advancement CAS is applied after the
+        deciding stage snapshot has been validated but before the official
+        table is checked.  Any validation, trigger or CAS failure rolls the
+        whole unit back and leaves the contest retryable in its prior active
+        state.
+        """
+        stage_idx = exact_nonnegative_int(stage_idx)
+        expected_decision_revision = exact_nonnegative_int(
+            expected_decision_revision
+        )
+        ends_at = validate_canonical_naive_timestamp(
+            ends_at, "赛事结束时间"
+        )
+        normalized_entry_updates = (
+            _contest_entry_advancement_batch(entry_updates)
+            if entry_updates is not None
+            else None
+        )
+        if (
+            stage_idx is None
+            or expected_decision_revision is None
+            or not isinstance(expected_status, str)
+            or expected_status not in (CONTEST_RUNNING, CONTEST_REST)
+            or not isinstance(official_result_rows, list)
+            or stage_result_rows is not None
+        ):
+            raise ValueError("赛事终态结果批次坐标无效")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if (
+                contest is None
+                or contest["status"] != expected_status
+                or exact_nonnegative_int(contest["current_stage_idx"])
+                != stage_idx
+                or exact_sqlite_bool(contest["official_results_ready"])
+                is not False
+                or exact_nonnegative_int(contest["pairing_topology_revision"])
+                != expected_decision_revision
+                or exact_nonnegative_int(
+                    contest["sealed_pairing_topology_revision"]
+                )
+                != expected_decision_revision
+            ):
+                raise ValueError("赛事终态状态、游标或就绪标记已变化")
+            if not self._contest_stage_manifest_is_valid_tx(
+                c,
+                contest_id,
+                stage_idx,
+                include_terminal_orphans=True,
+            ):
+                raise ValueError("赛事当前阶段对阵批次完整性校验失败")
+
+            expected_entry_ids, expected_entry_bots = (
+                _validate_expected_contest_entries_tx(
+                    c, contest_id, expected_entries
+                )
+            )
+            self._strict_stage_decision_tx(
+                c,
+                contest_id,
+                stage_idx,
+                expected_entries=expected_entries,
+                expected_stage_groups=expected_stage_groups,
+                allow_snapshot_bots=(expected_status == CONTEST_REST),
+            )
+
+            if normalized_entry_updates is not None:
+                _apply_contest_entry_advancement_tx(
+                    c, contest_id, normalized_entry_updates
+                )
+
+            _replace_official_result_batch_tx(
+                c, contest_id, official_result_rows
+            )
+            updated = c.execute(
+                "UPDATE contests SET status=?,ends_at=?,rest_ends_at=NULL,"
+                "official_results_ready=1 WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND official_results_ready=0",
+                (
+                    CONTEST_FINISHED,
+                    ends_at,
+                    contest_id,
+                    expected_status,
+                    stage_idx,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("赛事终态 CAS 失败")
+            after = c.execute(
+                "SELECT pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            after_revision = exact_nonnegative_int(
+                after["pairing_topology_revision"] if after else None
+            )
+            if after_revision is None:
+                raise ValueError("赛事终态 lifecycle revision 损坏")
+            resealed = c.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=? AND status=? "
+                "AND current_stage_idx=? AND pairing_topology_revision=?",
+                (contest_id, CONTEST_FINISHED, stage_idx, after_revision),
+            )
+            if resealed.rowcount != 1:
+                raise ValueError("赛事终态重封 CAS 失败")
+            result = _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+            )
+            if result is None:  # pragma: no cover - same transaction invariant
+                raise ValueError("赛事终态写入后记录丢失")
+            return result
 
     def clear_official_results(self, contest_id: int) -> None:
         with self._tx() as c:
@@ -15611,28 +21869,49 @@ class Store:
         points: float = 0,
         bot_id: int | None = None,
         user_id: int | None = None,
+        group_id: str = "",
+        rank_in_group: int | None = None,
         tiebreaks_json: str = "{}",
         awarded: str = "",
     ) -> None:
+        group_id, rank_in_group = _parse_official_group_coordinates(
+            group_id, rank_in_group
+        )
         with self._tx() as c:
             c.execute(
                 "INSERT INTO contest_official_results"
                 "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
-                "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?) "
+                "group_id, rank_in_group, tiebreaks_json, awarded) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(contest_id, entry_id) DO UPDATE SET "
                 "stage_idx=excluded.stage_idx, rank=excluded.rank, "
                 "points=excluded.points, bot_id=excluded.bot_id, "
-                "user_id=excluded.user_id, tiebreaks_json=excluded.tiebreaks_json, "
+                "user_id=excluded.user_id, group_id=excluded.group_id, "
+                "rank_in_group=excluded.rank_in_group, "
+                "tiebreaks_json=excluded.tiebreaks_json, "
                 "awarded=excluded.awarded",
                 (
                     contest_id, entry_id, stage_idx, rank, points, bot_id, user_id,
-                    tiebreaks_json, awarded,
+                    group_id, rank_in_group, tiebreaks_json, awarded,
                 ),
             )
 
     def list_official_results(self, contest_id: int) -> list[dict]:
         """全员正式名次（按 rank 升序，1..N 唯一连续）。"""
         with self._tx() as c:
+            c.execute("BEGIN")
+            if not c.execute(
+                "SELECT 1 FROM contests WHERE id=?", (contest_id,)
+            ).fetchone():
+                return []
+            (
+                contest,
+                roster_rows,
+                stage_entry_ids,
+                legacy_entry_groups,
+            ) = (
+                _official_result_validation_context_tx(c, contest_id)
+            )
             rows = c.execute(
                 "SELECT r.*, b.name AS bot_name, b.display_name AS bot_display, "
                 "u.username AS owner_name, u.display_name AS owner_display "
@@ -15642,7 +21921,25 @@ class Store:
                 "WHERE r.contest_id=? ORDER BY r.rank",
                 (contest_id,),
             ).fetchall()
-            return [_row(r) for r in rows]
+            if exact_sqlite_bool(contest.get("official_results_ready")) is True:
+                return _validate_complete_official_results(
+                    rows,
+                    contest_id=contest_id,
+                    contest=contest,
+                    roster_rows=roster_rows,
+                    stage_entry_ids=stage_entry_ids,
+                    legacy_entry_groups=legacy_entry_groups,
+                )
+            parsed: list[dict[str, Any]] = []
+            for raw in rows:
+                row = dict(raw)
+                row["group_id"], row["rank_in_group"] = (
+                    _parse_official_group_coordinates(
+                        row.get("group_id"), row.get("rank_in_group")
+                    )
+                )
+                parsed.append(row)
+            return parsed
 
     # ── contest_templates（历史只读；运行模板来自代码注册表）──
 

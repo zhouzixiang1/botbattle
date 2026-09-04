@@ -14,6 +14,7 @@ from bzplat.backend.games.base import (
     GameSpec,
     ProtocolSpec,
     SessionFactory,
+    TimeControlSpec,
 )
 from bzplat.backend.games.gomoku.spec import SPEC as _GOMOKU_SPEC
 from bzplat.backend.games.holdem.spec import SPEC as _HOLDEM_SPEC
@@ -113,6 +114,14 @@ def game_label(game_id: str) -> str:
     return registry.get(game_id).label
 
 
+def resolve_time_control(
+    game_id: str, time_control_id: str | None = None
+) -> TimeControlSpec:
+    """Resolve one game's exact frozen time-control id."""
+
+    return registry.get(game_id).resolve_time_control(time_control_id)
+
+
 def _build_game_labels() -> dict[str, str]:
     return {gid: registry.get(gid).label for gid in registry.all_ids()}
 
@@ -157,6 +166,7 @@ __all__ = [
     "GameSpec",
     "ProtocolSpec",
     "SessionFactory",
+    "TimeControlSpec",
     "normalize_game_id",
     "run_session",
     "dumps",
@@ -167,5 +177,6 @@ __all__ = [
     "validate_match_config",
     "default_match_config",
     "game_label",
+    "resolve_time_control",
     "GAME_LABELS",
 ]

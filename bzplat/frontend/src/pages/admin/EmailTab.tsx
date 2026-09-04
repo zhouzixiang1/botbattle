@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { apiGet, apiJson, errMsg, userToken } from '@/api'
+import { apiGet, apiJson, errMsg } from '@/api'
 import Pagination from '@/components/Pagination'
 import { ThreadView } from '@/components/communications/thread-view'
 import type {
@@ -637,12 +637,8 @@ export default function CommunicationsTab() {
     const controller = new AbortController()
     attachmentControllersRef.current.add(controller)
     try {
-      const headers = new Headers()
-      const token = userToken.get()
-      if (token) headers.set('Authorization', `Bearer ${token}`)
       const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(bugPublicId)}/attachments/${encodeURIComponent(attachmentId)}`, {
-        headers,
-        credentials: token ? 'omit' : 'include',
+        credentials: 'include',
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
         signal: controller.signal,

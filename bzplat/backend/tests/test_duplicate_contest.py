@@ -49,17 +49,22 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
 
     s = Store(str(tmp_path / "dup_cfg.db"))
     u = s.create_user("orgcfg", "c@e.com", "x")["id"]
+    opponent = s.create_user("opponentcfg", "opponent@e.com", "x")["id"]
     path_a = tmp_path / "cfg-a"
     path_b = tmp_path / "cfg-b"
     path_a.write_bytes(b"test fixture")
     path_b.write_bytes(b"test fixture")
     ba = s.create_bot(u, "cfgbotA", binary_path=str(path_a), format="elf", game_id="holdem", is_active=1)["id"]
-    bb = s.create_bot(u, "cfgbotB", binary_path=str(path_b), format="elf", game_id="holdem", is_active=1)["id"]
+    bb = s.create_bot(opponent, "cfgbotB", binary_path=str(path_b), format="elf", game_id="holdem", is_active=1)["id"]
+    version_a = s.add_bot_version(ba, binary_path=str(path_a), version=1)
+    version_b = s.add_bot_version(bb, binary_path=str(path_b), version=1)
+    time_control_id = "holdem_per_decision_60s_v1"
     contest = s.create_contest(
         "cfg contest",
         organizer_id=u,
-        status="running",
+        status="published",
         game_id="holdem",
+        time_control_id=time_control_id,
         stages_json=_json.dumps(
             [
                 {
@@ -73,12 +78,32 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
             ]
         ),
     )
-    pairing = s.add_pairing(
+    entry_a = s.add_contest_entry(contest["id"], u, ba)
+    entry_b = s.add_contest_entry(contest["id"], opponent, bb)
+    pairing = s.create_contest_stage_pairings(
         contest["id"],
-        ba,
-        bb,
-        pairing_seed=42,
-    )
+        0,
+        [
+            {
+                "entry_a_id": entry_a["id"],
+                "entry_b_id": entry_b["id"],
+                "bot_a_id": ba,
+                "bot_b_id": bb,
+                "bot_a_version_id": version_a["id"],
+                "bot_b_version_id": version_b["id"],
+                "pairing_seed": 42,
+                "round_num": 1,
+                "stage_key": "rr",
+                "series_index": 1,
+                "series_size": 1,
+                "published_at": "2026-01-01T00:00:00",
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
+    assert s.contest_stage_manifest_is_valid(contest["id"], 0)
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
     async def _go():
@@ -92,6 +117,7 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
                 contest_id=contest["id"],
                 contest_pairing_id=pairing["id"],
                 duplicate_seed=42,
+                time_control_id=time_control_id,
             )
             if duplicate
             else await orch.challenge(
@@ -101,6 +127,7 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
                 match_type="contest",
                 contest_id=contest["id"],
                 contest_pairing_id=pairing["id"],
+                time_control_id=time_control_id,
             )
         )
         job = claim_request(orch, request_id, start=False)
@@ -112,6 +139,7 @@ def test_contest_challenge_freezes_exact_duplicate_flag(tmp_path, duplicate):
     if isinstance(mc, str):
         mc = _json.loads(mc or "{}")
     assert mc.get("duplicate") is duplicate
+    assert mc.get("time_control_id") == time_control_id
     assert m.get("match_seed") == (42 if duplicate else None)
     s.close()
 

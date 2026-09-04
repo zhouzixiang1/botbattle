@@ -9,7 +9,7 @@ import math
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -20,13 +20,14 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Query,
     Request,
     Response,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field, StrictBool, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 from starlette.datastructures import FormData, UploadFile
 
 from bzplat.backend.auth.auth_manager import COOKIE_NAME
@@ -50,6 +51,7 @@ from bzplat.backend.runtime.limits import (
     MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
 )
 from bzplat.backend.runtime.local_ai import (
+    LOCAL_AI_WEBSOCKET_SUBPROTOCOL,
     LocalAIConnectionError,
     LocalAIResponseRejected,
 )
@@ -65,7 +67,23 @@ _LOCAL_AI_INBOUND_BURST = 20.0
 _LOCAL_AI_INBOUND_REFILL_PER_SECOND = 5.0
 
 
-async def _deny_local_ai_websocket(websocket: WebSocket) -> None:
+class _ResponseScopeCleanupStreamingResponse(StreamingResponse):
+    """Run a synchronous cleanup when the complete ASGI response scope ends."""
+
+    def __init__(self, *args, cleanup: Callable[[], None], **kwargs) -> None:
+        self._cleanup = cleanup
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._cleanup()
+
+
+async def _deny_local_ai_websocket(
+    websocket: WebSocket, *, reason: str = "invalid_credentials"
+) -> None:
     """Reject a connector during HTTP upgrade without exposing credentials."""
 
     # Keep the rejection on the baseline ASGI WebSocket contract.  Uvicorn's
@@ -73,12 +91,27 @@ async def _deny_local_ai_websocket(websocket: WebSocket) -> None:
     # handshake state incomplete after ``websocket.http.response`` denial
     # responses.  A close before accept is mapped to a valid HTTP 403 by every
     # supported Uvicorn backend and never upgrades an unauthenticated peer.
-    await websocket.close(code=1008, reason="invalid_credentials")
+    await websocket.close(code=1008, reason=reason)
+
+
+async def _deny_human_play_websocket(websocket: WebSocket) -> None:
+    """Return one existence-independent browser handshake rejection."""
+
+    await websocket.accept()
+    await websocket.send_json({
+        "type": "reject",
+        "reason": "forbidden",
+        "message": "无权访问该对局",
+    })
+    await websocket.close(code=1008, reason="forbidden")
+
+
 _DEBUG_NO_STORE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
     "Vary": "Authorization, Cookie",
 }
+_AUTH_VARY_HEADERS = {"Vary": "Authorization, Cookie"}
 _ADMIN_PRIVATE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
@@ -90,6 +123,7 @@ _CONTEST_IDENTITY_PRIVATE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.contests.manager import current_stage_topology_seal_is_valid
 from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.series import (
     contest_match_binding_is_valid,
@@ -103,6 +137,7 @@ from bzplat.backend.contests.validation import (
     SERIES_SCORING_AGGREGATE,
     SERIES_SCORING_INDEPENDENT,
     active_contest_entries,
+    reserved_group_markers_match_template,
     stage_duplicate_mode,
     stage_scoring_contract_is_valid,
 )
@@ -110,7 +145,10 @@ from bzplat.backend.contests.presentation import (
     build_elimination_tiebreak_projection,
     build_stage_counts,
     build_stage_summaries,
+    current_stage_cohort_from_summaries,
+    current_stage_ranking_from_summaries,
     expected_stage_topology,
+    public_format_snapshot,
 )
 from bzplat.backend.contests.stages import effective_swiss_rounds
 from bzplat.backend.contests.showcase import (
@@ -123,6 +161,10 @@ from bzplat.backend.contests.templates import list_templates, points_for_result
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games.base import MatchRecordExportError
 from bzplat.backend.matches import MatchOrchestrator
+from bzplat.backend.matches.orchestrator import (
+    HumanWebSocketLimitError,
+    PublicSSELimitError,
+)
 from bzplat.backend.matches.public_outcome import (
     build_public_outcome,
     normalized_delta_value,
@@ -133,6 +175,7 @@ from bzplat.backend.runtime.config import (
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
+    HUMAN_ACTION_MAX_BYTES,
     RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
@@ -162,6 +205,7 @@ from bzplat.backend.store.schema import (
     CONTEST_PUBLISHED,
     CONTEST_REST,
     CONTEST_RUNNING,
+    CONTEST_TITLE_MAX_LENGTH,
     DEFAULT_RUNTIME_MODE,
     EXECUTION_SOURCE_HUMAN,
     EXECUTION_SOURCE_MANUAL,
@@ -175,9 +219,15 @@ from bzplat.backend.store.schema import (
     STATUS_COMPLETED,
     STATUS_PENDING,
     STATUS_RUNNING,
+    TYPE_HUMAN,
     is_supported_binary_metadata,
+    validate_contest_title,
 )
-from bzplat.backend.store.public_contract import sanitize_public_match
+from bzplat.backend.store.public_contract import (
+    PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS,
+    sanitize_public_contest_tiebreaks,
+    sanitize_public_match,
+)
 from bzplat.backend.store.validation import (
     exact_nonnegative_int,
     exact_sqlite_bool,
@@ -292,6 +342,36 @@ async def _finish_upload_step_before_cancel(awaitable: Awaitable[_T]) -> _T:
         raise
     except BaseException:
         return task.result()
+
+
+async def _revoke_committed_local_ai_transports(
+    request: Request, result: dict[str, Any]
+) -> None:
+    """Drain the exact transport postimage returned by a disable transaction."""
+
+    raw_targets = result.pop("_revoked_local_ai_targets", [])
+    raw_scope = result.pop("_local_ai_revocation_scope", None)
+    if not isinstance(raw_targets, list):
+        raise RuntimeError("invalid Local-AI revocation postimage")
+    if raw_scope is None:
+        if raw_targets:
+            raise RuntimeError("missing Local-AI revocation scope")
+        return
+    if (
+        not isinstance(raw_scope, dict)
+        or set(raw_scope) != {"kind", "id"}
+        or raw_scope.get("kind") not in {"owner", "bot"}
+        or type(raw_scope.get("id")) is not int
+        or int(raw_scope["id"]) < 1
+    ):
+        raise RuntimeError("invalid Local-AI revocation scope")
+    await _finish_upload_step_before_cancel(
+        _local_ai(request).converge_revoked_transports(
+            raw_targets,
+            scope_kind=str(raw_scope["kind"]),
+            scope_id=int(raw_scope["id"]),
+        )
+    )
 
 
 @asynccontextmanager
@@ -552,6 +632,7 @@ _PUBLIC_MATCH_LIST_FIELDS = frozenset(
         "bot_a_environment",
         "bot_b_environment",
         "technical_loss",
+        "time_control",
         "result",
         "outcome",
         "bot_a",
@@ -573,6 +654,7 @@ _PUBLIC_MATCH_RECORD_FIELDS = frozenset(
         "started_at",
         "ended_at",
         "technical_loss",
+        "time_control",
         "result",
         "bot_a",
         "bot_b",
@@ -694,6 +776,20 @@ class LocalAIAgentCreate(BaseModel):
 def _private_no_store(response: Response) -> None:
     for key, value in _ADMIN_PRIVATE_HEADERS.items():
         response.headers[key] = value
+
+
+def _vary_by_auth(response: Response) -> None:
+    """Keep identity-shaped public responses out of another caller's cache key."""
+    existing = [
+        field.strip()
+        for field in response.headers.get("Vary", "").split(",")
+        if field.strip()
+    ]
+    known = {field.lower() for field in existing}
+    for field in ("Authorization", "Cookie"):
+        if field.lower() not in known:
+            existing.append(field)
+    response.headers["Vary"] = ", ".join(existing)
 
 
 def _owned_local_agent(request: Request, public_id: str, user: dict) -> dict:
@@ -876,10 +972,12 @@ async def admin_revoke_local_ai_agent(
 
 @router.get("/api/bots/public")
 def public_bots(
-    request: Request, game_id: str | None = None, owner_id: int | None = None,
+    request: Request, response: Response,
+    game_id: str | None = None, owner_id: int | None = None,
     page: int | None = None, per_page: int = 50,
     user=Depends(optional_user),
 ):
+    _vary_by_auth(response)
     result = _bots(request).list_public(
         game_id=game_id, owner_id=owner_id, page=page, per_page=per_page
     )
@@ -1039,14 +1137,16 @@ def my_favorites(request: Request, limit: int = 50, user=Depends(require_user)):
 
 @router.get("/api/users/{username}/bots")
 def user_bots(
-    username: str, request: Request, page: int | None = None, per_page: int = 50,
+    username: str, request: Request, response: Response,
+    page: int | None = None, per_page: int = 50,
     user=Depends(optional_user),
 ):
     """某用户的公开 Bot 列表（公开）。"""
+    _vary_by_auth(response)
     store = _store(request)
     u = store.get_user_by_username(username)
     if not u:
-        raise HTTPException(404, "用户不存在")
+        raise HTTPException(404, "用户不存在", headers=_AUTH_VARY_HEADERS)
     result = store.list_bots(
         owner_id=u["id"], runnable_only=True, page=page, per_page=per_page
     )
@@ -1127,10 +1227,16 @@ def _public_bot_identity(bot: dict) -> dict:
 
 
 @router.get("/api/bots/{bot_id}")
-def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
+def get_bot(
+    bot_id: int,
+    request: Request,
+    response: Response,
+    user=Depends(optional_user),
+):
+    _vary_by_auth(response)
     bot = _bots(request).get(bot_id)
     if not bot:
-        raise HTTPException(404, "bot 不存在")
+        raise HTTPException(404, "bot 不存在", headers=_AUTH_VARY_HEADERS)
     return {
         "bot": _public_bot_identity(
             _sanitize_bot(_with_bot_runnable(bot), user)
@@ -1139,12 +1245,18 @@ def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
 
 
 @router.get("/api/bots/{bot_id}/profile")
-def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
+def bot_profile(
+    bot_id: int,
+    request: Request,
+    response: Response,
+    user=Depends(optional_user),
+):
     """Bot 详情聚合：bot 信息 + owner + rating + 胜率（公开）。"""
+    _vary_by_auth(response)
     store = _store(request)
     p = store.bot_profile(bot_id)
     if not p:
-        raise HTTPException(404, "bot 不存在")
+        raise HTTPException(404, "bot 不存在", headers=_AUTH_VARY_HEADERS)
     # 脱敏敏感字段（审计 P1-B）——profile 是聚合 dict，按 owner/admin 判断后 pop
     is_privileged = user is not None and (
         p.get("owner_id") == user.get("id") or user.get("role") == "admin"
@@ -1438,11 +1550,6 @@ def rollback_bot_version(
 async def set_bot_active(
     bot_id: int, request: Request, active: bool = True, user=Depends(require_user)
 ):
-    public_ids = (
-        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
-        if not active
-        else []
-    )
     try:
         bot = _bots(request).set_active(bot_id, user["id"], active)
     except BotError as e:
@@ -1456,8 +1563,7 @@ async def set_bot_active(
             else 400
         )
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
-    if public_ids:
-        await _local_ai(request).revoke_public_ids(public_ids)
+    await _revoke_committed_local_ai_transports(request, bot)
     return {"bot": _with_bot_runnable(bot)}
 
 
@@ -1545,11 +1651,6 @@ async def update_my_bot(
         fields["is_active"] = 1 if body["is_active"] else 0
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    public_ids = (
-        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
-        if fields.get("is_active") == 0
-        else []
-    )
     try:
         bot = _bots(request).patch_owner(bot_id, user["id"], **fields)
     except BotError as exc:
@@ -1563,8 +1664,7 @@ async def update_my_bot(
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
-    if public_ids:
-        await _local_ai(request).revoke_public_ids(public_ids)
+    await _revoke_committed_local_ai_transports(request, bot)
     return {"bot": _with_bot_runnable(bot)}
 
 
@@ -1666,6 +1766,7 @@ _FIXED_RULE_OVERRIDE_FIELDS = frozenset({
     "timeLimitPerSide",
     "time_budget_per_side",
     "timeBudgetPerSide",
+    "time_control_id",
 })
 
 
@@ -1709,6 +1810,9 @@ class ChallengeBody(BaseModel):
     # my/opponent 四元组到物理座位的映射，不放宽 my_bot_id 的 owner 校验。
     my_seat: Literal[0, 1] = 0
     game_id: str | None = None
+    time_control_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{0,95}$"
+    )
     request_id: str | None = Field(
         default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
     )
@@ -1716,6 +1820,11 @@ class ChallengeBody(BaseModel):
 
 def _execution_idempotency_fingerprint(kind: str, body: BaseModel) -> str:
     body_payload = body.model_dump(mode="json", exclude={"request_id"})
+    if body_payload.get("time_control_id") is None:
+        # Older durable request fingerprints predate the explicit clock field.
+        # Omitting the implicit default keeps response-loss retries compatible,
+        # while an explicitly selected alternative remains part of the identity.
+        body_payload.pop("time_control_id", None)
     if isinstance(body, ChallengeBody) and body_payload.get("my_seat") == 0:
         # 升级前的 challenge fingerprint 没有 my_seat。默认座位继续省略该键，
         # 让旧请求在 202 响应丢失后跨版本重试仍命中原 durable request。
@@ -1843,6 +1952,7 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             bot_b_environment=seat_b[2],
             bot_a_local_agent_id=seat_a[3],
             bot_b_local_agent_id=seat_b[3],
+            time_control_id=body.time_control_id,
             request_id=body.request_id,
             idempotency_fingerprint=fingerprint,
         )
@@ -1877,6 +1987,9 @@ class HumanChallengeBody(BaseModel):
     bot_id: int
     human_seat: Literal[1] = 1  # 产品契约：人类固定座位 2（内部索引 1）
     game_id: str | None = None
+    time_control_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{0,95}$"
+    )
     request_id: str | None = Field(
         default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
     )
@@ -1902,6 +2015,7 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
+            time_control_id=body.time_control_id,
             request_id=body.request_id,
             idempotency_fingerprint=fingerprint,
         )
@@ -2008,75 +2122,221 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         "token" in websocket.query_params
         or not websocket_origin_allowed(websocket.headers.get("origin"))
     ):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "reject",
-            "reason": "forbidden",
-            "message": "无权访问该对局",
-        })
-        await websocket.close()
+        await _deny_human_play_websocket(websocket)
         return
-    # 鉴权
-    token = websocket.cookies.get(COOKIE_NAME)
-    user = auth.verify_session(token)
-    m = store.get_match(match_id)
-    if not user or not m or m.get("human_user_id") != user["id"]:
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "reject",
-            "reason": "forbidden",
-            "message": "无权访问该对局",
-        })
-        await websocket.close()
+
+    # A trusted-peer gate precedes cookie/session parsing and every SQLite
+    # authority lookup. Rotating cookies or match ids therefore cannot create
+    # unbounded unauthenticated DB work or bypass the process-wide concurrency
+    # ceiling. Origin/query-token rejection intentionally remains even earlier.
+    gate = getattr(websocket.app.state, "human_play_handshake_gate", None)
+    if gate is None:
+        await _deny_human_play_websocket(websocket)
         return
+    trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    try:
+        proxy_hops = max(1, int(os.environ.get("BZ_TRUSTED_PROXY_HOPS", "1")))
+    except ValueError:
+        proxy_hops = 1
+    peer_ip = client_ip(
+        websocket,
+        trust_proxy=trust_proxy,
+        hops=proxy_hops,
+        trusted_proxy_cidrs=getattr(
+            websocket.app.state, "trusted_proxy_cidrs", None
+        ),
+    )
+    if (
+        not isinstance(peer_ip, str)
+        or not peer_ip.strip()
+        or len(peer_ip.strip()) > 64
+    ):
+        peer_ip = "unknown"
+    else:
+        peer_ip = peer_ip.strip()
+    if not await gate.begin(peer_ip):
+        await _deny_human_play_websocket(websocket)
+        return
+    authorized = False
+    token: str | None = None
+    try:
+        token = websocket.cookies.get(COOKIE_NAME)
+        user = auth.verify_session(token) if token else None
+        # A missing/invalid session is resolved without probing the caller's
+        # chosen match id, so it cannot become an existence oracle or extra DB
+        # read. Only a current user reaches the ownership lookup.
+        m = store.get_match(match_id) if user else None
+        if user and m and m.get("human_user_id") == user["id"]:
+            human_seat = (
+                int(m.get("human_seat"))
+                if m.get("human_seat") is not None
+                else 1
+            )
+            human_user_id = int(user["id"])
+            authorized = True
+    finally:
+        await gate.end()
+    if not authorized:
+        # Network writes are outside the scarce pre-auth reservation. A peer
+        # that stops reading its denial cannot hold an SQLite admission slot.
+        await _deny_human_play_websocket(websocket)
+        return
+
     await websocket.accept()
     # subscribe 入队一条带 seats 与完整回放的权威 snapshot；pump 随即发送。
     # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
-    human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
-    q = orch.subscribe(match_id, human_viewer_seat=human_seat)
     try:
-        protocol = game_registry.get(m.get("game_id")).protocol
-    except KeyError:
-        await websocket.send_json({
-            "type": "reject",
-            "reason": "invalid_game_id",
-            "message": "对局游戏协议不存在",
-        })
-        await websocket.close()
-        orch.unsubscribe(match_id, q)
+        q = orch.subscribe(
+            match_id,
+            human_viewer_seat=human_seat,
+            human_user_id=human_user_id,
+        )
+    except HumanWebSocketLimitError:
+        await websocket.close(code=1013, reason="connection_limit")
         return
-
-    async def pump_events():
-        while True:
-            ev = await q.get()
-            await websocket.send_json(ev)
-            if _is_terminal_stream_event(ev):
-                return
-
-    async def receive_actions():
-        while True:
-            msg = await websocket.receive_json()
-            if not isinstance(msg, dict) or set(msg) != {"response"}:
-                await websocket.send_json({
-                    "type": "reject",
-                    "message": "动作协议错误：消息必须恰好包含 response 字段",
-                })
-                continue
-            try:
-                payload = protocol.validate_response_payload(msg["response"])
-            except (TypeError, ValueError) as exc:
-                await websocket.send_json({
-                    "type": "reject",
-                    "message": f"动作协议错误：{exc}",
-                })
-                continue
-            move = {"response": payload}
-            if not orch.resolve_human_turn(match_id, human_seat, move):
-                await websocket.send_json({"type": "reject", "message": "当前非你的回合或动作非法"})
-
-    sender = asyncio.create_task(pump_events())
-    receiver = asyncio.create_task(receive_actions())
+    sender: asyncio.Task | None = None
+    receiver: asyncio.Task | None = None
     try:
+        try:
+            protocol = game_registry.get(m.get("game_id")).protocol
+        except KeyError:
+            await websocket.send_json({
+                "type": "reject",
+                "reason": "invalid_game_id",
+                "message": "对局游戏协议不存在",
+            })
+            await websocket.close()
+            return
+
+        authority_rejection_completed = False
+        authority_rejection_lock = asyncio.Lock()
+
+        def human_authority_is_current() -> bool:
+            """Revalidate this exact session and human seat at an I/O boundary."""
+
+            try:
+                current_user = auth.verify_session(token)
+                current_match = store.get_match(match_id) if current_user else None
+                current_human_seat = (
+                    int(current_match.get("human_seat"))
+                    if current_match and current_match.get("human_seat") is not None
+                    else 1
+                )
+                return bool(
+                    current_user
+                    and int(current_user.get("id", -1)) == human_user_id
+                    and current_match
+                    and current_match.get("match_type") == TYPE_HUMAN
+                    and current_match.get("human_user_id") == human_user_id
+                    and current_human_seat == human_seat
+                )
+            except Exception:
+                # A broken authority read cannot justify sending another event or
+                # resolving a turn. Keep the client response generic; the server
+                # traceback remains in the operational log.
+                logger.exception(
+                    "human WebSocket authority revalidation failed match_id=%s",
+                    match_id,
+                )
+                return False
+
+        async def reject_revoked_authority() -> None:
+            """Complete one generic denial and policy close for all callers."""
+
+            nonlocal authority_rejection_completed
+            async with authority_rejection_lock:
+                if authority_rejection_completed:
+                    return
+                try:
+                    await websocket.send_json({
+                        "type": "reject",
+                        "reason": "session_revoked",
+                        "message": "会话已失效，请重新登录",
+                    })
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
+                try:
+                    await websocket.close(code=1008, reason="session_revoked")
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
+                authority_rejection_completed = True
+
+        async def pump_events():
+            while True:
+                ev = await q.get()
+                # The authenticated queue can contain private snapshots, hidden
+                # cards and future event types. Revalidate every frame immediately
+                # before its network send so a passive revoked socket cannot
+                # outlive its session or current human-seat ownership.
+                if not human_authority_is_current():
+                    await reject_revoked_authority()
+                    return
+                await websocket.send_json(ev)
+                if _is_terminal_stream_event(ev):
+                    return
+
+        async def receive_actions():
+            while True:
+                raw = await websocket.receive_text()
+                if len(raw.encode("utf-8")) > HUMAN_ACTION_MAX_BYTES:
+                    await websocket.send_json({
+                        "type": "reject",
+                        "reason": "message_too_large",
+                    })
+                    await websocket.close(code=1009, reason="message_too_large")
+                    return
+                if not orch.consume_human_action_token(
+                    human_user_id,
+                    peer_ip,
+                ):
+                    await websocket.send_json({
+                        "type": "reject",
+                        "reason": "rate_limit_exceeded",
+                    })
+                    await websocket.close(code=1008, reason="rate_limit_exceeded")
+                    return
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    await websocket.send_json({
+                        "type": "reject",
+                        "message": "动作协议错误：消息必须是 JSON 对象",
+                    })
+                    continue
+                if not human_authority_is_current():
+                    await reject_revoked_authority()
+                    return
+                if not isinstance(msg, dict) or set(msg) != {"response"}:
+                    await websocket.send_json({
+                        "type": "reject",
+                        "message": "动作协议错误：消息必须恰好包含 response 字段",
+                    })
+                    continue
+                try:
+                    payload = protocol.validate_response_payload(msg["response"])
+                except (TypeError, ValueError) as exc:
+                    await websocket.send_json({
+                        "type": "reject",
+                        "message": f"动作协议错误：{exc}",
+                    })
+                    continue
+                # Close the narrow validation-to-resolution window as well.  A
+                # password change or admin revocation racing payload validation
+                # must not resolve the in-memory turn Future with a stale session.
+                if not human_authority_is_current():
+                    await reject_revoked_authority()
+                    return
+                move = {"response": payload}
+                if not orch.resolve_human_turn(match_id, human_seat, move):
+                    await websocket.send_json({
+                        "type": "reject",
+                        "message": "当前非你的回合或动作非法",
+                    })
+
+        sender = asyncio.create_task(pump_events())
+        receiver = asyncio.create_task(receive_actions())
         done, _ = await asyncio.wait(
             {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
         )
@@ -2088,9 +2348,11 @@ async def play_websocket(websocket: WebSocket, match_id: str):
             except (RuntimeError, WebSocketDisconnect):
                 pass
     finally:
-        sender.cancel()
-        receiver.cancel()
-        await asyncio.gather(sender, receiver, return_exceptions=True)
+        tasks = [task for task in (sender, receiver) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         orch.unsubscribe(match_id, q)
 
 
@@ -2147,6 +2409,21 @@ async def local_ai_websocket(websocket: WebSocket):
             # Closing before accept produces an HTTP 403 handshake denial; bad
             # credentials never consume a long-lived WebSocket.
             await _deny_local_ai_websocket(websocket)
+            return
+        offered_subprotocols = {
+            item.strip()
+            for item in str(
+                websocket.headers.get("sec-websocket-protocol") or ""
+            ).split(",")
+            if item.strip()
+        }
+        if LOCAL_AI_WEBSOCKET_SUBPROTOCOL not in offered_subprotocols:
+            # Version negotiation happens before durable/live registration, so
+            # an older connector can never look runnable and then lose a Match
+            # merely because it does not understand the two-phase clock.
+            await _deny_local_ai_websocket(
+                websocket, reason="client_protocol_upgrade_required"
+            )
             return
     finally:
         await service.handshake_gate.end()
@@ -2211,19 +2488,34 @@ async def local_ai_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "ping"})
                 continue
             remaining_ms = max(
-                0, int((float(turn.deadline_at) - time.monotonic()) * 1000)
+                1, int((float(turn.deadline_at) - time.monotonic()) * 1000)
             )
-            await websocket.send_json(
-                {
-                    "type": "turn",
-                    "request_id": turn.request_id,
-                    "match_id": turn.match_id,
-                    "turn": turn.turn,
-                    "seat": turn.seat + 1,
-                    "input_line": turn.input,
-                    "timeout_ms": remaining_ms,
-                }
-            )
+            if turn.phase == "prepare":
+                # Do not expose the position until the connector has created
+                # its Traditional process.  The independent preparation limit
+                # protects the global slot without consuming the game clock.
+                await websocket.send_json(
+                    {
+                        "type": "prepare_turn",
+                        "request_id": turn.request_id,
+                        "match_id": turn.match_id,
+                        "turn": turn.turn,
+                        "seat": turn.seat + 1,
+                        "prepare_timeout_ms": remaining_ms,
+                    }
+                )
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "turn",
+                        "request_id": turn.request_id,
+                        "match_id": turn.match_id,
+                        "turn": turn.turn,
+                        "seat": turn.seat + 1,
+                        "input_line": turn.input,
+                        "timeout_ms": remaining_ms,
+                    }
+                )
 
     async def receive_responses() -> None:
         while True:
@@ -2260,6 +2552,9 @@ async def local_ai_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "pong"})
                 continue
             message_type = message.get("type")
+            prepared_fields = {
+                "type", "request_id", "match_id", "turn",
+            }
             response_fields = {
                 "type", "request_id", "match_id", "turn", "output",
             }
@@ -2267,7 +2562,8 @@ async def local_ai_websocket(websocket: WebSocket):
                 "type", "request_id", "match_id", "turn", "reason",
             }
             if not (
-                (message_type == "response" and set(message) == response_fields)
+                (message_type == "prepared" and set(message) == prepared_fields)
+                or (message_type == "response" and set(message) == response_fields)
                 or (message_type == "failure" and set(message) == failure_fields)
             ):
                 await websocket.send_json(
@@ -2275,7 +2571,15 @@ async def local_ai_websocket(websocket: WebSocket):
                 )
                 continue
             try:
-                if message_type == "response":
+                if message_type == "prepared":
+                    accepted = await service.hub.mark_prepared(
+                        public_id,
+                        connection_id,
+                        request_id=message["request_id"],
+                        match_id=message["match_id"],
+                        turn=message["turn"],
+                    )
+                elif message_type == "response":
                     output = message.get("output")
                     if (
                         not isinstance(output, str)
@@ -2314,6 +2618,11 @@ async def local_ai_websocket(websocket: WebSocket):
             # rejected/duplicate responses remain charged to the abuse bucket.
             refund_bound_turn_token()
             await persist_liveness_if_due()
+            if message_type == "prepared":
+                # The queued decision frame is the phase acknowledgement.  A
+                # separate accepted frame would race it and complicate strict
+                # clients without adding authority.
+                continue
             await websocket.send_json(
                 {
                     "type": "accepted",
@@ -2327,7 +2636,7 @@ async def local_ai_websocket(websocket: WebSocket):
         # Cleanup ownership starts immediately after durable connect.  Failures
         # in accept/ready/task construction cannot strand the hub registration
         # or its SQLite online generation.
-        await websocket.accept()
+        await websocket.accept(subprotocol=LOCAL_AI_WEBSOCKET_SUBPROTOCOL)
         await websocket.send_json(
             {
                 "type": "ready",
@@ -2691,7 +3000,35 @@ async def match_events(match_id: str, request: Request):
     orch = _orch(request)
     if not _store(request).get_match(match_id):
         raise HTTPException(404, "对局不存在")
-    q = orch.subscribe(match_id)
+    trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    try:
+        proxy_hops = max(1, int(os.environ.get("BZ_TRUSTED_PROXY_HOPS", "1")))
+    except ValueError:
+        proxy_hops = 1
+    peer_ip = client_ip(
+        request,
+        trust_proxy=trust_proxy,
+        hops=proxy_hops,
+        trusted_proxy_cidrs=getattr(
+            request.app.state, "trusted_proxy_cidrs", None
+        ),
+    )
+    try:
+        q = orch.subscribe(match_id, public_client_ip=peer_ip)
+    except PublicSSELimitError as exc:
+        logger.warning(
+            "public SSE subscriber limit reached scope=%s match_id=%s ip=%s",
+            exc.scope,
+            match_id,
+            peer_ip,
+        )
+        raise HTTPException(
+            429,
+            "实时观赛连接数已达上限，请稍后重试",
+            headers={"Retry-After": "5"},
+        ) from None
 
     async def gen():
         try:
@@ -2710,11 +3047,17 @@ async def match_events(match_id: str, request: Request):
 
     # 反向代理必须逐帧转发 SSE：首帧 snapshot 被默认 proxy_buffering 扣住时，
     # 直播端棋盘会永远停在「加载中」。X-Accel-Buffering 是 nginx 的逐响应开关。
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    try:
+        return _ResponseScopeCleanupStreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+            cleanup=lambda: orch.unsubscribe(match_id, q),
+        )
+    except BaseException:
+        # No response generator exists to run its finally block.
+        orch.unsubscribe(match_id, q)
+        raise
 
 
 # ── leaderboard ───────────────────────────────────────────────
@@ -3073,23 +3416,45 @@ class ContestStageSeriesSetting(BaseModel):
     swiss_extra_rounds: StrictInt | None = None
 
 
+class ContestStageFormatSetting(BaseModel):
+    """Organizer-owned format knobs for one template stage.
+
+    Only ``group_count`` is configurable today.  Keeping this as a strict,
+    stage-keyed object prevents arbitrary stage JSON from crossing the API
+    boundary when more format controls are added later.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    group_count: StrictInt
+
+
 class ContestCreate(BaseModel):
     model_config = {"extra": "forbid"}
 
-    title: str
+    title: str = Field(min_length=1, max_length=CONTEST_TITLE_MAX_LENGTH)
     description: str = ""
     template_id: str | None = None
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
     games_per_pair: StrictInt | None = None
     stage_series_settings: dict[str, ContestStageSeriesSetting] | None = None
+    stage_format_settings: dict[str, ContestStageFormatSetting] | None = None
+    time_control_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{0,95}$"
+    )
     phase: str = "standalone"  # P5: preliminary/final/standalone
-    source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
+    source_contest_id: StrictInt | None = Field(default=None, gt=0)
     require_real_name: bool = False  # 报名是否要求实名
     # 时间编排（ISO 字符串，可选；留空=手动触发对应阶段）
     registration_opens_at: str | None = None
     registration_closes_at: str | None = None
     starts_at: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        return validate_contest_title(value)
 
 
 class ContestRegister(BaseModel):
@@ -3103,7 +3468,11 @@ class ContestDispatch(BaseModel):
 class ContestStageSeriesPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
-    stage_series_settings: dict[str, ContestStageSeriesSetting]
+    stage_series_settings: dict[str, ContestStageSeriesSetting] | None = None
+    stage_format_settings: dict[str, ContestStageFormatSetting] | None = None
+    time_control_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{0,95}$"
+    )
 
 
 def _stage_series_settings_payload(
@@ -3124,6 +3493,19 @@ def _stage_series_settings_payload(
     return payload
 
 
+def _stage_format_settings_payload(
+    settings: dict[str, ContestStageFormatSetting] | None,
+) -> dict[str, dict[str, int]] | None:
+    if settings is None:
+        return None
+    if not settings:
+        raise ValueError("stage_format_settings 不能为空对象")
+    return {
+        stage_key: setting.model_dump()
+        for stage_key, setting in settings.items()
+    }
+
+
 _CONTEST_ENTRY_PUBLIC_FIELDS = (
     "id",
     "contest_id",
@@ -3135,6 +3517,27 @@ _CONTEST_ENTRY_PUBLIC_FIELDS = (
     "eliminated",
     "dispatched_at",
 )
+_CONTEST_ENTRY_LIST_PUBLIC_FIELDS = (
+    "id",
+    "user_id",
+    "bot_id",
+    "registered_at",
+    "group_id",
+    "seed",
+    "eliminated",
+    "bot_name",
+    "bot_display",
+    "owner_name",
+    "owner_display",
+)
+_CONTEST_ENTRY_LIST_IDENTITY_FIELDS = (
+    "real_name",
+    "phone",
+    "school",
+    "student_id",
+    "identity_source",
+    "identity_captured_at",
+)
 _CONTEST_OFFICIAL_RESULT_PUBLIC_FIELDS = (
     "id",
     "contest_id",
@@ -3144,7 +3547,7 @@ _CONTEST_OFFICIAL_RESULT_PUBLIC_FIELDS = (
     "points",
     "bot_id",
     "user_id",
-    "tiebreaks_json",
+    "tiebreaks",
     "awarded",
     "bot_name",
     "bot_display",
@@ -3152,6 +3555,9 @@ _CONTEST_OFFICIAL_RESULT_PUBLIC_FIELDS = (
     "owner_display",
     "source_stage",
     "ranking_cohort",
+    "overall_rank",
+    "group_id",
+    "rank_in_group",
 )
 
 
@@ -3160,6 +3566,16 @@ def _public_my_contest_entry(entry: dict[str, Any] | None) -> dict[str, Any] | N
     if entry is None:
         return None
     return {key: entry.get(key) for key in _CONTEST_ENTRY_PUBLIC_FIELDS}
+
+
+def _public_contest_entry_list_row(
+    entry: dict[str, Any], *, include_identity: bool
+) -> dict[str, Any]:
+    """Project one roster row without leaking Store or future schema fields."""
+    fields = _CONTEST_ENTRY_LIST_PUBLIC_FIELDS + (
+        _CONTEST_ENTRY_LIST_IDENTITY_FIELDS if include_identity else ()
+    )
+    return {field: entry.get(field) for field in fields}
 
 
 def _strip_contest_identity_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -3188,22 +3604,133 @@ def _csv_safe_cell(value: object, *, force_text: bool = False) -> object:
     return value
 
 
+def _time_control_for_api(
+    spec: Any,
+    time_control_id: str | None,
+    *,
+    applies_to: str = "both_bots",
+) -> dict[str, Any]:
+    control = spec.resolve_time_control(time_control_id)
+    public = {
+        "id": control.id,
+        "mode": control.mode,
+        "seconds": control.seconds,
+        "applies_to": applies_to,
+    }
+    label = getattr(control, "label", None)
+    if isinstance(label, str) and label.strip():
+        public["label"] = label.strip()
+    return public
+
+
+def _game_time_controls_for_api(
+    spec: Any,
+    *,
+    allowed_ids: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    ids = (
+        list(allowed_ids)
+        if allowed_ids is not None
+        else [control.id for control in spec.time_controls]
+    )
+    if not ids or any(
+        not isinstance(value, str) or not value for value in ids
+    ) or len(ids) != len(set(ids)):
+        raise ValueError("赛事模板 time_control_ids 契约无效")
+    default_id = spec.default_time_control_id
+    controls: list[dict[str, Any]] = []
+    for control_id in ids:
+        item = _time_control_for_api(spec, control_id)
+        item["is_default"] = control_id == default_id
+        controls.append(item)
+    return controls
+
+
 def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
     """Return the read-only public shape of one code-owned template."""
     public = dict(template)
     public.pop("match_config", None)
+    game_id = str(template.get("game_id") or "")
+    spec = game_registry.get(game_id)
+    raw_allowed = template.get("time_control_ids")
+    allowed = None
+    if raw_allowed is not None:
+        if not isinstance(raw_allowed, (list, tuple)):
+            raise ValueError("赛事模板 time_control_ids 必须是数组")
+        allowed = list(raw_allowed)
+    controls = _game_time_controls_for_api(spec, allowed_ids=allowed)
+    default_id = template.get("default_time_control_id") or spec.default_time_control_id
+    if (
+        not isinstance(default_id, str)
+        or default_id not in {control["id"] for control in controls}
+    ):
+        raise ValueError("赛事模板默认时限不在允许列表中")
+    for control in controls:
+        control["is_default"] = control["id"] == default_id
+    public.pop("time_control_ids", None)
+    public["time_controls"] = controls
+    public["default_time_control_id"] = default_id
     public["is_builtin"] = True
     public["source"] = CONFIGURATION_SOURCE
     return public
 
 
+_CONTEST_PUBLIC_FIELDS = (
+    "id",
+    "title",
+    "description",
+    "organizer_id",
+    "status",
+    "registration_opens_at",
+    "registration_closes_at",
+    "starts_at",
+    "ends_at",
+    "created_at",
+    "game_id",
+    "ruleset_version",
+    "protocol_version",
+    "rating_pool_id",
+    "stages_json",
+    "current_stage_idx",
+    "template_id",
+    "rest_ends_at",
+    "phase",
+    "source_contest_id",
+    "time_control_id",
+    "official_results_ready",
+    "require_real_name",
+    "showcase_key",
+)
+
+
 def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
-    """仅输出现行赛事契约；数据库迁移列不进入 REST 响应。"""
-    public = dict(contest)
-    public.pop("hands_per_match", None)
-    public.pop("match_config_json", None)
+    """Project the explicit public contest contract plus derived fields."""
+    format_snapshot = public_format_snapshot(contest)
+    public = {key: contest.get(key) for key in _CONTEST_PUBLIC_FIELDS}
+    public["format_snapshot"] = format_snapshot
     public["games_per_pair"] = None
     public["stage_series_settings"] = {}
+    public["stage_format_settings"] = {}
+    try:
+        spec = game_registry.get(str(contest.get("game_id") or ""))
+        persisted_time_control_id = (
+            ContestManager._resolve_contest_time_control_id(
+                spec.game_id,
+                contest.get("time_control_id"),
+                template_id=contest.get("template_id"),
+                persisted=True,
+            )
+        )
+        time_control = _time_control_for_api(
+            spec,
+            persisted_time_control_id,
+        )
+    except (KeyError, TypeError, ValueError):
+        public["time_control_id"] = None
+        public["time_control"] = None
+    else:
+        public["time_control_id"] = time_control["id"]
+        public["time_control"] = time_control
     raw_stages = contest.get("stages_json") or "[]"
     try:
         stages = json.loads(raw_stages) if isinstance(raw_stages, str) else raw_stages
@@ -3232,14 +3759,26 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
                 or not stage_scoring_contract_is_valid(
                     stage, game_id=contest.get("game_id")
                 )
-                or stage.get("series_scoring")
-                not in {SERIES_SCORING_INDEPENDENT, "aggregate_match_points_v1"}
             ):
+                continue
+            stage_key = str(stage.get("key") or f"stage{index + 1}")
+            group_count = stage.get("group_count")
+            if (
+                isinstance(group_count, int)
+                and not isinstance(group_count, bool)
+                and group_count >= 2
+            ):
+                public["stage_format_settings"][stage_key] = {
+                    "group_count": group_count
+                }
+            if stage.get("series_scoring") not in {
+                SERIES_SCORING_INDEPENDENT,
+                "aggregate_match_points_v1",
+            }:
                 continue
             games = stage.get("games_per_pair")
             if not isinstance(games, int) or isinstance(games, bool):
                 continue
-            stage_key = str(stage.get("key") or f"stage{index + 1}")
             setting: dict[str, int] = {"games_per_pair": games}
             extra = stage.get("swiss_extra_rounds")
             if isinstance(extra, int) and not isinstance(extra, bool):
@@ -3249,6 +3788,30 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
     if public.get("showcase_key"):
         public["description"] = contest_public_description(public)
     return public
+
+
+_PUBLIC_STAGE_SUMMARY_FIELDS = (
+    "stage_idx",
+    "stage_key",
+    "status",
+    "source",
+    "completed_pairings",
+    "total_pairings",
+    "counts",
+    "advancement_final",
+    "elimination_tiebreak",
+    "rows",
+)
+
+
+def _public_stage_summaries(
+    summaries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project the explicit public stage-summary response contract."""
+    return [
+        {key: summary.get(key) for key in _PUBLIC_STAGE_SUMMARY_FIELDS}
+        for summary in summaries
+    ]
 
 
 def _contest_write_http_error(exc: ValueError) -> HTTPException:
@@ -3281,6 +3844,9 @@ def contest_templates(request: Request, game: str | None = None):
 # 未发布/已取消赛事仅该赛事组织者与管理员可见。使用 schema 常量，避免
 # API 层另造一套状态字面量；显式 ``?status=draft`` 也不得绕过可见性。
 _CONTEST_HIDDEN_STATUSES = (CONTEST_DRAFT, CONTEST_CANCELLED)
+_CONTEST_LIST_MAX_PAGE = 10_000
+_CONTEST_LIST_MAX_PER_PAGE = 200
+_SOURCE_CANDIDATE_MAX_LIMIT = 50
 
 _PUBLIC_PAIRING_INTERNAL_FIELDS = (
     "contest_id",
@@ -3545,9 +4111,16 @@ def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
 
 
 @router.get("/api/contests")
-def list_contests(request: Request, status: str | None = None, game_id: str | None = None,
-                  page: int | None = None, per_page: int = 20,
+def list_contests(request: Request, response: Response,
+                  status: str | None = None, game_id: str | None = None,
+                  page: int = Query(
+                      default=1, ge=1, le=_CONTEST_LIST_MAX_PAGE
+                  ),
+                  per_page: int = Query(
+                      default=20, ge=1, le=_CONTEST_LIST_MAX_PER_PAGE
+                  ),
                   user=Depends(optional_user)):
+    _vary_by_auth(response)
     # admin 全见；组织者额外看到自己的隐藏赛事；其他调用方始终排除隐藏状态。
     # 过滤在 Store 的分页 SQL 内完成，避免 total/页数泄漏或页内裁剪错位。
     is_admin = user is not None and user.get("role") == ROLE_ADMIN
@@ -3578,12 +4151,71 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
     return {"contests": items}
 
 
+@router.get("/api/contests/source-candidates")
+def contest_source_candidates(
+    request: Request,
+    game_id: str = Query(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    ),
+    query: str | None = Query(
+        default=None,
+        max_length=100,
+        pattern=r"^[^\x00-\x1f\x7f]*$",
+    ),
+    limit: int = Query(default=50, ge=1, le=_SOURCE_CANDIDATE_MAX_LIMIT),
+    user=Depends(require_organizer),
+):
+    """Return one bounded organizer-only source-contest search result.
+
+    Eligibility is selected by the registered game's exact source-candidate
+    capability.  Games without that capability and unknown ids fail closed.
+    """
+    try:
+        spec = game_registry.get(game_id)
+    except KeyError as exc:
+        raise HTTPException(422, "该游戏不支持来源赛事候选") from exc
+    source_kind = spec.contest_source_candidate_kind
+    if source_kind is None:
+        raise HTTPException(422, "该游戏不支持来源赛事候选")
+    try:
+        result = _store(request).list_contest_source_candidates(
+            game_id=spec.game_id,
+            query=query,
+            limit=limit,
+            source_kind=source_kind,
+            hidden_owner_id=(
+                None if user.get("role") == ROLE_ADMIN else int(user["id"])
+            ),
+            include_all_hidden=user.get("role") == ROLE_ADMIN,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, "来源赛事候选数据暂不可用") from exc
+    return {
+        "candidates": [
+            {"id": row["id"], "title": row["title"]}
+            for row in result["items"]
+        ],
+        "has_more": result["has_more"],
+    }
+
+
 @router.post("/api/contests")
 def create_contest(body: ContestCreate, request: Request, user=Depends(require_organizer)):
     _reject_fixed_rule_overrides(body.stages)
     try:
+        if (
+            "source_contest_id" in body.model_fields_set
+            and body.source_contest_id is None
+        ):
+            raise ValueError("source_contest_id 不能为 null")
         stage_series_settings = _stage_series_settings_payload(
             body.stage_series_settings
+        )
+        stage_format_settings = _stage_format_settings_payload(
+            body.stage_format_settings
         )
         c = _contests(request).create(
             user["id"],
@@ -3594,8 +4226,11 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             stages=body.stages,
             games_per_pair=body.games_per_pair,
             stage_series_settings=stage_series_settings,
+            stage_format_settings=stage_format_settings,
+            time_control_id=body.time_control_id,
             phase=body.phase,
             source_contest_id=body.source_contest_id,
+            source_contest_include_all_hidden=user.get("role") == ROLE_ADMIN,
             require_real_name=int(body.require_real_name),
             registration_opens_at=body.registration_opens_at,
             registration_closes_at=body.registration_closes_at,
@@ -3635,10 +4270,28 @@ async def patch_contest_stage_series(
     ):
         raise HTTPException(403, "无权修改该赛事")
     try:
-        settings = _stage_series_settings_payload(body.stage_series_settings)
-        assert settings is not None
-        updated = await _contests(request).revise_stage_series_settings(
-            contest_id, settings
+        submitted = body.model_fields_set
+        if not submitted:
+            raise ValueError("至少提交一项赛事格式或时限设置")
+        if "stage_series_settings" in submitted and body.stage_series_settings is None:
+            raise ValueError("stage_series_settings 不能为 null")
+        if "stage_format_settings" in submitted and body.stage_format_settings is None:
+            raise ValueError("stage_format_settings 不能为 null")
+        if "time_control_id" in submitted and body.time_control_id is None:
+            raise ValueError("time_control_id 不能为 null")
+        series_settings = _stage_series_settings_payload(
+            body.stage_series_settings
+        )
+        format_settings = _stage_format_settings_payload(
+            body.stage_format_settings
+        )
+        updated = await _contests(request).revise_format_settings(
+            contest_id,
+            stage_series_settings=series_settings,
+            stage_format_settings=format_settings,
+            time_control_id=(
+                body.time_control_id if "time_control_id" in submitted else None
+            ),
         )
     except ValueError as exc:
         raise _contest_write_http_error(exc) from exc
@@ -3646,11 +4299,11 @@ async def patch_contest_stage_series(
         raise HTTPException(404, "比赛不存在")
     audit_log(
         request,
-        "contest_patch_stage_series",
+        "contest_patch_format_settings",
         result="ok",
         user=user.get("username"),
         target=contest_id,
-        detail="stage_series_settings=changed",
+        detail="fields=" + ",".join(sorted(body.model_fields_set)),
     )
     return {"contest": _contest_for_api(updated)}
 
@@ -3661,6 +4314,7 @@ def contest_detail(
     entries_page: int | None = None, entries_per_page: int = 50,
     user=Depends(optional_user),
 ):
+    _vary_by_auth(response)
     store = _store(request)
     snapshot = store.contest_projection_snapshot(
         contest_id,
@@ -3671,14 +4325,14 @@ def contest_detail(
         include_stage_results=True,
     )
     if snapshot is None:
-        raise HTTPException(404, "比赛不存在")
+        raise HTTPException(404, "比赛不存在", headers=_AUTH_VARY_HEADERS)
     c = snapshot["contest"]
     # hidden 赛事仅本赛事 organizer/admin 可见（不是任意 organizer）。
     if (
         c.get("status") in _CONTEST_HIDDEN_STATUSES
         and not _can_view_hidden_contest(c, user)
     ):
-        raise HTTPException(404, "比赛不存在")
+        raise HTTPException(404, "比赛不存在", headers=_AUTH_VARY_HEADERS)
     is_organizer = bool(
         user
         and (
@@ -3736,13 +4390,6 @@ def contest_detail(
             CONTEST_RUNNING,
         ),
     )
-    stage_summaries = build_stage_summaries(
-        _contests(request),
-        c,
-        stage_entries,
-        raw_pairings,
-        stage_results=snapshot["stage_results"],
-    )
     current_pairings = [
         row
         for row in raw_pairings
@@ -3750,17 +4397,54 @@ def contest_detail(
         and not isinstance(row.get("stage_idx"), bool)
         and row.get("stage_idx") == current_stage_idx
     ]
-    standings = (
-        _contests(request).standings(
-            contest_id,
-            stage_idx=current_stage_idx,
-            pairings=current_pairings,
-            entries=stage_entries,
-            contest=c,
-        )
-        if current_stage_valid
-        else []
+    stage_summaries = build_stage_summaries(
+        _contests(request),
+        c,
+        stage_entries,
+        raw_pairings,
+        stage_results=snapshot["stage_results"],
+        current_topology_sealed=current_stage_topology_seal_is_valid(
+            c, current_pairings
+        ),
     )
+    current_cohort = current_stage_cohort_from_summaries(
+        c, stage_entries, stage_summaries
+    )
+    current_summary = next(
+        (
+            row
+            for row in stage_summaries
+            if row.get("stage_idx") == current_stage_idx
+        ),
+        None,
+    )
+    persisted_current_ranking = current_stage_ranking_from_summaries(
+        c, stage_entries, stage_summaries
+    )
+    if (
+        c.get("status") == CONTEST_FINISHED
+        or (
+            isinstance(current_summary, dict)
+            and current_summary.get("source") == "persisted"
+        )
+    ):
+        # Once a current-stage decision exists, it is the only ranking
+        # authority.  A damaged decision remains an empty table; it must never
+        # fall through to a Match replay that could disagree with advancement.
+        standings = persisted_current_ranking or []
+    else:
+        standings = (
+            _contests(request).standings(
+                contest_id,
+                stage_idx=current_stage_idx,
+                pairings=current_pairings,
+                entries=stage_entries,
+                contest=c,
+                expected_current_entry_ids=current_cohort,
+            )
+            if current_stage_valid and current_cohort is not None
+            else []
+        )
     bot_names = {
         int(entry["bot_id"]): entry.get("bot_display") or entry.get("bot_name")
         for entry in stage_entries
@@ -3806,13 +4490,57 @@ def contest_detail(
         "entries": entries,
         "pairings": pairings,
         "standings": standings,
-        "stage_standings": stage_summaries,
+        "stage_standings": _public_stage_summaries(stage_summaries),
         "estimate": estimate,
         "my_entry": my_entry,
         "is_organizer": is_organizer,
     }
     resp.update(entries_meta)
     return resp
+
+
+@router.get("/api/contests/{contest_id}/entries")
+def contest_entries_page(
+    contest_id: int,
+    request: Request,
+    response: Response,
+    page: int = Query(default=1, ge=1, le=_CONTEST_LIST_MAX_PAGE),
+    per_page: int = Query(default=20, ge=1, le=_CONTEST_LIST_MAX_PER_PAGE),
+    user=Depends(optional_user),
+):
+    """Return one bounded roster page without reading pairings or standings."""
+    response.headers.update(_DEBUG_NO_STORE_HEADERS)
+    store = _store(request)
+    try:
+        result = store.contest_entries_page_snapshot(
+            contest_id,
+            page=page,
+            per_page=per_page,
+            viewer_user_id=(int(user["id"]) if user is not None else None),
+            viewer_is_admin=bool(user and user.get("role") == ROLE_ADMIN),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            409,
+            "赛事名册数据暂不可用",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        ) from exc
+    if result is None:
+        raise HTTPException(
+            404, "比赛不存在", headers=_DEBUG_NO_STORE_HEADERS
+        )
+    include_identity = bool(result["include_identity"])
+    if include_identity:
+        response.headers.update(_CONTEST_IDENTITY_PRIVATE_HEADERS)
+    return {
+        "entries": [
+            _public_contest_entry_list_row(row, include_identity=include_identity)
+            for row in result["items"]
+        ],
+        "page": result["page"],
+        "per_page": result["per_page"],
+        "total": result["total"],
+    }
 
 
 @router.get("/api/contests/{contest_id}/live")
@@ -3850,12 +4578,65 @@ def contest_live(
     roster_semantics_valid = active_snapshot_entries is not None
     stage_semantics_valid = bool(
         roster_semantics_valid
+        and reserved_group_markers_match_template(
+            contest.get("template_id"), stages, game_id=contest.get("game_id")
+        )
         and stage_scoring_contract_is_valid(
             stage, game_id=str(contest.get("game_id") or "")
         )
     )
     stage_type = stage.get("type") if stage else None
-    raw_pairings = snapshot["pairings"]
+    snapshot_pairings = snapshot["pairings"]
+    raw_pairings = [
+        row
+        for row in snapshot_pairings
+        if isinstance(row.get("stage_idx"), int)
+        and not isinstance(row.get("stage_idx"), bool)
+        and row.get("stage_idx") == stage_idx
+    ]
+    summary_pairings = (
+        snapshot_pairings
+        if snapshot.get("pairings_include_history")
+        else raw_pairings
+    )
+    reached_scope_valid = bool(
+        not snapshot.get("has_future_pairings")
+        and all(
+            isinstance(row.get("stage_idx"), int)
+            and not isinstance(row.get("stage_idx"), bool)
+            and row.get("stage_idx") <= stage_idx
+            for row in snapshot["stage_results"]
+        )
+    )
+    current_topology_sealed = bool(
+        reached_scope_valid
+        and current_stage_topology_seal_is_valid(contest, raw_pairings)
+    )
+    historical_topology_sealed = bool(
+        reached_scope_valid
+        and stage_idx > 0
+        and current_topology_sealed
+        and not snapshot.get("pairings_include_history")
+    )
+    stage_summaries = build_stage_summaries(
+        _contests(request),
+        contest,
+        snapshot["entries"],
+        summary_pairings,
+        stage_results=snapshot["stage_results"],
+        historical_topology_sealed=historical_topology_sealed,
+        current_topology_sealed=current_topology_sealed,
+    )
+    current_cohort = (
+        current_stage_cohort_from_summaries(
+            contest, snapshot["entries"], stage_summaries
+        )
+        if reached_scope_valid
+        else None
+    )
+    stage_semantics_valid = bool(
+        stage_semantics_valid and current_cohort is not None
+    )
     public_rows = _public_contest_pairings(
         raw_pairings,
         stage_types={stage_idx: stage_type},
@@ -4023,45 +4804,105 @@ def contest_live(
         selected = rows if limit is None else rows[:limit]
         return [public_by_id[int(row["id"])] for row in selected]
 
-    if stage and (
-        not stage_semantics_valid
-        or stage.get("series_scoring") in {
-            SERIES_SCORING_INDEPENDENT,
-            SERIES_SCORING_AGGREGATE,
-        }
-    ):
-        # The current strict-v1 cohort is frozen by elimination state, not by
-        # whatever fixture rows happen to survive.  Using the latter would hide
-        # an entrant and shrink totals when an entire opponent group is missing.
-        stage_entries = list(active_snapshot_entries or [])
-    else:
-        stage_entry_ids = {
-            int(entry_id)
-            for row in raw_pairings
-            for entry_id in (row.get("entry_a_id"), row.get("entry_b_id"))
-            if isinstance(entry_id, int) and not isinstance(entry_id, bool)
-        }
-        stage_entries = [
-            entry
-            for entry in snapshot["entries"]
-            if int(entry["id"]) in stage_entry_ids
-        ]
+    # This endpoint always projects the current stage.  Its cohort is the
+    # frozen active roster for every format, never the subset of entrants that
+    # still happen to occur in readable pairing rows.  Missing fixtures must
+    # remain visible as zero rows while topology gates completion/advancement.
+    stage_entries = [
+        entry
+        for entry in snapshot["entries"]
+        if current_cohort is not None and int(entry["id"]) in current_cohort
+    ]
     entry_names = {
         int(entry["id"]): entry.get("bot_display") or entry.get("bot_name")
         for entry in stage_entries
     }
-    ranked_rows = (
-        _contests(request).standings(
-            contest_id,
-            stage_idx=stage_idx,
-            pairings=raw_pairings,
-            entries=stage_entries,
-            contest=contest,
-        )
-        if stage_semantics_valid and stage_idx >= 0
-        else []
+    current_summary = next(
+        (
+            row
+            for row in stage_summaries
+            if row.get("stage_idx") == stage_idx
+        ),
+        None,
     )
-    if str(stage_type or "").startswith("group_"):
+    persisted_current_ranking = current_stage_ranking_from_summaries(
+        contest, snapshot["entries"], stage_summaries
+    )
+    if (
+        contest.get("status") == CONTEST_FINISHED
+        or (
+            isinstance(current_summary, dict)
+            and current_summary.get("source") == "persisted"
+        )
+    ):
+        ranked_rows = persisted_current_ranking or []
+    else:
+        ranked_rows = (
+            _contests(request).standings(
+                contest_id,
+                stage_idx=stage_idx,
+                pairings=raw_pairings,
+                entries=snapshot["entries"],
+                contest=contest,
+                expected_current_entry_ids=current_cohort,
+            )
+            if raw_pairings and stage_semantics_valid and stage_idx >= 0
+            else []
+        )
+    group_stage = str(stage_type or "").startswith("group_")
+    cross_group_fair = bool(
+        group_stage
+        and stage_semantics_valid
+        and stage is not None
+        and stage.get("overall_ranking") == "cross_group_fair_v1"
+    )
+    if cross_group_fair:
+        # This template has already frozen a roster-wide fair order.  Its live
+        # Top 8 must use that authority directly; interleaving groups by
+        # rank_in_group/group_id would silently publish a different leaderboard.
+        cross_group_rows: list[tuple[int, str, dict[str, Any]]] = []
+        overall_ranks: set[int] = set()
+        group_ranks: dict[str, list[int]] = {}
+        cross_group_valid = True
+        for row in ranked_rows:
+            overall_rank = exact_nonnegative_int(row.get("overall_rank"))
+            rank_in_group = exact_nonnegative_int(row.get("rank_in_group"))
+            group_id = row.get("group_id")
+            tiebreaks = sanitize_public_contest_tiebreaks(
+                row.get("tiebreaks")
+            )
+            if (
+                overall_rank is None
+                or overall_rank < 1
+                or rank_in_group is None
+                or rank_in_group < 1
+                or not isinstance(group_id, str)
+                or not group_id
+                or tiebreaks is None
+                or not all(
+                    field in tiebreaks
+                    for field in PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS
+                )
+            ):
+                cross_group_valid = False
+                break
+            overall_ranks.add(overall_rank)
+            group_ranks.setdefault(group_id, []).append(rank_in_group)
+            cross_group_rows.append((overall_rank, group_id, row))
+        if (
+            overall_ranks != set(range(1, len(ranked_rows) + 1))
+            or any(
+                sorted(ranks) != list(range(1, len(ranks) + 1))
+                for ranks in group_ranks.values()
+            )
+        ):
+            cross_group_valid = False
+        selected_standings = (
+            sorted(cross_group_rows, key=lambda item: item[0])[:8]
+            if cross_group_valid
+            else []
+        )
+    elif group_stage:
         group_positions: dict[str, int] = {}
         group_ranked: list[tuple[int, str, dict[str, Any]]] = []
         for row in ranked_rows:
@@ -4080,9 +4921,22 @@ def contest_live(
 
     standings: list[dict[str, Any]] = []
     for rank, _group_id, row in selected_standings:
+        raw_overall_rank = exact_nonnegative_int(row.get("overall_rank"))
+        raw_group_rank = exact_nonnegative_int(row.get("rank_in_group"))
+        tiebreaks = sanitize_public_contest_tiebreaks(row.get("tiebreaks"))
         standings.append(
             {
                 "rank": rank,
+                "overall_rank": (
+                    raw_overall_rank
+                    if raw_overall_rank is not None and raw_overall_rank >= 1
+                    else rank if not group_stage else None
+                ),
+                "rank_in_group": (
+                    raw_group_rank
+                    if raw_group_rank is not None and raw_group_rank >= 1
+                    else rank if group_stage else None
+                ),
                 "bot_id": row.get("bot_id"),
                 "bot_name": entry_names.get(int(row["entry_id"])),
                 "points": row.get("points") or 0,
@@ -4092,6 +4946,7 @@ def contest_live(
                 "byes": int(row.get("byes") or 0),
                 "delta_total": int(row.get("delta_total") or 0),
                 "group_id": row.get("group_id") or "",
+                "tiebreaks": tiebreaks,
                 "counts": row.get("counts") or {
                     "encounter_groups": 0,
                     "unique_opponents": 0,
@@ -4225,6 +5080,9 @@ def contest_live(
             "official_results_ready": (
                 exact_sqlite_bool(contest.get("official_results_ready")) is True
             ),
+            "time_control_id": public_contest.get("time_control_id"),
+            "time_control": public_contest.get("time_control"),
+            "format_snapshot": public_contest.get("format_snapshot"),
         },
         "stage": (
             {
@@ -4241,6 +5099,12 @@ def contest_live(
                 "swiss_extra_rounds": stage.get("swiss_extra_rounds"),
                 "effective_rounds": stage.get("effective_rounds"),
                 "scoring_mode": stage.get("series_scoring"),
+                "overall_ranking": (
+                    "cross_group_fair_v1"
+                    if stage_semantics_valid
+                    and stage.get("overall_ranking") == "cross_group_fair_v1"
+                    else None
+                ),
                 "tiebreak": (
                     stage.get("tiebreak") if stage_semantics_valid else None
                 ),
@@ -4294,20 +5158,24 @@ def contest_live(
 
 @router.get("/api/contests/{contest_id}/bracket")
 def contest_bracket(
-    contest_id: int, request: Request, user=Depends(optional_user)
+    contest_id: int,
+    request: Request,
+    response: Response,
+    user=Depends(optional_user),
 ):
     """对阵图数据；隐藏赛事沿用 detail 的 owner/admin 可见性。"""
+    _vary_by_auth(response)
     snapshot = _store(request).contest_projection_snapshot(
         contest_id, include_entries=False
     )
     if snapshot is None:
-        raise HTTPException(404, "比赛不存在")
+        raise HTTPException(404, "比赛不存在", headers=_AUTH_VARY_HEADERS)
     contest = snapshot["contest"]
     if (
         contest.get("status") in _CONTEST_HIDDEN_STATUSES
         and not _can_view_hidden_contest(contest, user)
     ):
-        raise HTTPException(404, "比赛不存在")
+        raise HTTPException(404, "比赛不存在", headers=_AUTH_VARY_HEADERS)
     raw_current_stage_idx = contest.get("current_stage_idx", 0)
     current_stage_idx = (
         raw_current_stage_idx
@@ -4633,7 +5501,10 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
         raise HTTPException(404, "比赛不存在")
     if exact_sqlite_bool(c.get("official_results_ready")) is not True:
         raise HTTPException(409, "正式名次尚未生成（赛事未结束或排名未落库）")
-    rows = store.list_official_results(contest_id)
+    try:
+        rows = store.list_official_results(contest_id)
+    except ValueError as exc:
+        raise HTTPException(409, "正式名次数据损坏，暂不可用") from exc
     # replace_top 的正式榜同时包含决赛选手和预赛未晋级者；积分只在各自
     # 来源阶段内可比较。先统一补齐读模型，再由 JSON/CSV 两种表示复用。
     stage_entry_ids: dict[int, set[int]] = {}
@@ -4643,11 +5514,23 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
         if stage is None or entry is None:
             continue
         stage_entry_ids.setdefault(stage, set()).add(entry)
+    validated_row_count = len(rows)
     rows = with_official_result_provenance(
         c,
         rows,
         stage_entry_ids=stage_entry_ids,
     )
+    if len(rows) != validated_row_count or not rows or any(
+        row.get("tiebreaks") is not None
+        and not isinstance(row.get("tiebreaks"), dict)
+        for row in rows
+    ):
+        raise HTTPException(409, "正式名次数据损坏，暂不可用")
+    for row in rows:
+        rank = exact_nonnegative_int(row.get("rank"))
+        if rank is None or rank < 1:
+            raise HTTPException(409, "正式名次数据损坏，暂不可用")
+        row["overall_rank"] = rank
     # 正式成绩是公开能力。即使未来 Store 行扩展，也不允许实名/快照字段
     # 被 JSON 或 CSV 的通用 dict 流程顺带带出。
     rows = [_strip_contest_identity_fields(row) for row in rows]
@@ -4658,26 +5541,41 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
         def gen():
             buf = io.StringIO()
             w = _csv.writer(buf)
-            w.writerow(["rank", "entry_id", "bot_name", "owner_name", "points",
-                        "buchholz_cut1", "sonneborn_berger", "awarded",
-                        "source_stage", "ranking_cohort"])
+            w.writerow([
+                "rank", "overall_rank", "group_id", "rank_in_group",
+                "entry_id", "bot_name", "owner_name", "points",
+                "buchholz", "buchholz_cut1", "sonneborn_berger",
+                "head_to_head", "normalized_delta", "technical_losses", "seed",
+                "group_rank", "points_rate", "opponent_strength",
+                "normalized_delta_rate", "technical_loss_rate", "draw_order",
+                "awarded", "source_stage", "ranking_cohort",
+            ])
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
             for r in rows:
-                tb = r.get("tiebreaks_json") or "{}"
-                try:
-                    import json as _json
-                    tb = _json.loads(tb)
-                except Exception:
-                    tb = {}
+                tb = r.get("tiebreaks") or {}
                 w.writerow([
                     _csv_safe_cell(r["rank"]),
+                    _csv_safe_cell(r.get("overall_rank") or ""),
+                    _csv_safe_cell(r.get("group_id") or ""),
+                    _csv_safe_cell(r.get("rank_in_group") or ""),
                     _csv_safe_cell(r["entry_id"]),
                     _csv_safe_cell(r.get("bot_name") or ""),
                     _csv_safe_cell(r.get("owner_name") or ""),
                     _csv_safe_cell(r.get("points") or 0),
-                    _csv_safe_cell(tb.get("buchholz_cut1", 0)),
-                    _csv_safe_cell(tb.get("sonneborn_berger", 0)),
+                    _csv_safe_cell(tb.get("buchholz", "")),
+                    _csv_safe_cell(tb.get("buchholz_cut1", "")),
+                    _csv_safe_cell(tb.get("sonneborn_berger", "")),
+                    _csv_safe_cell(tb.get("head_to_head", "")),
+                    _csv_safe_cell(tb.get("normalized_delta", "")),
+                    _csv_safe_cell(tb.get("technical_losses", "")),
+                    _csv_safe_cell(tb.get("seed", "")),
+                    _csv_safe_cell(tb.get("group_rank", "")),
+                    _csv_safe_cell(tb.get("points_rate", "")),
+                    _csv_safe_cell(tb.get("opponent_strength", "")),
+                    _csv_safe_cell(tb.get("normalized_delta_rate", "")),
+                    _csv_safe_cell(tb.get("technical_loss_rate", "")),
+                    _csv_safe_cell(tb.get("draw_order", "")),
                     _csv_safe_cell(r.get("awarded") or ""),
                     _csv_safe_cell(r["source_stage"]),
                     _csv_safe_cell(r["ranking_cohort"]),
@@ -4692,28 +5590,12 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
                 "X-Content-Type-Options": "nosniff",
             },
         )
-    # JSON 默认返回可直接展示的结构化破同分字段；不让前端猜测或解析数据库
-    # 存储格式。CSV 分支仍从同一份持久值展开，二者共享事实来源。
-    public_rows = []
-    for row in rows:
-        public = dict(row)
-        raw_tiebreaks = public.pop("tiebreaks_json", None) or "{}"
-        try:
-            import json as _json
-            parsed_tiebreaks = _json.loads(raw_tiebreaks)
-        except (TypeError, ValueError):
-            parsed_tiebreaks = {}
-        public["tiebreaks"] = (
-            parsed_tiebreaks if isinstance(parsed_tiebreaks, dict) else {}
-        )
-        public_rows.append(public)
-
     # json（默认）：返回结构化排名
     return {
         "contest_id": contest_id,
         "phase": c.get("phase") or "standalone",
         "ready": True,
-        "results": public_rows,
+        "results": rows,
     }
 
 
@@ -5259,16 +6141,10 @@ async def admin_patch_user(
         fields["role"] = body.role
     if not fields:
         raise HTTPException(400, "无更新字段", headers=_ADMIN_PRIVATE_HEADERS)
-    public_ids = (
-        _store(request).list_active_local_ai_public_ids_for_owner(user_id)
-        if fields.get("is_active") == 0
-        else []
-    )
     u = _store(request).update_user(user_id, **fields)
     if not u:
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
-    if public_ids:
-        await _local_ai(request).revoke_public_ids(public_ids)
+    await _revoke_committed_local_ai_transports(request, u)
     return {"user": _admin_user_for_api(u)}
 
 
@@ -5486,11 +6362,6 @@ async def admin_patch_bot(
         fields["description"] = str(body["description"])[:2000]
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    public_ids = (
-        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
-        if fields.get("is_active") == 0
-        else []
-    )
     try:
         bot = _bots(request).patch_admin(bot_id, **fields)
     except BotError as exc:
@@ -5500,8 +6371,7 @@ async def admin_patch_bot(
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
-    if public_ids:
-        await _local_ai(request).revoke_public_ids(public_ids)
+    await _revoke_committed_local_ai_transports(request, bot)
     return {
         "bot": _with_bot_runnable(bot, include_owner_deleted_at=True)
     }
@@ -5570,12 +6440,23 @@ class AdminContestPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
     status: str | None = None
-    title: str | None = None
+    title: str | None = Field(
+        default=None, min_length=1, max_length=CONTEST_TITLE_MAX_LENGTH
+    )
     # 时间编排（admin 可改时间窗口）
     registration_opens_at: str | None = None
     registration_closes_at: str | None = None
     starts_at: str | None = None
     stage_series_settings: dict[str, ContestStageSeriesSetting] | None = None
+    stage_format_settings: dict[str, ContestStageFormatSetting] | None = None
+    time_control_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{0,95}$"
+    )
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str | None) -> str | None:
+        return None if value is None else validate_contest_title(value)
 
 
 @router.get("/api/admin/contests")
@@ -5605,19 +6486,44 @@ async def admin_patch_contest(
         if tk in body.model_fields_set:
             fields[tk] = getattr(body, tk)
 
-    if "stage_series_settings" in body.model_fields_set:
+    format_fields = {
+        "stage_series_settings",
+        "stage_format_settings",
+        "time_control_id",
+    }.intersection(body.model_fields_set)
+    if format_fields:
         if body.status is not None or fields:
             raise HTTPException(
-                400, "系列设置不能与状态、标题或时间修改同时提交"
+                400, "赛事格式或时限不能与状态、标题或时间修改同时提交"
             )
         try:
-            settings = _stage_series_settings_payload(
+            if (
+                "stage_series_settings" in format_fields
+                and body.stage_series_settings is None
+            ):
+                raise ValueError("stage_series_settings 不能为 null")
+            if (
+                "stage_format_settings" in format_fields
+                and body.stage_format_settings is None
+            ):
+                raise ValueError("stage_format_settings 不能为 null")
+            if "time_control_id" in format_fields and body.time_control_id is None:
+                raise ValueError("time_control_id 不能为 null")
+            series_settings = _stage_series_settings_payload(
                 body.stage_series_settings
             )
-            if settings is None:
-                raise ValueError("stage_series_settings 不能为 null")
-            contest = await _contests(request).revise_stage_series_settings(
-                contest_id, settings
+            format_settings = _stage_format_settings_payload(
+                body.stage_format_settings
+            )
+            contest = await _contests(request).revise_format_settings(
+                contest_id,
+                stage_series_settings=series_settings,
+                stage_format_settings=format_settings,
+                time_control_id=(
+                    body.time_control_id
+                    if "time_control_id" in format_fields
+                    else None
+                ),
             )
         except ValueError as exc:
             raise _contest_write_http_error(exc) from exc
@@ -5625,11 +6531,11 @@ async def admin_patch_contest(
             raise HTTPException(404, "比赛不存在")
         audit_log(
             request,
-            "admin_patch_contest_stage_series",
+            "admin_patch_contest_format_settings",
             result="ok",
             user=admin.get("username"),
             target=contest_id,
-            detail="stage_series_settings=changed",
+            detail="fields=" + ",".join(sorted(format_fields)),
         )
         return {"contest": _contest_for_api(contest)}
 
@@ -6452,6 +7358,24 @@ def admin_patch_site(
 # ── 公开裁判引擎（只读） ──────────────────────────────
 # 现行规则只读：公开裁判元数据仅从游戏注册表派生。
 JUDGE_GAMES: list[dict[str, Any]] = game_registry.judge_games()
+
+
+@router.get("/api/games")
+def public_games():
+    """Public, code-owned game metadata used by challenge and replay clients."""
+
+    games: list[dict[str, Any]] = []
+    for game_id in sorted(game_registry.all_ids()):
+        spec = game_registry.get(game_id)
+        games.append(
+            {
+                "game_id": spec.game_id,
+                "label": spec.label,
+                "default_time_control_id": spec.default_time_control_id,
+                "time_controls": _game_time_controls_for_api(spec),
+            }
+        )
+    return {"games": games, "source": CONFIGURATION_SOURCE, "mutable": False}
 
 
 # ── 公开：裁判规则与源码（对全体玩家透明，可审计） ──────────────────

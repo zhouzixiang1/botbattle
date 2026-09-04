@@ -32,6 +32,7 @@ from bzplat.backend.contests.templates import points_for_result
 from bzplat.backend.contests.validation import (
     SERIES_SCORING_INDEPENDENT,
     contest_current_stage_index,
+    reserved_group_markers_match_template,
     stage_duplicate_mode,
     stage_scoring_contract_is_valid,
 )
@@ -443,21 +444,282 @@ def compute_official_ranking(
     return rows
 
 
+def compute_cross_group_ranking(
+    standings: list[dict],
+    pairings: list[dict],
+    matches: dict[str, dict],
+    *,
+    normalize_delta=None,
+    stage: dict[str, Any],
+    planned_games_per_match: int,
+    fixed_rounds_per_match: int | None,
+    game_id: str,
+    expected_contest_id: int,
+    expected_entry_bots: dict[int, int | None],
+    expected_entry_users: dict[int, int],
+    require_current_entry_bots: bool = False,
+) -> list[dict]:
+    """Rank unequal random groups without comparing their raw point totals.
+
+    Each group's existing 2/1/0 chain first determines ``rank_in_group``.
+    Cross-group order then uses only normalized rates and the frozen draw order;
+    direct encounters never cross group boundaries.
+    """
+    grouped_standings: dict[str, list[dict]] = {}
+    entry_groups: dict[int, str] = {}
+    for row in standings:
+        entry_id = row.get("entry_id")
+        group_id = row.get("group_id")
+        if (
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            or entry_id in entry_groups
+            or not isinstance(group_id, str)
+            or not group_id
+        ):
+            return []
+        entry_groups[entry_id] = group_id
+        grouped_standings.setdefault(group_id, []).append(row)
+    grouped_pairings: dict[str, list[dict]] = {}
+    for pairing in pairings:
+        entry_a_id = pairing.get("entry_a_id")
+        entry_b_id = pairing.get("entry_b_id")
+        group_id = pairing.get("group_id")
+        if (
+            not isinstance(group_id, str)
+            or group_id not in grouped_standings
+            or isinstance(entry_a_id, bool)
+            or not isinstance(entry_a_id, int)
+            or isinstance(entry_b_id, bool)
+            or not isinstance(entry_b_id, int)
+            or entry_a_id == entry_b_id
+            or entry_groups.get(entry_a_id) != group_id
+            or entry_groups.get(entry_b_id) != group_id
+        ):
+            return []
+        grouped_pairings.setdefault(group_id, []).append(pairing)
+    if set(grouped_pairings) != set(grouped_standings):
+        return []
+
+    all_rows: list[dict] = []
+    points_rates: dict[int, float] = {}
+    opponents: dict[int, list[dict]] = {}
+    for group_id in sorted(grouped_standings):
+        group_pairings = grouped_pairings[group_id]
+        group_match_ids = {
+            str(pairing["match_id"])
+            for pairing in group_pairings
+            if pairing.get("match_id") is not None
+        }
+        group_matches = {
+            match_id: match
+            for match_id, match in matches.items()
+            if str(match_id) in group_match_ids
+        }
+        ranked = compute_official_ranking(
+            grouped_standings[group_id],
+            group_pairings,
+            group_matches,
+            normalize_delta=normalize_delta,
+            stage=stage,
+            planned_games_per_match=planned_games_per_match,
+            fixed_rounds_per_match=fixed_rounds_per_match,
+            game_id=game_id,
+            expected_contest_id=expected_contest_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=require_current_entry_bots,
+        )
+        if len(ranked) != len(grouped_standings[group_id]):
+            return []
+        group_opponents = _entry_opponents_map(
+            group_pairings,
+            group_matches,
+            stage=stage,
+            planned_games_per_match=planned_games_per_match,
+            fixed_rounds_per_match=fixed_rounds_per_match,
+            game_id=game_id,
+            expected_contest_id=expected_contest_id,
+            expected_entry_bots=expected_entry_bots,
+            expected_entry_users=expected_entry_users,
+            require_current_entry_bots=require_current_entry_bots,
+        )
+        opponents.update(group_opponents)
+        for row in ranked:
+            games = int(row.get("wins") or 0) + int(row.get("draws") or 0) + int(row.get("losses") or 0)
+            entry_id = int(row["entry_id"])
+            # 2/1/0 scoring: divide by the maximum two points per game.
+            points_rates[entry_id] = (
+                float(row.get("points") or 0) / (2.0 * games)
+                if games
+                else 0.0
+            )
+            all_rows.append({**row, "rank_in_group": int(row["rank"])})
+
+    for row in all_rows:
+        entry_id = int(row["entry_id"])
+        games = int(row.get("wins") or 0) + int(row.get("draws") or 0) + int(row.get("losses") or 0)
+        opponent_rows = [
+            record for record in opponents.get(entry_id, []) if not record.get("virtual")
+        ]
+        if len(opponent_rows) != games:
+            return []
+        opponent_strength = (
+            sum(points_rates.get(int(record["opp_entry"]), 0.0) for record in opponent_rows)
+            / games
+        ) if games else 0.0
+        normalized_delta = float(row["tiebreaks"]["normalized_delta"])
+        technical_losses = int(row["tiebreaks"]["technical_losses"])
+        draw_order = int(row.get("seed") or 0)
+        if draw_order < 1:
+            return []
+        row["tiebreaks"] = {
+            **row["tiebreaks"],
+            "group_rank": int(row["rank_in_group"]),
+            "points_rate": points_rates[entry_id],
+            "opponent_strength": opponent_strength,
+            "normalized_delta_rate": normalized_delta / games if games else 0.0,
+            "technical_loss_rate": technical_losses / games if games else 0.0,
+            "draw_order": draw_order,
+        }
+
+    all_rows.sort(
+        key=lambda row: (
+            row["tiebreaks"]["group_rank"],
+            -row["tiebreaks"]["points_rate"],
+            -row["tiebreaks"]["opponent_strength"],
+            -row["tiebreaks"]["normalized_delta_rate"],
+            row["tiebreaks"]["technical_loss_rate"],
+            row["tiebreaks"]["draw_order"],
+        )
+    )
+    for index, row in enumerate(all_rows, start=1):
+        row["rank"] = index
+        row["overall_rank"] = index
+    return all_rows
+
+
 def merge_replace_top(
-    stage1_ranking: list[dict], stage2_ranking: list[dict], scope: int = 8
+    stage1_ranking: list[dict],
+    stage2_ranking: list[dict],
+    scope: int = 8,
+    *,
+    expected_entry_groups: dict[int, object] | None = None,
 ) -> list[dict]:
     """决赛合成榜（replace_top 模式）：1..scope 取 stage2（Top8 双循环），
 
     scope+1..N 取 stage1 未晋级者相对序。
     stage1_ranking/stage2_ranking 都是 compute_official_ranking 返回（含 rank）。
     """
-    top = stage2_ranking[:scope]
+    if (
+        isinstance(scope, bool)
+        or not isinstance(scope, int)
+        or scope < 1
+        or not stage1_ranking
+        or not stage2_ranking
+    ):
+        return []
+    previous_by_entry: dict[int, dict] = {}
+    for row in stage1_ranking:
+        entry_id = row.get("entry_id")
+        if (
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            or entry_id in previous_by_entry
+        ):
+            return []
+        previous_by_entry[entry_id] = row
+    final_rows = stage2_ranking[:scope]
+    final_entry_ids = [row.get("entry_id") for row in final_rows]
+    if (
+        any(
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            for entry_id in final_entry_ids
+        )
+        or len(set(final_entry_ids)) != len(final_entry_ids)
+        or any(entry_id not in previous_by_entry for entry_id in final_entry_ids)
+    ):
+        return []
+    top = [
+        {
+            **row,
+            "group_id": previous_by_entry.get(row["entry_id"], {}).get("group_id")
+            or row.get("group_id")
+            or "",
+            "rank_in_group": previous_by_entry.get(row["entry_id"], {}).get(
+                "rank_in_group"
+            ),
+        }
+        for row in final_rows
+    ]
     top_entry_ids = {r["entry_id"] for r in top}
-    rest = [r for r in stage1_ranking if r["entry_id"] not in top_entry_ids]
+    rest = [
+        dict(r) for r in stage1_ranking if r["entry_id"] not in top_entry_ids
+    ]
     merged = list(top) + list(rest)
+    if expected_entry_groups is not None:
+        if set(expected_entry_groups) != set(previous_by_entry):
+            return []
+        normalized_groups: dict[int, str] = {}
+        for entry_id, raw_group in expected_entry_groups.items():
+            if (
+                not isinstance(raw_group, str)
+                or raw_group != raw_group.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in raw_group)
+            ):
+                return []
+            normalized_groups[entry_id] = raw_group
+        grouped = [bool(group_id) for group_id in normalized_groups.values()]
+        if any(grouped) and not all(grouped):
+            return []
+        for row in merged:
+            entry_id = int(row["entry_id"])
+            group_id = normalized_groups[entry_id]
+            if group_id:
+                previous = previous_by_entry[entry_id]
+                rank_in_group = previous.get("rank_in_group")
+                if (
+                    previous.get("group_id") != group_id
+                    or isinstance(rank_in_group, bool)
+                    or not isinstance(rank_in_group, int)
+                    or rank_in_group < 1
+                ):
+                    return []
+                row["group_id"] = group_id
+                row["rank_in_group"] = rank_in_group
+            else:
+                # Legacy group templates did not freeze group_id on the roster.
+                # Keep their official table historically ungrouped while using
+                # the private completed-stage snapshot only for fallback order.
+                row["group_id"] = ""
+                row["rank_in_group"] = None
     for i, r in enumerate(merged):
         r["rank"] = i + 1
     return merged
+
+
+def final_stage_replaces_previous_ranking(
+    stage: dict | None, *, stage_idx: int
+) -> bool:
+    """Whether a terminal stage supplies only the leading ranking cohort.
+
+    ``replace_top`` is the explicit contract used by ranking finals.  Legacy
+    qualifier-to-KO templates predate that marker, but have the same durable
+    meaning: the KO orders its finalists while the frozen qualifier table
+    remains authoritative for everyone who did not advance.
+    """
+    return bool(
+        stage_idx > 0
+        and isinstance(stage, dict)
+        and (
+            stage.get("ranking_mode") == "replace_top"
+            or stage.get("type") == "single_elimination"
+        )
+    )
 
 
 def with_official_result_provenance(
@@ -488,6 +750,11 @@ def with_official_result_provenance(
         template_stages = template.get("stages") if template else []
         stages = template_stages if isinstance(template_stages, list) else []
 
+    if not reserved_group_markers_match_template(
+        contest.get("template_id"), stages, game_id=contest.get("game_id")
+    ):
+        return []
+
     final_stage_idx = contest_current_stage_index(
         contest, stage_count=len(stages)
     )
@@ -509,23 +776,43 @@ def with_official_result_provenance(
     )
     replace_top = (
         final_stage_valid
-        and final_stage.get("ranking_mode") == "replace_top"
-        and final_stage_idx > 0
-    )
-    raw_scope = final_stage.get("ranking_scope", 8) if final_stage_valid else 8
-    scope = (
-        raw_scope
-        if isinstance(raw_scope, int)
-        and not isinstance(raw_scope, bool)
-        and raw_scope >= 1
-        else 8
+        and final_stage_replaces_previous_ranking(
+            final_stage, stage_idx=final_stage_idx
+        )
     )
     final_entries = (stage_entry_ids or {}).get(final_stage_idx, set())
+    implicit_knockout = bool(
+        replace_top
+        and final_stage.get("type") == "single_elimination"
+        and final_stage.get("ranking_mode") != "replace_top"
+    )
+    if implicit_knockout:
+        # Legacy qualifier-to-KO stages did not persist a ranking_scope marker.
+        # Their exact finalist cohort is the completed final-stage snapshot.
+        # Without that evidence, expose an unknown cohort rather than guessing
+        # from a template's nominal advance count (small rosters are clamped).
+        scope = len(final_entries) if final_entries else None
+    else:
+        raw_scope = (
+            final_stage.get("ranking_scope", 8) if final_stage_valid else 8
+        )
+        scope = (
+            raw_scope
+            if isinstance(raw_scope, int)
+            and not isinstance(raw_scope, bool)
+            and raw_scope >= 1
+            else 8
+        )
 
     enriched: list[dict] = []
     for row in rows:
         public = dict(row)
         if replace_top:
+            if scope is None:
+                public["source_stage"] = None
+                public["ranking_cohort"] = "unknown"
+                enriched.append(public)
+                continue
             try:
                 rank = int(public.get("rank") or 0)
                 entry_id = int(public.get("entry_id"))
@@ -553,15 +840,13 @@ def with_official_result_provenance(
     return enriched
 
 
-def persist_official_results(
-    store,
-    contest_id: int,
+def build_official_result_rows(
     ranking: list[dict],
     *,
     stage_idx: int = 0,
     awarded_fn=None,
-) -> None:
-    """把全员正式名次作为完整批次原子落库（幂等替换）。"""
+) -> list[dict]:
+    """Build the one canonical Store batch for an official ranking."""
     result_rows: list[dict] = []
     for r in ranking:
         awarded = ""
@@ -575,10 +860,29 @@ def persist_official_results(
                 "points": r["tiebreaks"]["points"],
                 "bot_id": r.get("bot_id"),
                 "user_id": r.get("user_id"),
+                "group_id": r.get("group_id") or "",
+                "rank_in_group": r.get("rank_in_group"),
                 "tiebreaks_json": json.dumps(
                     r["tiebreaks"], ensure_ascii=False
                 ),
                 "awarded": awarded,
             }
         )
+    return result_rows
+
+
+def persist_official_results(
+    store,
+    contest_id: int,
+    ranking: list[dict],
+    *,
+    stage_idx: int = 0,
+    awarded_fn=None,
+) -> None:
+    """把全员正式名次作为完整批次原子落库（幂等替换）。"""
+    result_rows = build_official_result_rows(
+        ranking,
+        stage_idx=stage_idx,
+        awarded_fn=awarded_fn,
+    )
     store.replace_official_results(contest_id, result_rows)

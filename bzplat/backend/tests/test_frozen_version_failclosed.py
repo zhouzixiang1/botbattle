@@ -434,7 +434,7 @@ def test_contest_empty_frozen_path_aborts_and_resets_pairing_safely(tmp_path):
         contest = store.create_contest(
             "冻结版本失效赛事",
             organizer["id"],
-            status="running",
+            status="published",
             game_id="holdem",
             stages_json='[{"key":"ko","type":"single_elimination"}]',
         )
@@ -442,17 +442,30 @@ def test_contest_empty_frozen_path_aborts_and_resets_pairing_safely(tmp_path):
             store.add_contest_entry(contest["id"], users[i]["id"], bots[i]["id"])
             for i in range(2)
         ]
-        pairing = store.add_contest_pairing(
+        pairings = store.create_contest_stage_pairings(
             contest["id"],
-            bots[0]["id"],
-            bots[1]["id"],
-            entry_a_id=entries[0]["id"],
-            entry_b_id=entries[1]["id"],
-            bot_a_version_id=versions[0]["id"],
-            bot_b_version_id=versions[1]["id"],
-            stage_idx=0,
-            stage_key="ko",
+            0,
+            [
+                {
+                    "bot_a_id": bots[0]["id"],
+                    "bot_b_id": bots[1]["id"],
+                    "entry_a_id": entries[0]["id"],
+                    "entry_b_id": entries[1]["id"],
+                    "bot_a_version_id": versions[0]["id"],
+                    "bot_b_version_id": versions[1]["id"],
+                    "round_num": 1,
+                    "stage_key": "ko",
+                    "bracket_slot": 0,
+                    "published_at": "2026-01-01T00:00:00",
+                }
+            ],
+            expected_current_stage_idx=0,
+            expected_status="published",
+            activate_running=True,
         )
+        assert len(pairings) == 1
+        assert store.contest_stage_manifest_is_valid(contest["id"], 0)
+        pairing = pairings[0]
         runner = NeverRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         manager = ContestManager(store, orch)

@@ -143,6 +143,103 @@ def _terminal_match(
     return match_id
 
 
+def _running_contest_match(store, users, match_id: str):
+    user_a, bot_a = users["gomoku_a"]
+    user_b, bot_b = users["gomoku_b"]
+    contest = store.create_contest(
+        f"recovery-{match_id}",
+        user_a["id"],
+        status="running",
+        game_id="gomoku",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )
+    entry_a = store.add_contest_entry(contest["id"], user_a["id"], bot_a["id"])
+    entry_b = store.add_contest_entry(contest["id"], user_b["id"], bot_b["id"])
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bot_a["id"],
+        bot_b["id"],
+        status="pending",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+        published_at="2026-09-03T00:00:00",
+        scheduled_at="2026-09-03T00:00:00",
+    )
+    # This helper intentionally builds a low-level recovery state instead of
+    # running the dispatcher.  Give its complete two-entry RR batch the same
+    # exact manifest/revision proof a live contest must have before bind/reset;
+    # leaving it unsealed would only exercise the active lifecycle guard.
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=1 WHERE id=?",
+            (contest["id"],),
+        )
+        # Updating the manifest advances the lifecycle revision via trigger;
+        # seal only after that revision is durable inside this transaction.
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=user_a["id"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="gomoku",
+    )
+    store.update_match(match_id, status="running")
+    store.bind_contest_pairing_match(
+        contest["id"],
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
+    return contest, pairing
+
+
+def _pending_contest_pairing(store, users, *, status: str = "published"):
+    user_a, bot_a = users["gomoku_a"]
+    user_b, bot_b = users["gomoku_b"]
+    contest = store.create_contest(
+        f"pending-technical-{status}",
+        user_a["id"],
+        status=status,
+        game_id="gomoku",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+        time_control_id="gomoku_per_side_total_900s_v1",
+    )
+    entry_a = store.add_contest_entry(contest["id"], user_a["id"], bot_a["id"])
+    entry_b = store.add_contest_entry(contest["id"], user_b["id"], bot_b["id"])
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bot_a["id"],
+        bot_b["id"],
+        status="pending",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+    )
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=1 WHERE id=?",
+            (contest["id"],),
+        )
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+    return store.get_contest(contest["id"]), pairing
+
+
 @pytest.mark.parametrize("game_id", ["holdem", "gomoku", "pencil"])
 def test_terminal_log_is_deterministic_public_replay_for_every_game(
     tmp_path, game_id
@@ -218,6 +315,791 @@ def test_aborted_log_uses_the_same_authoritative_public_error(tmp_path, game_id)
     assert response.json()["replay"] == replay
     assert replay["events"][-1] == {"type": "error", "reason": "platform_error"}
     assert private not in response.text
+
+
+@pytest.mark.parametrize(
+    "interruption_reason",
+    (
+        "orphan_after_service_restart",
+        "orphan_after_runtime_recovery",
+    ),
+)
+@pytest.mark.parametrize("recovery_path", ("orphan_scan", "contest_reset"))
+def test_recovery_paths_atomically_finalize_replay_and_enable_log_export(
+    tmp_path,
+    interruption_reason,
+    recovery_path,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    match_id = f"{recovery_path}-{interruption_reason}"
+    prefix: list[dict[str, Any]] = []
+    if recovery_path == "orphan_scan":
+        user_a, bot_a = users["gomoku_a"]
+        bot_b = users["gomoku_b"][1]
+        store.create_match(
+            match_id,
+            bot_a["id"],
+            bot_b["id"],
+            owner_id=user_a["id"],
+            game_id="gomoku",
+            match_type="challenge",
+        )
+        store.update_match(match_id, status="running")
+        prior = _events("gomoku", terminal="error")
+        prefix = prior[:-1]
+        store.upsert_replay(match_id, json.dumps(prior, ensure_ascii=False))
+        assert store.recover_orphan_matches(
+            interruption_reason=interruption_reason
+        ) == 1
+    else:
+        _running_contest_match(store, users, match_id)
+        assert store.get_replay(match_id) is None
+        assert store.reset_dead_contest_pairings(
+            interruption_reason=interruption_reason
+        ) == 1
+
+    match = store.get_match(match_id)
+    terminal = {"type": "error", "reason": interruption_reason}
+    assert (match["status"], match["reason"]) == (
+        "aborted",
+        interruption_reason,
+    )
+    assert json.loads(store.get_replay(match_id)["events_json"]) == [
+        *prefix,
+        terminal,
+    ]
+    raw_replay = store.get_replay(match_id)["events_json"]
+    assert (
+        store.recover_orphan_matches(interruption_reason=interruption_reason)
+        if recovery_path == "orphan_scan"
+        else store.reset_dead_contest_pairings(
+            interruption_reason=interruption_reason
+        )
+    ) == 0
+    assert store.get_replay(match_id)["events_json"] == raw_replay
+    source = store.get_match_record_source(match_id)
+    assert source is not None and source["replay_finalized"] is True
+    response = client.get(f"/api/matches/{match_id}/log")
+    assert response.status_code == 200
+    exported = response.json()
+    assert exported["match"]["reason"] == interruption_reason
+    assert exported["replay"]["events"][-1] == terminal
+
+
+@pytest.mark.parametrize(
+    ("interruption_reason", "pending_reason"),
+    (
+        (
+            "orphan_after_service_restart",
+            "orphan_pending_after_service_restart",
+        ),
+        (
+            "orphan_after_runtime_recovery",
+            "orphan_pending_after_runtime_recovery",
+        ),
+    ),
+)
+def test_pending_orphan_recovery_finalizes_replay_and_log(
+    tmp_path,
+    interruption_reason,
+    pending_reason,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    user_a, bot_a = users["gomoku_a"]
+    bot_b = users["gomoku_b"][1]
+    match_id = f"pending-{interruption_reason}"
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=user_a["id"],
+        game_id="gomoku",
+        match_type="challenge",
+    )
+    assert store.get_replay(match_id) is None
+
+    assert store.recover_orphan_matches(
+        interruption_reason=interruption_reason
+    ) == 1
+
+    terminal = {"type": "error", "reason": pending_reason}
+    match = store.get_match(match_id)
+    assert (match["status"], match["reason"]) == ("aborted", pending_reason)
+    assert json.loads(store.get_replay(match_id)["events_json"]) == [terminal]
+    raw_replay = store.get_replay(match_id)["events_json"]
+    assert store.recover_orphan_matches(
+        interruption_reason=interruption_reason
+    ) == 0
+    assert store.get_replay(match_id)["events_json"] == raw_replay
+    response = client.get(f"/api/matches/{match_id}/log")
+    assert response.status_code == 200
+    assert response.json()["replay"]["events"][-1] == terminal
+
+
+@pytest.mark.parametrize("recovery_path", ("orphan_scan", "contest_reset"))
+def test_recovery_rebuilds_malformed_replay_as_audited_terminal_only(
+    tmp_path,
+    recovery_path,
+    caplog,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    match_id = f"malformed-{recovery_path}"
+    if recovery_path == "orphan_scan":
+        user_a, bot_a = users["gomoku_a"]
+        bot_b = users["gomoku_b"][1]
+        store.create_match(
+            match_id,
+            bot_a["id"],
+            bot_b["id"],
+            owner_id=user_a["id"],
+            game_id="gomoku",
+            match_type="challenge",
+        )
+        store.update_match(match_id, status="running")
+        pairing_before = None
+    else:
+        contest, _pairing = _running_contest_match(store, users, match_id)
+        pairing_before = store.list_contest_pairings(contest["id"])
+    store.upsert_replay(match_id, "{")
+
+    recovered = (
+        store.recover_orphan_matches(
+            interruption_reason="orphan_after_service_restart"
+        )
+        if recovery_path == "orphan_scan"
+        else store.reset_dead_contest_pairings(
+            interruption_reason="orphan_after_service_restart"
+        )
+    )
+
+    match = store.get_match(match_id)
+    terminal = {"type": "error", "reason": "orphan_after_service_restart"}
+    assert recovered == 1
+    assert (match["status"], match["reason"]) == (
+        "aborted",
+        "orphan_after_service_restart",
+    )
+    assert json.loads(store.get_replay(match_id)["events_json"]) == [terminal]
+    if recovery_path == "contest_reset":
+        after = store.list_contest_pairings(contest["id"])
+        assert after != pairing_before
+        assert (after[0]["status"], after[0]["match_id"]) == ("pending", None)
+    assert any(
+        "recovery_replay_rebuilt" in record.message
+        and match_id in record.message
+        for record in caplog.records
+    )
+    assert "{" not in caplog.text
+    assert client.get(f"/api/matches/{match_id}/log").status_code == 200
+
+
+@pytest.mark.parametrize("recovery_path", ("orphan_scan", "contest_reset"))
+def test_recovery_replay_write_failure_rolls_back_match_and_pairing(
+    tmp_path,
+    recovery_path,
+):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = f"replay-write-failure-{recovery_path}"
+    if recovery_path == "orphan_scan":
+        user_a, bot_a = users["gomoku_a"]
+        bot_b = users["gomoku_b"][1]
+        store.create_match(
+            match_id,
+            bot_a["id"],
+            bot_b["id"],
+            owner_id=user_a["id"],
+            game_id="gomoku",
+            match_type="challenge",
+        )
+        store.update_match(match_id, status="running")
+        pairing_before = None
+    else:
+        contest, _pairing = _running_contest_match(store, users, match_id)
+        pairing_before = store.list_contest_pairings(contest["id"])
+    with store._tx() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_recovery_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced replay failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced replay failure"):
+        if recovery_path == "orphan_scan":
+            store.recover_orphan_matches(
+                interruption_reason="orphan_after_service_restart"
+            )
+        else:
+            store.reset_dead_contest_pairings(
+                interruption_reason="orphan_after_service_restart"
+            )
+
+    match = store.get_match(match_id)
+    assert (match["status"], match["reason"]) == ("running", "")
+    assert store.get_replay(match_id) is None
+    if recovery_path == "contest_reset":
+        assert store.list_contest_pairings(contest["id"]) == pairing_before
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+@pytest.mark.parametrize("replay_shape", ("missing", "stale", "malformed"))
+def test_contest_reset_repairs_terminal_match_replay_before_pairing_decision(
+    tmp_path,
+    terminal_status,
+    replay_shape,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    match_id = f"terminal-contest-{terminal_status}-{replay_shape}"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    prefix = [{"type": "match_start", "game_id": "gomoku", "size": 15}]
+    authoritative_terminal = (
+        {
+            "type": "match_end",
+            "winner": 0,
+            "reason": "five",
+            "deltas": [3, -3],
+        }
+        if terminal_status == "completed"
+        else {"type": "error", "reason": "orphan_after_restart"}
+    )
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status=?,winner=?,reason=?,result=?,ended_at=? "
+            "WHERE id=?",
+            (
+                terminal_status,
+                0 if terminal_status == "completed" else None,
+                "five" if terminal_status == "completed" else "orphan_after_restart",
+                json.dumps({"rounds_played": 1, "deltas": [3, -3]}),
+                "2026-09-02T10:00:00",
+                match_id,
+            ),
+        )
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "stale":
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (
+                    match_id,
+                    json.dumps(
+                        [
+                            *prefix,
+                            {
+                                "type": "match_end",
+                                "winner": 1,
+                                "reason": "completed",
+                                "deltas": [-99, 99],
+                            },
+                            {"type": "error", "reason": "platform_error"},
+                        ]
+                    ),
+                    "2026-09-02T09:00:00",
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (match_id, "{", "2026-09-02T09:00:00"),
+            )
+
+    recovered = store.reset_dead_contest_pairings(
+        interruption_reason="orphan_after_service_restart"
+    )
+
+    assert recovered == (0 if terminal_status == "completed" else 1)
+    expected_events = (
+        [*prefix, authoritative_terminal]
+        if replay_shape == "stale"
+        else [authoritative_terminal]
+    )
+    repaired = store.get_replay(match_id)
+    assert json.loads(repaired["events_json"]) == expected_events
+    stored_once = (repaired["events_json"], repaired["updated_at"])
+    assert store.reset_dead_contest_pairings(
+        interruption_reason="orphan_after_service_restart"
+    ) == 0
+    repaired_twice = store.get_replay(match_id)
+    assert (repaired_twice["events_json"], repaired_twice["updated_at"]) == stored_once
+    pairing = store.list_contest_pairings(contest["id"])[0]
+    assert (pairing["status"], pairing["match_id"]) == (
+        ("running", match_id)
+        if terminal_status == "completed"
+        else ("pending", None)
+    )
+    source = store.get_match_record_source(match_id)
+    assert source is not None and source["replay_finalized"] is True
+    exported = client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == authoritative_terminal
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+def test_contest_terminal_replay_failure_rolls_back_pairing_recovery(
+    tmp_path,
+    terminal_status,
+):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = f"terminal-contest-replay-failure-{terminal_status}"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status=?,winner=?,reason=?,result=? WHERE id=?",
+            (
+                terminal_status,
+                0 if terminal_status == "completed" else None,
+                "five" if terminal_status == "completed" else "orphan_after_restart",
+                json.dumps({"rounds_played": 1, "deltas": [3, -3]}),
+                match_id,
+            ),
+        )
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "CREATE TRIGGER fail_terminal_contest_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced terminal contest replay failure'); END"
+        )
+    pairing_before = store.list_contest_pairings(contest["id"])
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced terminal contest replay failure"
+    ):
+        store.reset_dead_contest_pairings(
+            interruption_reason="orphan_after_service_restart"
+        )
+
+    assert store.list_contest_pairings(contest["id"]) == pairing_before
+    assert store.get_match(match_id)["status"] == terminal_status
+    assert store.get_replay(match_id) is None
+
+
+@pytest.mark.parametrize("replay_shape", ("missing", "stale", "malformed"))
+def test_pairing_completion_persists_match_authoritative_replay_before_status(
+    tmp_path,
+    replay_shape,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    match_id = f"pairing-completion-replay-{replay_shape}"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    prefix = [{"type": "match_start", "game_id": "gomoku", "size": 15}]
+    terminal = {
+        "type": "match_end",
+        "winner": 1,
+        "reason": "five",
+        "deltas": [-4, 4],
+    }
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status='completed',winner=1,reason='five',"
+            "result=?,ended_at=? WHERE id=?",
+            (
+                json.dumps({"deltas": [-4, 4]}),
+                "2026-09-02T10:00:00",
+                match_id,
+            ),
+        )
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "stale":
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (
+                    match_id,
+                    json.dumps(
+                        [
+                            *prefix,
+                            {
+                                "type": "match_end",
+                                "winner": 0,
+                                "reason": "completed",
+                                "deltas": [99, -99],
+                            },
+                        ]
+                    ),
+                    "2026-09-02T09:00:00",
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (match_id, "{", "2026-09-02T09:00:00"),
+            )
+
+    completed = store.complete_contest_pairing_for_match(contest["id"], match_id)
+
+    assert completed is not None and completed["status"] == "completed"
+    expected = [*prefix, terminal] if replay_shape == "stale" else [terminal]
+    replay = store.get_replay(match_id)
+    assert json.loads(replay["events_json"]) == expected
+    stored_once = (replay["events_json"], replay["updated_at"])
+    assert store.complete_contest_pairing_for_match(contest["id"], match_id)
+    replay_twice = store.get_replay(match_id)
+    assert (replay_twice["events_json"], replay_twice["updated_at"]) == stored_once
+    source = store.get_match_record_source(match_id)
+    assert source is not None and source["replay_finalized"] is True
+    exported = client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == terminal
+
+
+def test_pairing_completion_does_not_rewrite_existing_canonical_terminal(tmp_path):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = "pairing-completion-canonical-no-write"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    terminal = {
+        "type": "match_end",
+        "winner": 0,
+        "reason": "five",
+        "deltas": [2, -2],
+    }
+    raw_replay = json.dumps(
+        [{"type": "match_start", "game_id": "gomoku"}, terminal],
+        ensure_ascii=False,
+    )
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status='completed',winner=0,reason='five',"
+            "result=? WHERE id=?",
+            (json.dumps({"deltas": [2, -2]}), match_id),
+        )
+        conn.execute(
+            "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?)",
+            (match_id, raw_replay, "2026-09-02T09:00:00"),
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_canonical_replay_update BEFORE UPDATE ON match_replays "
+            f"WHEN OLD.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'canonical replay must be zero-write'); END"
+        )
+
+    completed = store.complete_contest_pairing_for_match(contest["id"], match_id)
+
+    assert completed is not None and completed["status"] == "completed"
+    replay = store.get_replay(match_id)
+    assert (replay["events_json"], replay["updated_at"]) == (
+        raw_replay,
+        "2026-09-02T09:00:00",
+    )
+
+
+@pytest.mark.parametrize(
+    "noncanonical_terminal",
+    (
+        {
+            "type": "match_end",
+            "winner": False,
+            "reason": "five",
+            "deltas": [2, -2],
+        },
+        {
+            "type": "match_end",
+            "winner": 0,
+            "reason": "five",
+            "deltas": [2.0, -2.0],
+        },
+    ),
+    ids=("boolean_winner", "float_deltas"),
+)
+def test_pairing_completion_rewrites_json_type_alias_terminal(
+    tmp_path,
+    noncanonical_terminal,
+):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = "pairing-completion-noncanonical-json-types"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    canonical_terminal = {
+        "type": "match_end",
+        "winner": 0,
+        "reason": "five",
+        "deltas": [2, -2],
+    }
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status='completed',winner=0,reason='five',"
+            "result=? WHERE id=?",
+            (json.dumps({"deltas": [2, -2]}), match_id),
+        )
+        conn.execute(
+            "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?)",
+            (
+                match_id,
+                json.dumps([noncanonical_terminal], separators=(",", ":")),
+                "2026-09-02T09:00:00",
+            ),
+        )
+
+    completed = store.complete_contest_pairing_for_match(contest["id"], match_id)
+
+    assert completed is not None and completed["status"] == "completed"
+    replay = store.get_replay(match_id)
+    assert replay["events_json"] == json.dumps(
+        [canonical_terminal],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def test_pairing_completion_replay_failure_rolls_back_pairing_status(tmp_path):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = "pairing-completion-replay-failure"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status='completed',winner=0,reason='five',"
+            "result=? WHERE id=?",
+            (json.dumps({"deltas": [2, -2]}), match_id),
+        )
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "CREATE TRIGGER fail_pairing_completion_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced pairing replay failure'); END"
+        )
+    pairing_before = store.list_contest_pairings(contest["id"])[0]
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced pairing replay failure"):
+        store.complete_contest_pairing_for_match(contest["id"], match_id)
+
+    assert store.list_contest_pairings(contest["id"])[0] == pairing_before
+    assert store.get_replay(match_id) is None
+
+
+@pytest.mark.parametrize(
+    "invalid_result",
+    (
+        {},
+        {"deltas": [True, -1]},
+        {"deltas": [4, -3]},
+    ),
+    ids=("missing", "wrong_type", "non_zero_sum"),
+)
+@pytest.mark.parametrize(
+    "replay_shape", ("missing", "malformed", "stale_terminal")
+)
+def test_pairing_completion_rejects_invalid_authoritative_result_without_writes(
+    tmp_path,
+    invalid_result,
+    replay_shape,
+):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = f"pairing-invalid-result-{replay_shape}-{invalid_result!s}"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_gomoku SET status='completed',winner=0,reason='five',"
+            "result=? WHERE id=?",
+            (json.dumps(invalid_result), match_id),
+        )
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "malformed":
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (match_id, "{", "2026-09-02T09:00:00"),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (
+                    match_id,
+                    json.dumps(
+                        [
+                            {
+                                "type": "match_end",
+                                "winner": 1,
+                                "reason": "completed",
+                                "deltas": [10, -10],
+                                "final_chips": [10, -10],
+                            }
+                        ]
+                    ),
+                    "2026-09-02T09:00:00",
+                ),
+            )
+    pairing_before = store.list_contest_pairings(contest["id"])[0]
+    replay_before = store.get_replay(match_id)
+
+    with pytest.raises(ValueError, match="completed Match result deltas"):
+        store.complete_contest_pairing_for_match(contest["id"], match_id)
+
+    assert store.list_contest_pairings(contest["id"])[0] == pairing_before
+    assert store.get_replay(match_id) == replay_before
+
+
+@pytest.mark.parametrize("replay_shape", ("missing", "stale", "malformed"))
+def test_reset_aborted_pairing_finalizes_replay_before_unbinding(
+    tmp_path,
+    replay_shape,
+):
+    client, store, users, _ = _fixture(tmp_path)
+    match_id = f"reset-aborted-replay-{replay_shape}"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    prefix = [{"type": "match_start", "game_id": "gomoku", "size": 15}]
+    store.update_match(
+        match_id,
+        status="aborted",
+        winner=None,
+        reason="admin_aborted",
+        ended_at="2026-09-02T10:00:00",
+    )
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "stale":
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (
+                    match_id,
+                    json.dumps(
+                        [
+                            *prefix,
+                            {"type": "error", "reason": "platform_error"},
+                        ]
+                    ),
+                    "2026-09-02T09:00:00",
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET events_json=excluded.events_json",
+                (match_id, "{", "2026-09-02T09:00:00"),
+            )
+
+    reset = store.reset_aborted_contest_pairing(contest["id"], match_id)
+
+    assert reset is not None
+    assert (reset["status"], reset["match_id"]) == ("pending", None)
+    terminal = {"type": "error", "reason": "admin_aborted"}
+    expected = [*prefix, terminal] if replay_shape == "stale" else [terminal]
+    assert json.loads(store.get_replay(match_id)["events_json"]) == expected
+    source = store.get_match_record_source(match_id)
+    assert source is not None and source["replay_finalized"] is True
+    exported = client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == terminal
+
+
+def test_reset_aborted_pairing_replay_failure_rolls_back_unbind(tmp_path):
+    _client, store, users, _ = _fixture(tmp_path)
+    match_id = "reset-aborted-replay-failure"
+    contest, _pairing = _running_contest_match(store, users, match_id)
+    store.update_match(match_id, status="aborted", reason="admin_aborted")
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "CREATE TRIGGER fail_reset_aborted_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced reset aborted replay failure'); END"
+        )
+    pairing_before = store.list_contest_pairings(contest["id"])[0]
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced reset aborted replay failure"
+    ):
+        store.reset_aborted_contest_pairing(contest["id"], match_id)
+
+    assert store.list_contest_pairings(contest["id"])[0] == pairing_before
+    assert store.get_replay(match_id) is None
+
+
+def test_unavailable_contest_adjudication_persists_exportable_terminal(tmp_path):
+    client, store, users, _ = _fixture(tmp_path)
+    contest, pairing = _pending_contest_pairing(store, users, status="published")
+    match_id = "unavailable-adjudication-terminal"
+
+    completed = store.adjudicate_unavailable_contest_pairing(
+        contest["id"],
+        pairing["id"],
+        match_id,
+        game_id="gomoku",
+        winner=1,
+        result={"rounds_played": 0, "deltas": [-1, 1], "normalized_delta": -1.0},
+        time_control_id=contest["time_control_id"],
+        activate_running=True,
+        require_execution_admission=False,
+    )
+
+    assert completed["status"] == "completed"
+    terminal = {
+        "type": "match_end",
+        "winner": 1,
+        "reason": "contest_bot_unavailable",
+        "deltas": [-1, 1],
+    }
+    assert json.loads(store.get_replay(match_id)["events_json"]) == [terminal]
+    assert store.get_contest(contest["id"])["status"] == "running"
+    exported = client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == terminal
+
+
+def test_unavailable_terminal_replay_failure_rolls_back_whole_adjudication(tmp_path):
+    _client, store, users, _ = _fixture(tmp_path)
+    contest, pairing = _pending_contest_pairing(store, users, status="published")
+    match_id = "unavailable-adjudication-replay-failure"
+    with store._tx() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_unavailable_terminal_insert BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' AND NEW.events_json<>'[]' BEGIN "
+            "SELECT RAISE(ABORT, 'forced unavailable replay failure'); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER fail_unavailable_terminal_update BEFORE UPDATE ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' AND NEW.events_json<>'[]' BEGIN "
+            "SELECT RAISE(ABORT, 'forced unavailable replay failure'); END"
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced unavailable replay failure"
+    ):
+        store.adjudicate_unavailable_contest_pairing(
+            contest["id"],
+            pairing["id"],
+            match_id,
+            game_id="gomoku",
+            winner=1,
+            result={
+                "rounds_played": 0,
+                "deltas": [-1, 1],
+                "normalized_delta": -1.0,
+            },
+            time_control_id=contest["time_control_id"],
+            activate_running=True,
+            require_execution_admission=False,
+        )
+
+    assert store.get_match(match_id) is None
+    assert store.get_replay(match_id) is None
+    with store._tx() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM matches_index WHERE id=?", (match_id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM match_rating_policies WHERE match_id=?",
+            (match_id,),
+        ).fetchone()[0] == 0
+    pairing_after = store.list_contest_pairings(contest["id"])[0]
+    assert (pairing_after["status"], pairing_after["match_id"]) == (
+        "pending",
+        None,
+    )
+    assert store.get_contest(contest["id"])["status"] == "published"
 
 
 def test_log_is_public_but_private_match_and_debug_data_never_crosses(tmp_path):

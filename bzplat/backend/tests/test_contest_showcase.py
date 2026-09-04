@@ -266,7 +266,11 @@ def test_scheduler_reconcile_recovery_and_active_stats_skip_showcases(tmp_path):
     scheduler = ContestScheduler(app.state.contest_manager, store)
     asyncio.run(scheduler._tick())
     assert store.get_contest(draft["id"])["status"] == "draft"
-    assert asyncio.run(app.state.contest_manager.reconcile_running_contests()) == 0
+    assert asyncio.run(
+        app.state.contest_manager.reconcile_running_contests(
+            interruption_reason="orphan_after_service_restart"
+        )
+    ) == 0
     assert store.get_contest(running["id"])["status"] == "running"
     assert store.list_contests_by_status(["draft", "running"]) == []
     assert store.count_stats()["contests_running"] == 0
@@ -292,33 +296,65 @@ def test_detail_returns_persisted_per_stage_actual_participants_and_advancement(
             binary_path=f"/tmp/stage-bot-{index}", format="elf", game_id="gomoku",
             is_active=1,
         )
-        entry = store.add_contest_entry(contest["id"], player["id"], bot["id"])
-        store.update_entry(
-            contest["id"], player["id"], group_id="A" if index < 2 else "B",
+        store.add_contest_entry(contest["id"], player["id"], bot["id"])
+        entry = store.update_entry(
+            contest["id"], player["id"],
+            group_id="A" if index < 2 else "B", seed=index + 1,
         )
         entries.append(entry)
         bots.append(bot)
 
-    # Stage 0 includes all four; stage 1 includes exactly the two group winners.
+    # Stage 0 includes all four and preserves the declared double-round-robin
+    # topology (one leg in each seat direction per group); stage 1 includes
+    # exactly the two group winners.
     for left, right, group in ((0, 1, "A"), (2, 3, "B")):
-        store.add_contest_pairing(
-            contest["id"], bots[left]["id"], bots[right]["id"],
-            entry_a_id=entries[left]["id"], entry_b_id=entries[right]["id"],
-            status="completed", stage_idx=0, stage_key="group", group_id=group,
-        )
+        for entry_a, entry_b in ((left, right), (right, left)):
+            store.add_contest_pairing(
+                contest["id"], bots[entry_a]["id"], bots[entry_b]["id"],
+                entry_a_id=entries[entry_a]["id"],
+                entry_b_id=entries[entry_b]["id"],
+                status="completed", stage_idx=0, stage_key="group",
+                group_id=group,
+            )
     store.add_contest_pairing(
         contest["id"], bots[0]["id"], bots[2]["id"],
         entry_a_id=entries[0]["id"], entry_b_id=entries[2]["id"],
         status="completed", stage_idx=1, stage_key="ko", bracket_slot=0,
     )
-    for stage_idx in (0, 1):
-        for index, (entry, bot) in enumerate(zip(entries, bots)):
+    for stage_idx, participant_indexes in ((0, range(4)), (1, (0, 2))):
+        for stage_rank, index in enumerate(participant_indexes, start=1):
+            entry = entries[index]
+            bot = bots[index]
+            points = float(8 - index)
+            snapshot_payload = {
+                "tiebreaks": {
+                    "points": points,
+                    "buchholz": 0,
+                    "buchholz_cut1": 0,
+                    "sonneborn_berger": 0,
+                    "head_to_head": 0,
+                    "normalized_delta": 0,
+                    "technical_losses": 0,
+                    "seed": int(entry["seed"]),
+                }
+            }
+            if stage_idx == 0:
+                snapshot_payload["overall_rank"] = stage_rank
             store.upsert_stage_result(
                 contest["id"], stage_idx, entry["id"], bot_id=bot["id"],
                 stage_key="group" if stage_idx == 0 else "ko",
-                points=float(8 - index), wins=4 - index, losses=index,
+                points=points, wins=4 - index, losses=index,
                 group_id="A" if index < 2 else "B",
+                rank_in_group=(index % 2) + 1 if stage_idx == 0 else stage_rank,
+                payload_json=json.dumps(snapshot_payload),
             )
+    # The finished current KO cohort is independently authoritative through
+    # the active roster; keep the fixture consistent with its two persisted
+    # finalists instead of relying on the stage-1 pairing to shrink four rows.
+    for index in (1, 3):
+        store.update_entry(
+            contest["id"], entries[index]["user_id"], eliminated=1
+        )
     replacement = store.create_bot(
         entries[0]["user_id"], "stage_bot_replacement",
         display_name="休息期替换 Bot", binary_path="/tmp/stage-bot-replacement",

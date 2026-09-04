@@ -1,7 +1,9 @@
 import { useState, lazy, Suspense } from 'react'
 import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate } from 'react-router-dom'
 import { CircleUserRound, Menu, LogOut, User as UserIcon, Loader2, Mail, PanelLeftClose, PanelLeft, Settings2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
+import { errMsg } from '@/api'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { GlobalSearch } from '@/components/shell/global-search'
@@ -110,8 +112,12 @@ export function AppShell() {
 
   const onLogout = async () => {
     setMobileOpen(false)
-    await logout()
-    nav('/')
+    try {
+      await logout()
+      nav('/')
+    } catch (cause) {
+      toast.error(errMsg(cause, '登出失败，当前会话仍保留，请稍后重试'))
+    }
   }
 
   // auth 页不显示侧边栏（干净居中）；其他页面统一显示侧边栏（含未登录）
@@ -431,7 +437,9 @@ export function AppShell() {
           className="mx-auto w-full min-w-0 flex-1 px-[var(--page-gutter)] py-4 outline-none sm:py-5"
         >
           <Suspense fallback={<PageFallback />}>
-            <Routes>
+                {/* Identity changes remount route-local state so account B can
+                    never inherit account A's cached private rows or form drafts. */}
+                <Routes key={`auth-identity-${user?.id ?? 'guest'}`}>
               <Route path="/" element={<Home />} />
               <Route path="/challenge" element={<Challenge />} />
               <Route path="/leaderboard" element={<Leaderboard />} />

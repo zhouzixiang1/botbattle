@@ -9,7 +9,7 @@
 |------|------|------|
 | Python | ≥ 3.12 | 后端 |
 | Node.js | ≥ 22 | 前端构建 |
-| Docker | 最新 | Bot 沙箱（必需；`BZ_BOT_LOCAL=1` 可退回本机仅测试用） |
+| Docker | 最新 | Bot 沙箱（必需；只有隔离 QA 同时设置 `BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1` 才可退回本机） |
 
 ### 1.2 后端安装（仅本任务 worktree）
 
@@ -39,19 +39,21 @@ npm install
 |------|------|------|
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
 | `BZ_ALLOW_LAN_BIND` | 只有设为 `1` 才允许 `BZ_HOST=0.0.0.0`；此前必须把主机防火墙限制到受信 LAN | 0 |
-| `BZ_PUBLIC_ORIGIN` | 浏览器实际访问的唯一 HTTP(S) origin；人机 WS 严格校验，生产必配 | 未设（WS fail closed） |
+| `BZ_PUBLIC_ORIGIN` | 浏览器实际访问的唯一 canonical HTTP(S) origin；cookie 写请求 CSRF 与人机 WS 都精确校验，生产必配公网 HTTPS origin | 未设（cookie unsafe method / WS fail closed） |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
 | `BZ_INSTANCE_KEY` | Docker 清理 namespace；输入会归一化为小写，结果须为 1–48 位字母、数字、`.`、`_`、`-`，生产/每个 worktree 必须稳定且唯一 | 未设时由绝对 DB 路径 SHA-256 派生 |
 | `BZ_DOCKER_HOST` | 生产 Docker 控制面显式覆写；只接受 canonical 本机 socket | `unix:///var/run/docker.sock` |
-| `BZ_BOT_LOCAL` | 强制本机跑 ELF（测试） | 未设 |
-| `BZ_QA_INSTANCE` | 标记隔离 QA 实例；启用时启动前拒绝主 checkout/50380 写目标 | 未设 |
+| `BZ_BOT_LOCAL` | 强制本机跑 ELF；仅与 `BZ_QA_INSTANCE=1` 同时用于隔离 QA，生产控制入口无条件拒绝 | 未设 |
+| `BZ_SKIP_CAPTCHA` / `BZ_TEST_CAPTCHA` | 隔离 QA 的跳过验证码 / 仍校验但在 captcha 响应附答案；任一为真都要求 `BZ_QA_INSTANCE=1`，生产控制入口无条件拒绝 | 未设 |
+| `BZ_QA_INSTANCE` | 标记隔离 QA 实例；启用时启动前拒绝主 checkout/50380 写目标，本身不能让生产入口接受测试开关 | 未设 |
 | `BZ_API_TARGET` | Vite REST/SSE/WS 代理目标；50380 被硬拒绝 | 127.0.0.1:50381 |
 | `BZ_AVATAR_DIR` | 头像目录 | avatars |
-| `BZ_RATE_LIMIT` | 启用限流 | 1 |
+| `BZ_RATE_LIMIT` | 启用单进程内存限流；生产保持 1，多 worker 前须改共享后端 | 1 |
 | `BZ_TRUST_PROXY` | 允许受信 socket peer 提供代理身份头（反向代理部署时开启） | 未设 |
 | `BZ_TRUSTED_PROXY_CIDRS` | 可提供 `X-Real-IP/XFF` 的 ASGI socket peer CIDR；生产显式设精确 loopback，不能填客户端 LAN | `127.0.0.1/32,::1/128` |
 | `BZ_TRUSTED_PROXY_HOPS` | XFF 中由受信 HTTP 代理写入的层数；frp TCP 透传不计一层 | 1 |
 | `BZ_LOG_LEVEL` / `BZ_LOG_DIR` | 日志级别 / 目录 | INFO / logs |
+| `BZ_SECURE_COOKIE` / `BZ_HSTS` | 生产 HTTPS 的 Secure session cookie / HSTS；公网生产均应为 1，本地 HTTP QA 保持 0 | 未设 |
 | `SMTP_HOST/PORT/USER/PASSWORD/FROM` | SMTP（邮箱验证/重置/通知） | 未配则注册/重置返回 503 |
 | `SMTP_FROM_NAME` | 邮件显示的发件人名称 | Botbattle |
 | `EMAIL_CODE_TTL_MINUTES` | 验证码 TTL | 30 |
@@ -62,7 +64,9 @@ npm install
 `DOCKER_CONTEXT` 与 TLS 变量会从子命令环境中清除，不参与 daemon 选择；若显式设置
 `BZ_DOCKER_HOST`，任何非 canonical 值都会在 Store 迁移前 fail closed。平台不支持远端 Docker。
 
-这里的 `BZ_BOT_LOCAL=1` 是**平台开发测试回退**：它让服务器进程直接启动 ELF，生产不得开启。玩家使用的“本地 Bot”是另一项产品能力：用户端通过 WSS 主动连接，服务器仍只负责裁判；两者不要混用。
+这里的 `BZ_BOT_LOCAL=1` 是**隔离 QA 测试回退**：它让服务器进程直接启动 ELF，必须同时通过 `BZ_QA_INSTANCE=1` 的完整路径/端口/数据库守卫。`BZ_SKIP_CAPTCHA` 与 `BZ_TEST_CAPTCHA` 也受同一启动门约束；生产 `scripts/platform-ctl.sh` 即使环境误带 QA marker 仍拒绝三者。玩家使用的“本地 Bot”是另一项产品能力：用户端通过 WSS 主动连接，服务器仍只负责裁判；两者不要混用。
+
+浏览器认证只使用同源 HttpOnly `bz_session` 和默认 `credentials: include`；前端不保存或自动注入 bearer，也不把完整用户/PII 写入 `localStorage`。跨标签同步只能写随机、非敏感的 `bzplat_auth_epoch`，接收方经 `/api/auth/me` 对账后再允许新私有操作；登出 UI 只能在服务端 2xx 后清理并跳转，失败时保留会话供重试。非浏览器 API 客户端仍可显式提交 Authorization Bearer。隔离 QA 可使用与浏览器实际 origin 精确一致的本机 HTTP `BZ_PUBLIC_ORIGIN`；公网生产必须使用实际 HTTPS origin，并启用 secure cookie/HSTS，不能把受控 LAN HTTP origin 配成生产 cookie 信任源。
 
 邮件模块只提供一套 Botbattle 多游戏平台默认文案：邮箱验证、密码重置和验证完成欢迎信。
 新库通过 `INSERT OR IGNORE` 播种这三条模板，因此管理后台已经保存的自定义模板不会在重启时
@@ -239,6 +243,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 - **严禁**前端 `BZ_API_TARGET` 指向 50380（测试写入线上 db）。
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
+- `BZ_BOT_LOCAL`、`BZ_SKIP_CAPTCHA`、`BZ_TEST_CAPTCHA` 任一 truthy 值都必须与 `BZ_QA_INSTANCE=1` 同时出现；CLI 在日志 handler、SQLite 和运行目录创建前拒绝非 QA 组合。不要在普通开发命令中单独导出这些开关，也不要把它们写进生产 `.env`。
 - QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
 - QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
 - 每个并行 worktree 要把示例 `BZ_INSTANCE_KEY` 换成自己的稳定唯一值；不要与生产或其他 worktree 共用。即使当前使用 `BZ_BOT_LOCAL=1`，也保留该约束以防切回 Docker 后误清理。
@@ -247,7 +252,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 ### 2.6 本地 Bot 客户端
 
-公开客户端为 `scripts/local_ai_client.py`。它只实现 Traditional 进程生命周期：收到一条 `turn` 后启动一次用户命令，向 stdin 写一行，读取 stdout 首行并结束进程。游戏信封和动作校验仍由 GameSpec/裁判负责，客户端不能添加游戏名分支。
+公开客户端为 `scripts/local_ai_client.py`。它只实现 Traditional 进程生命周期：先收到不含局面的 `prepare_turn`，在独立准备时限内启动一次用户命令并回送 `prepared`；平台随后冻结游戏棋钟并下发完整 `turn`，客户端才向 stdin 写一行、读取 stdout 首行并结束进程。游戏信封和动作校验仍由 GameSpec/裁判负责，客户端不能添加游戏名分支。
 
 ```bash
 read -rsp "接入令牌: " BZ_LOCAL_AI_TOKEN && echo
@@ -259,10 +264,10 @@ python scripts/local_ai_client.py \
 
 安全边界：
 
-- 客户端只接受 `wss://` 且拒绝 URL userinfo、query、fragment 和握手 30x 重定向；令牌只读 `BZ_LOCAL_AI_TOKEN`，只进入首个目标的 `Authorization: Bearer`，日志不输出连接异常正文，启动 Bot 子进程前还会从继承环境中移除该变量。重定向拒绝同时兼容 websockets 10.4--13 的 `handle_redirect` 与 14+ 的 `process_redirect`，未知连接实现 fail closed。
-- 单次服务端输入最大 1 MiB，Bot stdout 首行最大 64 KiB；`timeout_ms` 包括本机进程启动时间，超时后终止整个进程组。
-- 同一连接串行执行决策；断线按 1/2/4/8/16/30 秒退避，重连不改变服务端持有的绝对回合截止时间。
-- 服务端在数据库认证前按可信代理边界解析 peer IP，限制握手频率和同时认证数；未认证或被限流的连接在 `accept` 前发送标准 ASGI WebSocket policy close，由 Uvicorn 返回可解析的 HTTP 403，不走 SansIO 会产生重复实体头和未完成状态的 denial-response 扩展。Uvicorn 在解码前把单消息硬顶钉在 256 KiB（为 64 KiB Bot 输出经 JSON 转义预留空间），SansIO transport 每收到一条完整消息即暂停继续读取，应用兜底遇到超限消息立即以 1009 断开。已连接 socket 使用入站突发桶，SQLite 存活写合并到 15 秒一次。每用户最多 8 个 active identity、4 个在线连接，全站最多 64 个在线连接；令牌轮换同时受规范化 HTTP 路径桶和稳定 owner+agent 桶约束，并在同一 SQLite 事务拒绝仍持 active lease 的 identity，避免轮换中断正在执行的对局。
+- 客户端只接受 `wss://` 且拒绝 URL userinfo、query、fragment 和握手 30x 重定向；令牌只读 `BZ_LOCAL_AI_TOKEN`，只进入首个目标的 `Authorization: Bearer`，日志不输出连接异常正文，启动 Bot 子进程前还会从继承环境中移除该变量。重定向拒绝同时兼容 websockets 10.4--13 的 `handle_redirect` 与 14+ 的 `process_redirect`，未知连接实现 fail closed。连接必须协商 `botbattle.local-ai.v2`；平台在 durable/online registration 之前拒绝缺少该子协议的旧客户端，避免其静默取得不理解两阶段时钟的对局。
+- 单次服务端输入最大 1 MiB，Bot stdout 首行最大 64 KiB。正常两阶段路径的进程启动受独立 8 秒准备上限约束，不计入游戏棋钟；服务端在 `prepared` 通过强绑定后才冻结 deadline 并下发包含 `timeout_ms` 的完整输入，write/drain/完整响应共享该剩余预算。超时或异常清理会终止整个进程组。
+- 同一连接串行执行决策；断线按 1/2/4/8/16/30 秒退避。准备阶段重连仍使用原准备 deadline；决策阶段重连仍使用原游戏 deadline，不能借重连延时。已开始决策后的直接重投必须在原剩余预算内重新创建进程并完成响应。
+- 服务端在数据库认证前按可信代理边界解析 peer IP，限制握手频率和同时认证数；未认证或被限流的连接在 `accept` 前发送标准 ASGI WebSocket policy close，由 Uvicorn 返回可解析的 HTTP 403，不走 SansIO 会产生重复实体头和未完成状态的 denial-response 扩展。Uvicorn 在解码前把单消息硬顶钉在 256 KiB（为 64 KiB Bot 输出经 JSON 转义预留空间），SansIO transport 每收到一条完整消息即暂停继续读取，应用兜底遇到超限消息立即以 1009 断开。已连接 socket 使用入站突发桶，SQLite 存活写合并到 15 秒一次。每用户最多 8 个 active identity、4 个在线连接，全站最多 64 个在线连接；令牌轮换同时受规范化 HTTP 路径桶和稳定 owner+agent 桶约束，并在同一 SQLite 事务拒绝仍持 active lease 的 identity，避免轮换中断正在执行的对局。浏览器人机 `/play` 另有 4 KiB 动作帧硬顶和跨连接共享的 user/可信 peer 桶（突发 10、每秒补 2、身份表 4096），两者都在 JSON 与 session/Match 数据库复核前执行。
 - 撤销后的同名 identity 行可原子复用并换发全新 public id/token；账号或 Bot 停用会在同一 Store 事务撤销关联 identity、释放租约，transport 再由 hub 通知或周期复核关闭。
 - 用户端无需监听端口。生产反向代理必须允许 `/api/local-ai/connect` 的 WebSocket Upgrade 和 `Authorization` 请求头，并使用有效 TLS 证书。
 
@@ -320,6 +325,9 @@ python scripts/local_ai_client.py \
 - 在 `api_routes.py`（或 `auth/routes.py`）加路由，按需用 `require_user`/`require_admin`/`require_organizer` 依赖。
 - 常量（新状态码/类型）加到 `schema.py`。
 - **路由顺序注意**：字面量路由（如 `/api/matches/liked-top`）必须在参数路由（`/api/matches/{match_id}`）之前注册。
+- 所有 unsafe `/api` 默认受 1 MiB pre-parser 请求体硬顶；认证 JSON 是 64 KiB，只有经过显式安全评审的 multipart 路径可加入 Bot/附件/头像专用信封。不要只在 Pydantic、`UploadFile` 或 `Content-Length` 之后补限额。
+- 新 cookie 写入口自动受 canonical `BZ_PUBLIC_ORIGIN` 精确 Origin 校验；不要以 `Referer`、Host 猜同源或为浏览器绕过。非浏览器客户端应显式使用 Bearer，认证依赖保持 Bearer 优先且不可在无效 Bearer 后回退 cookie。
+- 任何携 Authorization 或 `bz_session` 的 API 会由全局 middleware 统一加 `private, no-store`、`no-referrer` 与 Authorization/Cookie `Vary`；匿名但返回凭据/验证码的端点仍须显式使用同一 helper。新增 public ID 动态写路由时，须同步把路径归一化进限流模板，防换 ID 重置额度。
 
 ## 6. 部署与运维
 
@@ -345,6 +353,11 @@ scripts/platform-ctl.sh status                # 应显示 running (user systemd)
 systemd 模板使用 `UMask=0077`，`scripts/platform-ctl.sh` 也在创建 PID、日志、数据库关联
 产物前固定 `umask 077`；生产 `.env`、数据库与日志应为 `0600`，私有运行目录为 `0700`。
 头像是公开静态内容，权限可按静态服务器的只读需求单独配置，不能因此放宽其他运行目录。
+生产 `.env` 还必须保证 `BZ_BOT_LOCAL/BZ_SKIP_CAPTCHA/BZ_TEST_CAPTCHA` 未设或为假，并将
+`BZ_PUBLIC_ORIGIN` 配为实际公网 HTTPS origin，启用 `BZ_SECURE_COOKIE=1`、`BZ_HSTS=1`、
+`BZ_RATE_LIMIT=1`；反向代理部署再启用 `BZ_TRUST_PROXY=1`，把 trusted CIDR 收紧到真实本机代理 peer。
+`scripts/platform-ctl.sh` 会在任何 systemd/PID/文件动作前检查并拒绝测试开关，即使 `.env` 同时误设
+`BZ_QA_INSTANCE=1` 也不会放行。完整排空与发布前检查见 [RUNTIME.md](./RUNTIME.md#部署排空状态机)。
 服务默认只绑定 `127.0.0.1`，本机 frp/nginx 继续连接回环端口。确需让
 `192.168.1.0/24` 直连时，必须先按 [SECURITY.md](./SECURITY.md#受控-lan-直连)
 把主机防火墙的 50380 入站限制到该网段，再同时设置
@@ -357,8 +370,8 @@ host/port，而由 CLI 从 `EnvironmentFile` 读取并安全默认到 `127.0.0.1
 
 ### 6.2 日志（三文件 + 启动日志）
 - `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。Uvicorn HTTP/WS record 在 handler 序列化前只保留 path，不记录 query。
-- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时；middleware 使用 `request.url.path`，不含 query）。
-- `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）。
+- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时；middleware 使用 `request.url.path`，不含 query）。IP/method/path 等可控字段先单行转义并限制 1024 字符，换行与超长目标不能注入或放大日志。
+- `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）；actor/action/result/detail 等字段复用单行、有界编码，不写 cookie、Authorization、验证码或原始错误正文。
 - `logs/web.log`：PID fallback 的 uvicorn 启动 stdout；systemd 模式通过 `scripts/platform-ctl.sh logs`
   读取该 unit 的 journal。CLI 禁止 Uvicorn 默认日志配置覆盖平台 handler，因此两者同样不含请求 query。
 - **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [SECURITY.md](./SECURITY.md)。

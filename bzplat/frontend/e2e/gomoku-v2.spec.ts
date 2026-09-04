@@ -4,6 +4,13 @@ import { monitorBrowser } from './helpers'
 
 const RULESET = 'gomoku_ccgc_2013_five_move_two_v2'
 const PREVIOUS_COMPETITION_RULESET = 'gomoku_ccgc_2013_v1'
+const GOMOKU_TIME_CONTROL = {
+  id: 'gomoku_per_side_total_900s_v1',
+  mode: 'per_side_total',
+  seconds: 900,
+  applies_to: 'both_bots',
+} as const
+const HUMAN_GOMOKU_TIME_CONTROL = { ...GOMOKU_TIME_CONTROL, applies_to: 'bot_only' } as const
 
 type Point = { x: number; y: number }
 type Fixture = {
@@ -23,10 +30,11 @@ function boardWith(stones: Array<Point & { color: 0 | 1 }>) {
   return board
 }
 
-function matchStart(ruleset = RULESET) {
+function matchStart(ruleset = RULESET, human = false) {
   return {
     type: 'match_start', game_id: 'gomoku', size: 15,
     ruleset, protocol_version: 2, time_budget_per_side: 900,
+    time_control: human ? HUMAN_GOMOKU_TIME_CONTROL : GOMOKU_TIME_CONTROL,
   }
 }
 
@@ -574,18 +582,18 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       request: request('opening_proposal', 0, 0, [0, 1], emptyBoard(), {
         fixed_black1: { x: 7, y: 7 }, n_range: [2, 2],
       }),
-      events: [matchStart(), { type: 'turn', player: 0, color: 0, phase: 'opening_proposal' }],
+      events: [matchStart(RULESET, true), { type: 'turn', player: 0, color: 0, phase: 'opening_proposal' }],
     },
     swap: {
       humanSeat: 1,
       request: request('swap_choice', 1, 1, [0, 1], board3, { n: 2 }),
-      events: [matchStart(), opening, { type: 'turn', player: 1, color: 1, phase: 'swap_choice' }],
+      events: [matchStart(RULESET, true), opening, { type: 'turn', player: 1, color: 1, phase: 'swap_choice' }],
     },
     white4: {
       humanSeat: 1,
       request: request('white4', 1, 1, [0, 1], board3, { n: 2 }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
         { type: 'turn', player: 1, color: 1, phase: 'white4' },
       ],
     },
@@ -593,7 +601,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       humanSeat: 1,
       request: request('black5_candidates', 1, 0, [1, 0], board4, { n: 2 }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
         { type: 'move', player: 0, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
         { type: 'turn', player: 1, color: 0, phase: 'black5_candidates' },
       ],
@@ -602,7 +610,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       humanSeat: 1,
       request: request('black5_candidates', 1, 0, [1, 0], board4, { n: 2 }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
         { type: 'move', player: 0, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
         { type: 'turn', player: 1, color: 0, phase: 'black5_candidates' },
       ],
@@ -611,7 +619,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       humanSeat: 0,
       request: request('black5_candidates', 0, 0, [0, 1], symmetricBoard4, { n: 2 }),
       events: [
-        matchStart(),
+        matchStart(RULESET, true),
         { type: 'turn', player: 0, color: 0, phase: 'black5_candidates' },
       ],
     },
@@ -621,7 +629,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
         n: 2, candidates: [{ x: 6, y: 6 }, { x: 8, y: 6 }],
       }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
         { type: 'move', player: 1, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
         { type: 'black5_candidates', player: 0, n: 2, points: [{ x: 6, y: 6 }, { x: 8, y: 6 }] },
         { type: 'turn', player: 1, color: 1, phase: 'black5_select' },
@@ -631,7 +639,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       humanSeat: 1,
       request: request('normal_play', 1, 1, [0, 1], board5, { n: 2, pass_allowed: true }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
         { type: 'move', player: 1, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
         { type: 'black5_candidates', player: 0, n: 2, points: [{ x: 6, y: 6 }, { x: 8, y: 6 }] },
         { type: 'black5_selected', player: 1, index: 0, point: { x: 6, y: 6 } },
@@ -643,13 +651,13 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       humanSeat: 1,
       request: request('normal_play', 1, 0, [1, 0], board6, { n: 2, pass_allowed: true }),
       events: [
-        matchStart(), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
+        matchStart(RULESET, true), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
         { type: 'move', player: 0, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
         { type: 'black5_candidates', player: 1, n: 2, points: [{ x: 6, y: 6 }, { x: 8, y: 6 }] },
         { type: 'black5_selected', player: 0, index: 0, point: { x: 6, y: 6 } },
         { type: 'move', player: 1, color: 0, x: 6, y: 6, phase: 'black5_select', move_index: 5 },
         { type: 'move', player: 0, color: 1, x: 5, y: 7, phase: 'normal_play', move_index: 6 },
-        { type: 'time_used', seat: 1, used: 870, remaining: 30, budget: 900 },
+        { type: 'time_used', seat: 0, used: 870, remaining: 30, budget: 900 },
         { type: 'turn', player: 1, color: 0, phase: 'normal_play' },
       ],
     },
@@ -660,7 +668,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       }),
       pending: false,
       events: [
-        matchStart(),
+        matchStart(RULESET, true),
         { type: 'turn', player: 0, color: 0, phase: 'opening_proposal' },
         {
           type: 'your_turn', player: 0,
@@ -694,6 +702,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
           status: 'running',
           match_type: 'human',
           human_seat: fixture.humanSeat,
+          time_control: HUMAN_GOMOKU_TIME_CONTROL,
           bot_a: { name: 'opening_bot', owner_name: 'alpha' },
           bot_b: fixture.humanSeat === 1
             ? { owner_name: 'human_player', is_human: true }
@@ -772,7 +781,10 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
   await expect(canvas).toHaveAccessibleName(/当前位置 \(0,0\)/)
   await canvas.press('Enter')
   await expect(page.getByText('已选 1/2', { exact: true })).toHaveAttribute('aria-live', 'polite')
-  await canvas.press('ArrowRight')
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  }))
+  await expect(canvas).toHaveAccessibleName(/当前位置 \(0,0\)/)
   await canvas.press('ArrowRight')
   await expect(canvas).toHaveAccessibleName(/当前位置 \(1,0\)/)
   await canvas.press('Enter')
@@ -806,14 +818,21 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
 
   await page.goto('/#/play/gomoku-v2-human-normal')
   await expect(page.getByTestId('human-matchup')).toContainText('交换决策方 · 当前执黑')
-  await expect(page.getByLabel('人类对战状态')).toContainText('30s')
+  await expect(page.getByLabel('人类对战状态')).toContainText('Bot：每方累计 15 分钟')
+  await expect.poll(async () => {
+    const label = await page.locator('[aria-label^="本回合剩余约 "]').getAttribute('aria-label')
+    const seconds = Number(label?.match(/(\d+) 秒$/)?.[1])
+    return Number.isInteger(seconds) && seconds >= 115 && seconds <= 120
+  }).toBe(true)
+  await expect(page.getByTestId('gomoku-clock-seat-1')).toContainText('0:30')
+  await expect(page.getByTestId('gomoku-clock-seat-2')).toContainText('—')
   canvas = page.getByRole('button', { name: /五子棋对局画面/ })
   await clickGrid(canvas, { x: 7, y: 7 })
   expect(sent.get('normal') ?? []).toHaveLength(0)
   await canvas.focus()
   await canvas.press('ArrowRight')
   await canvas.press('ArrowRight')
-  // The cumulative clock rerenders HumanPlay every 500 ms. The selected
+  // The human anti-idle clock rerenders HumanPlay every 500 ms. The selected
   // keyboard point must survive that parent render instead of jumping back to
   // the first legal point before Enter submits it.
   await page.waitForTimeout(700)

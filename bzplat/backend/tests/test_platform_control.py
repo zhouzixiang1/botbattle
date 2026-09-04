@@ -113,6 +113,16 @@ exec "$@"
     bash_env = tmp_path / "bash-env"
     bash_env.write_text("enable -n kill\n", encoding="utf-8")
     env = os.environ.copy()
+    # The full suite legitimately enables these escape hatches in unrelated
+    # in-process QA tests.  Production-control fixtures must model a clean
+    # operator environment unless a test opts in explicitly.
+    for test_only_flag in (
+        "BZ_BOT_LOCAL",
+        "BZ_SKIP_CAPTCHA",
+        "BZ_TEST_CAPTCHA",
+        "BZ_QA_INSTANCE",
+    ):
+        env.pop(test_only_flag, None)
     env.update(
         {
             "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -142,8 +152,23 @@ def _run(control: Path, env: dict[str, str], action: str) -> subprocess.Complete
     )
 
 
-def test_status_uses_matching_user_systemd_unit_without_pid_runtime(tmp_path: Path):
+def test_status_uses_matching_user_systemd_unit_without_pid_runtime(
+    tmp_path: Path, monkeypatch
+):
+    for test_only_flag in (
+        "BZ_BOT_LOCAL",
+        "BZ_SKIP_CAPTCHA",
+        "BZ_TEST_CAPTCHA",
+        "BZ_QA_INSTANCE",
+    ):
+        monkeypatch.setenv(test_only_flag, "1")
     control, env = _isolated_control(tmp_path)
+    assert not {
+        "BZ_BOT_LOCAL",
+        "BZ_SKIP_CAPTCHA",
+        "BZ_TEST_CAPTCHA",
+        "BZ_QA_INSTANCE",
+    }.intersection(env)
     env.update(
         {
             "FAKE_LOAD_STATE": "loaded",

@@ -157,7 +157,6 @@ class GomokuSession:
             first=0,
             ruleset=proto.RULESET_ID,
             protocol_version=proto.PROTOCOL_VERSION,
-            time_budget_per_side=900,
         )
 
         # 1. 开局方（seat 0）提交白2、黑3，并确认固定二打；黑1固定天元。

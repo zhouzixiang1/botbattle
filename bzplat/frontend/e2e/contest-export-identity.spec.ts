@@ -10,6 +10,7 @@ import {
 } from '@playwright/test'
 
 import {
+  cookieOriginHeaders,
   loginThroughUi,
   monitorBrowser,
   runCleanupTasks,
@@ -56,12 +57,26 @@ const PRIVATE_HEADERS = [
 
 const PUBLIC_HEADERS = [
   'rank',
+  'overall_rank',
+  'group_id',
+  'rank_in_group',
   'entry_id',
   'bot_name',
   'owner_name',
   'points',
+  'buchholz',
   'buchholz_cut1',
   'sonneborn_berger',
+  'head_to_head',
+  'normalized_delta',
+  'technical_losses',
+  'seed',
+  'group_rank',
+  'points_rate',
+  'opponent_strength',
+  'normalized_delta_rate',
+  'technical_loss_rate',
+  'draw_order',
   'awarded',
   'source_stage',
   'ranking_cohort',
@@ -277,6 +292,7 @@ async function createFinishedPublicResultsFixture(
   }
 
   const create = await adminPage.request.post('/api/contests', {
+    headers: cookieOriginHeaders(adminPage),
     data: {
       title: `PW 公开成绩下载 ${browserName} ${Date.now()}`,
       game_id: 'holdem',
@@ -288,12 +304,15 @@ async function createFinishedPublicResultsFixture(
 
   for (const entrant of entrants) {
     const entry = await adminPage.request.post(`/api/contests/${contestId}/entries`, {
+      headers: cookieOriginHeaders(adminPage),
       data: { user_id: entrant.userId, bot_id: entrant.botId },
     })
     await expectStatus(entry)
   }
   for (const action of ['open', 'publish', 'start']) {
-    const response = await adminPage.request.post(`/api/contests/${contestId}/${action}`)
+    const response = await adminPage.request.post(`/api/contests/${contestId}/${action}`, {
+      headers: cookieOriginHeaders(adminPage),
+    })
     await expectStatus(response)
   }
 
@@ -379,6 +398,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     originalProfile = playerUser
 
     const formulaProfile = await player.page.request.put('/api/auth/profile', {
+      headers: cookieOriginHeaders(player.page),
       data: {
         display_name: '+报名时显示名',
         bio: playerUser.bio || '',
@@ -409,6 +429,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     organizerContext = organizer.context
     for (const requireRealName of [true, false]) {
       const create = await organizer.page.request.post('/api/contests', {
+        headers: cookieOriginHeaders(organizer.page),
         data: {
           title: `PW 组织者报名门禁 ${browserName} ${requireRealName ? '实名赛' : '非实名赛'} ${Date.now()}`,
           game_id: 'holdem',
@@ -425,7 +446,9 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     const [identityContestId, publicContestId] = organizerContestIds
     const identityPath = `/api/contests/${identityContestId}/export`
     const exportSearch = '?format=csv&schema=2'
-    const open = await organizer.page.request.post(`/api/contests/${identityContestId}/open`)
+    const open = await organizer.page.request.post(`/api/contests/${identityContestId}/open`, {
+      headers: cookieOriginHeaders(organizer.page),
+    })
     await expectStatus(open)
 
     const organizerMonitor = monitorBrowser(organizer.page)
@@ -525,6 +548,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     })
 
     const changed = await player.page.request.put('/api/auth/profile', {
+      headers: cookieOriginHeaders(player.page),
       data: {
         display_name: '报名后显示名',
         bio: playerUser.bio || '',
@@ -723,6 +747,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     await expectTouchSafeWithoutRootOverflow(organizer.page, publicRosterDownload)
 
     const createAdminOverride = await page.request.post('/api/contests', {
+      headers: cookieOriginHeaders(page),
       data: {
         title: `PW 管理员审计代报名 ${browserName} ${Date.now()}`,
         game_id: 'holdem',
@@ -737,7 +762,10 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     adminContestIds.push(adminOverrideContestId)
     const adminOverride = await page.request.post(
       `/api/contests/${adminOverrideContestId}/entries`,
-      { data: { user_id: playerUser.id, bot_id: bot!.id } },
+      {
+        headers: cookieOriginHeaders(page),
+        data: { user_id: playerUser.id, bot_id: bot!.id },
+      },
     )
     await expectStatus(adminOverride)
     expect(await adminOverride.json()).toEqual({ ok: true })
@@ -830,6 +858,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
         label: `restore ${PLAYER} profile`,
         run: async () => {
           const response = await restorePage.request.put('/api/auth/profile', {
+            headers: cookieOriginHeaders(restorePage),
             data: {
               display_name: restoreProfile.display_name || '',
               bio: restoreProfile.bio || '',
@@ -847,7 +876,9 @@ test('organizer downloads stable identity exports while non-organizers and non-i
       tasks.push({
         label: `delete contest ${contestId}`,
         run: async () => {
-          const response = await page.request.delete(`/api/admin/contests/${contestId}`)
+          const response = await page.request.delete(`/api/admin/contests/${contestId}`, {
+            headers: cookieOriginHeaders(page),
+          })
           await expectStatus(response)
         },
       })

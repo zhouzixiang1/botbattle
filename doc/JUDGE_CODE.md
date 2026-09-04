@@ -43,9 +43,11 @@ games.registry.get(game_id).run_session(decide, **params)
 |------|----------|
 | Holdem | 每个计分场 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
 | Gomoku | 15×15；26 种指定开局；三手交换；五手二打；黑方长连/三三/四四禁手 |
-| Pencil | N=6；红先；每方累计棋钟 900 秒 |
+| Pencil | N=6；红先；成格后连走 |
 
-这些值不存入 `platform_settings`，不接受 match_config、admin 或直接 `run_session` kwargs 覆盖；未知参数立即报错。Holdem 上传预检与正式首请求均发送 `max_hand=70`。修改规则常量属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
+这些规则值不存入 `platform_settings`，不接受 match_config、admin 或直接 `run_session` kwargs 覆盖；未知参数立即报错。Holdem 上传预检与正式首请求均发送 `max_hand=70`。修改规则常量属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。
+
+时限是与裁判规则分离的版本化 GameSpec 契约：Holdem `holdem_per_decision_60s_v1`，Gomoku `gomoku_per_side_total_900s_v1`（默认）/`gomoku_per_side_total_300s_v1`，Pencil `pencil_per_side_total_900s_v1`（默认）/`pencil_per_decision_1s_v1`。选择冻结到 Contest、execution job 与 Match，runner 只按冻结 `id/mode/seconds/applies_to` 执行；单步每次权威决策重置，累计按座位单局累加。完整请求交给已就绪 Bot 到完整响应到达才计时，容器启动、预热和平台排队不计。Bot-vs-Bot 双方对称，人机只约束 Bot，真人继续使用 120 秒防挂机时限。
 
 ## 各游戏裁判要点
 
@@ -71,8 +73,8 @@ games.registry.get(game_id).run_session(decide, **params)
 
 - **固定 N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
 - pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"response":{"x":-1,"y":-1}}` 把回合交还。
-- Bot-vs-Bot 与人类对局均为每方累计 900s；决策成功发 `time_used`，总预算耗尽发 `time_out` 并判当前方负。人类侧同时有默认 120s 逐回合防挂机保护。
-- 格式正确但非法着、人类棋钟耗尽 → 裁判判负；Bot 协议错误/棋钟耗尽由平台层技术判负。对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
+- Bot-vs-Bot 依所选 Pencil 时限运行每方累计 900 秒或单步 1 秒；决策成功发权威计时事件，耗尽后判当前方负。人机只计 Bot，真人侧保持默认 120 秒逐回合防挂机保护。
+- 格式正确但非法着或真人防挂机超时 → 裁判/人机编排判负；Bot 协议错误或冻结时限耗尽由平台层技术判负。对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由 `match_start.time_control` 与后续计时事件显示剩余时间和超时徽章。
 
 ## 改动裁判代码
 

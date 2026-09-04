@@ -12,6 +12,7 @@ config/templates/spec），在 ``games/__init__.py`` 注册一行——通用层
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Awaitable, Callable, Protocol
 
 
@@ -113,6 +114,51 @@ class ProtocolSpec:
     fail_response: Callable[[], Any]
 
 
+@dataclass(frozen=True, slots=True)
+class TimeControlSpec:
+    """Stable, public time-control contract for one game.
+
+    ``mode`` describes the only two referee semantics supported by the
+    platform.  ``applies_to`` is ``both_bots`` for registry entries; a human
+    practice match projects the same frozen control as ``bot_only`` without
+    creating a second control id.
+    """
+
+    id: str
+    mode: str
+    seconds: int
+    applies_to: str = "both_bots"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.id, str)
+            or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*_v[1-9][0-9]*", self.id)
+            is None
+        ):
+            raise ValueError("time control id 必须是稳定的小写版本化 ID")
+        if self.mode not in {"per_decision", "per_side_total"}:
+            raise ValueError("time control mode 必须是 per_decision 或 per_side_total")
+        if (
+            isinstance(self.seconds, bool)
+            or not isinstance(self.seconds, int)
+            or self.seconds < 1
+        ):
+            raise ValueError("time control seconds 必须是正整数")
+        if self.applies_to not in {"both_bots", "bot_only"}:
+            raise ValueError("time control applies_to 必须是 both_bots 或 bot_only")
+
+    def public_payload(self, *, applies_to: str | None = None) -> dict[str, Any]:
+        target = self.applies_to if applies_to is None else applies_to
+        if target not in {"both_bots", "bot_only"}:
+            raise ValueError("time control applies_to 必须是 both_bots 或 bot_only")
+        return {
+            "id": self.id,
+            "mode": self.mode,
+            "seconds": self.seconds,
+            "applies_to": target,
+        }
+
+
 @dataclass(frozen=True)
 class GameSpec:
     """一款游戏的全部固有属性声明——"游戏类"模型的核心。
@@ -149,6 +195,10 @@ class GameSpec:
     # 返回 (ok: bool, detail: str)。所有注册游戏都必须提供，禁止“未定义即放行”。
     preflight_check: Callable[..., Awaitable[tuple[bool, str]]]
 
+    # 固定白名单时限。ID 是持久化/API 契约；秒数不能由调用者直接覆盖。
+    time_controls: tuple[TimeControlSpec, ...]
+    default_time_control_id: str
+
     default_scoring: str = "poker_3_1_0"
 
     # 固定长度游戏的权威单场轮数。公开赛果只用它回填旧版本复式 leg
@@ -181,13 +231,15 @@ class GameSpec:
     # games_per_pair_config 才能启用，绝不从 stage type 或 game_id 推断。
     # 未声明该字段的旧模板与旧赛事继续保持历史赛制语义。
     contest_games_per_pair_max: int | None = None
-    # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
-    # Gomoku/Pencil 设 900.0（每座位累计 15 分钟，超时判负）。
-    time_budget_per_side: float | None = None
-
     # 单场公开记录导出。None 表示该游戏尚未定义稳定导出格式；通用 API
     # 只检查能力是否存在，不按 game_id 分支。
     record_exporter: MatchRecordExporter | None = None
+
+    # 赛事来源候选查询能力。通用 API 只读取这个游戏注册表契约并把精确
+    # source_kind 传给 Store，不枚举 game_id。能力必须与本游戏模板中的
+    # requires_source_contest / allows_navigation_source_contest 声明一致；
+    # None 表示该游戏没有来源赛事选择器，未知或未声明能力一律 fail closed。
+    contest_source_candidate_kind: str | None = None
 
     def __post_init__(self) -> None:
         """派生并校验公开裁判源码白名单。
@@ -201,6 +253,19 @@ class GameSpec:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} 必须是非空字符串")
+        controls = tuple(self.time_controls)
+        if not controls:
+            raise ValueError("time_controls 至少声明一个时限")
+        if any(not isinstance(item, TimeControlSpec) for item in controls):
+            raise ValueError("time_controls 只能包含 TimeControlSpec")
+        if any(item.applies_to != "both_bots" for item in controls):
+            raise ValueError("GameSpec 时限注册项的 applies_to 必须是 both_bots")
+        ids = [item.id for item in controls]
+        if len(ids) != len(set(ids)):
+            raise ValueError("time_controls 不允许重复 ID")
+        if self.default_time_control_id not in set(ids):
+            raise ValueError("default_time_control_id 必须属于 time_controls")
+        object.__setattr__(self, "time_controls", controls)
         if (
             self.contest_games_per_pair_max is not None
             and (
@@ -219,6 +284,30 @@ class GameSpec:
             )
         ):
             raise ValueError("fixed_rounds_per_match 必须为正整数或 None")
+        source_capability_flags = {
+            "protected_seed": "requires_source_contest",
+            "navigation": "allows_navigation_source_contest",
+        }
+        source_kind = self.contest_source_candidate_kind
+        if source_kind is not None and source_kind not in source_capability_flags:
+            raise ValueError("contest_source_candidate_kind 不是受支持的来源候选类型")
+        declared_source_kinds: set[str] = set()
+        for template in self.templates:
+            if not isinstance(template, dict):
+                raise ValueError("赛事模板必须是对象")
+            for candidate_kind, flag in source_capability_flags.items():
+                marker = template.get(flag, False)
+                if not isinstance(marker, bool):
+                    raise ValueError(f"赛事模板 {flag} 必须是布尔值")
+                if marker:
+                    declared_source_kinds.add(candidate_kind)
+        if len(declared_source_kinds) > 1:
+            raise ValueError("同一游戏不能声明多种来源赛事候选类型")
+        template_source_kind = next(iter(declared_source_kinds), None)
+        if source_kind != template_source_kind:
+            raise ValueError(
+                "contest_source_candidate_kind 必须与赛事模板来源能力一致"
+            )
         judge_file = f"{self.game_id}_judge.py"
         files = tuple(self.source_files) or (
             judge_file,
@@ -257,6 +346,49 @@ class GameSpec:
         if len(shared_files) != len(set(shared_files)):
             raise ValueError("shared_source_files 不允许重复文件")
         object.__setattr__(self, "shared_source_files", shared_files)
+
+    def resolve_time_control(
+        self, time_control_id: str | None
+    ) -> TimeControlSpec:
+        """Resolve an exact whitelisted id; omission means the game default.
+
+        No case folding or whitespace normalization is intentional: persisted
+        malformed values must fail closed instead of being guessed into a
+        current contract.
+        """
+
+        target = (
+            self.default_time_control_id
+            if time_control_id is None
+            else time_control_id
+        )
+        if not isinstance(target, str):
+            raise ValueError("time_control_id 必须是字符串")
+        for control in self.time_controls:
+            if control.id == target:
+                return control
+        raise ValueError(
+            f"游戏 {self.game_id} 不支持时限 {target!r}；"
+            f"合法值: {[item.id for item in self.time_controls]}"
+        )
+
+    def uses_default_time_control(self, time_control_id: str | None) -> bool:
+        """Return whether a resolved control remains in the rating pool."""
+
+        return self.resolve_time_control(time_control_id).id == self.default_time_control_id
+
+    @property
+    def time_budget_per_side(self) -> float | None:
+        """Legacy read-only adapter for old internal callers and snapshots.
+
+        New code freezes ``time_control_id``.  Only a default cumulative
+        control can be represented by the former scalar contract.
+        """
+
+        control = self.resolve_time_control(None)
+        if control.mode != "per_side_total":
+            return None
+        return float(control.seconds)
 
     def run_session(
         self, decide: DecideFn, *, on_event: EventFn | None = None, **params: Any

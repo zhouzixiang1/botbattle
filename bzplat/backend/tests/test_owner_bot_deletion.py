@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -150,18 +151,44 @@ def _enqueue(store: Store, source: str, a: dict, b: dict) -> dict:
         )
     if source == EXECUTION_SOURCE_CONTEST:
         contest = store.create_contest(
-            f"finished-{a['bot_id']}",
+            f"active-{a['bot_id']}",
             a["owner_id"],
-            status=CONTEST_FINISHED,
+            status=CONTEST_PUBLISHED,
             game_id="holdem",
+            stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
         )
-        pairing = store.add_pairing(
+        entry_a = store.add_contest_entry(
+            int(contest["id"]), a["owner_id"], a["bot_id"]
+        )
+        entry_b = store.add_contest_entry(
+            int(contest["id"]), b["owner_id"], b["bot_id"]
+        )
+        pairings = store.create_contest_stage_pairings(
             int(contest["id"]),
-            a["bot_id"],
-            b["bot_id"],
-            bot_a_version_id=a["version_id"],
-            bot_b_version_id=b["version_id"],
+            0,
+            [
+                {
+                    "entry_a_id": int(entry_a["id"]),
+                    "entry_b_id": int(entry_b["id"]),
+                    "bot_a_id": a["bot_id"],
+                    "bot_b_id": b["bot_id"],
+                    "bot_a_version_id": a["version_id"],
+                    "bot_b_version_id": b["version_id"],
+                    "status": "pending",
+                    "round_num": 1,
+                    "stage_key": "rr",
+                    "series_index": 1,
+                    "series_size": 1,
+                    "published_at": "2026-01-01T00:00:00",
+                }
+            ],
+            expected_current_stage_idx=0,
+            expected_status=CONTEST_PUBLISHED,
+            activate_running=True,
         )
+        assert len(pairings) == 1
+        assert store.contest_stage_manifest_is_valid(int(contest["id"]), 0)
+        pairing = pairings[0]
         return store.executions.enqueue(
             source=source,
             owner_user_id=a["owner_id"],
@@ -173,6 +200,7 @@ def _enqueue(store: Store, source: str, a: dict, b: dict) -> dict:
             bot_b_version_id=b["version_id"],
             contest_id=int(contest["id"]),
             contest_pairing_id=int(pairing["id"]),
+            match_config={"duplicate": False},
         )
     return store.executions.enqueue(
         source=source,
@@ -466,7 +494,6 @@ def test_owner_delete_atomically_converges_durable_state_and_is_idempotent(
     (
         EXECUTION_SOURCE_MANUAL,
         EXECUTION_SOURCE_HUMAN,
-        EXECUTION_SOURCE_CONTEST,
         EXECUTION_SOURCE_AUTO,
     ),
 )
@@ -478,6 +505,42 @@ def test_owner_delete_cancels_every_safe_queued_source(tmp_path, source: str):
     opponent = _bot(store, opponent_owner, f"queued_{source}_opponent")
     enable_execution_queue(store)
     job = _enqueue(store, source, target, opponent)
+
+    result = store.owner_delete_bot(target["owner_id"], target["bot_id"])
+
+    assert result["changed"] is True
+    assert result["cancelled_queued_jobs"] == 1
+    cancelled = store.executions.get(str(job["public_id"]))
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancel_requested"] == 1
+    assert cancelled["retryable"] == 0
+    assert cancelled["next_attempt_at"] is None
+    assert cancelled["terminal_reason"] == "bot_owner_deleted"
+
+
+def test_owner_delete_cancels_terminal_legacy_contest_job_defensively(tmp_path):
+    store = Store(str(tmp_path / "queued-terminal-legacy-contest.db"))
+    owner = _user(store, "queued_terminal_legacy_contest_owner")
+    opponent_owner = _user(store, "queued_terminal_legacy_contest_other")
+    target = _bot(store, owner, "queued_terminal_legacy_contest")
+    opponent = _bot(
+        store, opponent_owner, "queued_terminal_legacy_contest_opponent"
+    )
+    enable_execution_queue(store)
+    job = _enqueue(store, EXECUTION_SOURCE_CONTEST, target, opponent)
+
+    # A legal live Contest blocks owner deletion.  Model only the imported
+    # legacy residue this compatibility path defends against: the Contest
+    # reached a terminal state while its old queued execution row remained.
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET status=? WHERE id=?",
+            (CONTEST_CANCELLED, int(job["contest_id"])),
+        )
+    assert (
+        store.get_contest(int(job["contest_id"]))["status"]
+        == CONTEST_CANCELLED
+    )
 
     result = store.owner_delete_bot(target["owner_id"], target["bot_id"])
 
@@ -511,12 +574,20 @@ def test_owner_delete_rejects_every_active_job_source_without_writes(
     opponent = _bot(store, opponent_owner, f"other_{source}_{state}")
     enable_execution_queue(store)
     job = _enqueue(store, source, target, opponent)
+    if source == EXECUTION_SOURCE_CONTEST:
+        contest_id = int(job["contest_id"])
+        assert store.get_contest(contest_id)["status"] == CONTEST_RUNNING
+        assert store.contest_stage_manifest_is_valid(contest_id, 0)
     _force_active_job_state(store, str(job["public_id"]), state)
 
     with pytest.raises(BotOwnerDeleteBusyError) as raised:
         store.owner_delete_bot(target["owner_id"], target["bot_id"])
 
     assert raised.value.code == "bot_busy"
+    if source == EXECUTION_SOURCE_CONTEST:
+        # In the legal model this stronger guard is reached first: every
+        # contest job still belongs to a live Contest that retains the Bot.
+        assert "联系赛事组织者" in raised.value.message
     assert store.get_bot(target["bot_id"])["owner_deleted_at"] is None
     assert store.executions.get(job["public_id"])["status"] == state
 

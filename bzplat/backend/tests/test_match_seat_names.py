@@ -72,7 +72,7 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
     allowed = {
         "id", "bot_a_id", "bot_b_id", "contest_id", "winner", "reason",
         "match_type", "status", "game_id", "result", "human_seat",
-        "technical_loss", "started_at", "ended_at", "created_at",
+        "technical_loss", "time_control", "started_at", "ended_at", "created_at",
         "likes_count", "views_count", "rated", "rating_reason",
         "rating_settled", "bot_a_environment", "bot_b_environment",
         "bot_a", "bot_b", "can_view_debug", "outcome",
