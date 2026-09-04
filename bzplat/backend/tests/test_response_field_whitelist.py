@@ -107,10 +107,45 @@ def test_matches_list_drops_dead_keeps_critical(tmp_path):
             "id", "game_id", "status", "winner", "reason", "match_type",
             "contest_id", "created_at", "bot_a_id", "bot_b_id",
             "technical_loss", "result", "bot_a_environment",
-            "bot_b_environment", "bot_a", "bot_b", "outcome",
+            "bot_b_environment", "time_control", "bot_a", "bot_b", "outcome",
         }
         assert set(m) <= allowed, f"matches 列表泄漏非公开字段: {set(m) - allowed}"
         # 守护：4 个会致回归的字段必须在（有消费者）
         for keep in ("winner", "reason", "match_type", "contest_id"):
             assert keep in m, f"matches 列表误删了关键字段 {keep}（会致回归）"
         assert "bot_a" in m and "bot_b" in m
+
+
+def test_contest_projections_drop_internal_publication_manifest(tmp_path):
+    app = create_app(db_path=str(tmp_path / "contest-whitelist.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        "contest_wl_org",
+        "contest-wl@example.com",
+        "unused-test-hash",
+        display_name="contest whitelist",
+        role="organizer",
+    )
+    contest = store.create_contest(
+        "contest whitelist",
+        organizer["id"],
+        game_id="holdem",
+        status="open",
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=7 WHERE id=?",
+            (contest["id"],),
+        )
+
+    with TestClient(app) as client:
+        listed = next(
+            row
+            for row in client.get("/api/contests").json()["contests"]
+            if row["id"] == contest["id"]
+        )
+        detail = client.get(f"/api/contests/{contest['id']}").json()["contest"]
+        live = client.get(f"/api/contests/{contest['id']}/live").json()["contest"]
+
+    for projection in (listed, detail, live):
+        assert "published_stage_pairing_count" not in projection

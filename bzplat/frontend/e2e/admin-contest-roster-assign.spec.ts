@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import { GOMOKU_TEMPLATE_TIME_CONTROLS } from './time-control-fixtures'
 
 const CONTEST_ID = 989_101
 const ADMIN = {
@@ -142,15 +143,14 @@ async function mockBase(page: Page, user = ADMIN) {
       body: JSON.stringify({ detail: `unmocked roster endpoint: ${url.pathname}` }),
     })
   })
-  await page.route('**/api/auth/me', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ user }),
-  }))
-  await page.addInitScript((activeUser) => {
-    localStorage.setItem('bzplat_token', 'roster-test-token')
-    localStorage.setItem('bzplat_user', JSON.stringify(activeUser))
-  }, user)
+  await page.route('**/api/auth/me', (route) => {
+    expect(route.request().headers().authorization).toBeUndefined()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ user }),
+    })
+  })
   return { unexpectedBackendRequests, forbiddenMainRequests }
 }
 
@@ -554,6 +554,7 @@ async function mockContestDetail(page: Page, requireRealName: number, isOrganize
         id: 'gomoku_rr',
         name: '五子棋单循环',
         game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
         stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
       }],
     }),
@@ -631,6 +632,800 @@ test('real-name organizer keeps the existing no-delegation boundary', async ({ p
   await expect(page.getByText('实名赛事仅允许选手本人报名，组织者不能代报名或批量指派。')).toBeVisible()
   await expect(page.getByTestId('admin-contest-roster-assign')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '批量指派', exact: true })).toHaveCount(0)
+  await monitor.expectClean()
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('contest detail keeps async action refreshes on the current roster page', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  const cancelledLightRequests: string[] = []
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() === 'GET' &&
+      url.pathname === `/api/contests/${CONTEST_ID}/entries` &&
+      url.search === '?page=2&per_page=20'
+    ) cancelledLightRequests.push(request.failure()?.errorText || '')
+  })
+  const fullDetailPages: number[] = []
+  const lightEntryPages: number[] = []
+  let resolveAssignStarted!: () => void
+  let resolveAssign!: () => void
+  let resolveFirstPageTwoStarted!: () => void
+  let resolveFirstPageTwo!: () => void
+  let resolveFirstPageTwoSettled!: () => void
+  let resolveOpenStarted!: () => void
+  let resolveOpen!: () => void
+  const assignStarted = new Promise<void>((resolve) => { resolveAssignStarted = resolve })
+  const assignGate = new Promise<void>((resolve) => { resolveAssign = resolve })
+  const firstPageTwoStarted = new Promise<void>((resolve) => { resolveFirstPageTwoStarted = resolve })
+  const firstPageTwoGate = new Promise<void>((resolve) => { resolveFirstPageTwo = resolve })
+  const firstPageTwoSettled = new Promise<void>((resolve) => { resolveFirstPageTwoSettled = resolve })
+  const openStarted = new Promise<void>((resolve) => { resolveOpenStarted = resolve })
+  const openGate = new Promise<void>((resolve) => { resolveOpen = resolve })
+  let lightPageTwoRequests = 0
+
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), async (route) => {
+    const url = new URL(route.request().url())
+    const requestedPage = Number(url.searchParams.get('entries_page') || '1')
+    fullDetailPages.push(requestedPage)
+    let entries = [{
+      ...existingEntries()[0],
+      bot_display: '第 1 页选手',
+    }]
+    if (requestedPage === 2) {
+      entries = [{
+        ...existingEntries()[0],
+        id: 989_203,
+        user_id: 989_021,
+        bot_id: 989_221,
+        bot_name: 'current_page_two_bot',
+        bot_display: '当前第 2 页选手',
+      }]
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: contest(0),
+        entries,
+        pairings: [],
+        standings: [],
+        stage_standings: [],
+        entries_page: requestedPage,
+        entries_per_page: 20,
+        entries_total: 40,
+        my_entry: null,
+        is_organizer: true,
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), async (route) => {
+    const url = new URL(route.request().url())
+    const requestedPage = Number(url.searchParams.get('page') || '1')
+    lightEntryPages.push(requestedPage)
+    let entries = [{ ...existingEntries()[0], bot_display: '第 1 页选手' }]
+    if (requestedPage === 2) {
+      lightPageTwoRequests += 1
+      resolveFirstPageTwoStarted()
+      await firstPageTwoGate
+      entries = [{
+        ...existingEntries()[0],
+        id: 989_202,
+        user_id: 989_020,
+        bot_id: 989_220,
+        bot_name: 'late_page_two_bot',
+        bot_display: '迟到的第 2 页选手',
+      }]
+    }
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ entries, page: requestedPage, per_page: 20, total: 40 }),
+      })
+    } catch {
+      // AbortController may cancel this deliberately stale intercepted request.
+    } finally {
+      if (requestedPage === 2) resolveFirstPageTwoSettled()
+    }
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+  await page.route(`**/api/admin/contests/${CONTEST_ID}/entries/bulk`, async (route) => {
+    resolveAssignStarted()
+    await assignGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ added: 1, skipped: [], total_entries: 40 }),
+    })
+  })
+  await page.route(`**/api/contests/${CONTEST_ID}/open`, async (route) => {
+    resolveOpenStarted()
+    await openGate
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+  })
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await expect(page.getByText('第 1 页选手', { exact: true })).toBeVisible()
+
+  const assignAll = page.getByTestId('admin-contest-roster-assign')
+    .getByRole('button', { name: '指派全部可用用户', exact: true })
+  await assignAll.click()
+  await page.getByRole('dialog', { name: '指派全部可用用户？' })
+    .getByRole('button', { name: '确认全员指派', exact: true })
+    .click()
+  await assignStarted
+
+  const rosterPagination = page.getByRole('navigation', { name: '分页导航' })
+  const pageTwo = rosterPagination.getByRole('button', { name: '第 2 页' })
+  await pageTwo.click()
+  await firstPageTwoStarted
+  expect(fullDetailPages).toEqual([1])
+  expect(lightEntryPages).toEqual([2])
+  resolveAssign()
+
+  // The child action started on page 1, but its delayed onDone callback must
+  // refresh the page selected while the POST was in flight with authoritative
+  // full detail. Pagination alone must never repeat that O(n²) projection.
+  await expect.poll(() => fullDetailPages.filter((value) => value === 2).length).toBe(1)
+  await expect(page.getByText('当前第 2 页选手', { exact: true })).toBeVisible()
+  expect(lightPageTwoRequests).toBe(1)
+
+  // A late response from the first page-2 request is from an older generation
+  // and cannot replace the action refresh that already won.
+  resolveFirstPageTwo()
+  await firstPageTwoSettled
+  await expect(page.getByText('迟到的第 2 页选手', { exact: true })).toHaveCount(0)
+
+  // Parent-owned actions freeze pagination until their POST and current-page
+  // refresh finish, so the visible rows cannot drift underneath a row action.
+  await page.getByRole('button', { name: '开放报名', exact: true }).click()
+  await openStarted
+  await expect(rosterPagination.getByRole('button', { name: '第 1 页' })).toBeDisabled()
+  await expect(pageTwo).toBeDisabled()
+  expect((await pageTwo.boundingBox())?.height).toBeGreaterThanOrEqual(44)
+  resolveOpen()
+  await expect(page.getByText('已开放报名', { exact: true })).toBeVisible()
+  await expect(page.getByText('当前第 2 页选手', { exact: true })).toBeVisible()
+  expect(fullDetailPages.at(-1)).toBe(2)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+
+  await expect.poll(() => cancelledLightRequests.length).toBe(1)
+  expect(cancelledLightRequests[0]).toMatch(
+    /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+  )
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: `/api/contests/${CONTEST_ID}/entries`,
+    search: '?page=2&per_page=20',
+    errorText: cancelledLightRequests[0],
+  }])
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('rapid roster pagination uses light reads and aborts a stale page response', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  const cancelledLightRequests: string[] = []
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() === 'GET' &&
+      url.pathname === `/api/contests/${CONTEST_ID}/entries` &&
+      url.search === '?page=2&per_page=20'
+    ) cancelledLightRequests.push(request.failure()?.errorText || '')
+  })
+  const fullDetailPages: number[] = []
+  const lightEntryPages: number[] = []
+  let releaseLatePage!: () => void
+  let markLatePageStarted!: () => void
+  let markLatePageSettled!: () => void
+  const latePageGate = new Promise<void>((resolve) => { releaseLatePage = resolve })
+  const latePageStarted = new Promise<void>((resolve) => { markLatePageStarted = resolve })
+  const latePageSettled = new Promise<void>((resolve) => { markLatePageSettled = resolve })
+
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), async (route) => {
+    const url = new URL(route.request().url())
+    fullDetailPages.push(Number(url.searchParams.get('entries_page') || '1'))
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: contest(0),
+        entries: [{ ...existingEntries()[0], bot_display: '初始第 1 页选手' }],
+        pairings: [],
+        standings: [],
+        stage_standings: [],
+        entries_page: 1,
+        entries_per_page: 20,
+        entries_total: 40,
+        my_entry: null,
+        is_organizer: true,
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), async (route) => {
+    const url = new URL(route.request().url())
+    const requestedPage = Number(url.searchParams.get('page') || '1')
+    lightEntryPages.push(requestedPage)
+    if (requestedPage === 2) {
+      markLatePageStarted()
+      await latePageGate
+    }
+    const entries = requestedPage === 2
+      ? [{ ...existingEntries()[0], id: 989_205, bot_display: '迟到的第 2 页选手' }]
+      : [{ ...existingEntries()[0], bot_display: '当前第 1 页选手' }]
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ entries, page: requestedPage, per_page: 20, total: 40 }),
+      })
+    } catch {
+      // The stale page-2 request is expected to be aborted by the page-1 load.
+    } finally {
+      if (requestedPage === 2) markLatePageSettled()
+    }
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await expect(page.getByText('初始第 1 页选手', { exact: true })).toBeVisible()
+  const rosterPagination = page.getByRole('navigation', { name: '分页导航' })
+  await rosterPagination.getByRole('button', { name: '第 2 页' }).click()
+  await latePageStarted
+  await rosterPagination.getByRole('button', { name: '第 1 页' }).click()
+  await expect(page.getByText('当前第 1 页选手', { exact: true })).toBeVisible()
+
+  expect(fullDetailPages).toEqual([1])
+  expect(lightEntryPages).toEqual([2, 1])
+  releaseLatePage()
+  await latePageSettled
+  await expect(page.getByText('迟到的第 2 页选手', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('当前第 1 页选手', { exact: true })).toBeVisible()
+
+  await expect.poll(() => cancelledLightRequests.length).toBe(1)
+  expect(cancelledLightRequests[0]).toMatch(
+    /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+  )
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: `/api/contests/${CONTEST_ID}/entries`,
+    search: '?page=2&per_page=20',
+    errorText: cancelledLightRequests[0],
+  }])
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('official-results failure survives a successful light roster page load', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  let releaseRosterPage!: () => void
+  let markRosterPageStarted!: () => void
+  const rosterPageGate = new Promise<void>((resolve) => { releaseRosterPage = resolve })
+  const rosterPageStarted = new Promise<void>((resolve) => { markRosterPageStarted = resolve })
+
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      contest: { ...contest(0), status: 'finished' },
+      entries: [{ ...existingEntries()[0], bot_display: '完赛第 1 页选手' }],
+      pairings: [],
+      standings: [],
+      stage_standings: [],
+      entries_page: 1,
+      entries_per_page: 20,
+      entries_total: 40,
+      my_entry: null,
+      is_organizer: true,
+    }),
+  }))
+  await page.route(`**/api/contests/${CONTEST_ID}/official-results`, (route) => route.fulfill({
+    status: 500,
+    contentType: 'application/json',
+    body: JSON.stringify({ detail: '正式名次服务暂不可用' }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), async (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('page') || '1')
+    if (requestedPage === 2) {
+      markRosterPageStarted()
+      await rosterPageGate
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: [{
+          ...existingEntries()[0],
+          id: 989_207,
+          bot_display: requestedPage === 2 ? '完赛第 2 页选手' : '完赛第 1 页选手',
+        }],
+        page: requestedPage,
+        per_page: 20,
+        total: 40,
+      }),
+    })
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  const officialError = page.getByText('正式名次加载失败：正式名次服务暂不可用', { exact: true })
+  await expect(officialError).toBeVisible()
+  await page.getByRole('tab', { name: /选手/ }).click()
+  await expect(page.getByText('完赛第 1 页选手', { exact: true })).toBeVisible()
+
+  await page.getByRole('navigation', { name: '分页导航' })
+    .getByRole('button', { name: '第 2 页' })
+    .click()
+  await rosterPageStarted
+  await expect(officialError).toBeVisible()
+  releaseRosterPage()
+  await expect(page.getByText('完赛第 2 页选手', { exact: true })).toBeVisible()
+  await expect(officialError).toBeVisible()
+
+  await monitor.expectClean([{
+    kind: 'http',
+    method: 'GET',
+    status: 500,
+    pathname: `/api/contests/${CONTEST_ID}/official-results`,
+    search: '',
+  }])
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('a succeeding light roster retry clears its own prior error', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  let pageTwoAttempts = 0
+  let releasePageOneRetry!: () => void
+  let markPageOneRetryStarted!: () => void
+  const pageOneRetryGate = new Promise<void>((resolve) => { releasePageOneRetry = resolve })
+  const pageOneRetryStarted = new Promise<void>((resolve) => { markPageOneRetryStarted = resolve })
+
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      contest: { ...contest(0), status: 'published' },
+      entries: [{ ...existingEntries()[0], bot_display: '初始名册第 1 页选手' }],
+      pairings: [],
+      standings: [],
+      stage_standings: [],
+      entries_page: 1,
+      entries_per_page: 20,
+      entries_total: 40,
+      my_entry: null,
+      is_organizer: true,
+    }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), async (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('page') || '1')
+    if (requestedPage === 2) {
+      pageTwoAttempts += 1
+      if (pageTwoAttempts === 1) {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: '名册分页暂不可用' }),
+        })
+        return
+      }
+    } else {
+      markPageOneRetryStarted()
+      await pageOneRetryGate
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: [{
+          ...existingEntries()[0],
+          id: requestedPage === 2 ? 989_208 : existingEntries()[0].id,
+          bot_display: requestedPage === 2 ? '重试成功的第 2 页选手' : '重试成功的第 1 页选手',
+        }],
+        page: requestedPage,
+        per_page: 20,
+        total: 40,
+      }),
+    })
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await page.getByRole('tab', { name: /选手/ }).click()
+  await expect(page.getByText('初始名册第 1 页选手', { exact: true })).toBeVisible()
+  const rosterPagination = page.getByRole('navigation', { name: '分页导航' })
+  await rosterPagination.getByRole('button', { name: '第 2 页' }).click()
+  const rosterError = page.getByText('名册分页暂不可用', { exact: true })
+  await expect(rosterError).toBeVisible()
+
+  await rosterPagination.getByRole('button', { name: '第 1 页' }).click()
+  await pageOneRetryStarted
+  await expect(rosterError).toBeVisible()
+  releasePageOneRetry()
+  await expect(page.getByText('重试成功的第 1 页选手', { exact: true })).toBeVisible()
+  await expect(rosterError).toHaveCount(0)
+
+  await rosterPagination.getByRole('button', { name: '第 2 页' }).click()
+  await expect(page.getByText('重试成功的第 2 页选手', { exact: true })).toBeVisible()
+  await expect(rosterError).toHaveCount(0)
+  expect(pageTwoAttempts).toBe(2)
+
+  await monitor.expectClean([{
+    kind: 'http',
+    method: 'GET',
+    status: 500,
+    pathname: `/api/contests/${CONTEST_ID}/entries`,
+    search: '?page=2&per_page=20',
+  }])
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('removing the only row on the last roster page refetches the last valid full-detail page', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  const fullDetailPages: number[] = []
+  const lightEntryPages: number[] = []
+  let deleted = false
+  let releaseCorrectedPage!: () => void
+  let markCorrectedPageStarted!: () => void
+  const correctedPageGate = new Promise<void>((resolve) => { releaseCorrectedPage = resolve })
+  const correctedPageStarted = new Promise<void>((resolve) => { markCorrectedPageStarted = resolve })
+  const lastEntry = {
+    ...existingEntries()[0],
+    id: 989_206,
+    user_id: 989_026,
+    bot_id: 989_226,
+    bot_name: 'last_page_only_bot',
+    bot_display: '末页唯一选手',
+  }
+
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), async (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('entries_page') || '1')
+    fullDetailPages.push(requestedPage)
+    if (deleted && requestedPage === 1) {
+      markCorrectedPageStarted()
+      await correctedPageGate
+    }
+    const entries = requestedPage === 2
+      ? (deleted ? [] : [lastEntry])
+      : [{ ...existingEntries()[0], bot_display: deleted ? '删除后第 1 页选手' : '初始第 1 页选手' }]
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: contest(0),
+        entries,
+        pairings: [],
+        standings: [],
+        stage_standings: [],
+        entries_page: requestedPage,
+        entries_per_page: 20,
+        entries_total: deleted ? 20 : 21,
+        my_entry: null,
+        is_organizer: true,
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('page') || '1')
+    lightEntryPages.push(requestedPage)
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: requestedPage === 2 ? [lastEntry] : existingEntries(),
+        page: requestedPage,
+        per_page: 20,
+        total: 21,
+      }),
+    })
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+  await page.route(`**/api/contests/${CONTEST_ID}/entries/${lastEntry.user_id}`, async (route) => {
+    deleted = true
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await expect(page.getByText('初始第 1 页选手', { exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: '分页导航' })
+    .getByRole('button', { name: '第 2 页' })
+    .click()
+  await expect(page.getByText('末页唯一选手', { exact: true })).toBeVisible()
+  expect(fullDetailPages).toEqual([1])
+  expect(lightEntryPages).toEqual([2])
+
+  await page.getByRole('button', { name: '移除', exact: true }).click()
+  await page.getByRole('dialog', { name: '移除报名选手？' })
+    .getByRole('button', { name: '确认移除', exact: true })
+    .click()
+  await correctedPageStarted
+
+  // Do not first commit the now-empty page 2 while the corrective full read is pending.
+  await expect(page.getByText('末页唯一选手', { exact: true })).toBeVisible()
+  await expect(page.getByText('暂无报名', { exact: true })).toHaveCount(0)
+  releaseCorrectedPage()
+  await expect(page.getByText('删除后第 1 页选手', { exact: true })).toBeVisible()
+  expect(fullDetailPages).toEqual([1, 2, 1])
+  expect(lightEntryPages).toEqual([2])
+
+  await monitor.expectClean()
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('a light roster response that observes a concurrent page shrink refetches the last valid page', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  const fullDetailPages: number[] = []
+  const lightEntryPages: number[] = []
+  let releaseCorrectedPage!: () => void
+  let markCorrectedPageStarted!: () => void
+  const correctedPageGate = new Promise<void>((resolve) => { releaseCorrectedPage = resolve })
+  const correctedPageStarted = new Promise<void>((resolve) => { markCorrectedPageStarted = resolve })
+
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), async (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('entries_page') || '1')
+    fullDetailPages.push(requestedPage)
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: contest(0),
+        entries: [{ ...existingEntries()[0], bot_display: '并发删除前第 1 页选手' }],
+        pairings: [],
+        standings: [],
+        stage_standings: [],
+        entries_page: requestedPage,
+        entries_per_page: 20,
+        entries_total: 21,
+        my_entry: null,
+        is_organizer: true,
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}/entries(?:\\?.*)?$`), async (route) => {
+    const requestedPage = Number(new URL(route.request().url()).searchParams.get('page') || '1')
+    lightEntryPages.push(requestedPage)
+    if (requestedPage === 1) {
+      markCorrectedPageStarted()
+      await correctedPageGate
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: requestedPage === 1
+          ? [{ ...existingEntries()[0], bot_display: '并发缩页后的第 1 页选手' }]
+          : [],
+        page: requestedPage,
+        per_page: 20,
+        total: 20,
+      }),
+    })
+  })
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await expect(page.getByText('并发删除前第 1 页选手', { exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: '分页导航' })
+    .getByRole('button', { name: '第 2 页' })
+    .click()
+  await correctedPageStarted
+
+  // The stale page remains visible until the replacement page has arrived.
+  await expect(page.getByText('并发删除前第 1 页选手', { exact: true })).toBeVisible()
+  await expect(page.getByText('暂无报名', { exact: true })).toHaveCount(0)
+  releaseCorrectedPage()
+  await expect(page.getByText('并发缩页后的第 1 页选手', { exact: true })).toBeVisible()
+  expect(fullDetailPages).toEqual([1])
+  expect(lightEntryPages).toEqual([2, 1])
+
+  await monitor.expectClean()
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+})
+
+test('a delayed roster callback cannot invalidate the next contest load', async ({ page }) => {
+  const nextContestId = CONTEST_ID + 1
+  const monitor = monitorBrowser(page)
+  const network = await mockBase(page)
+  let firstContestLoads = 0
+  let resolveAssignStarted!: () => void
+  let resolveAssign!: () => void
+  let resolveNextLoadStarted!: () => void
+  let resolveNextLoad!: () => void
+  const assignStarted = new Promise<void>((resolve) => { resolveAssignStarted = resolve })
+  const assignGate = new Promise<void>((resolve) => { resolveAssign = resolve })
+  const nextLoadStarted = new Promise<void>((resolve) => { resolveNextLoadStarted = resolve })
+  const nextLoadGate = new Promise<void>((resolve) => { resolveNextLoad = resolve })
+
+  await page.route('**/api/contests/templates?game=gomoku', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      templates: [{
+        id: 'gomoku_rr',
+        name: '五子棋单循环',
+        game_id: 'gomoku',
+        ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+        stages: [{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }],
+      }],
+    }),
+  }))
+  await page.route(
+    new RegExp(`/api/contests/(?:${CONTEST_ID}|${nextContestId})(?:\\?.*)?$`),
+    async (route) => {
+      const url = new URL(route.request().url())
+      const contestId = Number(url.pathname.split('/').at(-1))
+      const isNextContest = contestId === nextContestId
+      if (isNextContest) {
+        resolveNextLoadStarted()
+        await nextLoadGate
+      } else {
+        firstContestLoads += 1
+      }
+      const requestedPage = Number(url.searchParams.get('entries_page') || '1')
+      const detailContest = isNextContest
+        ? { ...contest(0), id: nextContestId, title: '切换后的赛事 B' }
+        : contest(0)
+      const detailEntry = {
+        ...existingEntries()[0],
+        contest_id: contestId,
+        id: isNextContest ? 989_204 : 989_201,
+        user_id: isNextContest ? 989_022 : EXISTING_USER.id,
+        bot_id: isNextContest ? 989_222 : 989_211,
+        bot_name: isNextContest ? 'next_contest_bot' : 'existing_bot',
+        bot_display: isNextContest ? '赛事 B 选手' : '赛事 A 选手',
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          contest: detailContest,
+          entries: [detailEntry],
+          pairings: [],
+          standings: [],
+          stage_standings: [],
+          entries_page: requestedPage,
+          entries_per_page: 20,
+          entries_total: 1,
+          my_entry: null,
+          is_organizer: true,
+        }),
+      })
+    },
+  )
+  await page.route('**/api/bots/mine?*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"bots":[]}',
+  }))
+  await page.route(`**/api/admin/contests/${CONTEST_ID}/entries/bulk`, async (route) => {
+    resolveAssignStarted()
+    await assignGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ added: 1, skipped: [], total_entries: 2 }),
+    })
+  })
+
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+  await expect(page.getByText('赛事 A 选手', { exact: true })).toBeVisible()
+  await page.getByTestId('admin-contest-roster-assign')
+    .getByRole('button', { name: '指派全部可用用户', exact: true })
+    .click()
+  await page.getByRole('dialog', { name: '指派全部可用用户？' })
+    .getByRole('button', { name: '确认全员指派', exact: true })
+    .click()
+  await assignStarted
+
+  await page.goto(`/#/contests/${nextContestId}`)
+  await nextLoadStarted
+  const loadsBeforeOldActionFinished = firstContestLoads
+  resolveAssign()
+  await expect(page.getByText('已指派 1 人', { exact: true })).toBeVisible()
+  expect(firstContestLoads).toBe(loadsBeforeOldActionFinished)
+
+  const nextContestResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return url.pathname === `/api/contests/${nextContestId}`
+  })
+  resolveNextLoad()
+  await nextContestResponse
+  await expect(page.getByRole('heading', { name: '切换后的赛事 B', exact: true })).toBeVisible()
+  await expect(page.getByText('赛事 B 选手', { exact: true })).toBeVisible()
+  await expect(page.getByText('赛事 A 选手', { exact: true })).toHaveCount(0)
+
   await monitor.expectClean()
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])

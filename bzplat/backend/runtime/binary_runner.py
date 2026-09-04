@@ -35,6 +35,7 @@ from ..bots.classify import (
 )
 from ..store.schema import (
     DEFAULT_RUNTIME_MODE,
+    RUNTIME_LONGRUNNING,
     SUPPORTED_BINARY_ERROR,
     VALID_RUNTIME_MODES,
 )
@@ -57,6 +58,51 @@ class ExecutionAttemptCancelled(asyncio.CancelledError):
 def _raise_if_attempt_cancelled(exc: Exception) -> None:
     if getattr(exc, "code", "") == "execution_attempt_not_current":
         raise ExecutionAttemptCancelled(str(exc)) from exc
+
+
+def _subprocess_stdin_confirmed_closed(
+    proc: asyncio.subprocess.Process,
+) -> bool:
+    """Return true only when subprocess state proves its stdin is closing.
+
+    CPython's asyncio subprocess writer normally reports a dead pipe as
+    ``BrokenPipeError``/``ConnectionResetError``.  uvloop may instead raise a
+    plain ``RuntimeError`` from ``WriteUnixTransport.write``.  RuntimeError is
+    otherwise too broad to attribute to a Bot, so callers must only translate
+    it after either the child exit code or the writer/transport state confirms
+    that the pipe has closed.
+    """
+
+    try:
+        if proc.returncode is not None:
+            return True
+    except Exception:
+        # A non-standard process wrapper must not make broad RuntimeError
+        # classification fail open.
+        pass
+
+    try:
+        stdin = getattr(proc, "stdin", None)
+    except Exception:
+        return False
+    candidates = [stdin]
+    for attribute in ("transport", "_transport"):
+        try:
+            candidates.append(getattr(stdin, attribute, None))
+        except Exception:
+            continue
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            is_closing = getattr(candidate, "is_closing", None)
+            if callable(is_closing) and bool(is_closing()):
+                return True
+        except Exception:
+            # Introspection is evidence only; failure cannot justify assigning
+            # an otherwise generic RuntimeError to the uploaded Bot.
+            continue
+    return False
 
 
 @dataclass
@@ -102,6 +148,73 @@ class ExecutionScope:
 
 
 @dataclass
+class _DecisionTransportTimer:
+    """Authoritative Bot transport interval for one decision.
+
+    The timer begins immediately before the complete request is written to an
+    already-started Bot.  Synchronous platform attempt guards may run while a
+    LongRunning response is still incomplete; those intervals extend the
+    transport deadline and are subtracted from reported Bot time.
+    """
+
+    loop: object
+    timeout: float
+    expects_extra_line: bool
+    started_at: float | None = None
+    deadline_at: float | None = None
+    finished_at: float | None = None
+    excluded_seconds: float = 0.0
+
+    def start(self) -> None:
+        if self.started_at is not None:
+            return
+        self.started_at = float(self.loop.time())
+        self.deadline_at = self.started_at + max(0.0, float(self.timeout))
+
+    @property
+    def active(self) -> bool:
+        return self.started_at is not None and self.finished_at is None
+
+    def remaining(self) -> float:
+        if self.started_at is None or self.deadline_at is None:
+            return 0.0
+        if self.finished_at is not None:
+            return 0.0
+        return max(0.0, self.deadline_at - float(self.loop.time()))
+
+    def exclude_platform_check(self, callback: Callable[[], None]) -> None:
+        """Run one platform-owned guard without charging or shrinking Bot time."""
+
+        if self.started_at is None or self.finished_at is not None:
+            callback()
+            return
+        started = float(self.loop.time())
+        try:
+            callback()
+        finally:
+            duration = max(0.0, float(self.loop.time()) - started)
+            self.excluded_seconds += duration
+            self.deadline_at += duration
+
+    def finish(self) -> None:
+        if self.started_at is not None and self.finished_at is None:
+            self.finished_at = float(self.loop.time())
+
+    def elapsed(self) -> float:
+        if self.started_at is None:
+            return 0.0
+        finished = (
+            self.finished_at
+            if self.finished_at is not None
+            else float(self.loop.time())
+        )
+        return max(
+            0.0,
+            float(finished) - self.started_at - self.excluded_seconds,
+        )
+
+
+@dataclass
 class BotSession:
     session_id: str
     info: BinaryInfo
@@ -122,6 +235,9 @@ class BotSession:
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
     execution_scope: ExecutionScope | None = None
+    _decision_timer: _DecisionTransportTimer | None = field(
+        default=None, repr=False
+    )
     _preflight_permit_held: bool = False
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
@@ -753,28 +869,115 @@ class BinaryRunner:
             session.execution_scope.assert_current()
         if not line.endswith("\n"):
             line = line + "\n"
+        encoded_line = line.encode("utf-8")
+        loop = asyncio.get_running_loop()
+        timer = _DecisionTransportTimer(
+            loop=loop,
+            timeout=timeout,
+            expects_extra_line=(
+                getattr(session, "runtime_mode", DEFAULT_RUNTIME_MODE)
+                == RUNTIME_LONGRUNNING
+                and int(getattr(session, "turn", 0)) == 0
+            ),
+        )
+        session._decision_timer = timer
+
         try:
-            session.proc.stdin.write(line.encode("utf-8"))
-            await session.proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
-            raise await self._process_exit_error(session, "stdin 已关闭") from exc
-        try:
-            raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
+            try:
+                # This is the authoritative clock boundary: startup, preheat,
+                # queueing and the durable-attempt guard above are platform
+                # work; request write/backpressure and the complete response
+                # are Bot transport time under one absolute deadline.
+                timer.start()
+                session.proc.stdin.write(encoded_line)
+                write_budget = timer.remaining()
+                if write_budget <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(
+                    session.proc.stdin.drain(), timeout=write_budget
+                )
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                timer.finish()
+                raise await self._process_exit_error(
+                    session, "stdin 已关闭"
+                ) from exc
+            except RuntimeError as exc:
+                if not _subprocess_stdin_confirmed_closed(session.proc):
+                    raise
+                timer.finish()
+                raise await self._process_exit_error(
+                    session, "stdin 已关闭"
+                ) from exc
+            read_budget = timer.remaining()
+            if read_budget <= 0:
+                raise asyncio.TimeoutError
+            raw = await asyncio.wait_for(
+                session.proc.stdout.readline(), timeout=read_budget
+            )
         except asyncio.TimeoutError:
+            timer.finish()
+            # One absolute decision deadline covers request write/backpressure
+            # and the complete response line.  A Bot that stops reading stdin
+            # must not evade a one-second control by filling the pipe before
+            # stdout is awaited.
             # stderr is uploaded-program-controlled and may contain host/container
             # paths. The orchestrator emits the attributable structured record with
             # match/bot/version/runtime/seat/turn after this typed timeout propagates.
             logger.warning("bot session %s 决策超时 (%ss)", session_id, timeout)
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
         except ValueError as exc:
+            timer.finish()
             # StreamReader.readline 将 LimitOverrunError 规范化为 ValueError。
             # 不记录 Bot 控制的原始 stdout，也不把它误判成平台故障。
             raise BotResponseLineTooLargeError("Bot stdout 响应行超过硬顶") from exc
+        except asyncio.CancelledError:
+            timer.finish()
+            raise
+        except Exception:
+            timer.finish()
+            raise
         if not raw:
+            timer.finish()
             raise await self._process_exit_error(session, "stdout EOF")
+        if not timer.expects_extra_line:
+            timer.finish()
         if session.execution_scope is not None:
-            session.execution_scope.assert_current()
+            if timer.active:
+                timer.exclude_platform_check(
+                    session.execution_scope.assert_current
+                )
+            else:
+                session.execution_scope.assert_current()
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    def decision_remaining(self, session_id: str) -> float | None:
+        """Return the active authoritative transport budget, if any."""
+
+        session = self._sessions.get(session_id)
+        timer = (
+            getattr(session, "_decision_timer", None)
+            if session is not None
+            else None
+        )
+        if timer is None or not timer.active:
+            return None
+        return timer.remaining()
+
+    def consume_decision_elapsed(self, session_id: str) -> float | None:
+        """Finish and consume one decision's Bot-attributable transport time."""
+
+        session = self._sessions.get(session_id)
+        timer = (
+            getattr(session, "_decision_timer", None)
+            if session is not None
+            else None
+        )
+        if timer is None:
+            return None
+        timer.finish()
+        elapsed = timer.elapsed()
+        session._decision_timer = None
+        return elapsed
 
     async def _process_exit_error(
         self, session: BotSession, context: str
@@ -817,22 +1020,56 @@ class BinaryRunner:
 
     async def read_extra_line(self, session_id: str, *,
                               timeout: float = 1.0) -> str | None:
-        """读取 Bot stdout 的一行（带短超时）。无数据返回 None（不报错）。
+        """Read one extra stdout line within the active decision deadline.
 
-        用于 LongRunning 模式首回合后探测 ``>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`` 握手：
-        Bot 若想长驻，在响应后立即输出该行；平台读到即置 long_running。
+        A timed-out active decision propagates ``TimeoutError`` so the match
+        layer can classify it as ``decision_timeout``.  EOF and an empty line
+        still return ``None`` and remain missing-handshake protocol failures.
         """
         session = self._sessions.get(session_id)
         if not session or not session.proc or not session.proc.stdout:
             return None
+        timer = getattr(session, "_decision_timer", None)
         if session.execution_scope is not None:
-            session.execution_scope.assert_current()
+            if timer is not None and timer.active:
+                timer.exclude_platform_check(
+                    session.execution_scope.assert_current
+                )
+            else:
+                session.execution_scope.assert_current()
+        read_timeout = max(0.0, float(timeout))
+        if timer is not None and timer.active:
+            read_timeout = min(read_timeout, timer.remaining())
+        if read_timeout <= 0:
+            timer_was_active = timer is not None and timer.active
+            if timer_was_active:
+                timer.finish()
+                raise asyncio.TimeoutError
+            return None
         try:
-            raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
+            raw = await asyncio.wait_for(
+                session.proc.stdout.readline(), timeout=read_timeout
+            )
         except asyncio.TimeoutError:
+            timer_was_active = timer is not None and timer.active
+            if timer_was_active:
+                timer.finish()
+                raise
             return None
         except ValueError as exc:
+            if timer is not None:
+                timer.finish()
             raise BotResponseLineTooLargeError("Bot stdout 握手行超过硬顶") from exc
+        except asyncio.CancelledError:
+            if timer is not None:
+                timer.finish()
+            raise
+        except Exception:
+            if timer is not None:
+                timer.finish()
+            raise
+        if timer is not None:
+            timer.finish()
         if not raw:
             return None
         if session.execution_scope is not None:

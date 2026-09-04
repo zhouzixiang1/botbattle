@@ -1,6 +1,7 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
 
 import {
+  cookieOriginHeaders,
   loginThroughUi,
   monitorBrowser,
   runCleanupTasks,
@@ -73,7 +74,9 @@ async function ensureCreatedContestSettled(
       pairings?: Array<{ id?: number; status?: string; match_id?: string | null }>
     }
 
-    const remove = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
+    const remove = await admin.page.request.delete(`/api/admin/contests/${contestId}`, {
+      headers: cookieOriginHeaders(admin.page),
+    })
     if (detail.contest.status === 'finished') {
       // Finished contests are immutable audit records by product contract. A QA
       // instance is disposable as a whole, so cleanup verifies protection rather
@@ -309,7 +312,9 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
   await expect(row).toBeVisible()
   await expect(row.getByText('成绩已归档 · 只读', { exact: true })).toBeVisible()
   await expect(row.getByRole('button', { name: /删除/ })).toHaveCount(0)
-  const forbiddenDelete = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
+  const forbiddenDelete = await admin.page.request.delete(`/api/admin/contests/${contestId}`, {
+    headers: cookieOriginHeaders(admin.page),
+  })
   expect(forbiddenDelete.status(), await forbiddenDelete.text()).toBe(409)
   await admin.monitor.expectClean([
     ...expectedRuntimeCancellations(),

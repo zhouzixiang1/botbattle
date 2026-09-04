@@ -236,6 +236,38 @@ def group_round_robin(
     return out
 
 
+def frozen_group_round_robin(
+    groups: dict[str, list[int]], *, double: bool = False
+) -> list[PairingSpec]:
+    """Generate a group schedule from a publication-frozen assignment.
+
+    Unlike ``group_round_robin`` this helper never recomputes or shrinks groups.
+    It is therefore safe for CSPRNG draws and recovery: every retry consumes the
+    exact durable group labels and membership chosen at publication.
+    """
+    if not isinstance(groups, dict) or len(groups) < 2:
+        raise ValueError("冻结分组至少需要 2 组")
+    seen: set[int] = set()
+    out: list[PairingSpec] = []
+    for group_id in sorted(groups):
+        members = groups[group_id]
+        if not isinstance(group_id, str) or not group_id or len(members) < 2:
+            raise ValueError("冻结分组标识或人数非法")
+        if any(
+            isinstance(bot_id, bool)
+            or not isinstance(bot_id, int)
+            or bot_id < 1
+            or bot_id in seen
+            for bot_id in members
+        ):
+            raise ValueError("冻结分组参赛者重复或身份非法")
+        seen.update(members)
+        for pairing in round_robin(members, double=double):
+            pairing.group_id = group_id
+            out.append(pairing)
+    return out
+
+
 def next_power_of_two(n: int) -> int:
     if n <= 1:
         return 1

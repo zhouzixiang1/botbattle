@@ -18,6 +18,31 @@ READY_WAIT_SECONDS=60
 # shellcheck disable=SC1091
 [[ -f .env ]] && set -a && source .env && set +a
 
+env_truthy() {
+  local normalized="${1,,}"
+  normalized="${normalized#"${normalized%%[![:space:]]*}"}"
+  normalized="${normalized%"${normalized##*[![:space:]]}"}"
+  case "$normalized" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# This is the production-only control entrypoint. Test escape hatches must not
+# survive a stale shell environment or .env, even when BZ_QA_INSTANCE was also
+# set by mistake; isolated QA services invoke the CLI directly from a worktree.
+for test_only_flag in BZ_BOT_LOCAL BZ_SKIP_CAPTCHA BZ_TEST_CAPTCHA; do
+  test_only_value=""
+  if [[ -v "$test_only_flag" ]]; then
+    test_only_value="${!test_only_flag}"
+  fi
+  if env_truthy "$test_only_value"; then
+    echo "refusing production control: $test_only_flag is test-only and must be unset or false" >&2
+    exit 1
+  fi
+done
+unset test_only_flag test_only_value
+
 HOST="${BZ_HOST:-127.0.0.1}"
 PORT="${BZ_PORT:-50380}"
 ALLOW_LAN_BIND="${BZ_ALLOW_LAN_BIND:-0}"

@@ -1,6 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import {
+  GOMOKU_TEMPLATE_TIME_CONTROLS,
+  HOLDEM_TEMPLATE_TIME_CONTROL,
+} from './time-control-fixtures'
 
 const ORGANIZER = {
   id: 91,
@@ -148,6 +152,8 @@ async function installFinalContestApi(page: Page, options: { patchFails?: boolea
         contentType: 'application/json',
         body: JSON.stringify({ templates: [{
           id: 'holdem_final_ranked',
+          game_id: 'holdem',
+          ...HOLDEM_TEMPLATE_TIME_CONTROL,
           name: '德州：历史决赛（循环 → Top 8）',
           recommended_min: 8,
           recommended_max: 8,
@@ -201,7 +207,13 @@ async function installPrelimContestApi(page: Page) {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ templates: [{ id: 'holdem_prelim_swiss', stages: prelimTemplateStages, stage_series_configs: prelimConfig }] }),
+        body: JSON.stringify({ templates: [{
+          id: 'holdem_prelim_swiss',
+          game_id: 'holdem',
+          ...HOLDEM_TEMPLATE_TIME_CONTROL,
+          stages: prelimTemplateStages,
+          stage_series_configs: prelimConfig,
+        }] }),
       })
     }
     if (url.pathname === '/api/bots/mine') {
@@ -356,6 +368,7 @@ test('publishing stops when the fairness settings PATCH fails', async ({ page })
 test('built-in id with a custom stage graph publishes without injecting template defaults', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const writes: string[] = []
+  const patchBodies: unknown[] = []
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -369,7 +382,13 @@ test('built-in id with a custom stage graph publishes without injecting template
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ templates: [{ id: 'holdem_final_ranked', stages: finalTemplateStages, stage_series_configs: finalConfigs }] }),
+        body: JSON.stringify({ templates: [{
+          id: 'holdem_final_ranked',
+          game_id: 'holdem',
+          ...HOLDEM_TEMPLATE_TIME_CONTROL,
+          stages: finalTemplateStages,
+          stage_series_configs: finalConfigs,
+        }] }),
       })
     }
     if (url.pathname === '/api/bots/mine') {
@@ -381,6 +400,13 @@ test('built-in id with a custom stage graph publishes without injecting template
       detail.contest.title = '保留旧自定义阶段'
       detail.contest.stages_json = JSON.stringify([{ key: 'custom', type: 'swiss', rounds: 2 }])
       detail.contest.stage_series_settings = {}
+      detail.contest.time_control_id = 'holdem_per_decision_60s_v1'
+      detail.contest.time_control = {
+        id: 'holdem_per_decision_60s_v1',
+        mode: 'per_decision',
+        seconds: 60,
+        applies_to: 'both_bots',
+      }
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(detail) })
     }
     if (url.pathname === '/api/contests/7003/publish' && request.method() === 'POST') {
@@ -389,7 +415,12 @@ test('built-in id with a custom stage graph publishes without injecting template
     }
     if (url.pathname === '/api/contests/7003' && request.method() === 'PATCH') {
       writes.push(`${request.method()} ${url.pathname}`)
-      return route.fulfill({ status: 400, contentType: 'application/json', body: '{"detail":"must not patch"}' })
+      patchBodies.push(request.postDataJSON())
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ contest: { id: 7003, status: 'open' } }),
+      })
     }
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"unexpected mock request"}' })
   })
@@ -400,7 +431,11 @@ test('built-in id with a custom stage graph publishes without injecting template
   await expect(page.getByText('冻结阶段拓扑与内置模板不一致，已停用公平性设置编辑；发布时将保留当前冻结阶段。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '截止报名·出排期' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '确认发布' }).click()
-  await expect.poll(() => writes).toEqual(['POST /api/contests/7003/publish'])
+  await expect.poll(() => writes).toEqual([
+    'PATCH /api/contests/7003',
+    'POST /api/contests/7003/publish',
+  ])
+  expect(patchBodies).toEqual([{ time_control_id: 'holdem_per_decision_60s_v1' }])
   await monitor.expectClean()
 })
 
@@ -449,6 +484,8 @@ for (const malformed of [
           contentType: 'application/json',
           body: JSON.stringify({ templates: [{
             id: 'gomoku_swiss_ranked',
+            game_id: 'gomoku',
+            ...GOMOKU_TEMPLATE_TIME_CONTROLS,
             name: '五子棋：瑞士制最终排名',
             recommended_min: 13,
             recommended_max: null,

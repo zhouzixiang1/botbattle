@@ -32,8 +32,22 @@ def turn_payload(**updates):
         "request_id": "req-1",
         "match_id": "match-1",
         "turn": 3,
+        "seat": 1,
         "input_line": '{"requests":[{}],"responses":[]}',
         "timeout_ms": 1000,
+    }
+    payload.update(updates)
+    return payload
+
+
+def prepare_payload(**updates):
+    payload = {
+        "type": "prepare_turn",
+        "request_id": "req-1",
+        "match_id": "match-1",
+        "turn": 3,
+        "seat": 1,
+        "prepare_timeout_ms": 8000,
     }
     payload.update(updates)
     return payload
@@ -107,6 +121,21 @@ def test_turn_and_response_contract_are_small_and_explicit():
     }
     with pytest.raises(ValueError, match="未知"):
         module.failure_message(turn, "private:/home/user/bot")
+
+    preparation = module.parse_prepare_turn(prepare_payload())
+    assert module.prepared_message(preparation) == {
+        "type": "prepared",
+        "request_id": "req-1",
+        "match_id": "match-1",
+        "turn": 3,
+    }
+    for malformed in (
+        prepare_payload(input_line="must-not-be-present"),
+        prepare_payload(prepare_timeout_ms=0),
+        prepare_payload(seat=True),
+    ):
+        with pytest.raises(module.TurnError):
+            module.parse_prepare_turn(malformed)
 
     for updates in (
         {"turn": True},
@@ -183,6 +212,189 @@ def test_traditional_turn_timeout_and_output_limit_are_enforced():
     assert oversized.value.reason == "bot_output_too_large"
 
 
+def test_two_phase_client_excludes_process_startup_from_decision_timeout(monkeypatch):
+    module = load_client()
+    preparation = module.parse_prepare_turn(prepare_payload(prepare_timeout_ms=100))
+    turn = module.parse_turn(turn_payload(timeout_ms=10))
+    process = object()
+    stopped: list[object] = []
+
+    async def slow_spawn(_command):
+        await asyncio.sleep(0.03)
+        return process
+
+    async def immediate_response(actual_process, actual_turn):
+        assert actual_process is process
+        assert actual_turn is turn
+        return '{"response":0}'
+
+    async def stop(actual_process):
+        stopped.append(actual_process)
+
+    monkeypatch.setattr(module, "_spawn_traditional_process", slow_spawn)
+    monkeypatch.setattr(module, "_communicate_traditional_process", immediate_response)
+    monkeypatch.setattr(module, "_stop_process", stop)
+
+    async def scenario():
+        prepared = await module.prepare_traditional_process(("./bot",), preparation)
+        return await module.run_prepared_traditional_turn(prepared, turn)
+
+    assert asyncio.run(scenario()) == '{"response":0}'
+    assert stopped == [process]
+
+
+def test_response_is_relayed_before_slow_process_teardown(monkeypatch):
+    module = load_client()
+    turn = module.parse_turn(turn_payload(timeout_ms=20))
+    process = object()
+    events: list[str] = []
+
+    async def immediate_response(actual_process, actual_turn):
+        assert actual_process is process
+        assert actual_turn is turn
+        events.append("output")
+        return '{"response":0}'
+
+    async def slow_stop(actual_process):
+        assert actual_process is process
+        events.append("cleanup_started")
+        await asyncio.sleep(0.05)
+        events.append("cleanup_finished")
+
+    async def relay(output):
+        assert output == '{"response":0}'
+        events.append("relayed")
+
+    monkeypatch.setattr(module, "_communicate_traditional_process", immediate_response)
+    monkeypatch.setattr(module, "_stop_process", slow_stop)
+
+    async def scenario():
+        return await module.run_prepared_traditional_turn(
+            process, turn, on_output=relay
+        )
+
+    assert asyncio.run(scenario()) == '{"response":0}'
+    assert events == ["output", "relayed", "cleanup_started", "cleanup_finished"]
+
+
+def test_failure_is_relayed_before_slow_process_teardown(monkeypatch):
+    module = load_client()
+    turn = module.parse_turn(turn_payload(timeout_ms=20))
+    process = object()
+    events: list[str] = []
+
+    async def invalid_response(actual_process, actual_turn):
+        assert actual_process is process
+        assert actual_turn is turn
+        events.append("invalid_output")
+        raise module.TurnError("无效输出", reason="bot_output_invalid")
+
+    async def slow_stop(actual_process):
+        assert actual_process is process
+        events.append("cleanup_started")
+        await asyncio.sleep(0.05)
+        events.append("cleanup_finished")
+
+    async def relay(exc):
+        assert exc.reason == "bot_output_invalid"
+        events.append("failure_relayed")
+
+    monkeypatch.setattr(module, "_communicate_traditional_process", invalid_response)
+    monkeypatch.setattr(module, "_stop_process", slow_stop)
+
+    async def scenario():
+        await module.run_prepared_traditional_turn(
+            process, turn, on_failure=relay
+        )
+
+    with pytest.raises(module.TurnError) as failed:
+        asyncio.run(scenario())
+    assert failed.value.reason == "bot_output_invalid"
+    assert events == [
+        "invalid_output",
+        "failure_relayed",
+        "cleanup_started",
+        "cleanup_finished",
+    ]
+
+
+def test_transport_close_during_post_response_teardown_cannot_orphan_process():
+    module = load_client()
+
+    async def scenario():
+        turn = module.parse_turn(turn_payload(timeout_ms=1000))
+        process = await module._spawn_traditional_process(
+            (
+                sys.executable,
+                "-c",
+                "import signal,sys,time; "
+                "signal.signal(signal.SIGTERM, lambda *_: None); "
+                "sys.stdin.readline(); print('{\"response\":0}', flush=True); "
+                "time.sleep(30)",
+            )
+        )
+        relayed = asyncio.Event()
+
+        class ClosingAfterRelay:
+            async def wait_closed(self):
+                await relayed.wait()
+
+        async def relay(output):
+            assert output == '{"response":0}'
+            relayed.set()
+
+        with pytest.raises(module.ConnectionLostDuringTurn):
+            await module.run_prepared_turn_while_connected(
+                ClosingAfterRelay(), process, turn, on_output=relay
+            )
+        assert process.returncode is not None
+
+    asyncio.run(scenario())
+
+
+def test_repeated_outer_cancel_during_teardown_cannot_orphan_process():
+    module = load_client()
+
+    async def scenario():
+        turn = module.parse_turn(turn_payload(timeout_ms=1000))
+        process = await module._spawn_traditional_process(
+            (
+                sys.executable,
+                "-c",
+                "import signal,sys,time; "
+                "signal.signal(signal.SIGTERM, lambda *_: None); "
+                "sys.stdin.readline(); print('{\"response\":0}', flush=True); "
+                "time.sleep(30)",
+            )
+        )
+        relayed = asyncio.Event()
+
+        class ClosingAfterRelay:
+            async def wait_closed(self):
+                await relayed.wait()
+
+        async def relay(output):
+            assert output == '{"response":0}'
+            relayed.set()
+
+        wrapper = asyncio.create_task(
+            module.run_prepared_turn_while_connected(
+                ClosingAfterRelay(), process, turn, on_output=relay
+            )
+        )
+        await relayed.wait()
+        # The connection-close path has already cancelled the turn task while
+        # it owns the 1s TERM grace period.  Simulate a second admin/shutdown
+        # cancellation of the wrapper during that exact window.
+        await asyncio.sleep(0.05)
+        wrapper.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await wrapper
+        assert process.returncode is not None
+
+    asyncio.run(scenario())
+
+
 def test_traditional_turn_reports_start_and_empty_output_categories():
     module = load_client()
     turn = module.parse_turn(turn_payload())
@@ -235,6 +447,9 @@ def test_connection_rejects_redirects_across_supported_websockets_apis():
     assert modern.kwargs["additional_headers"] == {
         "Authorization": f"Bearer {token}"
     }
+    assert modern.kwargs["subprotocols"] == [
+        module.LOCAL_AI_WEBSOCKET_SUBPROTOCOL
+    ]
 
     class LegacyConnect:
         def __init__(self, uri, **kwargs):
@@ -254,6 +469,9 @@ def test_connection_rejects_redirects_across_supported_websockets_apis():
     assert legacy.kwargs["extra_headers"] == {
         "Authorization": f"Bearer {token}"
     }
+    assert legacy.kwargs["subprotocols"] == [
+        module.LOCAL_AI_WEBSOCKET_SUBPROTOCOL
+    ]
 
     with pytest.raises(module.ClientConfigError, match="重定向策略"):
         module._redirect_rejecting_connect(
@@ -288,10 +506,12 @@ def test_connection_replies_to_ping_and_relays_one_turn(monkeypatch):
         async def send(self, raw):
             sent.append(json.loads(raw))
 
-    async def fake_run(_command, _turn):
+    async def fake_run(_websocket, _command, _turn, *, on_output, on_failure):
+        assert on_failure is not None
+        await on_output('{"response":0}')
         return '{"response":0}'
 
-    monkeypatch.setattr(module, "run_traditional_turn", fake_run)
+    monkeypatch.setattr(module, "run_turn_while_connected", fake_run)
     asyncio.run(module.handle_connection(FakeWebSocket(), ("./bot",)))
 
     assert sent == [
@@ -304,6 +524,111 @@ def test_connection_replies_to_ping_and_relays_one_turn(monkeypatch):
             "output": '{"response":0}',
         },
     ]
+
+
+def test_connection_uses_position_free_prepare_then_prepared_process(monkeypatch):
+    module = load_client()
+    sent: list[dict] = []
+    process = object()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = iter(
+                [json.dumps(prepare_payload()), json.dumps(turn_payload())]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def send(self, raw):
+            sent.append(json.loads(raw))
+
+    async def fake_prepare(_command, preparation):
+        assert preparation.request_id == "req-1"
+        return process
+
+    async def fake_run(
+        _websocket, actual_process, turn, *, on_output, on_failure
+    ):
+        assert actual_process is process
+        assert turn.input_line == turn_payload()["input_line"]
+        assert on_failure is not None
+        await on_output('{"response":0}')
+        return '{"response":0}'
+
+    monkeypatch.setattr(module, "prepare_traditional_process", fake_prepare)
+    monkeypatch.setattr(module, "run_prepared_turn_while_connected", fake_run)
+    asyncio.run(module.handle_connection(FakeWebSocket(), ("./bot",)))
+
+    assert sent == [
+        {
+            "type": "prepared",
+            "request_id": "req-1",
+            "match_id": "match-1",
+            "turn": 3,
+        },
+        {
+            "type": "response",
+            "request_id": "req-1",
+            "match_id": "match-1",
+            "turn": 3,
+            "output": '{"response":0}',
+        },
+    ]
+
+
+def test_invalid_decision_frame_cleans_already_prepared_process(monkeypatch):
+    module = load_client()
+    sent: list[dict] = []
+    stopped: list[object] = []
+    process = object()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = iter(
+                [
+                    json.dumps(prepare_payload()),
+                    json.dumps(turn_payload(input_line="malformed\nline")),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def send(self, raw):
+            sent.append(json.loads(raw))
+
+    async def fake_prepare(_command, _preparation):
+        return process
+
+    async def stop(actual_process):
+        stopped.append(actual_process)
+
+    monkeypatch.setattr(module, "prepare_traditional_process", fake_prepare)
+    monkeypatch.setattr(module, "_stop_process", stop)
+    asyncio.run(module.handle_connection(FakeWebSocket(), ("./bot",)))
+
+    assert sent == [
+        {
+            "type": "prepared",
+            "request_id": "req-1",
+            "match_id": "match-1",
+            "turn": 3,
+        }
+    ]
+    assert stopped == [process]
 
 
 def test_connection_reports_only_bound_failure_category(monkeypatch):
@@ -326,11 +651,14 @@ def test_connection_reports_only_bound_failure_category(monkeypatch):
         async def send(self, raw):
             sent.append(json.loads(raw))
 
-    async def failed_run(_command, _turn):
-        raise module.TurnError(
+    async def failed_run(_command, _turn, *, on_output, on_failure):
+        assert on_output is not None
+        error = module.TurnError(
             "private /home/student/bot stderr contents",
             reason="bot_start_failed",
         )
+        await on_failure(error)
+        raise error
 
     monkeypatch.setattr(module, "run_traditional_turn", failed_run)
     asyncio.run(module.handle_connection(FakeWebSocket(), ("./bot",)))

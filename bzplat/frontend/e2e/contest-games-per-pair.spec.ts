@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import { HOLDEM_TEMPLATE_TIME_CONTROL } from './time-control-fixtures'
 
 const USER = {
   id: 81,
@@ -97,7 +98,11 @@ async function mockOrganizerContestApi(page: Page) {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ templates: game === 'holdem' ? templates : [] }),
+        body: JSON.stringify({
+          templates: game === 'holdem'
+            ? templates.map((template) => ({ ...template, ...HOLDEM_TEMPLATE_TIME_CONTROL }))
+            : [],
+        }),
       })
     }
     if (url.pathname === '/api/contests' && request.method() === 'GET') {

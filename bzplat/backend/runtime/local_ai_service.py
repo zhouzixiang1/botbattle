@@ -12,6 +12,7 @@ from dataclasses import asdict
 from typing import Any
 
 from bzplat.backend.runtime.local_ai import LocalAIConnectionError, LocalAIHub
+from bzplat.backend.runtime.websocket_gate import WebSocketHandshakeGate
 from bzplat.backend.store.db import LocalAIAgentBusyError
 
 
@@ -21,6 +22,7 @@ LOCAL_AI_ROTATE_WINDOW_SECONDS = 60.0
 LOCAL_AI_HANDSHAKE_MAX_ATTEMPTS = 20
 LOCAL_AI_HANDSHAKE_WINDOW_SECONDS = 60.0
 LOCAL_AI_HANDSHAKE_MAX_INFLIGHT = 16
+LOCAL_AI_HANDSHAKE_MAX_BUCKETS = 2048
 
 
 class LocalAIRateLimitError(RuntimeError):
@@ -31,43 +33,16 @@ class LocalAIRateLimitError(RuntimeError):
         self.retry_after = max(1, int(retry_after))
 
 
-class LocalAIHandshakeGate:
-    """Bound pre-auth DB work by peer rate and process-wide concurrency."""
+class LocalAIHandshakeGate(WebSocketHandshakeGate):
+    """Local AI's compatibility wrapper around the shared pre-auth gate."""
 
     def __init__(self) -> None:
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
-        self._inflight = 0
-        self._lock = asyncio.Lock()
-
-    async def begin(self, peer_ip: str) -> bool:
-        now = time.monotonic()
-        cutoff = now - LOCAL_AI_HANDSHAKE_WINDOW_SECONDS
-        key = str(peer_ip or "unknown")
-        async with self._lock:
-            bucket = self._hits[key]
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
-            if (
-                len(bucket) >= LOCAL_AI_HANDSHAKE_MAX_ATTEMPTS
-                or self._inflight >= LOCAL_AI_HANDSHAKE_MAX_INFLIGHT
-            ):
-                return False
-            bucket.append(now)
-            self._inflight += 1
-            if len(self._hits) > 2048:
-                self._hits = defaultdict(
-                    deque,
-                    {
-                        item_key: item_bucket
-                        for item_key, item_bucket in self._hits.items()
-                        if item_bucket and item_bucket[-1] > cutoff
-                    },
-                )
-            return True
-
-    async def end(self) -> None:
-        async with self._lock:
-            self._inflight = max(0, self._inflight - 1)
+        super().__init__(
+            max_attempts=LOCAL_AI_HANDSHAKE_MAX_ATTEMPTS,
+            window_seconds=LOCAL_AI_HANDSHAKE_WINDOW_SECONDS,
+            max_inflight=LOCAL_AI_HANDSHAKE_MAX_INFLIGHT,
+            max_buckets=LOCAL_AI_HANDSHAKE_MAX_BUCKETS,
+        )
 
 
 def _token_hash(token: str) -> str:
@@ -98,6 +73,12 @@ class LocalAIService:
         # socket cleanup from deleting a newer reconnect for the same agent.
         self._connected_public_ids: dict[int, str] = {}
         self._connected_connection_ids: dict[int, str] = {}
+        # A transport exists only in this process, so its unfinished revocation
+        # belongs beside the hub rather than in unbounded historical DB rows.
+        # Each entry freezes the owner/Bot scope from the disabling write
+        # transaction before the first hub await; a process restart clears both
+        # this registry and every transport it protects.
+        self._pending_scope_revocations: dict[str, tuple[int, int]] = {}
 
     @staticmethod
     def _private_projection(agent: dict) -> dict[str, Any]:
@@ -367,12 +348,77 @@ class LocalAIService:
         """Notify live transports after a Store transaction disabled identity."""
 
         unique_ids = tuple(dict.fromkeys(str(item) for item in public_ids if item))
-        revoked = set(unique_ids)
-        for agent_id, public_id in tuple(self._connected_public_ids.items()):
-            if public_id in revoked:
-                self._forget_connection(agent_id, public_id=public_id)
         for public_id in unique_ids:
             await self.hub.revoke(public_id)
+            for agent_id, connected_id in tuple(self._connected_public_ids.items()):
+                if connected_id == public_id:
+                    self._forget_connection(agent_id, public_id=public_id)
+
+    async def converge_revoked_transports(
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        scope_kind: str,
+        scope_id: int,
+    ) -> None:
+        """Close one transaction-frozen batch plus unfinished scope retries."""
+
+        if scope_kind not in {"owner", "bot"} or type(scope_id) is not int:
+            raise RuntimeError("invalid Local-AI revocation scope")
+        scope_id = int(scope_id)
+        if scope_id < 1:
+            raise RuntimeError("invalid Local-AI revocation scope")
+
+        newly_revoked: list[str] = []
+        for raw in targets:
+            if (
+                not isinstance(raw, dict)
+                or set(raw) != {"public_id", "owner_id", "bot_id"}
+                or not isinstance(raw.get("public_id"), str)
+                or not raw["public_id"]
+                or type(raw.get("owner_id")) is not int
+                or int(raw["owner_id"]) < 1
+                or type(raw.get("bot_id")) is not int
+                or int(raw["bot_id"]) < 1
+            ):
+                raise RuntimeError("invalid Local-AI revocation target")
+            public_id = str(raw["public_id"])
+            frozen_scope = (int(raw["owner_id"]), int(raw["bot_id"]))
+            if (
+                scope_kind == "owner" and frozen_scope[0] != scope_id
+            ) or (
+                scope_kind == "bot" and frozen_scope[1] != scope_id
+            ):
+                raise RuntimeError("Local-AI revocation target escaped its scope")
+            previous_scope = self._pending_scope_revocations.get(public_id)
+            if previous_scope is not None and previous_scope != frozen_scope:
+                raise RuntimeError("Local-AI revocation target scope changed")
+            newly_revoked.append(public_id)
+
+        # Register the complete batch before the first await.  If any one hub
+        # operation raises, every not-yet-converged public ID remains discoverable
+        # by an idempotent repeat disable, including offline pending decisions.
+        for raw, public_id in zip(targets, newly_revoked, strict=True):
+            self._pending_scope_revocations[public_id] = (
+                int(raw["owner_id"]),
+                int(raw["bot_id"]),
+            )
+
+        retry_ids = [
+            public_id
+            for public_id, (owner_id, bot_id) in self._pending_scope_revocations.items()
+            if (
+                (scope_kind == "owner" and owner_id == scope_id)
+                or (scope_kind == "bot" and bot_id == scope_id)
+            )
+        ]
+        ordered_ids = tuple(dict.fromkeys((*newly_revoked, *retry_ids)))
+        for public_id in ordered_ids:
+            await self.hub.revoke(public_id)
+            for agent_id, connected_id in tuple(self._connected_public_ids.items()):
+                if connected_id == public_id:
+                    self._forget_connection(agent_id, public_id=public_id)
+            self._pending_scope_revocations.pop(public_id, None)
 
     def _forget_connection(
         self,

@@ -35,6 +35,9 @@ class _CreatingFakeOrch:
     async def challenge(self, bot_a_id, bot_b_id, owner_user_id, **kwargs):
         self.calls += 1
         match_id = f"schedule-fake-{self.calls}"
+        match_config = dict(kwargs.get("match_config") or {})
+        if kwargs.get("time_control_id") is not None:
+            match_config["time_control_id"] = kwargs["time_control_id"]
         self.store.create_match(
             match_id,
             bot_a_id,
@@ -43,7 +46,7 @@ class _CreatingFakeOrch:
             contest_id=kwargs.get("contest_id"),
             match_type=kwargs.get("match_type", "contest"),
             game_id=kwargs.get("game_id") or "holdem",
-            match_config=kwargs.get("match_config") or {},
+            match_config=match_config,
         )
         return match_id
 
@@ -250,6 +253,207 @@ def test_publish_without_start_time_waits_for_manual_start(setup):
     assert started["starts_at"] is not None
 
 
+def test_scheduler_does_not_revalidate_or_reenqueue_active_queued_pairing(
+    setup, monkeypatch
+):
+    store, _legacy_manager, _legacy_scheduler, users = setup
+    store.executions.resume()
+    orchestrator = MatchOrchestrator(store, max_concurrent=1)
+    manager = ContestManager(store, orchestrator)
+    scheduler = ContestScheduler(manager, store)
+    contest = manager.create(
+        users["u1"],
+        "queued scheduler idempotency",
+        template_id="holdem_rr",
+        game_id="holdem",
+        starts_at="2099-12-31T23:59:59",
+    )
+    asyncio.run(manager.open_registration(contest["id"]))
+    asyncio.run(manager.register(contest["id"], users["u1"], users["b1"]))
+    asyncio.run(manager.register(contest["id"], users["u2"], users["b2"]))
+    asyncio.run(manager.publish(contest["id"]))
+    pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
+    due_at = store.get_contest(contest["id"])["registration_closes_at"]
+    store.update_published_contest_schedule(
+        contest["id"],
+        {"starts_at": due_at},
+        stage_idx=0,
+        pending_pairing_schedules=[
+            {
+                "id": pairing["id"],
+                "round_num": pairing["round_num"],
+                "scheduled_at": due_at,
+            }
+            for pairing in pairings
+        ],
+    )
+
+    availability_checks = 0
+    enqueue_calls = 0
+    original_unavailable = manager._bot_unavailable_reason
+    original_challenge = orchestrator.challenge
+
+    def counted_unavailable(*args, **kwargs):
+        nonlocal availability_checks
+        availability_checks += 1
+        return original_unavailable(*args, **kwargs)
+
+    async def counted_challenge(*args, **kwargs):
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        return await original_challenge(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_bot_unavailable_reason", counted_unavailable)
+    monkeypatch.setattr(orchestrator, "challenge", counted_challenge)
+
+    asyncio.run(scheduler._tick())
+    first_checks = availability_checks
+    first_enqueues = enqueue_calls
+    queued = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=? AND status='queued'",
+        (contest["id"],),
+    ).fetchone()[0]
+    assert queued == len(pairings)
+    assert (
+        store.get_contest(contest["id"])["published_stage_pairing_count"]
+        == len(pairings)
+    )
+    assert first_checks == 2
+    assert first_enqueues == len(pairings)
+
+    original_stage_plan = manager._stage_pairing_plan
+    original_pairing_list = store.list_contest_pairings
+    stage_plan_calls = 0
+    pairing_list_calls = 0
+
+    def counted_stage_plan(*args, **kwargs):
+        nonlocal stage_plan_calls
+        stage_plan_calls += 1
+        return original_stage_plan(*args, **kwargs)
+
+    def counted_pairing_list(*args, **kwargs):
+        nonlocal pairing_list_calls
+        pairing_list_calls += 1
+        return original_pairing_list(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_stage_pairing_plan", counted_stage_plan)
+    monkeypatch.setattr(store, "list_contest_pairings", counted_pairing_list)
+    asyncio.run(scheduler._tick())
+    assert stage_plan_calls == 0
+    assert pairing_list_calls == 0
+    assert availability_checks == first_checks
+    assert enqueue_calls == first_enqueues
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=? AND status='queued'",
+        (contest["id"],),
+    ).fetchone()[0] == queued
+    monkeypatch.setattr(manager, "_stage_pairing_plan", original_stage_plan)
+    monkeypatch.setattr(store, "list_contest_pairings", original_pairing_list)
+
+    # A terminal job is no longer an active exclusion.  Once its bounded
+    # backoff is due, the still-pending pairing must be eligible for a fresh
+    # durable request rather than wedging forever.
+    first_job = store._conn.execute(
+        "SELECT public_id,contest_pairing_id FROM execution_jobs "
+        "WHERE contest_id=? ORDER BY id LIMIT 1",
+        (contest["id"],),
+    ).fetchone()
+    store.executions.request_cancel(first_job["public_id"], owner_user_id=None)
+    store.update_contest_pairing(
+        first_job["contest_pairing_id"], scheduled_at=due_at
+    )
+    asyncio.run(scheduler._tick())
+    assert availability_checks == first_checks + 2
+    assert enqueue_calls == first_enqueues + 1
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == queued + 1
+
+
+def test_active_published_batch_missing_row_blocks_scheduler_dispatch(setup):
+    store, _legacy_manager, _legacy_scheduler, users = setup
+    store.executions.resume()
+    orchestrator = MatchOrchestrator(store, max_concurrent=1)
+    manager = ContestManager(store, orchestrator)
+    scheduler = ContestScheduler(manager, store)
+    contest = manager.create(
+        users["u1"],
+        "damaged active published batch",
+        template_id="holdem_rr",
+        game_id="holdem",
+        games_per_pair=4,
+        starts_at="2099-12-31T23:59:59",
+    )
+    asyncio.run(manager.open_registration(contest["id"]))
+    asyncio.run(manager.register(contest["id"], users["u1"], users["b1"]))
+    asyncio.run(manager.register(contest["id"], users["u2"], users["b2"]))
+    asyncio.run(manager.publish(contest["id"]))
+    pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
+    assert len(pairings) == 4
+    due_at = store.get_contest(contest["id"])["registration_closes_at"]
+    store.update_published_contest_schedule(
+        contest["id"],
+        {"starts_at": due_at},
+        stage_idx=0,
+        pending_pairing_schedules=[
+            {
+                "id": pairing["id"],
+                "round_num": pairing["round_num"],
+                "scheduled_at": due_at,
+            }
+            for pairing in pairings
+        ],
+    )
+    asyncio.run(scheduler._tick())
+    jobs = store._conn.execute(
+        "SELECT public_id,contest_pairing_id FROM execution_jobs "
+        "WHERE contest_id=? ORDER BY id",
+        (contest["id"],),
+    ).fetchall()
+    assert len(jobs) == 4
+    for job in jobs[1:]:
+        store.executions.request_cancel(job["public_id"], owner_user_id=None)
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?",
+            (jobs[1]["contest_pairing_id"],),
+        )
+
+    with pytest.raises(ValueError, match="active 对阵批次完整性"):
+        asyncio.run(manager._dispatch_pending(contest["id"], 0))
+    asyncio.run(scheduler._tick())
+
+    assert store.get_contest(contest["id"])["status"] == "published"
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=? AND status='queued'",
+        (contest["id"],),
+    ).fetchone()[0] == 0
+    failed_closed = store._conn.execute(
+        "SELECT retryable,terminal_reason,last_error,next_attempt_at,terminal_at "
+        "FROM execution_jobs WHERE contest_id=? AND status='cancelled' "
+        "AND terminal_reason='contest_pairing_batch_changed'",
+        (contest["id"],),
+    ).fetchall()
+    assert len(failed_closed) == 1
+    assert all(
+        tuple(row[:4])
+        == (
+            0,
+            "contest_pairing_batch_changed",
+            "contest_pairing_batch_changed",
+            None,
+        )
+        and row[4] is not None
+        for row in failed_closed
+    )
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 4
+    assert store.list_matches(contest_id=contest["id"]) == []
+
+
 def test_publish_then_schedule_arrives_dispatches(setup):
     """排期到点后 dispatch 开打，status→running。"""
     store, mgr, _, users = setup
@@ -432,7 +636,59 @@ def test_start_from_published_does_not_duplicate_pairings(setup):
     asyncio.run(mgr.start(c["id"]))
     after = len(store.list_contest_pairings(c["id"]))
     assert after == before, f"start(published) 不应重复生成 pairing: {before} → {after}"
-    assert store.get_contest(c["id"])["status"] == "running"
+    started = store.get_contest(c["id"])
+    assert started["status"] == "running"
+    assert started["registration_closes_at"] == started["starts_at"]
+    assert {
+        pairing["scheduled_at"]
+        for pairing in store.list_contest_pairings(c["id"], stage_idx=0)
+    } == {started["starts_at"]}
+
+
+def test_start_from_published_accepts_complete_batch_with_persisted_bye(
+    setup, tmp_path
+):
+    """Manifest covers pending games plus completed no-match byes atomically."""
+    store, mgr, _, users = setup
+    third = store.create_user("user03", "u3@e.com", "hx")
+    bot_dir = tmp_path / f"bot_uploads/{third['id']}/v1"
+    bot_dir.mkdir(parents=True)
+    shutil.copyfile(str(SAMPLES / "callbot_linux_amd64"), str(bot_dir / "bot.bin"))
+    third_bot = store.create_bot(
+        third["id"],
+        "b3",
+        binary_path=str(bot_dir / "bot.bin"),
+        format="elf",
+        game_id="holdem",
+    )
+    contest = mgr.create(
+        users["u1"],
+        "Published Swiss bye",
+        game_id="holdem",
+        starts_at="2099-12-31T23:59:59",
+        stages=[{"key": "swiss", "type": "swiss", "rounds": 1}],
+    )
+    for user_id, bot_id in (
+        (users["u1"], users["b1"]),
+        (users["u2"], users["b2"]),
+        (third["id"], third_bot["id"]),
+    ):
+        store.add_contest_entry(contest["id"], user_id, bot_id)
+
+    asyncio.run(mgr.publish(contest["id"]))
+    before = store.list_contest_pairings(contest["id"], stage_idx=0)
+    assert len(before) == 2
+    bye = next(pairing for pairing in before if pairing["entry_b_id"] is None)
+    assert bye["status"] == "completed" and bye["match_id"] is None
+
+    asyncio.run(mgr.start(contest["id"]))
+
+    started = store.get_contest(contest["id"])
+    after = store.list_contest_pairings(contest["id"], stage_idx=0)
+    saved_bye = next(pairing for pairing in after if pairing["id"] == bye["id"])
+    assert started["status"] == "running"
+    assert saved_bye == bye
+    assert sum(pairing["match_id"] is not None for pairing in after) == 1
 
 
 def test_maybe_finish_has_per_contest_lock(setup):
@@ -456,6 +712,190 @@ def test_time_format_validation_rejects_bad_iso(setup):
     with pytest.raises(ValueError, match="格式非法"):
         mgr.create(users["u1"], "Bad", template_id="holdem_rr", game_id="holdem",
                    registration_opens_at="not-a-date")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-01-01 00:00:00",
+        "20260101T000000",
+        "2026-01-01T00:00:00.000000",
+    ],
+)
+def test_contest_time_writes_require_canonical_naive_iso_seconds(
+    setup, value
+):
+    """All persisted contest times use one lexicographically sortable format."""
+    store, mgr, _, users = setup
+    before = len(store.list_contests())
+
+    with pytest.raises(ValueError, match="规范.*ISO.*秒"):
+        mgr.create(
+            users["u1"],
+            "Noncanonical time",
+            template_id="holdem_rr",
+            game_id="holdem",
+            starts_at=value,
+        )
+
+    assert len(store.list_contests()) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ends_at", "2026-01-01 00:00:00"),
+        ("rest_ends_at", "20260101T000000"),
+    ],
+)
+def test_store_rejects_noncanonical_terminal_times_without_partial_write(
+    setup, field, value
+):
+    store, _mgr, _, users = setup
+    contest = store.create_contest("Canonical boundary", users["u1"])
+
+    with pytest.raises(ValueError, match="规范.*ISO.*秒"):
+        store.update_contest(contest["id"], title="must-not-write", **{field: value})
+
+    saved = store.get_contest(contest["id"])
+    assert saved["title"] == "Canonical boundary"
+    assert saved[field] is None
+
+
+def test_formal_pairing_batch_rejects_noncanonical_publication_time(setup):
+    store, _mgr, _, users = setup
+    contest = store.create_contest(
+        "Canonical pairing batch",
+        users["u1"],
+        status="published",
+        stages_json='[{"key":"rr","type":"round_robin"}]',
+    )
+    entry_a = store.add_contest_entry(
+        contest["id"], users["u1"], users["b1"]
+    )
+    entry_b = store.add_contest_entry(
+        contest["id"], users["u2"], users["b2"]
+    )
+
+    with pytest.raises(ValueError, match="发布时间.*规范"):
+        store.create_contest_stage_pairings(
+            contest["id"],
+            0,
+            [
+                {
+                    "entry_a_id": entry_a["id"],
+                    "entry_b_id": entry_b["id"],
+                    "bot_a_id": users["b1"],
+                    "bot_b_id": users["b2"],
+                    "round_num": 1,
+                    "stage_key": "rr",
+                    "published_at": "2026-01-01 00:00:00",
+                }
+            ],
+            expected_current_stage_idx=0,
+            expected_status="published",
+        )
+
+    assert store.list_contest_pairings(contest["id"]) == []
+
+
+def test_published_schedule_batch_rejects_noncanonical_time_atomically(setup):
+    store, _mgr, _, users = setup
+    contest = store.create_contest(
+        "Canonical published reschedule",
+        users["u1"],
+        status="published",
+        starts_at="2099-01-01T00:00:00",
+        stages_json='[{"key":"rr","type":"round_robin"}]',
+    )
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        users["b1"],
+        users["b2"],
+        stage_idx=0,
+        stage_key="rr",
+        published_at="2026-01-01T00:00:00",
+        scheduled_at="2099-01-01T00:00:00",
+    )
+
+    with pytest.raises(ValueError, match="计划时间.*规范"):
+        store.update_published_contest_schedule(
+            contest["id"],
+            {"title": "must-not-write"},
+            stage_idx=0,
+            pending_pairing_schedules=[
+                {
+                    "id": pairing["id"],
+                    "round_num": 1,
+                    "scheduled_at": "2099-01-01 00:00:00",
+                }
+            ],
+        )
+
+    saved = store.get_contest(contest["id"])
+    assert saved["title"] == "Canonical published reschedule"
+    persisted = next(
+        row
+        for row in store.list_contest_pairings(contest["id"])
+        if row["id"] == pairing["id"]
+    )
+    assert persisted["scheduled_at"] == "2099-01-01T00:00:00"
+
+
+def test_terminal_result_writer_rejects_noncanonical_end_time_before_write(setup):
+    store, _mgr, _, _users = setup
+
+    with pytest.raises(ValueError, match="结束时间.*规范"):
+        store.finish_contest_with_results(
+            999999,
+            0,
+            stage_result_rows=None,
+            official_result_rows=[],
+            expected_decision_revision=0,
+            expected_status="running",
+            expected_entries=[],
+            expected_stage_groups=None,
+            ends_at="2026-01-01 00:00:00",
+        )
+
+
+@pytest.mark.parametrize(
+    "started_at",
+    ["2026-08-09 20:56:17", "20260809T205617", "2026-08-09T20:56:17+08:00"],
+)
+def test_actual_start_backfill_rejects_noncanonical_match_time(
+    setup, started_at
+):
+    store, _mgr, _, users = setup
+    contest = store.create_contest(
+        "Malformed legacy actual start",
+        users["u1"],
+        status="running",
+        game_id="holdem",
+        stages_json='[{"key":"rr","type":"round_robin"}]',
+    )
+    match_id = f"malformed-start-{started_at}"
+    store.create_match(
+        match_id,
+        users["b1"],
+        users["b2"],
+        contest_id=contest["id"],
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(match_id, status="running", started_at=started_at)
+    store.add_contest_pairing(
+        contest["id"],
+        users["b1"],
+        users["b2"],
+        match_id=match_id,
+        status="running",
+        stage_idx=0,
+        stage_key="rr",
+    )
+
+    assert store.backfill_contest_actual_start(contest["id"]) is None
+    assert store.get_contest(contest["id"])["starts_at"] is None
 
 
 def test_scheduler_tick_does_not_double_process(setup):
@@ -527,8 +967,8 @@ def test_contest_dispatch_admits_only_free_slots_and_refills_on_completion(
     assert sum(pairing["status"] == "running" for pairing in refreshed) == 2
 
 
-def test_reconcile_repairs_legacy_start_time_and_completed_pairing(setup):
-    """启动对账幂等修复旧赛事 NULL starts_at 与 running 假状态。"""
+def test_reconcile_repairs_active_legacy_start_time_and_completed_pairing(setup):
+    """启动对账幂等修复 active 旧赛事 NULL starts_at 与 running 假状态。"""
     store, mgr, _, users = setup
     contest = store.create_contest(
         "LegacyTimeline", users["u1"], game_id="holdem",
@@ -547,9 +987,21 @@ def test_reconcile_repairs_legacy_start_time_and_completed_pairing(setup):
         contest["id"], users["b1"], users["b2"], match_id=match_id,
         status="running", stage_idx=0, stage_key="rr",
     )
-    store.update_contest(contest["id"], status="finished")
+    # Intentional pre-transaction active legacy shape: this test exercises
+    # start-time/pairing repair without granting permission to rewrite a
+    # finished/cancelled historical contest.
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET status='running' WHERE id=?",
+            (contest["id"],),
+        )
 
-    asyncio.run(mgr.reconcile_running_contests())
+    asyncio.run(
+        mgr.reconcile_running_contests(
+            interruption_reason="orphan_after_service_restart"
+        )
+    )
     repaired = store.get_contest(contest["id"])
     pairing = store.list_contest_pairings(contest["id"])[0]
     assert repaired["starts_at"] == "2026-08-09T20:56:17"
@@ -589,19 +1041,15 @@ def test_actual_start_backfill_never_arms_published_or_cross_bound_contest(setup
 
 def test_match_can_bind_to_only_one_pairing(setup):
     """逻辑外键 match_id 必须保持一对一，避免状态与积分双计。"""
-    store, _mgr, _, users = setup
+    store, mgr, _, users = setup
     contest = store.create_contest(
-        "UniqueBind", users["u1"], status="running", game_id="holdem",
-        stages_json='[{"key":"rr","type":"round_robin"}]',
+        "UniqueBind", users["u1"], status="published", game_id="holdem",
+        stages_json='[{"key":"rr","type":"double_round_robin"}]',
     )
-    first = store.add_contest_pairing(
-        contest["id"], users["b1"], users["b2"], status="pending",
-        stage_idx=0, stage_key="rr",
-    )
-    second = store.add_contest_pairing(
-        contest["id"], users["b2"], users["b1"], status="pending",
-        stage_idx=0, stage_key="rr",
-    )
+    store.add_contest_entry(contest["id"], users["u1"], users["b1"])
+    store.add_contest_entry(contest["id"], users["u2"], users["b2"])
+    asyncio.run(mgr._begin_stage(contest["id"], 0, dispatch_pending=False))
+    first, second = store.list_contest_pairings(contest["id"], stage_idx=0)
     match_id = "unique-pairing-match"
     store.create_match(
         match_id, users["b1"], users["b2"], contest_id=contest["id"],

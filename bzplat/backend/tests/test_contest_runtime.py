@@ -132,9 +132,16 @@ def test_update_contest_state_machine_rejects_terminal_to_cancelled(tmp_path):
 
     s = Store(str(tmp_path / "statemachine.db"))
     u = s.create_user("org", "o@e.com", "x", role="organizer")["id"]
-    c = s.create_contest("test", u, game_id="holdem", template_id="holdem_prelim_swiss")["id"]
-    # draft → finished（模拟赛事跑完）
-    s.update_contest(c, status="finished", official_results_ready=1)
+    # The state-machine guard only needs an imported terminal row.  Do not use
+    # generic update_contest to bypass the dedicated decision/finish transaction.
+    c = s.create_contest(
+        "test",
+        u,
+        status="finished",
+        game_id="holdem",
+        template_id="holdem_prelim_swiss",
+    )["id"]
+    s.update_contest(c, official_results_ready=1)
     # finished → cancelled 应被拒（ValueError）
     with pytest.raises(ValueError, match="终态"):
         s.update_contest(c, status="cancelled")

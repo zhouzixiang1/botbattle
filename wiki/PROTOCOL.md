@@ -96,7 +96,26 @@ canonical JSON v1 日志。顶层严格为 `format="botbattle.match.log"`、`for
 上传预检使用所选运行模式的同一首回合信封和同一响应校验；其 `debug` 会被丢弃，
 LongRunning 预检也必须
 完成握手。预检采用独立的 **8 秒首回合健康检查**，只用于确认程序能启动并完成一次通信，
-不占用正式对局的思考时间。尤其是 Pencil 的正式对局仍按每方 900 秒累计棋钟计算。
+不占用正式对局的思考时间，也不会从所选正式时限中扣除。
+
+### 版本化时限
+
+平台只接受代码注册的稳定时限 ID：Holdem 为单步 60 秒；Gomoku 为每方累计 900 秒（默认）或
+300 秒；Pencil 为每方累计 900 秒（默认）或单步 1 秒。`per_decision` 在每次决策重新计时，
+`per_side_total` 在一局内按座位累加并在下一局重置。计时从完整请求交给已经就绪的 Bot 起，到
+完整响应到达为止；平台排队、容器启动和预热不计入。Traditional 与 LongRunning 使用同一边界。
+
+公开回放的 `match_start` 携带严格对象：
+
+```json
+{"time_control":{"id":"pencil_per_decision_1s_v1","mode":"per_decision","seconds":1,"applies_to":"both_bots"}}
+```
+
+只有真正的历史回放缺键才能由平台按该游戏旧默认时限补全。若事件明确携带了错型或与 Match 冻结值矛盾的时限，公开回放会输出 `"time_control":null` 表示证据损坏，前端不得再从旧 `budget` 字段猜测棋钟。
+
+Bot-vs-Bot 双方对称；人机局的 `applies_to` 为 `bot_only`，只约束 Bot，真人继续使用页面 120 秒
+防挂机时限。普通挑战只有游戏默认时限计入平台 Rating；替代时限明确属于不计 Rating 的练习局，
+赛事与人机仍不计 Rating。
 
 ## 3. Holdem payload
 
@@ -205,7 +224,7 @@ Gomoku 新局固定使用 `ruleset="gomoku_ccgc_2013_five_move_two_v2"`、`proto
 
 ## 5. Pencil payload
 
-点格棋固定 **N=6**（交错坐标板为 11×11），双方各有固定 **900 秒累计棋钟**。
+点格棋固定 **N=6**（交错坐标板为 11×11）；对局可选择上文注册的累计 900 秒或单步 1 秒时限。
 
 请求 payload：
 

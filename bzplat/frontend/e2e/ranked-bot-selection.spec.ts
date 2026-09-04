@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import { GAME_TIME_CONTROL_REGISTRY_RESPONSE } from './time-control-fixtures'
 
 const USER = {
   id: 42,
@@ -36,16 +37,13 @@ async function mockApp(page: Page) {
   await page.route('https://fonts.googleapis.com/**', async (route) => {
     await route.fulfill({ status: 200, contentType: 'text/css', body: '' })
   })
-  await page.addInitScript((user) => {
-    localStorage.setItem('bzplat_token', 'ranked-bot-test-token')
-    localStorage.setItem('bzplat_user', JSON.stringify(user))
-  }, USER)
   // Feature-specific routes are registered after this fallback. Playwright
   // evaluates the most recently registered matching route first.
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname === '/api/auth/me') {
+      expect(request.headers().authorization).toBeUndefined()
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -59,6 +57,14 @@ async function mockApp(page: Page) {
     }
     if (url.pathname === '/api/local-ai/agents') {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[]}' })
+      return
+    }
+    if (url.pathname === '/api/games') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(GAME_TIME_CONTROL_REGISTRY_RESPONSE),
+      })
       return
     }
     if (url.pathname === '/api/site/info') {
@@ -260,15 +266,17 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   await exitDialog.getByRole('button', { name: '确认退出', exact: true }).click()
   await expect(beta.getByText('未参榜', { exact: true })).toBeVisible()
   await expect(page.getByText('德州 Beta 已退出德州扑克排行榜；已取消 1 个旧计分排队', { exact: true })).toBeVisible()
+  await expect(exitDialog).toBeHidden()
   expect(calls).toEqual([
     { method: 'PUT', botId: 102 },
     { method: 'DELETE', botId: 102 },
   ])
 
   await beta.getByRole('button', { name: '派遣参榜', exact: true }).click()
-  await page.getByRole('dialog', { name: '派遣排行榜 Bot' })
-    .getByRole('button', { name: '确认派遣', exact: true })
-    .click()
+  const dispatchDialog = page.getByRole('dialog', { name: '派遣排行榜 Bot' })
+  const dispatchConfirm = dispatchDialog.getByRole('button', { name: '确认派遣', exact: true })
+  await expectTouchTarget(dispatchConfirm, 'mobile dispatch confirmation')
+  await dispatchConfirm.click()
   await expect(page.getByText('当前排位 Bot 仍有进行中或待结算的计分对局', { exact: true })).toBeVisible()
   await expect(page.locator('main')).not.toContainText('"code":"ranking_busy"')
   await expect(beta.getByText('未参榜', { exact: true })).toBeVisible()

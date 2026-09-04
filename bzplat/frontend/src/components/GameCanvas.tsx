@@ -54,6 +54,7 @@ export default function GameCanvas({
   const activeSpecRef = useRef(spec)
   const renderedEventsRef = useRef<RawEvent[] | null>(null)
   const hoverPickRef = useRef<{ x: number; y: number } | null>(null)
+  const keyboardPickRef = useRef<{ x: number; y: number } | null>(null)
   /** 当前场景动画进度；hover 重绘必须保持这一帧，不能把未完成动画强制跳到 t=1。 */
   const animationProgressRef = useRef(1)
   const [hoverState, setHoverState] = useState<'idle' | 'valid' | 'invalid'>('idle')
@@ -113,6 +114,8 @@ export default function GameCanvas({
     animationProgressRef.current = 1
     setAnimationState('settled')
     hoverPickRef.current = null
+    keyboardPickRef.current = null
+    setKeyboardPick(null)
     activeSpecRef.current = spec
   }, [spec])
 
@@ -163,9 +166,23 @@ export default function GameCanvas({
     const next = renderer.toScene(events)
     const delta = renderer.diff(prev, next)
     stateRef.current = { prev, next }
-    hoverPickRef.current = null
-    setHoverState('idle')
-    setKeyboardPick(null)
+    const currentKeyboardPick = keyboardPickRef.current
+    const preserveKeyboardPick = Boolean(
+      currentKeyboardPick
+      && renderer.keyboardPicks?.(next).some(
+        (pick) => pick.x === currentKeyboardPick.x && pick.y === currentKeyboardPick.y,
+      ),
+    )
+    if (preserveKeyboardPick && currentKeyboardPick) {
+      hoverPickRef.current = currentKeyboardPick
+      setKeyboardPick(currentKeyboardPick)
+      setHoverState('valid')
+    } else {
+      hoverPickRef.current = null
+      keyboardPickRef.current = null
+      setHoverState('idle')
+      setKeyboardPick(null)
+    }
     const drawAt = (progress: number) => renderer.draw(ctx, prev, next, progress, {
       ...drawOptsRef.current,
       // timeline 每帧读取 ref；pointer move 后不会继续用创建 timeline 时捕获的旧 hover。
@@ -260,6 +277,7 @@ export default function GameCanvas({
     if (!interactive || !onMove) return
     const picked = pickAt(e.clientX, e.clientY)
     hoverPickRef.current = picked
+    keyboardPickRef.current = null
     setKeyboardPick(null)
     setHoverState(picked ? 'valid' : 'invalid')
     redrawHover(picked)
@@ -267,6 +285,7 @@ export default function GameCanvas({
 
   const clearHover = () => {
     hoverPickRef.current = null
+    keyboardPickRef.current = null
     setHoverState('idle')
     setKeyboardPick(null)
     redrawHover(null)
@@ -275,6 +294,7 @@ export default function GameCanvas({
   useEffect(() => {
     if (interactive && onMove) return
     hoverPickRef.current = null
+    keyboardPickRef.current = null
     setHoverState('idle')
     setKeyboardPick(null)
     redrawHover(null)
@@ -304,6 +324,7 @@ export default function GameCanvas({
 
   const selectKeyboardPick = (pick: { x: number; y: number }) => {
     hoverPickRef.current = pick
+    keyboardPickRef.current = pick
     setKeyboardPick(pick)
     setHoverState('valid')
     redrawHover(pick)
@@ -313,8 +334,9 @@ export default function GameCanvas({
     if (!interactive || !onMove || !spec?.CanvasRenderer?.keyboardPicks) return
     const picks = keyboardPicks()
     if (!picks.length) return
-    const currentIndex = keyboardPick
-      ? picks.findIndex((pick) => pick.x === keyboardPick.x && pick.y === keyboardPick.y)
+    const currentKeyboardPick = keyboardPickRef.current
+    const currentIndex = currentKeyboardPick
+      ? picks.findIndex((pick) => pick.x === currentKeyboardPick.x && pick.y === currentKeyboardPick.y)
       : -1
     if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) {
       e.preventDefault()

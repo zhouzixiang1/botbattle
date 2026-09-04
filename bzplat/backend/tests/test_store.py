@@ -12,6 +12,7 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     CODE_RESET,
     CODE_VERIFY,
+    EMAIL_CODE_MAX_FAILED_ATTEMPTS,
     TPL_VERIFY_EMAIL,
     TPL_WELCOME,
 )
@@ -55,6 +56,123 @@ def test_sessions(tmp_path):
     assert s.delete_sessions_for_user(u["id"]) == 2
 
 
+def test_session_issue_linearizes_with_account_disable(tmp_path):
+    db_path = tmp_path / "session-disable-race.db"
+    first = Store(str(db_path))
+    user = first.create_user("session-race", "session-race@ex.com", "hash")
+    second = Store(str(db_path))
+    barrier = threading.Barrier(2)
+
+    def issue() -> bool:
+        barrier.wait()
+        return second.add_session_if_user_active(
+            "racing-token",
+            user["id"],
+            "2099-01-01T00:00:00",
+            expected_password_hash="hash",
+        )
+
+    def disable() -> dict | None:
+        barrier.wait()
+        return first.update_user(user["id"], is_active=0)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            issue_result = pool.submit(issue)
+            disable_result = pool.submit(disable)
+            assert issue_result.result(timeout=10) in (True, False)
+            assert disable_result.result(timeout=10)["is_active"] == 0
+        assert first.get_session("racing-token") is None
+    finally:
+        second.close()
+        first.close()
+
+
+def test_disabling_user_revokes_sessions_before_reenable(tmp_path):
+    """A dormant token cannot revive after an admin re-enables the account."""
+    s = _store(tmp_path)
+    user = s.create_user("disabled", "disabled@ex.com", "hash")
+    s.add_session("dormant-token", user["id"], "2099-01-01T00:00:00")
+
+    assert s.update_user(user["id"], is_active=0)["is_active"] == 0
+    assert s.get_session("dormant-token") is None
+    assert s.update_user(user["id"], is_active=1)["is_active"] == 1
+    assert s.get_session("dormant-token") is None
+
+
+def test_disabling_user_and_session_revoke_are_one_transaction(tmp_path):
+    """A failed session revoke must roll the account state back to active."""
+    s = _store(tmp_path)
+    user = s.create_user("disable-rollback", "disable-rollback@ex.com", "hash")
+    s.add_session("kept-token", user["id"], "2099-01-01T00:00:00")
+    with s._tx() as connection:
+        connection.execute(
+            f"""
+            CREATE TEMP TRIGGER fail_disable_session_delete
+            BEFORE DELETE ON sessions
+            WHEN OLD.user_id={int(user['id'])}
+            BEGIN
+                SELECT RAISE(ABORT, 'forced disable session delete failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="forced disable session"):
+        s.update_user(user["id"], is_active=0)
+
+    assert s.get_user(user["id"])["is_active"] == 1
+    assert s.get_session("kept-token") is not None
+
+
+def test_password_rotation_and_session_revoke_are_one_cas_transaction(tmp_path):
+    s = _store(tmp_path)
+    user = s.create_user("rotate-rollback", "rotate-rollback@ex.com", "old-hash")
+    s.add_session("kept-token", user["id"], "2099-01-01T00:00:00")
+
+    assert not s.rotate_password_if_current(
+        user["id"],
+        expected_password_hash="wrong-hash",
+        password_hash="new-hash",
+    )
+    assert s.get_user(user["id"])["password_hash"] == "old-hash"
+    assert s.get_session("kept-token") is not None
+
+    with s._tx() as connection:
+        connection.execute(
+            f"""
+            CREATE TEMP TRIGGER fail_rotation_session_delete
+            BEFORE DELETE ON sessions
+            WHEN OLD.user_id={int(user['id'])}
+            BEGIN
+                SELECT RAISE(ABORT, 'forced rotation session delete failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="forced rotation session"):
+        s.rotate_password_if_current(
+            user["id"],
+            expected_password_hash="old-hash",
+            password_hash="new-hash",
+        )
+
+    assert s.get_user(user["id"])["password_hash"] == "old-hash"
+    assert s.get_session("kept-token") is not None
+
+
+@pytest.mark.parametrize("invalid", ["0", 0.0, None, 2])
+def test_user_active_flag_rejects_coerced_values_without_revoking(tmp_path, invalid):
+    s = _store(tmp_path)
+    user = s.create_user("strict-active", "strict-active@ex.com", "hash")
+    s.add_session("strict-token", user["id"], "2099-01-01T00:00:00")
+
+    with pytest.raises(ValueError, match="is_active"):
+        s.update_user(user["id"], is_active=invalid)
+
+    assert s.get_user(user["id"])["is_active"] == 1
+    assert s.get_session("strict-token") is not None
+
+
 def test_email_codes_and_templates(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("dave", "d@ex.com", hash_password("password1"))
@@ -89,6 +207,103 @@ def test_password_resets(tmp_path):
     assert s.get_password_reset("rtok")["user_id"] == u["id"]
     s.mark_password_reset_used("rtok")
     assert s.get_password_reset("rtok") is None
+
+
+def _different_six_digit_code(code: str) -> str:
+    return "000000" if code != "000000" else "000001"
+
+
+def test_reset_code_failure_budget_persists_across_reopen(tmp_path):
+    db_path = tmp_path / "reset-attempts-reopen.db"
+    first = Store(str(db_path))
+    user = first.create_user("attempts", "attempts@example.com", "old-hash")
+    first.add_email_code(
+        user["id"], CODE_RESET, "123456", "2099-01-01T00:00:00"
+    )
+    row = first.get_latest_email_code(user["id"], CODE_RESET)
+    wrong_code = _different_six_digit_code(row["code"])
+    for _ in range(2):
+        assert first.reset_password_with_credential(
+            user["id"], "attacker-hash", email_code=wrong_code
+        ) == "invalid"
+    first.close()
+
+    reopened = Store(str(db_path))
+    try:
+        for _ in range(EMAIL_CODE_MAX_FAILED_ATTEMPTS - 2):
+            assert reopened.reset_password_with_credential(
+                user["id"], "attacker-hash", email_code=wrong_code
+            ) == "invalid"
+        exhausted = reopened._conn.execute(
+            "SELECT failed_attempts,used_at FROM email_codes WHERE id=?",
+            (row["id"],),
+        ).fetchone()
+        assert exhausted["failed_attempts"] == EMAIL_CODE_MAX_FAILED_ATTEMPTS
+        assert exhausted["used_at"] is not None
+        assert reopened.reset_password_with_credential(
+            user["id"], "attacker-hash", email_code=row["code"]
+        ) == "invalid"
+        assert reopened.get_user(user["id"])["password_hash"] == "old-hash"
+    finally:
+        reopened.close()
+
+
+def test_reset_code_failure_budget_is_atomic_across_store_connections(tmp_path):
+    db_path = tmp_path / "reset-attempts-race.db"
+    first = Store(str(db_path))
+    user = first.create_user("attempt-race", "attempt-race@example.com", "old-hash")
+    first.add_email_code(
+        user["id"], CODE_RESET, "123456", "2099-01-01T00:00:00"
+    )
+    row = first.get_latest_email_code(user["id"], CODE_RESET)
+    wrong_code = _different_six_digit_code(row["code"])
+    second = Store(str(db_path))
+
+    def fail(store: Store) -> str:
+        return store.reset_password_with_credential(
+            user["id"], "attacker-hash", email_code=wrong_code
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(
+                pool.map(fail, [first, second, first, second, first, second, first, second])
+            )
+        assert outcomes == ["invalid"] * 8
+        exhausted = first._conn.execute(
+            "SELECT failed_attempts,used_at FROM email_codes WHERE id=?",
+            (row["id"],),
+        ).fetchone()
+        assert exhausted["failed_attempts"] == EMAIL_CODE_MAX_FAILED_ATTEMPTS
+        assert exhausted["used_at"] is not None
+        assert first.get_user(user["id"])["password_hash"] == "old-hash"
+    finally:
+        second.close()
+        first.close()
+
+
+def test_exhausted_latest_reset_code_never_falls_back_to_older_code(tmp_path):
+    s = _store(tmp_path)
+    user = s.create_user("no-fallback", "no-fallback@example.com", "old-hash")
+    s.add_email_code(user["id"], CODE_RESET, "111111", "2099-01-01T00:00:00")
+    older = s.get_latest_email_code(user["id"], CODE_RESET)
+    s.add_email_code(user["id"], CODE_RESET, "222222", "2099-01-01T00:00:00")
+    latest = s.get_latest_email_code(user["id"], CODE_RESET)
+
+    for _ in range(EMAIL_CODE_MAX_FAILED_ATTEMPTS):
+        assert s.reset_password_with_credential(
+            user["id"], "attacker-hash", email_code="000000"
+        ) == "invalid"
+    assert s.reset_password_with_credential(
+        user["id"], "attacker-hash", email_code=older["code"]
+    ) == "invalid"
+    assert s._conn.execute(
+        "SELECT failed_attempts FROM email_codes WHERE id=?", (older["id"],)
+    ).fetchone()[0] == 0
+    assert s._conn.execute(
+        "SELECT failed_attempts,used_at FROM email_codes WHERE id=?", (latest["id"],)
+    ).fetchone()["used_at"] is not None
+    assert s.get_user(user["id"])["password_hash"] == "old-hash"
 
 
 @pytest.mark.parametrize("credential_kind", ["email_code", "reset_token"])
@@ -384,21 +599,25 @@ def test_recover_orphan_matches(tmp_path):
     )
 
     # 重启清理：running + 非赛事 pending 被标 aborted
-    recovered = s.recover_orphan_matches()
+    recovered = s.recover_orphan_matches(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert recovered == 5
     assert s.get_match("m_running")["status"] == "aborted"
-    assert s.get_match("m_running")["reason"] == "orphan_after_restart"
+    assert s.get_match("m_running")["reason"] == "orphan_after_service_restart"
     assert s.get_match("m_running")["ended_at"] is not None
     for match_type in ("challenge", "table", "ladder", "human"):
         pending = s.get_match(f"m_pending_{match_type}")
         assert pending["status"] == "aborted"
-        assert pending["reason"] == "orphan_pending_after_restart"
+        assert pending["reason"] == "orphan_pending_after_service_restart"
     # completed 与活跃赛事 pending 不动
     assert s.get_match("m_done")["status"] == "completed"
     assert s.get_match("m_contest_pending")["status"] == "pending"
 
     # 幂等：再清理一次返回 0（已无 running）
-    assert s.recover_orphan_matches() == 0
+    assert s.recover_orphan_matches(
+        interruption_reason="orphan_after_service_restart"
+    ) == 0
 
 
 def test_rating_settlement_schema_migrates_legacy_db_idempotently(tmp_path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -34,6 +35,10 @@ from bzplat.backend.store.execution import (
 from bzplat.backend.store.schema import (
     AUTO_IDLE_POLICY_CUTOVER_REASON,
     AUTO_YIELD_FOREGROUND_REASON,
+    EXECUTION_QUEUED,
+    EXECUTION_SOURCE_AUTO,
+    ORPHAN_AFTER_RUNTIME_RECOVERY_REASON,
+    ORPHAN_AFTER_SERVICE_RESTART_REASON,
 )
 
 
@@ -60,7 +65,7 @@ class ExecutionDispatcher:
         max_match_slots: int,
         max_sandbox_units: int | None = None,
         auto_capability_enabled: bool = True,
-        contest_reconciler: Callable[[], Awaitable[int]] | None = None,
+        contest_reconciler: Callable[..., Awaitable[int]] | None = None,
         singleton_acquired: Callable[[], None] | None = None,
         uploads_in_flight: Callable[[], int] | None = None,
         max_host_cpu_millis: int | None = None,
@@ -193,18 +198,22 @@ class ExecutionDispatcher:
             self.repo.assert_docker_launch_idle()
             await self.orch.runner.runner.ensure_runtime_ready()
             auto_reconciled = self.repo.reconcile_auto_scheduler_policy()
-            # The policy transition must linearize before generic restart
-            # recovery.  Otherwise a legacy automatic match that already
-            # emitted events would be rewritten as ``orphan_after_restart``
+            # The policy transition must linearize before startup recovery.
+            # Otherwise a legacy automatic match that already
+            # emitted events would be rewritten as a service-restart orphan
             # before the idle-only cutover can attach its dedicated reason.
-            recovered = self.repo.recover_after_namespace_cleanup()
+            recovered = self.repo.recover_after_namespace_cleanup(
+                interruption_reason=ORPHAN_AFTER_SERVICE_RESTART_REASON
+            )
             # Accepting is restored only after physical cleanup and durable
             # attempt compensation.  The remaining application recovery then
             # uses the same ordered pipeline as delayed pause -> resume, notably
             # allowing contest reconciliation to enqueue restored pairings.
             self.repo.resume()
             application_recovered = (
-                await self._recover_application_state_after_resume()
+                await self._recover_application_state_after_resume(
+                    interruption_reason=ORPHAN_AFTER_SERVICE_RESTART_REASON
+                )
             )
         except (
             SandboxControlUncertain,
@@ -328,7 +337,9 @@ class ExecutionDispatcher:
             except TimeoutError:
                 pass
 
-    async def _recover_application_state(self) -> dict[str, int]:
+    async def _recover_application_state(
+        self, *, interruption_reason: str
+    ) -> dict[str, int]:
         """Run the post-namespace recovery pipeline used by every resume path.
 
         Keeping this in the dispatcher prevents startup and delayed recovery
@@ -337,7 +348,11 @@ class ExecutionDispatcher:
         finished contests whose official-result transaction never committed.
         The callback is injected to avoid a matches -> contests import cycle.
         """
-        legacy_orphans = int(self.store.recover_orphan_matches())
+        legacy_orphans = int(
+            self.store.recover_orphan_matches(
+                interruption_reason=interruption_reason
+            )
+        )
         if legacy_orphans:
             logger.warning(
                 "legacy orphan matches recovered after label cleanup: %s",
@@ -352,7 +367,11 @@ class ExecutionDispatcher:
                 rating_recovered,
             )
         contests_reconciled = (
-            int(await self.contest_reconciler())
+            int(
+                await self.contest_reconciler(
+                    interruption_reason=interruption_reason
+                )
+            )
             if self.contest_reconciler is not None
             else 0
         )
@@ -367,7 +386,9 @@ class ExecutionDispatcher:
             "contests": contests_reconciled,
         }
 
-    async def _recover_application_state_after_resume(self) -> dict[str, int]:
+    async def _recover_application_state_after_resume(
+        self, *, interruption_reason: str
+    ) -> dict[str, int]:
         """Run business recovery after admission state changes to running.
 
         ``admin_resume`` is an HTTP coroutine and may be cancelled when its
@@ -377,7 +398,9 @@ class ExecutionDispatcher:
         """
         self._recovering_application_state = True
         try:
-            return await self._recover_application_state()
+            return await self._recover_application_state(
+                interruption_reason=interruption_reason
+            )
         except asyncio.CancelledError:
             self.repo.pause(
                 "执行队列恢复被中断；等待下一次安全恢复",
@@ -429,7 +452,9 @@ class ExecutionDispatcher:
                 self.repo.assert_docker_launch_idle()
                 await self.orch.runner.runner.ensure_runtime_ready()
                 self.repo.reconcile_auto_scheduler_policy()
-                recovered = self.repo.recover_after_namespace_cleanup()
+                recovered = self.repo.recover_after_namespace_cleanup(
+                    interruption_reason=ORPHAN_AFTER_RUNTIME_RECOVERY_REASON
+                )
                 logger.warning("execution namespace recovered: %s", recovered)
                 # Keep the durable state paused until every awaited business
                 # reconciliation completes.  Runtime recovery is allowed to
@@ -439,7 +464,9 @@ class ExecutionDispatcher:
                 # persistent deployment drain makes resume() retain
                 # accepting=0 and the reconciler itself stays read-only.
                 self.repo.resume()
-                await self._recover_application_state_after_resume()
+                await self._recover_application_state_after_resume(
+                    interruption_reason=ORPHAN_AFTER_RUNTIME_RECOVERY_REASON
+                )
                 return True
             except (
                 SandboxControlUncertain,
@@ -675,13 +702,93 @@ class ExecutionDispatcher:
         return projected
 
     @staticmethod
-    def _eta(ahead_jobs: int, max_slots: int) -> dict:
-        waves = ahead_jobs // max(1, max_slots)
+    def _job_eta_seconds(job: dict) -> int:
+        """Resolve one private queue row's frozen duration upper bound."""
+
+        from bzplat.backend.games import registry as game_registry
+
+        raw_config = job.get("match_config")
+        if isinstance(raw_config, str):
+            config = json.loads(raw_config or "{}")
+        elif isinstance(raw_config, dict):
+            config = dict(raw_config)
+        elif raw_config is None:
+            config = {}
+        else:
+            raise ValueError("execution match_config is malformed")
+        if not isinstance(config, dict):
+            raise ValueError("execution match_config is malformed")
+        raw_control = config.get("time_control_id")
+        if "time_control_id" in config and (
+            not isinstance(raw_control, str) or not raw_control
+        ):
+            raise ValueError("execution time control is malformed")
+        spec = game_registry.get(str(job.get("game_id") or ""))
+        eta_config = (
+            {"time_control_id": raw_control}
+            if "time_control_id" in config
+            else {}
+        )
+        seconds = spec.eta_for_match(eta_config)
+        duplicate = config.get("duplicate", False)
+        if not isinstance(duplicate, bool):
+            raise ValueError("execution duplicate marker is malformed")
+        if duplicate:
+            seconds *= 2
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+            raise ValueError("execution ETA is malformed")
+        return seconds
+
+    @classmethod
+    def _eta(
+        cls,
+        *,
+        active: list[dict],
+        ahead: list[dict],
+        target: dict,
+    ) -> dict:
+        try:
+            # Validate the target's own frozen clock even though this field is
+            # explicitly queue *wait* time and therefore excludes its runtime.
+            cls._job_eta_seconds(target)
+            target_public_id = target.get("public_id")
+            if not isinstance(target_public_id, str) or not target_public_id:
+                raise ValueError("execution public id is malformed")
+            if target.get("status") != EXECUTION_QUEUED:
+                return {
+                    "min_seconds": 0,
+                    "max_seconds": 0,
+                    "dynamic": True,
+                    "available": True,
+                    "note": "请求已不在等待队列中",
+                }
+            # A foreground enqueue asks any active auto match to yield.  That
+            # cleanup can temporarily keep occupying a slot, but auto is not a
+            # foreground predecessor and must not be represented as a full
+            # extra match in the user's queue wait estimate.
+            predecessors = [
+                row
+                for row in [*active, *ahead]
+                if row.get("source") != EXECUTION_SOURCE_AUTO
+                and row.get("public_id") != target_public_id
+            ]
+            upper = sum(cls._job_eta_seconds(row) for row in predecessors)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return {
+                "min_seconds": 0,
+                "max_seconds": 0,
+                "dynamic": True,
+                "available": False,
+                "note": "冻结时限不可用，无法安全估算等待时间",
+            }
         return {
-            "min_seconds": waves * 30,
-            "max_seconds": max(60, (waves + 1) * 300),
+            # Scheduling, resource conflicts and active elapsed time are
+            # dynamic, so only the conservative frozen upper bound is useful.
+            "min_seconds": 0,
+            "max_seconds": upper,
             "dynamic": True,
-            "note": "区间会随对局时长、优先级与资源变化",
+            "available": True,
+            "note": "按前台活跃及前方任务的冻结时限上界估算，实际会随调度与资源变化",
         }
 
     @staticmethod
@@ -751,7 +858,11 @@ class ExecutionDispatcher:
             "ahead_jobs": ahead_jobs,
             "ahead_sandbox_units": int(snap["ahead_sandbox_units"]),
             "capacity": self._public_capacity(snap["capacity"]),
-            "eta": self._eta(ahead_jobs, self.max_match_slots),
+            "eta": self._eta(
+                active=list(snap["active"]),
+                ahead=list(snap.get("ahead") or []),
+                target=dict(snap["target"]),
+            ),
         }
         if blocked_code:
             projected["blocked_code"] = blocked_code

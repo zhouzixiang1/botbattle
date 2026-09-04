@@ -31,9 +31,48 @@ FULL_RR_MAX_N: int | None = None
 BOT_UPLOAD_ADMISSION_SLOTS = 1
 BOT_UPLOAD_ADMISSION_WAIT_SEC = 1.0
 
+# 公共观赛 SSE 是匿名长连接。单个订阅队列为突发高速 Bot 事件保留 2000
+# 帧，因此必须同时限制单 IP、单局和单进程的活跃队列数量。限制只覆盖
+# `/api/matches/{id}/events`；人类对战 WebSocket 与编排器内部订阅不占该额度。
+PUBLIC_SSE_GLOBAL_LIMIT = 64
+PUBLIC_SSE_PER_MATCH_LIMIT = 32
+PUBLIC_SSE_PER_IP_LIMIT = 8
+
+# Authenticated human-play WebSockets carry private snapshots and use the same
+# 2000-frame queue as public streams.  Keep their reservations separate from
+# anonymous SSE so a valid session cannot create unbounded queues/tasks while
+# also preserving the existing spectator allowance.
+HUMAN_WS_GLOBAL_LIMIT = 32
+HUMAN_WS_PER_MATCH_LIMIT = 4
+HUMAN_WS_PER_USER_LIMIT = 4
+
+# Human-play handshake authentication and match ownership checks touch SQLite
+# before a socket can join the authenticated connection quota. Bound that
+# pre-auth phase independently by trusted peer, process-wide concurrency, and
+# a hard-capped peer registry; rotating cookies or match ids cannot bypass it.
+HUMAN_WS_HANDSHAKE_MAX_ATTEMPTS = 30
+HUMAN_WS_HANDSHAKE_WINDOW_SECONDS = 60.0
+HUMAN_WS_HANDSHAKE_MAX_INFLIGHT = 16
+HUMAN_WS_HANDSHAKE_MAX_BUCKETS = 2048
+
+# Human-play action frames are much smaller than the transport-wide WebSocket
+# ceiling.  Meter them across every socket owned by the same account and peer
+# before JSON decoding or any SQLite authority lookup, so reconnecting or using
+# the four allowed viewer sockets cannot multiply database work.
+HUMAN_ACTION_MAX_BYTES = 4 * 1024
+HUMAN_ACTION_RATE_BURST = 10
+HUMAN_ACTION_RATE_REFILL_PER_SECOND = 2.0
+HUMAN_ACTION_RATE_BUCKET_LIMIT = 4096
+
 # 人类对战回合参数；并发统一由全局 execution queue 控制。
 HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
+
+# Local AI 的 Traditional 进程按回合启动。进程准备不消耗游戏棋钟，但
+# 仍必须有独立、代码持有的技术上限，避免连接器或本机启动故障无限占用
+# 全局 Match slot。准备信封不包含局面；只有连接器确认进程已创建后，
+# 平台才冻结游戏决策 deadline 并下发完整请求。
+LOCAL_AI_PREPARE_TIMEOUT_SEC = 8.0
 
 
 # 全来源执行队列：每个 job 固定占 1 个全局 match slot，Bot-vs-Bot
@@ -97,7 +136,22 @@ __all__ = [
     "EXECUTION_USER_ACTIVE_LIMIT",
     "EXECUTION_USER_QUEUED_LIMIT",
     "HUMAN_ACTION_TIMEOUT_SEC",
+    "HUMAN_ACTION_MAX_BYTES",
+    "HUMAN_ACTION_RATE_BUCKET_LIMIT",
+    "HUMAN_ACTION_RATE_BURST",
+    "HUMAN_ACTION_RATE_REFILL_PER_SECOND",
     "HUMAN_MAX_CONSECUTIVE_TIMEOUTS",
+    "HUMAN_WS_GLOBAL_LIMIT",
+    "HUMAN_WS_HANDSHAKE_MAX_ATTEMPTS",
+    "HUMAN_WS_HANDSHAKE_MAX_BUCKETS",
+    "HUMAN_WS_HANDSHAKE_MAX_INFLIGHT",
+    "HUMAN_WS_HANDSHAKE_WINDOW_SECONDS",
+    "HUMAN_WS_PER_MATCH_LIMIT",
+    "HUMAN_WS_PER_USER_LIMIT",
+    "LOCAL_AI_PREPARE_TIMEOUT_SEC",
     "MAX_CONCURRENT_MATCHES",
+    "PUBLIC_SSE_GLOBAL_LIMIT",
+    "PUBLIC_SSE_PER_IP_LIMIT",
+    "PUBLIC_SSE_PER_MATCH_LIMIT",
     "RANKING_MIN_RATED_MATCHES",
 ]

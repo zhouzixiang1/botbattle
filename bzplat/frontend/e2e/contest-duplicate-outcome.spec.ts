@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import { HOLDEM_TEMPLATE_TIME_CONTROL } from './time-control-fixtures'
 
 const CONTEST_ID = 913
 
@@ -245,6 +246,8 @@ async function installOpenDuplicateContestApi(
         body: JSON.stringify({
           templates: [{
             id: 'holdem_dup_rr',
+            game_id: 'holdem',
+            ...HOLDEM_TEMPLATE_TIME_CONTROL,
             stages: [{ key: 'dup_rr', type: 'round_robin', scoring: 'poker_3_1_0', duplicate: true }],
             ...(legacyScalarGamesPerPair == null
               ? { stage_series_configs: [{
@@ -317,6 +320,40 @@ test('duplicate detail separates encounter groups, scoring games, partial techni
   await expect(authoritativeCompletedCard).toContainText('Alpha 1 1胜 · 平 0 · Beta 1 1胜')
   await expect(authoritativeCompletedCard).toContainText('已完成')
   await expect(authoritativeCompletedCard).not.toContainText('进行中')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('legacy group detail shows backend group ranks without inventing overall ranks', async ({ page }) => {
+  const body = duplicateDetail()
+  body.contest.template_id = 'legacy_group_drr'
+  body.contest.template_name = '历史分组双循环'
+  body.contest.stages_json = JSON.stringify([{
+    key: 'groups',
+    type: 'group_double_round_robin',
+    scoring: 'poker_3_1_0',
+    group_count: 2,
+    advance_per_group: 1,
+  }])
+  body.stage_standings[0]!.stage_key = 'groups'
+  body.stage_standings[0]!.rows = body.stage_standings[0]!.rows.map((row, index) => ({
+    ...row,
+    group_id: index < 2 ? 'A' : 'B',
+    rank: index % 2 + 1,
+  }))
+  const monitor = monitorBrowser(page)
+  await installContestApi(page, body)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/#/contests/${CONTEST_ID}`)
+
+  const panel = page.getByRole('heading', { name: '阶段排名与晋级', exact: true })
+    .locator('xpath=ancestor::*[@data-slot="data-region"][1]')
+  await expect(panel.getByText('A组 · 组内 1', { exact: true })).toBeVisible()
+  await expect(panel.getByText('A组 · 组内 2', { exact: true })).toBeVisible()
+  await expect(panel.getByText('B组 · 组内 1', { exact: true })).toBeVisible()
+  await expect(panel.getByText('B组 · 组内 2', { exact: true })).toBeVisible()
+  await expect(panel.getByText('名次不可用', { exact: true })).toHaveCount(0)
+  await expect(panel.getByText(/总\d/)).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean()
 })

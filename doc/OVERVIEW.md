@@ -11,8 +11,8 @@
 | 游戏 | game_id | 规则摘要 |
 |------|---------|---------|
 | 德州扑克（HU NLHE） | `holdem` | 每个计分场固定 70 手、每手 20000 筹码、50/100 盲注；raise=额外下注量 |
-| 五子棋 | `gomoku` | 15×15、26 种指定开局、三手交换、五手二打、黑方禁手、每方 900 秒 |
-| 点格棋（Dots and Boxes） | `pencil` | 固定 N=6 点（交错网格 11×11、25 格）、成格连走计分 |
+| 五子棋 | `gomoku` | 15×15、26 种指定开局、三手交换、五手二打、黑方禁手；每方累计 900/300 秒两档 |
+| 点格棋（Dots and Boxes） | `pencil` | 固定 N=6 点（交错网格 11×11、25 格）、成格连走计分；每方累计 900 秒或单步 1 秒 |
 
 ## 2. 核心能力一览
 
@@ -26,10 +26,10 @@
 | **对局身份与检索** | 首页、历史、Bot 详情、搜索、赛事、回放与管理端共用座位身份契约：显示 Bot 与所属用户或实际真人，并明确自动排位、用户挑战、自博弈、真人对战、锦标赛等性质；owner 可把 Bot 不可逆地移出管理库存，但平台以墓碑保留版本、评分、赛事和历史身份，不用硬删除抹掉既有记录 |
 | **私有 Bot 调试** | 可选响应 `debug` 经限额、清洗、脱敏后独立保存；终局按 Bot owner/赛事组织者/admin 授权查看，不进入公共回放或任何公开导出 |
 | **自主挑战位置** | Bot-vs-Bot 发起者可选择自己的 Bot 位于任一游戏位置；Bot、版本、执行环境与本地连接整体换位，普通用户的本人 Bot 授权不因换位放宽；真人仍固定在第二方 |
-| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场；与其他来源共享全局 match slots，只占 1 个沙箱单元，不计平台排行榜 |
+| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场；与其他来源共享全局 match slots，只占 1 个沙箱单元，不计平台排行榜。所选游戏时限只约束 Bot，真人继续使用 120 秒防挂机时限 |
 | **全来源执行队列** | 人工、人机、赛事与自动排位统一写持久 job；代码硬顶为 6 match slots / 12 sandbox units，job 入队冻结 sandbox/CPU/内存向量，claim 按主机预算逐维准入，实际并发依组合为 1–6。显式参数只能收紧；同一非 human Bot 全局至多一个 active job。contest 仅在不跨 manual/human 排序边界的连续队列段内按持久 claim 历史轮转。自动排位只在前台清空并连续空闲 5 分钟后使用至多 1 个槽；挑战/人机返回 HTTP 202 请求，支持刷新恢复、查询、取消与中断后重试，Match 仅在原子 claim 时创建 |
 | **Glicko-2 数值排行榜** | 按游戏分别排名；每个账号、每款游戏只展示一个当前派遣的排行榜 Bot，其他 Bot 保留历史评分并可用于练习/赛事；展示 1-based 名次/百分位、Rating、RD、95% 置信区间、不同对手数、变化量、最近对局与无名次计分样本 |
-| **赛事系统** | 6 种阶段 + 19 个代码注册模板（18 个可新建），完整生命周期（草稿→报名→发布当前阶段排期→进行→休息→结束）、积分榜、对阵图、正式名次与轻量赛中转播。全员及分组单/双循环均无人数硬上限，O(n²) 完整排期只扩展持久队列；历史 `allow_large_round_robin` 为兼容 no-op。人数区间、用途、时长等级与替代模板只指导选择，不阻断创建/发布；页面公开基础对局、基础计分场、基础 ETA 与不封顶加赛风险。Gomoku Swiss 在发布时冻结 13–15 人 7 轮、16–20 人 9 轮、21 人以上 11 轮。新 Holdem/Gomoku 单败平局以两场换座组按原阶段积分反复决胜，不用 margin/delta/seed 兜底；Holdem 同牌，Gomoku 不承诺相同开局，历史无 marker 仍阻断。运行中/历史赛事不静默迁移；德州 70 手独立计分及实名/导出边界保持不变 |
+| **赛事系统** | 6 种阶段 + 21 个代码注册模板（20 个可新建），完整生命周期（草稿→报名→发布当前阶段排期→进行→休息→结束）、积分榜、对阵图、正式名次与轻量赛中转播。赛制与时限独立选择；Pencil 支持安全随机均衡分组双循环及线上单步 1 秒/线下累计 900 秒预设，Gomoku 新增严格 22–26 人的保护种子分组双循环→决赛双循环。一般全员及分组单/双循环无人数硬上限，唯一严格例外是该保护种子正式赛。页面公开基础对局、计分场、冻结时限 ETA、权威组内/总名次与有界抽签审计。Gomoku Swiss、换座决胜及历史兼容规则保持不变 |
 | **社交与互动** | 关注用户、收藏 Bot、对局/Bot 评论、点赞、浏览计数、点赞榜 |
 | **平台通信** | conversation/message 作为站内真相，邮件为异步 delivery；旧通知 API 兼容投影、用户/admin 线程、固定快照广播、Bug 反馈与诊断附件 |
 | **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级 |
@@ -41,8 +41,10 @@
 代码模板目录如下；括号内为阶段结构，`holdem_final_ranked` 仅供历史读取：
 
 - Holdem（8 注册 / 7 可新建）：`holdem_dup_rr`（复式单循环）、`holdem_rr`（单循环）、`holdem_swiss_ranked`（Swiss 排名）、`holdem_swiss_top8_ranked`（Swiss → Top 8 排位循环）、`holdem_swiss_ko`（Swiss → 单败）、`holdem_top8_ranked`（Top 8 排位循环）、`holdem_prelim_swiss`（独立预赛 Swiss）、`holdem_final_ranked`（历史循环 → Top 8）。
-- Gomoku（6 / 6）：`board_rr`（双循环）、`gomoku_rr`（单循环）、`gomoku_swiss_ranked`（Swiss 排名）、`gomoku_swiss_top8_ranked`（Swiss → Top 8 排位循环）、`gomoku_group_drr_ko`（分组双循环 → 单败）、`gomoku_swiss_ko`（Swiss → 单败）。
-- Pencil（5 / 5）：`pencil_drr`（双循环）、`pencil_group_drr_ko`（分组双循环 → 单败）、`pencil_swiss_ranked`（Swiss 排名）、`pencil_swiss_ko`（Swiss → 单败）、`pencil_ko`（纯单败）。Pencil 每方棋钟固定 900 秒，赛事单场 ETA 以双方棋钟合计 1800 秒保守估算。
+- Gomoku（7 / 7）：`gomoku_seeded_group_drr_final`（保护种子分组双循环 → 决赛双循环，固定 300 秒、限 22–26 人）、`board_rr`（双循环）、`gomoku_rr`（单循环）、`gomoku_swiss_ranked`（Swiss 排名）、`gomoku_swiss_top8_ranked`（Swiss → Top 8 排位循环）、`gomoku_group_drr_ko`（分组双循环 → 单败）、`gomoku_swiss_ko`（Swiss → 单败）。
+- Pencil（6 / 6）：`pencil_drr`（双循环）、`pencil_group_drr`（安全随机均衡分组双循环）、`pencil_group_drr_ko`（分组双循环 → 单败）、`pencil_swiss_ranked`（Swiss 排名）、`pencil_swiss_ko`（Swiss → 单败）、`pencil_ko`（纯单败）。Pencil 可选每方累计 900 秒或单步 1 秒；ETA 按冻结档位计算，单步模式按 84 次定时请求（60 次占边 + 最多 24 次强制 `pass` 确认）计算。
+
+普通挑战从代码注册表选择时限：只有各游戏默认档计入现有 Rating，替代档明确为练习且不计 Rating。Holdem 唯一使用单步 60 秒；Gomoku 默认每方 900 秒、可选 300 秒；Pencil 默认每方 900 秒、可选单步 1 秒。单步/累计均只计算完整请求交给已就绪 Bot 至完整响应到达，排队、容器启动与预热不计入。
 
 ## 3. 技术栈
 

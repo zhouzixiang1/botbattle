@@ -1,12 +1,19 @@
 """Auth / Captcha 单测。"""
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from bzplat.backend.auth.auth_manager import AuthError, AuthManager
 from bzplat.backend.auth.captcha import CaptchaStore, png_to_data_url
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import CODE_RESET, CODE_VERIFY
+from bzplat.backend.store.schema import (
+    CODE_RESET,
+    CODE_VERIFY,
+    EMAIL_CODE_MAX_FAILED_ATTEMPTS,
+)
 
 
 class RecordingMailer:
@@ -169,6 +176,96 @@ def test_change_password(tmp_path):
     assert token2
 
 
+@pytest.mark.parametrize("mutation", ["change", "reset"])
+def test_stale_password_authentication_cannot_issue_session_after_password_rotation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+):
+    """Password rotation linearizes against an already-verified old login.
+
+    A login may finish the expensive password check before a concurrent change
+    or reset commits.  Its later session insert must still compare the exact
+    credential generation it verified, otherwise an old password can create a
+    fresh bearer after the revocation transaction has deleted existing tokens.
+    """
+    db_path = tmp_path / f"password-session-race-{mutation}.db"
+    login_auth = AuthManager(Store(str(db_path)), mailer=None)
+    user = login_auth.register(
+        f"race_{mutation}",
+        f"race-{mutation}@example.test",
+        "password12",
+    )
+    login_auth.store.update_user(user["id"], email_verified=1)
+    rotating_auth = AuthManager(Store(str(db_path)), mailer=None)
+    password_verified = threading.Event()
+    rotation_committed = threading.Event()
+    original_issue = login_auth.store.add_session_if_user_active
+
+    def delayed_issue(*args, **kwargs):
+        password_verified.set()
+        assert rotation_committed.wait(timeout=10)
+        return original_issue(*args, **kwargs)
+
+    monkeypatch.setattr(
+        login_auth.store,
+        "add_session_if_user_active",
+        delayed_issue,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            stale_login = pool.submit(
+                login_auth.authenticate,
+                user["username"],
+                "password12",
+            )
+            assert password_verified.wait(timeout=10)
+            if mutation == "change":
+                rotating_auth.change_password(
+                    user["id"],
+                    "password12",
+                    "replacement12",
+                )
+            else:
+                assert rotating_auth.request_reset(user["username"])[0]
+                code = rotating_auth.store.get_latest_email_code(
+                    user["id"], CODE_RESET
+                )["code"]
+                rotating_auth.reset_password(
+                    user["username"],
+                    code,
+                    "replacement12",
+                )
+            rotation_committed.set()
+            with pytest.raises(AuthError) as rejected:
+                stale_login.result(timeout=10)
+            assert rejected.value.code == "invalid_credentials"
+
+        with pytest.raises(AuthError) as old_password:
+            rotating_auth.authenticate(user["username"], "password12")
+        assert old_password.value.code == "invalid_credentials"
+        _safe, fresh_token = rotating_auth.authenticate(
+            user["username"], "replacement12"
+        )
+        assert rotating_auth.verify_session(fresh_token)["id"] == user["id"]
+    finally:
+        rotation_committed.set()
+        rotating_auth.store.close()
+        login_auth.store.close()
+
+
+def test_disabled_session_does_not_revive_after_reenable(tmp_path):
+    auth, _ = _auth(tmp_path, mailer=False)
+    user = auth.register("dormant", "dormant@ex.com", "password12")
+    auth.store.update_user(user["id"], email_verified=1)
+    _, token = auth.authenticate("dormant", "password12")
+
+    auth.store.update_user(user["id"], is_active=0)
+    auth.store.update_user(user["id"], is_active=1)
+
+    assert auth.verify_session(token) is None
+
+
 def test_request_reset_and_reset_password(tmp_path):
     auth, mailer = _auth(tmp_path)
     user = auth.register("erin", "e@ex.com", "password12")
@@ -192,6 +289,28 @@ def test_request_reset_and_reset_password(tmp_path):
     ok2, empty = auth.request_reset("nobody@ex.com")
     assert ok2 is False
     assert empty == {}
+
+
+def test_auth_reset_wrong_code_exhausts_durable_credential(tmp_path):
+    auth, _ = _auth(tmp_path, mailer=False)
+    user = auth.register("resetlimit", "resetlimit@ex.com", "password12")
+    auth.request_reset(user["username"])
+    row = auth.store.get_latest_email_code(user["id"], CODE_RESET)
+    wrong = "000000" if row["code"] != "000000" else "000001"
+
+    for _ in range(EMAIL_CODE_MAX_FAILED_ATTEMPTS):
+        with pytest.raises(AuthError) as rejected:
+            auth.reset_password(user["username"], wrong, "attackerpass1")
+        assert rejected.value.code == "invalid_code"
+
+    exhausted = auth.store._conn.execute(
+        "SELECT failed_attempts,used_at FROM email_codes WHERE id=?", (row["id"],)
+    ).fetchone()
+    assert exhausted["failed_attempts"] == EMAIL_CODE_MAX_FAILED_ATTEMPTS
+    assert exhausted["used_at"] is not None
+    with pytest.raises(AuthError) as correct_after_exhaustion:
+        auth.reset_password(user["username"], row["code"], "attackerpass1")
+    assert correct_after_exhaustion.value.code == "invalid_code"
 
 
 def test_admin_reset_credential_endpoint_is_removed(tmp_path, monkeypatch):

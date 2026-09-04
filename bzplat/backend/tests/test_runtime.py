@@ -233,6 +233,15 @@ def test_started_container_exit_125_is_bot_crash(tmp_path, monkeypatch):
     with pytest.raises(BotCrashedError):
         asyncio.run(bot_fault.send("bot", "{}"))
 
+    # A process that exits successfully but produces no protocol line is still
+    # a Bot failure (the production ``111`` symptom), not a valid response.
+    clean_exit_without_response = BinaryRunner(prefer_local=False)
+    clean_exit_without_response._sessions["silent-clean-exit"] = BotSession(
+        "silent-clean-exit", info, path, proc=FakeProc(0), mode="docker",
+    )
+    with pytest.raises(BotCrashedError, match="stdout EOF.*进程退出码=0"):
+        asyncio.run(clean_exit_without_response.send("silent-clean-exit", "{}"))
+
 
 def test_decision_timeout_log_does_not_expose_bot_stderr_paths(tmp_path, caplog):
     class FakeStdin:
@@ -265,6 +274,95 @@ def test_decision_timeout_log_does_not_expose_bot_stderr_paths(tmp_path, caplog)
     assert "timeout-session" in caplog.text
     assert "/private" not in caplog.text
     assert "secret-version" not in caplog.text
+
+
+def test_decision_deadline_includes_stdin_backpressure(tmp_path):
+    class BlockedStdin:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            await asyncio.Event().wait()
+
+    class UnreadStdout:
+        async def readline(self):
+            raise AssertionError("stdout must not be read before stdin drains")
+
+    class FakeProc:
+        returncode = None
+        stdin = BlockedStdin()
+        stdout = UnreadStdout()
+
+    path = tmp_path / "blocked-stdin-bot"
+    path.write_bytes(b"unused")
+    runner = BinaryRunner(prefer_local=False)
+    session = BotSession(
+        "blocked-stdin", BinaryInfo("elf", "linux", "amd64", True), path,
+        proc=FakeProc(), mode="docker",
+    )
+    runner._sessions[session.session_id] = session
+
+    with pytest.raises(TimeoutError, match="决策超时"):
+        asyncio.run(runner.send(session.session_id, "{}", timeout=0.01))
+
+
+def test_decision_write_and_response_share_one_absolute_deadline(
+    tmp_path, monkeypatch
+):
+    import bzplat.backend.runtime.binary_runner as binary_runner_module
+
+    class Clock:
+        now = 100.0
+
+        def time(self):
+            return self.now
+
+    clock = Clock()
+    observed_budgets: list[float] = []
+
+    class DelayedDrainStdin:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            clock.now += 0.6
+
+    class ReadyStdout:
+        async def readline(self):
+            return b'{"response": 1}\n'
+
+    class FakeProc:
+        returncode = None
+        stdin = DelayedDrainStdin()
+        stdout = ReadyStdout()
+
+    async def exercise(runner: BinaryRunner, session_id: str) -> str:
+        async def tracked_wait_for(awaitable, *, timeout):
+            observed_budgets.append(timeout)
+            return await awaitable
+
+        monkeypatch.setattr(
+            binary_runner_module.asyncio, "get_running_loop", lambda: clock
+        )
+        monkeypatch.setattr(
+            binary_runner_module.asyncio, "wait_for", tracked_wait_for
+        )
+        return await runner.send(session_id, "{}", timeout=1.0)
+
+    path = tmp_path / "shared-deadline-bot"
+    path.write_bytes(b"unused")
+    runner = BinaryRunner(prefer_local=False)
+    session = BotSession(
+        "shared-deadline",
+        BinaryInfo("elf", "linux", "amd64", True),
+        path,
+        proc=FakeProc(),
+        mode="docker",
+    )
+    runner._sessions[session.session_id] = session
+
+    assert asyncio.run(exercise(runner, session.session_id)) == '{"response": 1}'
+    assert observed_budgets == pytest.approx([1.0, 0.4])
 
 
 def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path):
@@ -924,6 +1022,93 @@ def test_broken_stdin_uses_same_docker_exit_classification(tmp_path):
     )
     with pytest.raises(BotCrashedError, match="stdin"):
         asyncio.run(bot_fault.send("bot-pipe", "{}"))
+
+
+def test_uvloop_closed_stdin_runtime_error_is_bot_crash(tmp_path):
+    """uvloop reports a closed subprocess pipe as RuntimeError, not BrokenPipe."""
+
+    class ClosedTransport:
+        def is_closing(self):
+            return True
+
+    class ClosedStdin:
+        _transport = ClosedTransport()
+
+        def is_closing(self):
+            return self._transport.is_closing()
+
+        def write(self, _data):
+            raise RuntimeError(
+                "unable to perform operation on <WriteUnixTransport "
+                "closed=True reading=False>; the handler is closed"
+            )
+
+        async def drain(self):
+            raise AssertionError("drain must not run after write failed")
+
+    class UnusedStdout:
+        async def readline(self):
+            raise AssertionError("stdout must not be read after closed stdin")
+
+    class FakeProc:
+        returncode = None
+        stdin = ClosedStdin()
+        stdout = UnusedStdout()
+
+        async def wait(self):
+            return self.returncode
+
+    path = tmp_path / "bot"
+    path.write_bytes(b"unused")
+    info = BinaryInfo("elf", "linux", "amd64", True)
+    runner = BinaryRunner(prefer_local=False)
+    runner._sessions["closed-uvloop-pipe"] = BotSession(
+        "closed-uvloop-pipe", info, path, proc=FakeProc(), mode="docker"
+    )
+
+    with pytest.raises(BotCrashedError, match="closed-uvloop-pipe.*stdin"):
+        asyncio.run(runner.send("closed-uvloop-pipe", "{}"))
+
+
+def test_open_stdin_runtime_error_is_not_reclassified_as_bot_crash(tmp_path):
+    """An arbitrary RuntimeError must remain a platform/programming failure."""
+
+    failure = RuntimeError("unexpected stream writer implementation failure")
+
+    class OpenStdin:
+        def is_closing(self):
+            return False
+
+        def write(self, _data):
+            raise failure
+
+        async def drain(self):
+            raise AssertionError("drain must not run after write failed")
+
+    class UnusedStdout:
+        async def readline(self):
+            raise AssertionError("stdout must not be read after failed stdin write")
+
+    class FakeProc:
+        returncode = None
+        stdin = OpenStdin()
+        stdout = UnusedStdout()
+
+        async def wait(self):
+            raise AssertionError("an open process must not be awaited")
+
+    path = tmp_path / "bot"
+    path.write_bytes(b"unused")
+    info = BinaryInfo("elf", "linux", "amd64", True)
+    runner = BinaryRunner(prefer_local=False)
+    runner._sessions["open-runtime-error"] = BotSession(
+        "open-runtime-error", info, path, proc=FakeProc(), mode="docker"
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(runner.send("open-runtime-error", "{}"))
+    assert raised.value is failure
+    assert not isinstance(raised.value, BotCrashedError)
 
 
 def test_docker_spawn_oserror_is_sanitized_platform_fault(monkeypatch):

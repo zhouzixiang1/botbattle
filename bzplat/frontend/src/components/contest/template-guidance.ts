@@ -8,6 +8,7 @@ export interface ContestTemplateGuidance {
   name: string
   recommended_min?: number | null
   recommended_max?: number | null
+  participant_range_is_strict?: boolean
   purpose?: ContestTemplatePurpose | null
   time_class?: ContestTemplateTimeClass | null
   stages?: Array<{
@@ -43,9 +44,10 @@ export function recommendedRangeLabel(template: ContestTemplateGuidance): string
   const minimum = template.recommended_min
   const maximum = template.recommended_max
   if (typeof minimum !== 'number' || !Number.isInteger(minimum) || minimum < 2) return null
-  if (maximum == null) return `建议 ${minimum} 人以上`
+  const prefix = template.participant_range_is_strict ? '限' : '建议'
+  if (maximum == null) return `${prefix} ${minimum} 人以上`
   if (typeof maximum !== 'number' || !Number.isInteger(maximum) || maximum < minimum) return null
-  return minimum === maximum ? `建议 ${minimum} 人` : `建议 ${minimum}–${maximum} 人`
+  return minimum === maximum ? `${prefix} ${minimum} 人` : `${prefix} ${minimum}–${maximum} 人`
 }
 
 export type TemplateParticipantFit = 'within' | 'below' | 'above' | 'unknown'
@@ -70,6 +72,11 @@ export function templateFitMessage(
   const range = recommendedRangeLabel(template)
   if (!range) return null
   const fit = templateParticipantFit(template, participantCount)
+  if (template.participant_range_is_strict) {
+    if (fit === 'unknown') return `${range}；报名截止并发布时严格校验人数。`
+    if (fit === 'within') return `当前 ${participantCount} 人符合发布人数要求。`
+    return `当前 ${participantCount} 人不符合发布人数要求；必须调整到 ${range.replace(/^限\s*/, '')}。`
+  }
   if (fit === 'unknown') return `${range}；人数仅影响推荐，不限制创建或发布。`
   if (fit === 'within') return `当前 ${participantCount} 人符合建议范围；人数仅影响推荐，不限制发布。`
   return `当前 ${participantCount} 人${fit === 'below' ? '低于' : '超过'}建议范围；仍可发布，请结合基础场数和耗时选择。`

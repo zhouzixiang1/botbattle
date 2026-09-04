@@ -1,6 +1,11 @@
 import { useMemo } from 'react'
 
 import type { RawEvent } from '@/games/base'
+import {
+  parseMatchTimeControl,
+  type TimeControlAppliesTo,
+  type TimeControlMode,
+} from '../../lib/time-controls.ts'
 
 export const GOMOKU_COMPETITION_RULESET = 'gomoku_ccgc_2013_five_move_two_v2'
 export const GOMOKU_PREVIOUS_COMPETITION_RULESET = 'gomoku_ccgc_2013_v1'
@@ -193,6 +198,10 @@ export function reduceGomokuEvents(events: RawEvent[]): GomokuViewModel {
   let timeBudget: number | null = null
   let timeRemaining: [number | null, number | null] = [null, null]
   let timeOut: number | null = null
+  let timeMode: TimeControlMode | null = null
+  let timeAppliesTo: TimeControlAppliesTo | null = null
+  let botOnlySeat: number | null = null
+  let hasProjectedTimeControl = false
   let interaction: GomokuInteractionDraft | null = null
 
   for (const ev of events) {
@@ -222,15 +231,31 @@ export function reduceGomokuEvents(events: RawEvent[]): GomokuViewModel {
       selectedPoint = null
       forbidden = null
       consecutivePasses = 0
-      timeBudget = Number.isFinite(Number(ev.time_budget_per_side))
-        ? Number(ev.time_budget_per_side)
-        : null
-      timeRemaining = [timeBudget, timeBudget]
+      hasProjectedTimeControl = ev.time_control !== undefined
+      const timeControl = parseMatchTimeControl(ev.time_control, 'gomoku')
+      const legacyBudget = Number(ev.time_budget_per_side)
+      timeBudget = timeControl?.seconds ?? (
+        !hasProjectedTimeControl && Number.isFinite(legacyBudget) && legacyBudget > 0
+          ? legacyBudget
+          : null
+      )
+      timeMode = timeControl?.mode ?? (timeBudget === null ? null : 'per_side_total')
+      timeAppliesTo = timeControl?.applies_to ?? (timeBudget === null ? null : 'both_bots')
+      botOnlySeat = null
+      timeRemaining = timeAppliesTo === 'bot_only' ? [null, null] : [timeBudget, timeBudget]
       timeOut = null
       interaction = null
     } else if (t === 'turn') {
       const nextSeat = finiteInteger(ev.player)
       if (nextSeat === 0 || nextSeat === 1) toAct = nextSeat
+      if (
+        timeMode === 'per_decision'
+        && timeBudget !== null
+        && (nextSeat === 0 || nextSeat === 1)
+        && (timeAppliesTo !== 'bot_only' || botOnlySeat === nextSeat)
+      ) {
+        timeRemaining[nextSeat] = timeBudget
+      }
       toColor = color(ev.color) ?? (toAct === 0 || toAct === 1 ? seatColors[toAct] : null)
       if (typeof ev.phase === 'string' && ev.phase) phase = ev.phase
       interaction = null
@@ -297,13 +322,27 @@ export function reduceGomokuEvents(events: RawEvent[]): GomokuViewModel {
     } else if (t === 'time_used') {
       const seat = finiteInteger(ev.seat)
       const remaining = Number(ev.remaining)
+      if (hasProjectedTimeControl && timeBudget === null) continue
+      if (timeAppliesTo === 'bot_only' && (seat === 0 || seat === 1)) botOnlySeat = seat
       if ((seat === 0 || seat === 1) && Number.isFinite(remaining)) timeRemaining[seat] = remaining
       const budget = Number(ev.budget)
-      if (Number.isFinite(budget)) timeBudget = budget
+      if (!hasProjectedTimeControl && Number.isFinite(budget) && budget > 0) {
+        timeBudget = budget
+        timeMode = 'per_side_total'
+        timeAppliesTo = 'both_bots'
+        if (timeRemaining[0] === null && timeRemaining[1] === null) timeRemaining = [budget, budget]
+      }
     } else if (t === 'time_out') {
       const seat = finiteInteger(ev.seat)
       const budget = Number(ev.budget)
-      if (Number.isFinite(budget)) timeBudget = budget
+      if (hasProjectedTimeControl && timeBudget === null) continue
+      if (timeAppliesTo === 'bot_only' && (seat === 0 || seat === 1)) botOnlySeat = seat
+      if (!hasProjectedTimeControl && Number.isFinite(budget) && budget > 0) {
+        timeBudget = budget
+        timeMode = 'per_side_total'
+        timeAppliesTo = 'both_bots'
+        if (timeRemaining[0] === null && timeRemaining[1] === null) timeRemaining = [budget, budget]
+      }
       if (seat === 0 || seat === 1) {
         timeRemaining[seat] = 0
         timeOut = seat

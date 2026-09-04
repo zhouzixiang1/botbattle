@@ -228,6 +228,7 @@ def _enqueue_contest_pair(
         bot_a_version_id=a["version_id"],
         bot_b_version_id=b["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     return store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=a["user_id"],
@@ -240,6 +241,223 @@ def _enqueue_contest_pair(
         contest_id=int(contest["id"]),
         contest_pairing_id=int(pairing["id"]),
     )
+
+
+def _seal_current_contest_stage_for_execution(
+    store: Store,
+    contest_id: int,
+) -> None:
+    """Establish the strict execution seal for a unit-test pairing batch."""
+    with store._tx() as conn:
+        contest = conn.execute(
+            "SELECT current_stage_idx FROM contests WHERE id=?",
+            (int(contest_id),),
+        ).fetchone()
+        assert contest is not None
+        stage_idx = int(contest["current_stage_idx"])
+        manifest = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=?",
+                (int(contest_id), stage_idx),
+            ).fetchone()[0]
+        )
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=? WHERE id=?",
+            (manifest, int(contest_id)),
+        )
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (int(contest_id),),
+        )
+
+
+def _sealed_contest_batch(
+    store: Store,
+    key: str,
+    *,
+    size: int = 2,
+) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Create one due, sealed stage and enqueue every pairing in that seal."""
+    bots = [_bot(store, f"{key}-{index}") for index in range(size * 2)]
+    contest = store.create_contest(
+        f"sealed execution batch {key}",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            int(contest["id"]),
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+        )
+        for index in range(size)
+    ]
+    store.seal_published_stage_pairing_count(
+        int(contest["id"]),
+        0,
+        expected_count=size,
+        expected_existing_ids=[int(pairing["id"]) for pairing in pairings],
+    )
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[index * 2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[index * 2]["bot_id"],
+            bot_b_id=bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            contest_id=int(contest["id"]),
+            contest_pairing_id=int(pairings[index]["id"]),
+        )
+        for index in range(size)
+    ]
+    return contest, bots, pairings, jobs
+
+
+def _damage_contest_execution_seal(
+    store: Store,
+    contest_id: int,
+    damage: str,
+) -> None:
+    assignments = {
+        "manifest_null": "published_stage_pairing_count=NULL",
+        "seal_null": "sealed_pairing_topology_revision=NULL",
+        "stale": (
+            "sealed_pairing_topology_revision="
+            "pairing_topology_revision+1"
+        ),
+        "manifest_real": "published_stage_pairing_count=1.5",
+        "revision_text": "pairing_topology_revision='broken'",
+        "seal_text": "sealed_pairing_topology_revision='broken'",
+    }
+    with store._tx() as conn:
+        if damage in {"manifest_real", "revision_text", "seal_text"}:
+            conn.execute("PRAGMA ignore_check_constraints=ON")
+        try:
+            conn.execute(
+                f"UPDATE contests SET {assignments[damage]} WHERE id=?",
+                (int(contest_id),),
+            )
+        finally:
+            if damage in {"manifest_real", "revision_text", "seal_text"}:
+                conn.execute("PRAGMA ignore_check_constraints=OFF")
+
+
+def _contest_execution_artifact_counts(store: Store, contest_id: int) -> dict:
+    with store._tx() as conn:
+        return {
+            "matches": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM matches_holdem WHERE contest_id=?",
+                    (int(contest_id),),
+                ).fetchone()[0]
+            ),
+            "replays": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM match_replays r JOIN matches_holdem m "
+                    "ON m.id=r.match_id WHERE m.contest_id=?",
+                    (int(contest_id),),
+                ).fetchone()[0]
+            ),
+            "attempts": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM execution_job_attempts a "
+                    "JOIN execution_jobs j ON j.id=a.job_id WHERE j.contest_id=?",
+                    (int(contest_id),),
+                ).fetchone()[0]
+            ),
+            "leases": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM local_ai_leases l "
+                    "JOIN execution_jobs j ON j.public_id=l.job_public_id "
+                    "WHERE j.contest_id=?",
+                    (int(contest_id),),
+                ).fetchone()[0]
+            ),
+            "bindings": int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM contest_pairings WHERE contest_id=? "
+                    "AND (match_id IS NOT NULL OR status<>'pending')",
+                    (int(contest_id),),
+                ).fetchone()[0]
+            ),
+        }
+
+
+def _clone_contest_queue(
+    store: Store,
+    *,
+    contest_id: int,
+    seed_job: dict,
+    total_jobs: int,
+) -> None:
+    """Expand one valid request into a large same-contest queue in one SQL batch."""
+    assert total_jobs >= 1
+    seed_pairing_id = int(seed_job["contest_pairing_id"])
+    if total_jobs == 1:
+        return
+    with store._tx() as conn:
+        pairing_columns = [
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info('contest_pairings')")
+            if str(row["name"]) != "id"
+        ]
+        pairing_names = ",".join(f'"{name}"' for name in pairing_columns)
+        pairing_values = ",".join(f'p."{name}"' for name in pairing_columns)
+        conn.execute(
+            "WITH RECURSIVE seq(n) AS ("
+            "SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<?) "
+            f"INSERT INTO contest_pairings({pairing_names}) "
+            f"SELECT {pairing_values} FROM contest_pairings p CROSS JOIN seq "
+            "WHERE p.id=?",
+            (total_jobs - 1, seed_pairing_id),
+        )
+
+        job_columns = [
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info('execution_jobs')")
+            if str(row["name"]) != "id"
+        ]
+        job_names = ",".join(f'"{name}"' for name in job_columns)
+        job_values = ",".join(
+            (
+                "printf('perf-%d-%d',p.contest_id,p.id)"
+                if name == "public_id"
+                else "p.id"
+                if name == "contest_pairing_id"
+                else f'j."{name}"'
+            )
+            for name in job_columns
+        )
+        conn.execute(
+            f"INSERT INTO execution_jobs({job_names}) SELECT {job_values} "
+            "FROM contest_pairings p CROSS JOIN execution_jobs j "
+            "WHERE p.contest_id=? AND p.id<>? AND j.id=?",
+            (contest_id, seed_pairing_id, int(seed_job["id"])),
+        )
+        # Model a modern, sealed stage so the scheduler test exercises its
+        # steady-state fast path.  Legacy NULL manifests intentionally remain
+        # on the strict compatibility scan path.
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=? WHERE id=?",
+            (total_jobs, contest_id),
+        )
+        conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest_id,),
+        )
 
 
 def _enqueue_human(store: Store, key: str) -> tuple[dict, dict, dict]:
@@ -298,6 +516,45 @@ def _claim_auto(store: Store, *, slots: int = 2, units: int = 4) -> dict | None:
         contest_share_slots=1,
         claim_class="auto",
     )
+
+
+def _force_active_execution_state(
+    store: Store,
+    claimed: dict,
+    status: str,
+    *,
+    events_observed: bool = False,
+) -> None:
+    """Build a constraint-valid residual attempt in any active lifecycle state."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if status == "running":
+            connection.execute(
+                "UPDATE execution_jobs SET status='running',started_at=? WHERE id=?",
+                (now, int(claimed["id"])),
+            )
+        elif status == "settling":
+            connection.execute(
+                "UPDATE execution_jobs SET status='settling',started_at=?,"
+                "settling_at=?,cleanup_state='pending' WHERE id=?",
+                (now, now, int(claimed["id"])),
+            )
+        else:
+            assert status == "starting"
+        connection.execute(
+            "UPDATE execution_job_attempts SET status=?,started_at=CASE "
+            "WHEN ?='starting' THEN started_at ELSE ? END,events_observed=? "
+            "WHERE job_id=? AND attempt_no=?",
+            (
+                status,
+                status,
+                now,
+                int(events_observed),
+                int(claimed["id"]),
+                int(claimed["attempt_count"]),
+            ),
+        )
 
 
 def _create_legacy_auto_match_queue(conn: sqlite3.Connection) -> None:
@@ -362,6 +619,181 @@ def execution_api(tmp_path, monkeypatch):
     yield SimpleNamespace(app=app, client=client, store=app.state.store)
     client.close()
     app.state.store.close()
+
+
+def test_public_game_time_controls_and_challenge_binding(execution_api):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    registry = client.get("/api/games")
+    assert registry.status_code == 200
+    payload = registry.json()
+    assert payload["source"] == "code"
+    assert payload["mutable"] is False
+    assert payload["games"] == [
+        {
+            "game_id": "gomoku",
+            "label": "五子棋",
+            "default_time_control_id": "gomoku_per_side_total_900s_v1",
+            "time_controls": [
+                {
+                    "id": "gomoku_per_side_total_900s_v1",
+                    "mode": "per_side_total",
+                    "seconds": 900,
+                    "applies_to": "both_bots",
+                    "is_default": True,
+                },
+                {
+                    "id": "gomoku_per_side_total_300s_v1",
+                    "mode": "per_side_total",
+                    "seconds": 300,
+                    "applies_to": "both_bots",
+                    "is_default": False,
+                },
+            ],
+        },
+        {
+            "game_id": "holdem",
+            "label": "德州扑克",
+            "default_time_control_id": "holdem_per_decision_60s_v1",
+            "time_controls": [
+                {
+                    "id": "holdem_per_decision_60s_v1",
+                    "mode": "per_decision",
+                    "seconds": 60,
+                    "applies_to": "both_bots",
+                    "is_default": True,
+                }
+            ],
+        },
+        {
+            "game_id": "pencil",
+            "label": "点格棋",
+            "default_time_control_id": "pencil_per_side_total_900s_v1",
+            "time_controls": [
+                {
+                    "id": "pencil_per_side_total_900s_v1",
+                    "mode": "per_side_total",
+                    "seconds": 900,
+                    "applies_to": "both_bots",
+                    "is_default": True,
+                },
+                {
+                    "id": "pencil_per_decision_1s_v1",
+                    "mode": "per_decision",
+                    "seconds": 1,
+                    "applies_to": "both_bots",
+                    "is_default": False,
+                },
+            ],
+        },
+    ]
+
+    owner = _api_user(store, "time_control_owner")
+    opponent = _api_user(store, "time_control_opponent")
+    own_bot = _owned_bot(store, owner, "time_control_owner", game_id="gomoku")
+    opponent_bot = _owned_bot(
+        store, opponent, "time_control_opponent", game_id="gomoku"
+    )
+    headers = _auth_headers(app, owner)
+    request_body = {
+        "my_bot_id": own_bot["bot_id"],
+        "opponent_bot_id": opponent_bot["bot_id"],
+        "game_id": "gomoku",
+    }
+
+    wrong_game = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={
+            **request_body,
+            "time_control_id": "pencil_per_decision_1s_v1",
+        },
+    )
+    assert wrong_game.status_code == 400
+    assert wrong_game.json()["detail"] == (
+        "游戏 gomoku 不支持时限 'pencil_per_decision_1s_v1'；"
+        "合法值: ['gomoku_per_side_total_900s_v1', "
+        "'gomoku_per_side_total_300s_v1']"
+    )
+
+    alternative = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json={
+            **request_body,
+            "time_control_id": "gomoku_per_side_total_300s_v1",
+        },
+    )
+    assert alternative.status_code == 202
+    alternative_payload = alternative.json()
+    assert alternative_payload["request"]["rated"] is False
+    assert alternative_payload["request"]["rating_reason"] == (
+        "alternate_time_control"
+    )
+    frozen = store.executions.get(alternative_payload["public_id"])
+    assert frozen is not None
+    assert json.loads(frozen["match_config"])["time_control_id"] == (
+        "gomoku_per_side_total_300s_v1"
+    )
+
+    default = client.post(
+        "/api/matches/challenge",
+        headers=headers,
+        json=request_body,
+    )
+    assert default.status_code == 202
+    default_payload = default.json()
+    assert default_payload["request"]["rated"] is True
+    assert default_payload["request"]["rating_reason"] == "eligible"
+    default_job = store.executions.get(default_payload["public_id"])
+    assert default_job is not None
+    assert json.loads(default_job["match_config"])["time_control_id"] == (
+        "gomoku_per_side_total_900s_v1"
+    )
+
+    human = _api_user(store, "time_control_human")
+    human_bot_owner = _api_user(store, "time_control_human_bot_owner")
+    human_bot = _owned_bot(
+        store,
+        human_bot_owner,
+        "time_control_human_target",
+        game_id="gomoku",
+    )
+    human_headers = _auth_headers(app, human)
+    human_wrong_game = client.post(
+        "/api/matches/human",
+        headers=human_headers,
+        json={
+            "bot_id": human_bot["bot_id"],
+            "human_seat": 1,
+            "game_id": "gomoku",
+            "time_control_id": "pencil_per_decision_1s_v1",
+        },
+    )
+    assert human_wrong_game.status_code == 400
+
+    human_alternative = client.post(
+        "/api/matches/human",
+        headers=human_headers,
+        json={
+            "bot_id": human_bot["bot_id"],
+            "human_seat": 1,
+            "game_id": "gomoku",
+            "time_control_id": "gomoku_per_side_total_300s_v1",
+        },
+    )
+    assert human_alternative.status_code == 202
+    human_payload = human_alternative.json()
+    assert human_payload["request"]["rated"] is False
+    assert human_payload["request"]["rating_reason"] == "human"
+    human_job = store.executions.get(human_payload["public_id"])
+    assert human_job is not None
+    assert json.loads(human_job["match_config"])["time_control_id"] == (
+        "gomoku_per_side_total_300s_v1"
+    )
 
 
 def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api):
@@ -436,6 +868,7 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
         "min_seconds",
         "max_seconds",
         "dynamic",
+        "available",
         "note",
     }
     assert snapshot["request"] == {
@@ -493,7 +926,9 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
     match_id = claimed["current_match_id"]
     store.update_match(match_id, status="running")
     store.upsert_replay(match_id, json.dumps([{"type": "match_start"}]))
-    assert store.executions.recover_after_namespace_cleanup() == {
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    ) == {
         "requeued": 0,
         "interrupted": 1,
         "settling": 0,
@@ -1141,6 +1576,7 @@ def test_claim_version_loss_backs_off_contest_pairing(queue_store):
         bot_a_version_id=pair[0]["version_id"],
         bot_b_version_id=pair[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=pair[0]["user_id"],
@@ -1193,6 +1629,7 @@ def test_contest_and_auto_requests_are_admin_mutations_only(execution_api):
         bot_a_version_id=bots[0]["version_id"],
         bot_b_version_id=bots[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     contest_job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=organizer["id"],
@@ -1346,6 +1783,7 @@ def test_dispatcher_claims_foreground_sources_and_holds_auto_outside_idle_policy
         bot_a_version_id=bots[3]["version_id"],
         bot_b_version_id=bots[4]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
     manual = _enqueue_pair(store, (bots[0], bots[1]))
     human_job = store.executions.enqueue(
@@ -1482,6 +1920,7 @@ def test_priority_aging_auto_switch_and_contest_share(queue_store):
         bot_a_version_id=bots[2]["version_id"],
         bot_b_version_id=bots[3]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
 
     def enqueue_contest(pairing: dict, a: dict, b: dict) -> dict:
@@ -1607,6 +2046,7 @@ def test_idle_only_foreground_enqueue_yields_queued_and_active_auto(
             bot_a_version_id=bots[4]["version_id"],
             bot_b_version_id=bots[5]["version_id"],
         )
+        _seal_current_contest_stage_for_execution(store, int(contest["id"]))
         foreground = store.executions.enqueue(
             source=EXECUTION_SOURCE_CONTEST,
             owner_user_id=bots[4]["user_id"],
@@ -1692,6 +2132,7 @@ def test_idle_only_showcase_enqueue_does_not_yield_auto(queue_store):
         bot_a_version_id=bots[4]["version_id"],
         bot_b_version_id=bots[5]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=bots[4]["user_id"],
@@ -1803,6 +2244,7 @@ def test_idle_only_aging_and_contest_share_never_consider_auto(queue_store):
         )
         for offset in (4, 6)
     ]
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     contest_jobs = [
         store.executions.enqueue(
             source=EXECUTION_SOURCE_CONTEST,
@@ -2963,6 +3405,10 @@ def test_contest_claims_rotate_durably_and_keep_each_contest_fifo(queue_store):
                 bot_a_version_id=bots[offset]["version_id"],
                 bot_b_version_id=bots[offset + 1]["version_id"],
             )
+            _seal_current_contest_stage_for_execution(
+                store,
+                int(contests[contest_index]["id"]),
+            )
             jobs_by_contest[contest_index].append(
                 store.executions.enqueue(
                     source=EXECUTION_SOURCE_CONTEST,
@@ -3160,6 +3606,435 @@ def test_contest_rotation_cannot_cross_manual_priority_barrier(queue_store):
     ]
 
 
+def test_large_contest_claim_reads_a_bounded_candidate_window(queue_store):
+    """A 100-player DRR-sized queue must not be materialised per claim."""
+    store = queue_store
+    bots = [_bot(store, f"claim-window-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "Claim window",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    first = _enqueue_contest_pair(store, contest, (bots[0], bots[1]))
+    _clone_contest_queue(
+        store,
+        contest_id=int(contest["id"]),
+        seed_job=first,
+        total_jobs=100 * 99,
+    )
+
+    progress_calls = 0
+
+    def count_vm_steps() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return 0
+
+    store._conn.set_progress_handler(count_vm_steps, 100)
+    try:
+        claimed = _claim(store, slots=2, units=4)
+    finally:
+        store._conn.set_progress_handler(None, 0)
+
+    assert claimed and claimed["public_id"] == first["public_id"]
+    # Each callback represents 100 SQLite VM instructions.  The old
+    # SELECT-all + Python sort path exceeds this bound before validating the
+    # first candidate; indexed paging remains independent of the 9,900 tail.
+    assert progress_calls < 200
+
+    # An active contest at its configured share must not make a later manual
+    # request pay for scanning the remaining 9,899 contest rows.  The first
+    # pass narrows to the manual/human barrier sources; the relaxed pass remains
+    # available when those foreground rows are themselves blocked.
+    manual_bots = [_bot(store, f"claim-window-manual-{index}") for index in range(2)]
+    manual = _enqueue_pair(store, (manual_bots[0], manual_bots[1]))
+    progress_calls = 0
+    store._conn.set_progress_handler(count_vm_steps, 100)
+    try:
+        foreground = _claim(store, slots=2, units=6)
+    finally:
+        store._conn.set_progress_handler(None, 0)
+    assert foreground and foreground["public_id"] == manual["public_id"]
+    assert progress_calls < 200
+
+
+def test_large_running_contest_scheduler_uses_covered_batch_fast_path(
+    queue_store,
+    monkeypatch,
+):
+    """Steady ticks must not anti-join all 9,900 active requests."""
+    store = queue_store
+    bots = [_bot(store, f"tick-window-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "Tick window",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    first = _enqueue_contest_pair(store, contest, (bots[0], bots[1]))
+    _clone_contest_queue(
+        store,
+        contest_id=int(contest["id"]),
+        seed_job=first,
+        total_jobs=100 * 99,
+    )
+    manager = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+    original = store.list_dispatchable_contest_pairings
+    dispatchable_reads = 0
+
+    def counted_dispatchable(*args, **kwargs):
+        nonlocal dispatchable_reads
+        dispatchable_reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "list_dispatchable_contest_pairings",
+        counted_dispatchable,
+    )
+    asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert dispatchable_reads == 1
+
+    progress_calls = 0
+
+    def count_vm_steps() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return 0
+
+    store._conn.set_progress_handler(count_vm_steps, 100)
+    try:
+        asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    finally:
+        store._conn.set_progress_handler(None, 0)
+    assert dispatchable_reads == 1
+    assert progress_calls < 100
+
+    # The cache is only a negative fast path.  A terminal request that leaves
+    # its pairing pending must reopen strict repair and cannot starve behind it.
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET status='cancelled',terminal_at=? "
+            "WHERE id=? AND status='queued'",
+            (datetime.now().isoformat(timespec="seconds"), int(first["id"])),
+        )
+    asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert dispatchable_reads == 2
+    active = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_pairing_id=? "
+        "AND status IN ('queued','starting','running','settling')",
+        (int(first["contest_pairing_id"]),),
+    ).fetchone()[0]
+    assert active == 1
+
+
+def test_contest_job_reference_triggers_reject_orphan_and_cross_contest_refs(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"job-ref-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "job ref source",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    job = _enqueue_contest_pair(store, contest, (bots[0], bots[1]))
+    other = store.create_contest(
+        "job ref other",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    other_pairing = store.add_pairing(
+        int(other["id"]),
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="contest execution job"):
+        with store._tx() as connection:
+            columns = [
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info('execution_jobs')")
+                if str(row["name"]) != "id"
+            ]
+            names = ",".join(f'"{name}"' for name in columns)
+            values = ",".join(
+                (
+                    "'orphan-job-ref-insert'"
+                    if name == "public_id"
+                    else "NULL"
+                    if name == "contest_pairing_id"
+                    else f'job."{name}"'
+                )
+                for name in columns
+            )
+            connection.execute(
+                f"INSERT INTO execution_jobs({names}) SELECT {values} "
+                "FROM execution_jobs job WHERE job.id=?",
+                (int(job["id"]),),
+            )
+
+    with pytest.raises(sqlite3.IntegrityError, match="contest execution job"):
+        with store._tx() as connection:
+            connection.execute(
+                "UPDATE execution_jobs SET contest_pairing_id=? WHERE id=?",
+                (int(other_pairing["id"]), int(job["id"])),
+            )
+    assert store.executions.get(job["public_id"])["status"] == "queued"
+
+
+def test_running_scheduler_cache_blocks_topology_damage_before_redispatch(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"running-cache-damage-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "running cache damage",
+        bots[0]["user_id"],
+        status="running",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    jobs = [
+        _enqueue_contest_pair(store, contest, (bots[0], bots[1]))
+        for _ in range(2)
+    ]
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET published_stage_pairing_count=2 WHERE id=?",
+            (int(contest["id"]),),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (int(contest["id"]),),
+        )
+    manager = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+    asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert manager._dispatch_coverage[int(contest["id"])] == (0, 2)
+
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?",
+            (int(jobs[1]["contest_pairing_id"]),),
+        )
+    job_count = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (int(contest["id"]),),
+    ).fetchone()[0]
+    with pytest.raises(ValueError, match="active 对阵批次完整性"):
+        asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (int(contest["id"]),),
+    ).fetchone()[0] == job_count
+    assert store.list_matches(contest_id=int(contest["id"])) == []
+    for job in jobs:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["retryable"] == 0
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["last_error"] == "contest_pairing_batch_changed"
+        assert terminal["next_attempt_at"] is None
+        assert terminal["terminal_at"] is not None
+
+
+def test_restart_technical_adjudication_rechecks_topology_and_cancels_batch(
+    queue_store, monkeypatch
+):
+    store = queue_store
+    bots = [_bot(store, f"technical-topology-{index}") for index in range(4)]
+    contest = store.create_contest(
+        "technical topology guard",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds"),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+        )
+        for index in range(2)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=2,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    store.update_contest(contest["id"], status="running")
+    queued = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[2]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[2]["bot_id"],
+        bot_b_id=bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairings[1]["id"],
+    )
+    with store._tx() as connection:
+        connection.execute("UPDATE bots SET is_active=0 WHERE id=?", (bots[0]["bot_id"],))
+
+    manager = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+    original = manager._bot_unavailable_reason
+    injected = False
+
+    def mutate_after_dispatch_snapshot(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            with store._tx() as connection:
+                connection.execute(
+                    "UPDATE contest_pairings SET published_at=? WHERE id=?",
+                    ("2026-09-02T01:02:03", pairings[0]["id"]),
+                )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_bot_unavailable_reason", mutate_after_dispatch_snapshot)
+    with pytest.raises(ValueError, match="active 对阵批次完整性"):
+        asyncio.run(manager._dispatch_pending_safe_locked(contest["id"], 0))
+    assert injected is True
+    assert store.list_matches(contest_id=contest["id"]) == []
+    persisted = store.list_contest_pairings(contest["id"])
+    assert all(row["match_id"] is None and row["status"] == "pending" for row in persisted)
+    terminal = store.executions.get(queued["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["retryable"] == 0
+    assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+    assert terminal["last_error"] == "contest_pairing_batch_changed"
+    assert terminal["next_attempt_at"] is None
+    assert terminal["terminal_at"] is not None
+
+
+def test_scheduler_and_finish_block_after_pending_sibling_identity_rewrite(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"scheduler-identity-{index}") for index in range(3)]
+    contest = store.create_contest(
+        "running scheduler identity damage",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], bot["user_id"], bot["bot_id"])
+        for bot in bots
+    ]
+    pairing_coordinates = [(0, 1), (0, 2), (1, 2)]
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[bot_a_index]["bot_id"],
+            bots[bot_b_index]["bot_id"],
+            entry_a_id=entries[bot_a_index]["id"],
+            entry_b_id=entries[bot_b_index]["id"],
+            bot_a_version_id=bots[bot_a_index]["version_id"],
+            bot_b_version_id=bots[bot_b_index]["version_id"],
+            stage_key="rr",
+        )
+        for bot_a_index, bot_b_index in pairing_coordinates
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=3,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[bot_a_index]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[bot_a_index]["bot_id"],
+            bot_b_id=bots[bot_b_index]["bot_id"],
+            bot_a_version_id=bots[bot_a_index]["version_id"],
+            bot_b_version_id=bots[bot_b_index]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for pairing, (bot_a_index, bot_b_index) in zip(
+            pairings, pairing_coordinates, strict=True
+        )
+    ]
+    manager = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+    asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert manager._dispatch_coverage[int(contest["id"])] == (0, 3)
+
+    first = _claim(store, slots=3, units=6)
+    assert first and first["public_id"] == jobs[0]["public_id"]
+    matches_before = store.list_matches(contest_id=contest["id"])
+    jobs_before = store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0]
+    sibling = pairings[1]
+    store.update_pairing(
+        sibling["id"],
+        round_num=2,
+        entry_a_id=entries[1]["id"],
+        entry_b_id=entries[2]["id"],
+        bot_a_id=bots[1]["bot_id"],
+        bot_b_id=bots[2]["bot_id"],
+        bot_a_version_id=bots[1]["version_id"],
+        bot_b_version_id=bots[2]["version_id"],
+        stage_key="rewritten",
+        group_id="B",
+        bracket_slot=2,
+        color_first=1,
+    )
+
+    with pytest.raises(ValueError, match="active 对阵批次完整性"):
+        asyncio.run(manager._dispatch_pending_locked(int(contest["id"]), 0))
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == jobs_before
+    assert [
+        match["id"]
+        for match in store.list_matches(contest_id=contest["id"])
+    ] == [matches_before[0]["id"]]
+
+    assert _claim(store, slots=3, units=6) is None
+    assert all(
+        store.executions.get(job["public_id"])["status"] == "cancelled"
+        for job in jobs[1:]
+    )
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_pairings SET status='completed' WHERE contest_id=?",
+            (contest["id"],),
+        )
+    assert manager._stage_done(int(contest["id"]), 0) is False
+    assert asyncio.run(manager.maybe_finish(int(contest["id"]))) is None
+    assert store.get_contest(contest["id"])["status"] == "running"
+    assert len(store.list_matches(contest_id=contest["id"])) == 1
+
+
 def test_contest_fairness_history_has_targeted_restart_safe_index(queue_store):
     store = queue_store
     with store._tx() as conn:
@@ -3258,6 +4133,10 @@ def test_nonrated_bot_conflict_skips_to_next_contest(queue_store):
             bots[right]["bot_id"],
             bot_a_version_id=bots[left]["version_id"],
             bot_b_version_id=bots[right]["version_id"],
+        )
+        _seal_current_contest_stage_for_execution(
+            store,
+            int(contests[contest_index]["id"]),
         )
         contest_jobs.append(
             store.executions.enqueue(
@@ -3431,6 +4310,7 @@ def test_six_slot_resource_admission_lets_one_contest_fill_host(queue_store):
             bot_a_version_id=bots[offset]["version_id"],
             bot_b_version_id=bots[offset + 1]["version_id"],
         )
+        _seal_current_contest_stage_for_execution(store, int(contest["id"]))
         jobs.append(
             store.executions.enqueue(
                 source=EXECUTION_SOURCE_CONTEST,
@@ -3495,6 +4375,7 @@ def test_contest_share_never_leaves_capacity_idle(queue_store):
         )
         for offset in (0, 2)
     ]
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
 
     def contest_job(index: int, offset: int) -> dict:
@@ -3558,6 +4439,7 @@ def test_contest_jobs_do_not_consume_organizer_personal_queue_limits(queue_store
         bot_a_version_id=contest_pair[0]["version_id"],
         bot_b_version_id=contest_pair[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
     contest_job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
@@ -3618,6 +4500,12 @@ def test_contest_claim_obeys_start_and_pairing_schedule_gates(queue_store):
             timespec="seconds"
         ),
     )
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=1,
+        expected_existing_ids=[pairing["id"]],
+    )
     _verify_projection(store)
     job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
@@ -3654,6 +4542,1765 @@ def test_contest_claim_obeys_start_and_pairing_schedule_gates(queue_store):
     assert claimed and claimed["public_id"] == job["public_id"]
 
 
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "manifest_null",
+        "seal_null",
+        "stale",
+        "manifest_real",
+        "revision_text",
+        "seal_text",
+    ),
+)
+def test_contest_enqueue_requires_exact_current_stage_execution_seal(
+    queue_store,
+    damage,
+):
+    store = queue_store
+    contest, bots, pairings, _jobs = _sealed_contest_batch(
+        store,
+        f"enqueue-seal-{damage}",
+        size=1,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "DELETE FROM execution_jobs WHERE contest_id=?",
+            (int(contest["id"]),),
+        )
+    _damage_contest_execution_seal(store, int(contest["id"]), damage)
+
+    with pytest.raises(ValueError, match="赛事当前阶段执行快照"):
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[0]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[0]["bot_id"],
+            bot_b_id=bots[1]["bot_id"],
+            bot_a_version_id=bots[0]["version_id"],
+            bot_b_version_id=bots[1]["version_id"],
+            contest_id=int(contest["id"]),
+            contest_pairing_id=int(pairings[0]["id"]),
+        )
+
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (int(contest["id"]),),
+    ).fetchone()[0] == 0
+    assert _contest_execution_artifact_counts(store, int(contest["id"])) == {
+        "matches": 0,
+        "replays": 0,
+        "attempts": 0,
+        "leases": 0,
+        "bindings": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "manifest_null",
+        "seal_null",
+        "stale",
+        "manifest_real",
+        "revision_text",
+        "seal_text",
+    ),
+)
+def test_contest_claim_cancels_whole_queue_before_any_artifact_when_seal_invalid(
+    queue_store,
+    damage,
+):
+    store = queue_store
+    contest, bots, _pairings, jobs = _sealed_contest_batch(
+        store,
+        f"claim-seal-{damage}",
+    )
+    _damage_contest_execution_seal(store, int(contest["id"]), damage)
+    if damage == "stale":
+        # Seal invalidation is claim's first mutable Contest check: even a
+        # simultaneously unavailable Bot must not split the required batch
+        # cancellation into per-job version outcomes.
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE bots SET is_active=0 WHERE id=?",
+                (int(bots[0]["bot_id"]),),
+            )
+
+    assert _claim(store, slots=2, units=4) is None
+
+    for job in jobs:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["retryable"] == 0
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["last_error"] == "contest_pairing_batch_changed"
+        assert terminal["next_attempt_at"] is None
+        assert terminal["current_match_id"] is None
+    assert _contest_execution_artifact_counts(store, int(contest["id"])) == {
+        "matches": 0,
+        "replays": 0,
+        "attempts": 0,
+        "leases": 0,
+        "bindings": 0,
+    }
+
+
+@pytest.mark.parametrize("transition", ("rollback", "recovery"))
+def test_contest_requeue_transitions_cancel_on_broken_execution_seal(
+    queue_store,
+    transition,
+):
+    store = queue_store
+    contest, _bots, _pairings, jobs = _sealed_contest_batch(
+        store,
+        f"requeue-seal-{transition}",
+    )
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+    _damage_contest_execution_seal(store, int(contest["id"]), "manifest_null")
+
+    if transition == "rollback":
+        assert store.executions.rollback_unstarted_claim(
+            jobs[0]["public_id"],
+            reason="task_start_failed",
+        ) is True
+    else:
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE execution_jobs SET match_config=? WHERE id=?",
+                ('{"time_control_id":"damaged"}', int(claimed["id"])),
+            )
+        assert store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_service_restart"
+        ) == {"requeued": 0, "interrupted": 0, "settling": 0}
+
+    for job in jobs:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["retryable"] == 0
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["current_match_id"] is None
+    assert _contest_execution_artifact_counts(store, int(contest["id"])) == {
+        "matches": 0,
+        "replays": 0,
+        "attempts": 1,
+        "leases": 0,
+        "bindings": 0,
+    }
+
+
+@pytest.mark.parametrize("transition", ("rollback", "recovery"))
+def test_contest_backoff_pairing_schedule_uses_canonical_naive_seconds(
+    queue_store,
+    transition,
+):
+    store = queue_store
+    contest, _bots, pairings, jobs = _sealed_contest_batch(
+        store,
+        f"canonical-backoff-{transition}",
+        size=1,
+    )
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+
+    if transition == "rollback":
+        assert store.executions.rollback_unstarted_claim(
+            jobs[0]["public_id"],
+            reason="task_start_failed",
+        ) is True
+    else:
+        store.executions.mark_cleanup_pending(
+            jobs[0]["public_id"],
+            "contest runtime failure",
+        )
+        store.executions.mark_cleanup_confirmed(
+            jobs[0]["public_id"],
+            int(claimed["attempt_count"]),
+        )
+        assert store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_runtime_recovery"
+        ) == {"requeued": 1, "interrupted": 0, "settling": 0}
+
+    requeued = store.executions.get(jobs[0]["public_id"])
+    pairing = store.list_pairings(int(contest["id"]))[0]
+    scheduled_at = str(pairing["scheduled_at"])
+    parsed_schedule = datetime.fromisoformat(scheduled_at)
+    assert requeued["status"] == "queued"
+    assert pairing["id"] == pairings[0]["id"]
+    assert parsed_schedule.tzinfo is None
+    assert parsed_schedule.microsecond == 0
+    assert scheduled_at == parsed_schedule.isoformat(timespec="seconds")
+    assert scheduled_at == datetime.fromisoformat(
+        str(requeued["next_attempt_at"])
+    ).isoformat(timespec="seconds")
+
+
+@pytest.mark.parametrize("entrypoint", ("recovery", "rollback"))
+@pytest.mark.parametrize("terminal_status", ("finished", "cancelled"))
+@pytest.mark.parametrize("job_status", ("starting", "running", "settling"))
+@pytest.mark.parametrize("match_status", ("pending", "running", "completed"))
+@pytest.mark.parametrize("with_events", (False, True))
+def test_terminal_contest_residual_job_cleanup_preserves_business_artifacts(
+    queue_store,
+    entrypoint,
+    terminal_status,
+    job_status,
+    match_status,
+    with_events,
+):
+    store = queue_store
+    bots = [
+        _bot(
+            store,
+            f"terminal-contest-{entrypoint}-{terminal_status}-"
+            f"{match_status}-{with_events}-{index}",
+        )
+        for index in range(2)
+    ]
+    contest = store.create_contest(
+        f"terminal residual {entrypoint} {terminal_status} {match_status}",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], bot["user_id"], bot["bot_id"])
+        for bot in bots
+    ]
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        stage_key="rr",
+    )
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=1,
+        expected_existing_ids=[pairing["id"]],
+    )
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[0]["bot_id"],
+        bot_b_id=bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    now = datetime.now().isoformat(timespec="seconds")
+    if job_status != "starting":
+        with store._tx() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if job_status == "running":
+                connection.execute(
+                    "UPDATE execution_jobs SET status='running',started_at=? "
+                    "WHERE id=?",
+                    (now, int(claimed["id"])),
+                )
+            else:
+                connection.execute(
+                    "UPDATE execution_jobs SET status='settling',started_at=?,"
+                    "settling_at=?,cleanup_state='pending' WHERE id=?",
+                    (now, now, int(claimed["id"])),
+                )
+            connection.execute(
+                "UPDATE execution_job_attempts SET status=?,started_at=? "
+                "WHERE job_id=? AND attempt_no=?",
+                (
+                    job_status,
+                    now,
+                    int(claimed["id"]),
+                    int(claimed["attempt_count"]),
+                ),
+            )
+    if match_status == "running":
+        store.update_match(match_id, status="running", started_at=now)
+    elif match_status == "completed":
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            reason="completed_before_contest_terminal_cleanup",
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1,
+            },
+            ended_at=now,
+        )
+    if with_events:
+        store.upsert_replay(
+            match_id,
+            json.dumps(
+                [{"type": "historical_event", "match_status": match_status}]
+            ),
+        )
+
+    agent = _local_agent(
+        store,
+        bots[0],
+        f"term-{entrypoint[0]}-{terminal_status[0]}-"
+        f"{match_status[0]}-{int(with_events)}",
+    )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for rank, (entry, bot) in enumerate(zip(entries, bots), start=1):
+            connection.execute(
+                "INSERT INTO contest_stage_results("
+                "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,losses,"
+                "payload_json) VALUES(?,0,'rr',?,?,?,1,0,?)",
+                (
+                    int(contest["id"]),
+                    int(entry["id"]),
+                    int(bot["bot_id"]),
+                    float(3 - rank),
+                    json.dumps({"sentinel": f"stage-{rank}"}),
+                ),
+            )
+            if terminal_status == "finished":
+                connection.execute(
+                    "INSERT INTO contest_official_results("
+                    "contest_id,entry_id,stage_idx,rank,points,bot_id,user_id,"
+                    "tiebreaks_json,awarded) VALUES(?,?,0,?,?,?,?,?,?)",
+                    (
+                        int(contest["id"]),
+                        int(entry["id"]),
+                        rank,
+                        float(3 - rank),
+                        int(bot["bot_id"]),
+                        int(bot["user_id"]),
+                        json.dumps({"sentinel": f"official-{rank}"}),
+                        f"award-{rank}",
+                    ),
+                )
+        connection.execute(
+            "UPDATE contests SET status=?,official_results_ready=?,ends_at=? "
+            "WHERE id=?",
+            (
+                terminal_status,
+                1 if terminal_status == "finished" else 0,
+                now,
+                int(contest["id"]),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?,?,?,0,'active',?)",
+            (
+                int(agent["id"]),
+                str(job["public_id"]),
+                int(claimed["attempt_count"]),
+                now,
+            ),
+        )
+
+    def business_snapshot() -> dict:
+        with store._tx() as connection:
+            def one(sql: str, params: tuple) -> dict | None:
+                row = connection.execute(sql, params).fetchone()
+                return dict(row) if row is not None else None
+
+            def many(sql: str, params: tuple) -> list[dict]:
+                return [
+                    dict(row) for row in connection.execute(sql, params).fetchall()
+                ]
+
+            return {
+                "contest": one(
+                    "SELECT * FROM contests WHERE id=?", (int(contest["id"]),)
+                ),
+                "pairing": one(
+                    "SELECT * FROM contest_pairings WHERE id=?",
+                    (int(pairing["id"]),),
+                ),
+                "match": one(
+                    "SELECT * FROM matches_holdem WHERE id=?", (match_id,)
+                ),
+                "index": one(
+                    "SELECT * FROM matches_index WHERE id=?", (match_id,)
+                ),
+                "replay": one(
+                    "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                ),
+                "rating_policy": one(
+                    "SELECT * FROM match_rating_policies WHERE match_id=?",
+                    (match_id,),
+                ),
+                "stage_results": many(
+                    "SELECT * FROM contest_stage_results WHERE contest_id=? ORDER BY id",
+                    (int(contest["id"]),),
+                ),
+                "official_results": many(
+                    "SELECT * FROM contest_official_results "
+                    "WHERE contest_id=? ORDER BY id",
+                    (int(contest["id"]),),
+                ),
+            }
+
+    before = business_snapshot()
+    before_attempt = dict(
+        store._conn.execute(
+            "SELECT * FROM execution_job_attempts WHERE job_id=? AND attempt_no=?",
+            (int(claimed["id"]), int(claimed["attempt_count"])),
+        ).fetchone()
+    )
+    if entrypoint == "recovery":
+        assert store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_service_restart"
+        ) == {"requeued": 0, "interrupted": 0, "settling": 0}
+    else:
+        assert store.executions.rollback_unstarted_claim(
+            job["public_id"],
+            reason="task_start_failed",
+        ) is True
+
+    assert business_snapshot() == before
+    terminal_job = store.executions.get(job["public_id"])
+    assert terminal_job["status"] == "cancelled"
+    assert terminal_job["retryable"] == 0
+    assert terminal_job["cancel_requested"] == 0
+    assert terminal_job["cleanup_state"] == "confirmed"
+    assert terminal_job["current_match_id"] == match_id
+    assert terminal_job["terminal_reason"] == f"contest_{terminal_status}"
+    assert terminal_job["last_error"] == ""
+    assert terminal_job["next_attempt_at"] is None
+    assert terminal_job["terminal_at"] is not None
+    terminal_attempt = dict(
+        store._conn.execute(
+            "SELECT * FROM execution_job_attempts WHERE job_id=? AND attempt_no=?",
+            (int(claimed["id"]), int(claimed["attempt_count"])),
+        ).fetchone()
+    )
+    assert terminal_attempt["status"] == "cancelled"
+    assert terminal_attempt["events_observed"] == before_attempt["events_observed"]
+    assert terminal_attempt["terminal_reason"] == f"contest_{terminal_status}"
+    assert terminal_attempt["terminal_at"] is not None
+    terminal_lease = store._conn.execute(
+        "SELECT status,released_at,terminal_reason FROM local_ai_leases "
+        "WHERE job_public_id=? AND attempt_no=?",
+        (str(job["public_id"]), int(claimed["attempt_count"])),
+    ).fetchone()
+    assert terminal_lease["status"] == "released"
+    assert terminal_lease["released_at"] is not None
+    assert terminal_lease["terminal_reason"] == f"contest_{terminal_status}"
+
+
+@pytest.mark.parametrize("source", (EXECUTION_SOURCE_MANUAL, EXECUTION_SOURCE_AUTO))
+@pytest.mark.parametrize("affiliation", ("direct", "pairing"))
+@pytest.mark.parametrize(
+    "contest_state", ("published", "running", "rest", "showcase", "finished", "cancelled")
+)
+@pytest.mark.parametrize("job_status", ("starting", "running", "settling"))
+@pytest.mark.parametrize("match_status", ("pending", "running", "completed"))
+@pytest.mark.parametrize("with_events", (False, True))
+def test_durable_contest_affiliation_state_machine_for_noncontest_jobs(
+    queue_store,
+    source,
+    affiliation,
+    contest_state,
+    job_status,
+    match_status,
+    with_events,
+):
+    store = queue_store
+    key = (
+        f"aff-{source[0]}-{affiliation[0]}-{contest_state[0]}-"
+        f"{job_status[0]}-{match_status[0]}-{int(with_events)}"
+    )
+    bots = [_bot(store, f"{key}-{index}") for index in range(2)]
+    _verify_projection(store)
+    job = _enqueue_pair(store, (bots[0], bots[1]), source=source)
+    claimed = (
+        _claim_auto(store)
+        if source == EXECUTION_SOURCE_AUTO
+        else _claim(store, slots=1, units=2)
+    )
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    _force_active_execution_state(
+        store,
+        claimed,
+        job_status,
+        events_observed=with_events,
+    )
+    now = datetime.now().isoformat(timespec="seconds")
+    if match_status == "running":
+        store.update_match(match_id, status="running", started_at=now)
+    elif match_status == "completed":
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            reason="completed_before_affiliation_cleanup",
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1,
+            },
+            ended_at=now,
+        )
+    if with_events:
+        store.upsert_replay(
+            match_id,
+            json.dumps([{"type": "affiliation_event", "status": match_status}]),
+        )
+
+    contest = store.create_contest(
+        f"terminal affiliation {key}",
+        bots[0]["user_id"],
+        status="published",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    if affiliation == "pairing":
+        store.add_pairing(
+            int(contest["id"]),
+            bots[0]["bot_id"],
+            bots[1]["bot_id"],
+            bot_a_version_id=bots[0]["version_id"],
+            bot_b_version_id=bots[1]["version_id"],
+            match_id=match_id,
+        )
+    agent = _local_agent(store, bots[0], f"aff-{source[0]}-{affiliation[0]}")
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if affiliation == "direct":
+            connection.execute(
+                "UPDATE matches_holdem SET contest_id=? WHERE id=?",
+                (int(contest["id"]), match_id),
+            )
+        connection.execute(
+            "UPDATE contests SET status=?,showcase_key=?,official_results_ready=?,"
+            "ends_at=? WHERE id=?",
+            (
+                "running" if contest_state == "showcase" else contest_state,
+                f"showcase-{key}" if contest_state == "showcase" else None,
+                int(contest_state == "finished"),
+                now if contest_state in {"finished", "cancelled"} else None,
+                int(contest["id"]),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?,?,?,0,'active',?)",
+            (
+                int(agent["id"]),
+                str(job["public_id"]),
+                int(claimed["attempt_count"]),
+                now,
+            ),
+        )
+
+    def business_snapshot() -> dict:
+        with store._tx() as connection:
+            def one(sql: str, params: tuple) -> dict | None:
+                row = connection.execute(sql, params).fetchone()
+                return dict(row) if row is not None else None
+
+            return {
+                "contest": one(
+                    "SELECT * FROM contests WHERE id=?", (int(contest["id"]),)
+                ),
+                "pairings": [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM contest_pairings WHERE contest_id=? ORDER BY id",
+                        (int(contest["id"]),),
+                    ).fetchall()
+                ],
+                "match": one(
+                    "SELECT * FROM matches_holdem WHERE id=?", (match_id,)
+                ),
+                "index": one(
+                    "SELECT * FROM matches_index WHERE id=?", (match_id,)
+                ),
+                "replay": one(
+                    "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                ),
+                "rating_policy": one(
+                    "SELECT * FROM match_rating_policies WHERE match_id=?",
+                    (match_id,),
+                ),
+            }
+
+    before = business_snapshot()
+    before_job = store.executions.get(job["public_id"])
+    before_attempt = dict(
+        store._conn.execute(
+            "SELECT * FROM execution_job_attempts WHERE job_id=? AND attempt_no=?",
+            (int(claimed["id"]), int(claimed["attempt_count"])),
+        ).fetchone()
+    )
+    before_lease = dict(
+        store._conn.execute(
+            "SELECT * FROM local_ai_leases WHERE job_public_id=? AND attempt_no=?",
+            (str(job["public_id"]), int(claimed["attempt_count"])),
+        ).fetchone()
+    )
+    if contest_state in {"published", "running", "rest"}:
+        with pytest.raises(
+            ExecutionInvariantError,
+            match="non-Contest execution durable affiliation",
+        ):
+            store.executions.recover_after_namespace_cleanup(
+                interruption_reason="orphan_after_service_restart"
+            )
+        assert business_snapshot() == before
+        assert store.executions.get(job["public_id"]) == before_job
+        assert dict(
+            store._conn.execute(
+                "SELECT * FROM execution_job_attempts "
+                "WHERE job_id=? AND attempt_no=?",
+                (int(claimed["id"]), int(claimed["attempt_count"])),
+            ).fetchone()
+        ) == before_attempt
+        assert dict(
+            store._conn.execute(
+                "SELECT * FROM local_ai_leases WHERE job_public_id=? "
+                "AND attempt_no=?",
+                (str(job["public_id"]), int(claimed["attempt_count"])),
+            ).fetchone()
+        ) == before_lease
+        return
+
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {"requeued": 0, "interrupted": 0, "settling": 0}
+
+    assert business_snapshot() == before
+    protected_reason = (
+        "contest_showcase_read_only"
+        if contest_state == "showcase"
+        else f"contest_{contest_state}"
+    )
+    terminal_job = store.executions.get(job["public_id"])
+    assert terminal_job["source"] == source
+    assert terminal_job["status"] == "cancelled"
+    assert terminal_job["current_match_id"] == match_id
+    assert terminal_job["retryable"] == 0
+    assert terminal_job["cleanup_state"] == "confirmed"
+    assert terminal_job["terminal_reason"] == protected_reason
+    terminal_attempt = dict(
+        store._conn.execute(
+            "SELECT * FROM execution_job_attempts WHERE job_id=? AND attempt_no=?",
+            (int(claimed["id"]), int(claimed["attempt_count"])),
+        ).fetchone()
+    )
+    assert terminal_attempt["status"] == "cancelled"
+    assert terminal_attempt["events_observed"] == before_attempt["events_observed"]
+    assert terminal_attempt["terminal_reason"] == protected_reason
+    terminal_lease = store._conn.execute(
+        "SELECT status,released_at,terminal_reason FROM local_ai_leases "
+        "WHERE job_public_id=? AND attempt_no=?",
+        (str(job["public_id"]), int(claimed["attempt_count"])),
+    ).fetchone()
+    assert terminal_lease["status"] == "released"
+    assert terminal_lease["released_at"] is not None
+    assert terminal_lease["terminal_reason"] == protected_reason
+
+
+@pytest.mark.parametrize("terminal_side", ("reported", "durable"))
+@pytest.mark.parametrize("terminal_status", ("finished", "cancelled"))
+@pytest.mark.parametrize("job_status", ("starting", "running", "settling"))
+@pytest.mark.parametrize("match_status", ("pending", "running", "completed"))
+@pytest.mark.parametrize("with_events", (False, True))
+def test_contest_job_id_conflict_uses_durable_match_affiliation_fail_closed(
+    queue_store,
+    terminal_side,
+    terminal_status,
+    job_status,
+    match_status,
+    with_events,
+):
+    store = queue_store
+    key = (
+        f"conf-{terminal_side[0]}-{terminal_status[0]}-{job_status[0]}-"
+        f"{match_status[0]}-{int(with_events)}"
+    )
+    reported, bots, pairings, jobs = _sealed_contest_batch(store, key, size=1)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+    match_id = str(claimed["current_match_id"])
+    _force_active_execution_state(
+        store,
+        claimed,
+        job_status,
+        events_observed=with_events,
+    )
+    now = datetime.now().isoformat(timespec="seconds")
+    if match_status == "running":
+        store.update_match(match_id, status="running", started_at=now)
+    elif match_status == "completed":
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            reason="completed_before_contest_id_conflict",
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1,
+            },
+            ended_at=now,
+        )
+    if with_events:
+        store.upsert_replay(
+            match_id,
+            json.dumps([{"type": "conflict_event", "status": match_status}]),
+        )
+
+    durable = store.create_contest(
+        f"durable affiliation {key}",
+        bots[0]["user_id"],
+        status="published",
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    agent = _local_agent(
+        store,
+        bots[0],
+        f"conf-{terminal_side[0]}-{terminal_status[0]}-{job_status[0]}",
+    )
+    terminal_contest_id = (
+        int(reported["id"])
+        if terminal_side == "reported"
+        else int(durable["id"])
+    )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE matches_holdem SET contest_id=? WHERE id=?",
+            (int(durable["id"]), match_id),
+        )
+        if terminal_side == "reported":
+            connection.execute(
+                "UPDATE contest_pairings SET match_id=NULL WHERE id=?",
+                (int(pairings[0]["id"]),),
+            )
+        connection.execute(
+            "UPDATE contests SET status=?,official_results_ready=?,ends_at=? "
+            "WHERE id=?",
+            (
+                terminal_status,
+                int(terminal_status == "finished"),
+                now,
+                terminal_contest_id,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?,?,?,0,'active',?)",
+            (
+                int(agent["id"]),
+                str(jobs[0]["public_id"]),
+                int(claimed["attempt_count"]),
+                now,
+            ),
+        )
+
+    def snapshot() -> dict:
+        with store._tx() as connection:
+            def one(sql: str, params: tuple) -> dict | None:
+                row = connection.execute(sql, params).fetchone()
+                return dict(row) if row is not None else None
+
+            return {
+                "business": {
+                    "contests": [
+                        dict(row)
+                        for row in connection.execute(
+                            "SELECT * FROM contests WHERE id IN (?,?) ORDER BY id",
+                            (int(reported["id"]), int(durable["id"])),
+                        ).fetchall()
+                    ],
+                    "pairings": [
+                        dict(row)
+                        for row in connection.execute(
+                            "SELECT * FROM contest_pairings WHERE contest_id IN (?,?) "
+                            "ORDER BY id",
+                            (int(reported["id"]), int(durable["id"])),
+                        ).fetchall()
+                    ],
+                    "match": one(
+                        "SELECT * FROM matches_holdem WHERE id=?", (match_id,)
+                    ),
+                    "index": one(
+                        "SELECT * FROM matches_index WHERE id=?", (match_id,)
+                    ),
+                    "replay": one(
+                        "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                    ),
+                    "rating_policy": one(
+                        "SELECT * FROM match_rating_policies WHERE match_id=?",
+                        (match_id,),
+                    ),
+                },
+                "job": one(
+                    "SELECT * FROM execution_jobs WHERE id=?", (int(claimed["id"]),)
+                ),
+                "attempt": one(
+                    "SELECT * FROM execution_job_attempts "
+                    "WHERE job_id=? AND attempt_no=?",
+                    (int(claimed["id"]), int(claimed["attempt_count"])),
+                ),
+                "lease": one(
+                    "SELECT * FROM local_ai_leases WHERE job_public_id=? "
+                    "AND attempt_no=?",
+                    (
+                        str(jobs[0]["public_id"]),
+                        int(claimed["attempt_count"]),
+                    ),
+                ),
+            }
+
+    before = snapshot()
+    if terminal_side == "reported":
+        with pytest.raises(
+            ExecutionInvariantError,
+            match="durable affiliation changed",
+        ):
+            store.executions.recover_after_namespace_cleanup(
+                interruption_reason="orphan_after_service_restart"
+            )
+        assert snapshot() == before
+        return
+
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {"requeued": 0, "interrupted": 0, "settling": 0}
+    after = snapshot()
+    assert after["business"] == before["business"]
+    assert after["job"]["status"] == "cancelled"
+    assert after["job"]["current_match_id"] == match_id
+    assert after["job"]["terminal_reason"] == f"contest_{terminal_status}"
+    assert after["attempt"]["status"] == "cancelled"
+    assert after["attempt"]["events_observed"] == before["attempt"][
+        "events_observed"
+    ]
+    assert after["attempt"]["terminal_reason"] == f"contest_{terminal_status}"
+    assert after["lease"]["status"] == "released"
+    assert after["lease"]["terminal_reason"] == f"contest_{terminal_status}"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "exact_published",
+        "exact_running",
+        "exact_rest",
+        "multiple_active",
+        "conflict_active",
+        "no_affiliation",
+        "showcase_exact",
+        "showcase_multiple",
+    ),
+)
+@pytest.mark.parametrize("job_status", ("starting", "running", "settling"))
+@pytest.mark.parametrize("match_status", ("pending", "running", "completed"))
+@pytest.mark.parametrize("with_events", (False, True))
+def test_contest_job_durable_affiliation_state_machine(
+    queue_store,
+    scenario,
+    job_status,
+    match_status,
+    with_events,
+):
+    store = queue_store
+    key = (
+        f"state-{scenario[:4]}-{job_status[0]}-{match_status[0]}-"
+        f"{int(with_events)}"
+    )
+    reported, bots, pairings, jobs = _sealed_contest_batch(store, key, size=1)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+    match_id = str(claimed["current_match_id"])
+    _force_active_execution_state(
+        store,
+        claimed,
+        job_status,
+        events_observed=with_events,
+    )
+    now = datetime.now().isoformat(timespec="seconds")
+    if match_status == "running":
+        store.update_match(match_id, status="running", started_at=now)
+    elif match_status == "completed":
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            reason="completed_before_affiliation_state_check",
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1,
+            },
+            ended_at=now,
+        )
+    if with_events:
+        store.upsert_replay(
+            match_id,
+            json.dumps([{"type": "state_event", "status": match_status}]),
+        )
+
+    other = None
+    if scenario in {"multiple_active", "conflict_active", "showcase_multiple"}:
+        other = store.create_contest(
+            f"other affiliation {key}",
+            bots[0]["user_id"],
+            status="published",
+            game_id="holdem",
+            stages_json=_valid_contest_stages_json(),
+        )
+    agent = _local_agent(store, bots[0], f"state-{scenario[:4]}-{job_status[0]}")
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if scenario.startswith("exact_"):
+            connection.execute(
+                "UPDATE contests SET status=? WHERE id=?",
+                (scenario.removeprefix("exact_"), int(reported["id"])),
+            )
+        elif scenario == "no_affiliation":
+            connection.execute(
+                "UPDATE matches_holdem SET contest_id=NULL WHERE id=?", (match_id,)
+            )
+            connection.execute(
+                "UPDATE contest_pairings SET match_id=NULL WHERE id=?",
+                (int(pairings[0]["id"]),),
+            )
+        elif scenario in {"multiple_active", "conflict_active"}:
+            connection.execute(
+                "UPDATE matches_holdem SET contest_id=? WHERE id=?",
+                (int(other["id"]), match_id),
+            )
+            if scenario == "conflict_active":
+                connection.execute(
+                    "UPDATE contest_pairings SET match_id=NULL WHERE id=?",
+                    (int(pairings[0]["id"]),),
+                )
+        elif scenario == "showcase_exact":
+            connection.execute(
+                "UPDATE contests SET status='running',showcase_key=? WHERE id=?",
+                (f"showcase-{key}", int(reported["id"])),
+            )
+        else:
+            assert scenario == "showcase_multiple"
+            connection.execute(
+                "UPDATE matches_holdem SET contest_id=? WHERE id=?",
+                (int(other["id"]), match_id),
+            )
+            connection.execute(
+                "UPDATE contests SET status='running',showcase_key=? WHERE id=?",
+                (f"showcase-{key}", int(other["id"])),
+            )
+        connection.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?,?,?,0,'active',?)",
+            (
+                int(agent["id"]),
+                str(jobs[0]["public_id"]),
+                int(claimed["attempt_count"]),
+                now,
+            ),
+        )
+
+    contest_ids = [int(reported["id"])]
+    if other is not None:
+        contest_ids.append(int(other["id"]))
+
+    def snapshot() -> dict:
+        placeholders = ",".join("?" for _ in contest_ids)
+        with store._tx() as connection:
+            def one(sql: str, params: tuple) -> dict | None:
+                row = connection.execute(sql, params).fetchone()
+                return dict(row) if row is not None else None
+
+            return {
+                "business": {
+                    "contests": [
+                        dict(row)
+                        for row in connection.execute(
+                            f"SELECT * FROM contests WHERE id IN ({placeholders}) "
+                            "ORDER BY id",
+                            tuple(contest_ids),
+                        ).fetchall()
+                    ],
+                    "pairings": [
+                        dict(row)
+                        for row in connection.execute(
+                            f"SELECT * FROM contest_pairings "
+                            f"WHERE contest_id IN ({placeholders}) ORDER BY id",
+                            tuple(contest_ids),
+                        ).fetchall()
+                    ],
+                    "match": one(
+                        "SELECT * FROM matches_holdem WHERE id=?", (match_id,)
+                    ),
+                    "index": one(
+                        "SELECT * FROM matches_index WHERE id=?", (match_id,)
+                    ),
+                    "replay": one(
+                        "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                    ),
+                    "rating_policy": one(
+                        "SELECT * FROM match_rating_policies WHERE match_id=?",
+                        (match_id,),
+                    ),
+                },
+                "job": one(
+                    "SELECT * FROM execution_jobs WHERE id=?", (int(claimed["id"]),)
+                ),
+                "attempt": one(
+                    "SELECT * FROM execution_job_attempts "
+                    "WHERE job_id=? AND attempt_no=?",
+                    (int(claimed["id"]), int(claimed["attempt_count"])),
+                ),
+                "lease": one(
+                    "SELECT * FROM local_ai_leases WHERE job_public_id=? "
+                    "AND attempt_no=?",
+                    (
+                        str(jobs[0]["public_id"]),
+                        int(claimed["attempt_count"]),
+                    ),
+                ),
+            }
+
+    before = snapshot()
+    invalid = {"multiple_active", "conflict_active", "no_affiliation"}
+    if scenario in invalid:
+        with pytest.raises(
+            ExecutionInvariantError,
+            match="durable affiliation changed",
+        ):
+            store.executions.recover_after_namespace_cleanup(
+                interruption_reason="orphan_after_service_restart"
+            )
+        assert snapshot() == before
+        return
+
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
+    if scenario.startswith("showcase_"):
+        assert recovered == {"requeued": 0, "interrupted": 0, "settling": 0}
+        after = snapshot()
+        assert after["business"] == before["business"]
+        assert after["job"]["status"] == "cancelled"
+        assert after["job"]["current_match_id"] == match_id
+        assert after["job"]["terminal_reason"] == "contest_showcase_read_only"
+        assert after["attempt"]["status"] == "cancelled"
+        assert after["attempt"]["events_observed"] == before["attempt"][
+            "events_observed"
+        ]
+        assert after["attempt"]["terminal_reason"] == "contest_showcase_read_only"
+        assert after["lease"]["status"] == "released"
+        assert after["lease"]["terminal_reason"] == "contest_showcase_read_only"
+        return
+
+    if match_status == "completed":
+        assert recovered == {"requeued": 0, "interrupted": 0, "settling": 1}
+        active = store.executions.get(jobs[0]["public_id"])
+        assert active["status"] == "settling"
+        assert active["current_match_id"] == match_id
+        assert store.get_match(match_id)["status"] == "completed"
+    elif scenario == "exact_rest":
+        # Durable affiliation permits the existing recovery state machine to
+        # run.  REST is intentionally non-executable under the stricter seal
+        # gate, so a non-terminal physical Match is cancelled rather than
+        # requeued; this is distinct from an affiliation invariant failure.
+        assert recovered == {"requeued": 0, "interrupted": 0, "settling": 0}
+        terminal = store.executions.get(jobs[0]["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["current_match_id"] is None
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert store.list_pairings(int(reported["id"]))[0]["match_id"] is None
+        if with_events:
+            assert store.get_match(match_id)["status"] == "aborted"
+        else:
+            assert store.get_match(match_id) is None
+    else:
+        assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
+        queued = store.executions.get(jobs[0]["public_id"])
+        assert queued["status"] == "queued"
+        assert queued["current_match_id"] is None
+        assert store.list_pairings(int(reported["id"]))[0]["match_id"] is None
+        if with_events:
+            assert store.get_match(match_id)["status"] == "aborted"
+        else:
+            assert store.get_match(match_id) is None
+
+
+@pytest.mark.parametrize("terminal_status", ("finished", "cancelled"))
+@pytest.mark.parametrize("job_status", ("starting", "running", "settling"))
+@pytest.mark.parametrize("with_events", (False, True))
+def test_missing_match_uses_terminal_contest_job_affiliation_fallback(
+    queue_store,
+    terminal_status,
+    job_status,
+    with_events,
+):
+    store = queue_store
+    key = f"missing-{terminal_status[0]}-{job_status[0]}-{int(with_events)}"
+    contest, bots, pairings, jobs = _sealed_contest_batch(store, key, size=1)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+    match_id = str(claimed["current_match_id"])
+    _force_active_execution_state(
+        store,
+        claimed,
+        job_status,
+        events_observed=with_events,
+    )
+    if with_events:
+        store.upsert_replay(match_id, json.dumps([{"type": "preserved_event"}]))
+    agent = _local_agent(
+        store,
+        bots[0],
+        f"missing-{terminal_status[0]}-{job_status[0]}-{int(with_events)}",
+    )
+    now = datetime.now().isoformat(timespec="seconds")
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contest_pairings SET match_id=NULL WHERE id=?",
+            (int(pairings[0]["id"]),),
+        )
+        connection.execute("DELETE FROM matches_holdem WHERE id=?", (match_id,))
+        connection.execute(
+            "UPDATE contests SET status=?,official_results_ready=?,ends_at=? "
+            "WHERE id=?",
+            (
+                terminal_status,
+                int(terminal_status == "finished"),
+                now,
+                int(contest["id"]),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?,?,?,0,'active',?)",
+            (
+                int(agent["id"]),
+                str(jobs[0]["public_id"]),
+                int(claimed["attempt_count"]),
+                now,
+            ),
+        )
+
+    def business_snapshot() -> dict:
+        with store._tx() as connection:
+            return {
+                "contest": dict(
+                    connection.execute(
+                        "SELECT * FROM contests WHERE id=?", (int(contest["id"]),)
+                    ).fetchone()
+                ),
+                "pairing": dict(
+                    connection.execute(
+                        "SELECT * FROM contest_pairings WHERE id=?",
+                        (int(pairings[0]["id"]),),
+                    ).fetchone()
+                ),
+                "match": connection.execute(
+                    "SELECT * FROM matches_holdem WHERE id=?", (match_id,)
+                ).fetchone(),
+                "index": dict(
+                    connection.execute(
+                        "SELECT * FROM matches_index WHERE id=?", (match_id,)
+                    ).fetchone()
+                ),
+                "replay": dict(
+                    connection.execute(
+                        "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                    ).fetchone()
+                ),
+                "rating_policy": dict(
+                    connection.execute(
+                        "SELECT * FROM match_rating_policies WHERE match_id=?",
+                        (match_id,),
+                    ).fetchone()
+                ),
+            }
+
+    before = business_snapshot()
+    assert before["match"] is None
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {"requeued": 0, "interrupted": 0, "settling": 0}
+    assert business_snapshot() == before
+    terminal_job = store.executions.get(jobs[0]["public_id"])
+    assert terminal_job["status"] == "cancelled"
+    assert terminal_job["current_match_id"] == match_id
+    assert terminal_job["terminal_reason"] == f"contest_{terminal_status}"
+    attempt = store._conn.execute(
+        "SELECT status,events_observed,terminal_reason "
+        "FROM execution_job_attempts WHERE job_id=? AND attempt_no=?",
+        (int(claimed["id"]), int(claimed["attempt_count"])),
+    ).fetchone()
+    assert tuple(attempt) == (
+        "cancelled",
+        int(with_events),
+        f"contest_{terminal_status}",
+    )
+    lease = store._conn.execute(
+        "SELECT status,terminal_reason FROM local_ai_leases "
+        "WHERE job_public_id=? AND attempt_no=?",
+        (str(jobs[0]["public_id"]), int(claimed["attempt_count"])),
+    ).fetchone()
+    assert tuple(lease) == ("released", f"contest_{terminal_status}")
+
+
+def test_contest_manual_retry_cancels_instead_of_requeueing_after_seal_break(
+    queue_store,
+):
+    store = queue_store
+    contest, bots, _pairings, jobs = _sealed_contest_batch(
+        store,
+        "retry-seal",
+        size=1,
+    )
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == jobs[0]["public_id"]
+    match_id = str(claimed["current_match_id"])
+    now = datetime.now().isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE matches_holdem SET status='aborted',reason='platform_error',"
+            "ended_at=? WHERE id=?",
+            (now, match_id),
+        )
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "cleanup_state='confirmed',terminal_at=? WHERE id=?",
+            (now, int(claimed["id"])),
+        )
+    _damage_contest_execution_seal(store, int(contest["id"]), "seal_null")
+
+    with pytest.raises(ValueError, match="赛事当前阶段执行快照"):
+        store.executions.retry(
+            jobs[0]["public_id"],
+            owner_user_id=bots[0]["user_id"],
+        )
+
+    terminal = store.executions.get(jobs[0]["public_id"])
+    assert terminal["status"] == "cancelled"
+    assert terminal["retryable"] == 0
+    assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+    assert terminal["current_match_id"] == match_id
+    assert len(store.list_matches(contest_id=int(contest["id"]))) == 1
+
+
+@pytest.mark.parametrize("deleted_pairing_index", [0, 1])
+def test_published_claim_cancels_batch_when_manifest_count_changed(
+    queue_store, deleted_pairing_index
+):
+    store = queue_store
+    bots = [_bot(store, f"manifest-claim-{index}") for index in range(2)]
+    contest = store.create_contest(
+        "Damaged published manifest claim",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[0]["bot_id"],
+            bots[1]["bot_id"],
+            bot_a_version_id=bots[0]["version_id"],
+            bot_b_version_id=bots[1]["version_id"],
+        )
+        for _ in range(2)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=2,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[0]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[0]["bot_id"],
+            bot_b_id=bots[1]["bot_id"],
+            bot_a_version_id=bots[0]["version_id"],
+            bot_b_version_id=bots[1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for pairing in pairings
+    ]
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?",
+            (pairings[deleted_pairing_index]["id"],),
+        )
+
+    assert _claim(store, slots=1, units=2) is None
+    for job in jobs:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["current_match_id"] is None
+    assert store.get_contest(contest["id"])["status"] == "published"
+    assert store.list_matches(contest_id=contest["id"]) == []
+    remaining = store.list_contest_pairings(contest["id"])
+    assert len(remaining) == 1
+    assert remaining[0]["status"] == "pending"
+    assert remaining[0]["match_id"] is None
+
+
+@pytest.mark.parametrize("deleted_pairing_index", [1, 2])
+def test_running_claim_cancels_batch_when_manifest_count_changed(
+    queue_store, deleted_pairing_index
+):
+    store = queue_store
+    bots = [_bot(store, f"running-manifest-{index}") for index in range(6)]
+    contest = store.create_contest(
+        "Damaged running manifest claim",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+        )
+        for index in range(3)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=3,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[index * 2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[index * 2]["bot_id"],
+            bot_b_id=bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for index, pairing in enumerate(pairings)
+    ]
+
+    first = store.executions.claim_next(
+        max_match_slots=3,
+        max_sandbox_units=6,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=3,
+    )
+    assert first and first["public_id"] == jobs[0]["public_id"]
+    assert store.get_contest(contest["id"])["status"] == "running"
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?",
+            (pairings[deleted_pairing_index]["id"],),
+        )
+
+    assert (
+        store.executions.claim_next(
+            max_match_slots=3,
+            max_sandbox_units=6,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=3,
+        )
+        is None
+    )
+    assert len(store.list_matches(contest_id=contest["id"])) == 1
+    for job in jobs[1:]:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["current_match_id"] is None
+
+
+@pytest.mark.parametrize(
+    "mutation_kind",
+    [
+        "round",
+        "entries",
+        "bots",
+        "versions",
+        "stage_key",
+        "group",
+        "bracket",
+        "color",
+        "series_index",
+        "series_size",
+        "tiebreak_group",
+        "tiebreak_game",
+        "pairing_seed",
+        "published_at",
+        "combined",
+    ],
+)
+def test_running_claim_cancels_batch_when_pending_sibling_identity_changes(
+    queue_store, mutation_kind
+):
+    """A same-cardinality in-place rewrite must invalidate the whole seal."""
+    store = queue_store
+    bots = [
+        _bot(store, f"running-identity-{mutation_kind}-{index}")
+        for index in range(8)
+    ]
+    contest = store.create_contest(
+        f"Damaged running identity {mutation_kind}",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    entries = [
+        store.add_contest_entry(
+            contest["id"], bot["user_id"], bot["bot_id"]
+        )
+        for bot in bots
+    ]
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            entry_a_id=entries[index * 2]["id"],
+            entry_b_id=entries[index * 2 + 1]["id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            stage_key="rr",
+        )
+        for index in range(3)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=3,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[index * 2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[index * 2]["bot_id"],
+            bot_b_id=bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for index, pairing in enumerate(pairings)
+    ]
+    first = _claim(store, slots=3, units=6)
+    assert first and first["public_id"] == jobs[0]["public_id"]
+    matches_before = store.list_matches(contest_id=contest["id"])
+    assert len(matches_before) == 1
+
+    mutations = {
+        "round": {"round_num": 2},
+        "entries": {
+            "entry_a_id": entries[6]["id"],
+            "entry_b_id": entries[7]["id"],
+        },
+        "bots": {
+            "bot_a_id": bots[6]["bot_id"],
+            "bot_b_id": bots[7]["bot_id"],
+        },
+        "versions": {
+            "bot_a_version_id": bots[6]["version_id"],
+            "bot_b_version_id": bots[7]["version_id"],
+        },
+        "stage_key": {"stage_key": "rewritten"},
+        "group": {"group_id": "B"},
+        "bracket": {"bracket_slot": 2},
+        "color": {"color_first": 1},
+        "series_index": {"series_index": 2},
+        "series_size": {"series_size": 3},
+        "tiebreak_group": {"tiebreak_group": 2},
+        "tiebreak_game": {"tiebreak_game": 2},
+        "pairing_seed": {"pairing_seed": 919191},
+        "published_at": {"published_at": "2026-09-02T01:02:03"},
+        "combined": {
+            "round_num": 3,
+            "entry_a_id": entries[6]["id"],
+            "entry_b_id": entries[7]["id"],
+            "bot_a_id": bots[6]["bot_id"],
+            "bot_b_id": bots[7]["bot_id"],
+            "bot_a_version_id": bots[6]["version_id"],
+            "bot_b_version_id": bots[7]["version_id"],
+            "stage_key": "rewritten",
+            "group_id": "B",
+            "bracket_slot": 2,
+            "color_first": 1,
+        },
+    }
+    preparation = {
+        "series_index": {"series_size": 3},
+        "tiebreak_group": {"tiebreak_group": 1, "tiebreak_game": 1},
+        "tiebreak_game": {"tiebreak_group": 1, "tiebreak_game": 1},
+    }.get(mutation_kind)
+    if preparation:
+        with store._tx() as connection:
+            connection.execute(
+                "UPDATE contest_pairings SET "
+                + ",".join(f"{field}=?" for field in preparation)
+                + " WHERE id=?",
+                (*preparation.values(), pairings[1]["id"]),
+            )
+            # Test preparation establishes a valid revision baseline; the next
+            # single-field write is the mutation under test.
+            connection.execute(
+                "UPDATE contests SET sealed_pairing_topology_revision="
+                "pairing_topology_revision WHERE id=?",
+                (contest["id"],),
+            )
+    revision_before = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    assert revision_before[0] == revision_before[1]
+    mutation = mutations[mutation_kind]
+    if mutation_kind in {
+        "series_index", "series_size", "tiebreak_group", "tiebreak_game",
+        "pairing_seed", "published_at",
+    }:
+        with store._tx() as connection:
+            connection.execute(
+                "UPDATE contest_pairings SET "
+                + ",".join(f"{field}=?" for field in mutation)
+                + " WHERE id=?",
+                (*mutation.values(), pairings[1]["id"]),
+            )
+    else:
+        store.update_pairing(pairings[1]["id"], **mutation)
+    revision_after = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    assert revision_after == (revision_before[0] + 1, revision_before[1])
+
+    assert _claim(store, slots=3, units=6) is None
+    assert [
+        match["id"]
+        for match in store.list_matches(contest_id=contest["id"])
+    ] == [matches_before[0]["id"]]
+    for job in jobs[1:]:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+        assert terminal["current_match_id"] is None
+
+
+def test_running_claim_cancels_same_count_batch_with_orphan_job(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"running-orphan-{index}") for index in range(6)]
+    contest = store.create_contest(
+        "Damaged running same-count manifest",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+        )
+        for index in range(3)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=3,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[index * 2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[index * 2]["bot_id"],
+            bot_b_id=bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for index, pairing in enumerate(pairings)
+    ]
+    first = store.executions.claim_next(
+        max_match_slots=3,
+        max_sandbox_units=6,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=3,
+    )
+    assert first and first["public_id"] == jobs[0]["public_id"]
+
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?", (pairings[2]["id"],)
+        )
+    replacement = store.add_pairing(
+        contest["id"],
+        bots[4]["bot_id"],
+        bots[5]["bot_id"],
+        bot_a_version_id=bots[4]["version_id"],
+        bot_b_version_id=bots[5]["version_id"],
+    )
+    assert replacement["id"] != pairings[2]["id"]
+    assert len(store.list_contest_pairings(contest["id"], stage_idx=0)) == 3
+
+    assert (
+        store.executions.claim_next(
+            max_match_slots=3,
+            max_sandbox_units=6,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=3,
+        )
+        is None
+    )
+    assert len(store.list_matches(contest_id=contest["id"])) == 1
+    for job in jobs[1:]:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+
+
+def test_recovered_running_job_rechecks_manifest_before_new_match(queue_store):
+    store = queue_store
+    bots = [_bot(store, f"running-recovery-manifest-{index}") for index in range(4)]
+    contest = store.create_contest(
+        "Damaged running recovery manifest",
+        bots[0]["user_id"],
+        status="published",
+        starts_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        game_id="holdem",
+        stages_json=_valid_contest_stages_json(),
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+        )
+        for index in range(2)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=2,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[index * 2]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[index * 2]["bot_id"],
+            bot_b_id=bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
+        )
+        for index, pairing in enumerate(pairings)
+    ]
+    first = _claim(store, slots=1, units=2)
+    assert first and first["public_id"] == jobs[0]["public_id"]
+    first_match_id = first["current_match_id"]
+    with store._tx() as connection:
+        connection.execute(
+            "DELETE FROM contest_pairings WHERE id=?", (pairings[1]["id"],)
+        )
+
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {
+        "requeued": 0,
+        "interrupted": 0,
+        "settling": 0,
+    }
+    assert store.get_match(first_match_id) is None
+    assert _claim(store, slots=1, units=2) is None
+    assert store.list_matches(contest_id=contest["id"]) == []
+    for job in jobs:
+        terminal = store.executions.get(job["public_id"])
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
+
+
 @pytest.mark.parametrize("damaged_cursor", [0.5, -1, "bad"])
 def test_contest_claim_rejects_malformed_persisted_stage_cursor(
     queue_store, damaged_cursor
@@ -3686,6 +6333,7 @@ def test_contest_claim_rejects_malformed_persisted_stage_cursor(
         bot_b_version_id=bots[1]["version_id"],
         stage_idx=0,
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=bots[0]["user_id"],
@@ -3708,7 +6356,7 @@ def test_contest_claim_rejects_malformed_persisted_stage_cursor(
     assert _claim(store, slots=1, units=2) is None
     terminal = store.executions.get(job["public_id"])
     assert terminal["status"] == "cancelled"
-    assert terminal["terminal_reason"] == "contest_pairing_changed"
+    assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
     assert terminal["current_match_id"] is None
     persisted_pairing = store.list_contest_pairings(contest["id"])[0]
     assert persisted_pairing["status"] == "pending"
@@ -3746,6 +6394,7 @@ def _seed_bound_contest_job(
         stage_key=str(stage.get("key") or ""),
         pairing_seed=pairing_seed,
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=bots[0]["user_id"],
@@ -3760,6 +6409,202 @@ def _seed_bound_contest_job(
         match_config=match_config,
     )
     return contest, pairing, job
+
+
+@pytest.mark.parametrize("sealed_manifest", [False, True])
+def test_legacy_pairing_seed_repair_preserves_or_reseals_topology(
+    queue_store, sealed_manifest
+):
+    store = queue_store
+    bots = [_bot(store, f"legacy-seed-reseal-{sealed_manifest}-{index}") for index in range(2)]
+    stage = {
+        "key": "rr",
+        "type": "round_robin",
+        "scoring": "poker_3_1_0",
+        "duplicate": False,
+        "games_per_pair": 2,
+        "series_scoring": "aggregate_match_points_v1",
+    }
+    stages_json = json.dumps([stage])
+    contest = store.create_contest(
+        f"legacy seed reseal {sealed_manifest}",
+        bots[0]["user_id"],
+        status="published" if sealed_manifest else "running",
+        game_id="holdem",
+        stages_json=stages_json,
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        stage_key="rr",
+    )
+    if sealed_manifest:
+        store.seal_published_stage_pairing_count(
+            contest["id"], 0, expected_count=1, expected_existing_ids=[pairing["id"]]
+        )
+        store.update_contest(contest["id"], status="running")
+    before = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    if not sealed_manifest:
+        with pytest.raises(ValueError, match="active 对阵批次完整性"):
+            store.ensure_contest_pairing_seed_for_enqueue(
+                contest["id"], pairing, expected_stages_json=stages_json
+            )
+        assert store._conn.execute(
+            "SELECT pairing_seed FROM contest_pairings WHERE id=?",
+            (pairing["id"],),
+        ).fetchone()[0] is None
+        assert tuple(
+            store._conn.execute(
+                "SELECT pairing_topology_revision,"
+                "sealed_pairing_topology_revision FROM contests WHERE id=?",
+                (contest["id"],),
+            ).fetchone()
+        ) == before
+        return
+    repaired = store.ensure_contest_pairing_seed_for_enqueue(
+        contest["id"], pairing, expected_stages_json=stages_json
+    )
+    assert isinstance(repaired["pairing_seed"], int)
+    after = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    assert after[0] == before[0] + 1
+    assert after[1] == after[0]
+
+
+def test_legacy_pairing_seed_repair_rejects_invalid_seal_without_writing(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"legacy-seed-invalid-{index}") for index in range(2)]
+    stages_json = json.dumps(
+        [{
+            "key": "rr",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "duplicate": False,
+            "games_per_pair": 2,
+            "series_scoring": "aggregate_match_points_v1",
+        }]
+    )
+    contest = store.create_contest(
+        "legacy seed invalid seal",
+        bots[0]["user_id"],
+        status="published",
+        game_id="holdem",
+        stages_json=stages_json,
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        bot_a_version_id=bots[0]["version_id"],
+        bot_b_version_id=bots[1]["version_id"],
+        stage_key="rr",
+    )
+    store.seal_published_stage_pairing_count(
+        contest["id"], 0, expected_count=1, expected_existing_ids=[pairing["id"]]
+    )
+    store.update_contest(contest["id"], status="running")
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_pairings SET published_at=? WHERE id=?",
+            ("2026-09-02T01:02:03", pairing["id"]),
+        )
+    with pytest.raises(ValueError, match="完整性校验失败"):
+        store.ensure_contest_pairing_seed_for_enqueue(
+            contest["id"],
+            {**pairing, "published_at": "2026-09-02T01:02:03"},
+            expected_stages_json=stages_json,
+        )
+    persisted = store.list_contest_pairings(contest["id"])[0]
+    assert persisted["pairing_seed"] is None
+
+
+def test_legacy_pairing_seed_repair_rejects_active_sibling_without_writing(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"legacy-seed-active-{index}") for index in range(4)]
+    stages_json = json.dumps(
+        [{
+            "key": "rr",
+            "type": "round_robin",
+            "scoring": "poker_3_1_0",
+            "duplicate": False,
+            "games_per_pair": 2,
+            "series_scoring": "aggregate_match_points_v1",
+        }]
+    )
+    contest = store.create_contest(
+        "legacy seed active sibling",
+        bots[0]["user_id"],
+        status="published",
+        game_id="holdem",
+        stages_json=stages_json,
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[index * 2]["bot_id"],
+            bots[index * 2 + 1]["bot_id"],
+            bot_a_version_id=bots[index * 2]["version_id"],
+            bot_b_version_id=bots[index * 2 + 1]["version_id"],
+            stage_key="rr",
+        )
+        for index in range(2)
+    ]
+    store.seal_published_stage_pairing_count(
+        contest["id"],
+        0,
+        expected_count=2,
+        expected_existing_ids=[pairing["id"] for pairing in pairings],
+    )
+    store.update_contest(contest["id"], status="running")
+    store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[2]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[2]["bot_id"],
+        bot_b_id=bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairings[1]["id"],
+    )
+    before = tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    )
+    with pytest.raises(ValueError, match="active 执行请求"):
+        store.ensure_contest_pairing_seed_for_enqueue(
+            contest["id"], pairings[0], expected_stages_json=stages_json
+        )
+    assert store.list_contest_pairings(contest["id"])[0]["pairing_seed"] is None
+    assert tuple(
+        store._conn.execute(
+            "SELECT pairing_topology_revision,sealed_pairing_topology_revision "
+            "FROM contests WHERE id=?",
+            (contest["id"],),
+        ).fetchone()
+    ) == before
 
 
 def test_contest_duplicate_claim_binds_exact_pairing_seed(queue_store):
@@ -3816,7 +6661,7 @@ def test_contest_claim_rejects_pairing_seed_drift_without_creating_match(queue_s
     assert _claim(store, slots=1, units=4) is None
     terminal = store.executions.get(job["public_id"])
     assert terminal["status"] == "cancelled"
-    assert terminal["terminal_reason"] == "contest_pairing_changed"
+    assert terminal["terminal_reason"] == "contest_pairing_batch_changed"
     assert terminal["current_match_id"] is None
     assert store._conn.execute(
         "SELECT COUNT(*) FROM matches_holdem WHERE contest_id=?",
@@ -3884,6 +6729,7 @@ def test_ko_tiebreak_claim_binds_ordinary_match_seed(queue_store):
             "tiebreak_game=1 WHERE id=?",
             (pairing["id"],),
         )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
 
     claimed = _claim(store, slots=1, units=4)
     assert claimed and claimed["public_id"] == job["public_id"]
@@ -3916,6 +6762,7 @@ def test_ko_tiebreak_claim_rejects_duplicate_frozen_stage(queue_store):
             "tiebreak_game=1 WHERE id=?",
             (pairing["id"],),
         )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
 
     assert _claim(store, slots=1, units=4) is None
     assert store.executions.get(job["public_id"])["terminal_reason"] == (
@@ -4919,6 +7766,7 @@ def test_runtime_pause_recovery_reconciles_contest_before_returning(queue_store)
         published_at="2026-08-14T00:00:00",
         scheduled_at="2026-08-14T00:00:00",
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
 
     class Runtime:
         supervisor = None
@@ -4993,6 +7841,188 @@ def test_runtime_pause_recovery_reconciles_contest_before_returning(queue_store)
     assert store.list_contest_pairings(contest["id"])[0]["match_id"] is None
 
 
+def test_dispatcher_persists_distinct_service_and_runtime_recovery_reasons(
+    queue_store,
+):
+    """Process startup and an in-process namespace recovery are different facts."""
+    store = queue_store
+    bots = [_bot(store, f"recovery-source-{index}") for index in range(4)]
+    _verify_projection(store)
+
+    def active_eventful_job(pair: tuple[dict, dict]) -> tuple[dict, str]:
+        job = _enqueue_pair(store, pair)
+        claimed = _claim(store, slots=1, units=2)
+        assert claimed and claimed["public_id"] == job["public_id"]
+        match_id = str(claimed["current_match_id"])
+        store.update_match(match_id, status="running")
+        store.upsert_replay(match_id, json.dumps([{"type": "match_start"}]))
+        return claimed, match_id
+
+    service_claim, service_match_id = active_eventful_job((bots[0], bots[1]))
+    service_pending_id = "recovery-source-service-pending"
+    store.create_match(
+        service_pending_id,
+        bots[0]["bot_id"],
+        bots[0]["bot_id"],
+    )
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+    )
+
+    async def exercise() -> tuple[dict, tuple[dict, str], str, bool]:
+        try:
+            started = await dispatcher.start()
+            runtime_claim = active_eventful_job((bots[2], bots[3]))
+            runtime_pending_id = "recovery-source-runtime-pending"
+            store.create_match(
+                runtime_pending_id,
+                bots[2]["bot_id"],
+                bots[2]["bot_id"],
+            )
+            store.executions.pause("runtime recovery test", bounded_retry=False)
+            resumed = await dispatcher.admin_resume()
+            return started, runtime_claim, runtime_pending_id, resumed
+        finally:
+            await dispatcher.close()
+
+    started, (runtime_claim, runtime_match_id), runtime_pending_id, resumed = (
+        asyncio.run(exercise())
+    )
+    assert started["outcome"] == "running"
+    assert resumed is True
+
+    def assert_terminal_reason(claimed: dict, match_id: str, expected: str) -> None:
+        match = store.get_match(match_id)
+        assert (match["status"], match["reason"]) == ("aborted", expected)
+        replay = json.loads(store.get_replay(match_id)["events_json"])
+        assert replay[-1] == {"type": "error", "reason": expected}
+        attempt = store._conn.execute(
+            "SELECT status,terminal_reason FROM execution_job_attempts "
+            "WHERE job_id=? AND match_id=?",
+            (int(claimed["id"]), match_id),
+        ).fetchone()
+        assert tuple(attempt) == ("interrupted", expected)
+        job = store.executions.get(str(claimed["public_id"]))
+        assert (job["status"], job["terminal_reason"]) == ("interrupted", expected)
+
+    assert_terminal_reason(
+        service_claim,
+        service_match_id,
+        "orphan_after_service_restart",
+    )
+    assert_terminal_reason(
+        runtime_claim,
+        runtime_match_id,
+        "orphan_after_runtime_recovery",
+    )
+    assert (
+        store.get_match(service_pending_id)["status"],
+        store.get_match(service_pending_id)["reason"],
+    ) == ("aborted", "orphan_pending_after_service_restart")
+    assert (
+        store.get_match(runtime_pending_id)["status"],
+        store.get_match(runtime_pending_id)["reason"],
+    ) == ("aborted", "orphan_pending_after_runtime_recovery")
+
+
+def test_recovery_reason_rejects_unknown_and_legacy_codes_before_any_write(
+    queue_store,
+):
+    store = queue_store
+    pair = (_bot(store, "invalid-recovery-a"), _bot(store, "invalid-recovery-b"))
+    _verify_projection(store)
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    store.update_match(match_id, status="running")
+    original_events = [{"type": "match_start"}]
+    store.upsert_replay(match_id, json.dumps(original_events))
+    attempt_before = tuple(
+        store._conn.execute(
+            "SELECT status,terminal_reason FROM execution_job_attempts "
+            "WHERE job_id=? AND match_id=?",
+            (int(claimed["id"]), match_id),
+        ).fetchone()
+    )
+    job_before = store.executions.get(job["public_id"])
+
+    for rejected in ("orphan_after_restart", "free_form_recovery_reason"):
+        with pytest.raises(ValueError, match="recovery reason"):
+            store.executions.recover_after_namespace_cleanup(
+                interruption_reason=rejected
+            )
+        assert store.get_match(match_id)["status"] == "running"
+        assert json.loads(store.get_replay(match_id)["events_json"]) == original_events
+        assert tuple(
+            store._conn.execute(
+                "SELECT status,terminal_reason FROM execution_job_attempts "
+                "WHERE job_id=? AND match_id=?",
+                (int(claimed["id"]), match_id),
+            ).fetchone()
+        ) == attempt_before
+        current = store.executions.get(job["public_id"])
+        assert (current["status"], current["terminal_reason"]) == (
+            job_before["status"],
+            job_before["terminal_reason"],
+        )
+
+    direct_match_id = "invalid-legacy-recovery"
+    store.create_match(
+        direct_match_id,
+        pair[0]["bot_id"],
+        pair[0]["bot_id"],
+    )
+    store.update_match(direct_match_id, status="running")
+    with pytest.raises(ValueError, match="recovery reason"):
+        store.recover_orphan_matches(interruption_reason="orphan_after_restart")
+    assert store.get_match(direct_match_id)["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "orphan_after_restart",
+        "orphan_after_service_restart",
+        "orphan_after_runtime_recovery",
+        "orphan_pending_after_restart",
+        "orphan_pending_after_service_restart",
+        "orphan_pending_after_runtime_recovery",
+    ],
+)
+def test_public_match_sanitizer_preserves_stable_recovery_reason_codes(reason):
+    assert sanitize_public_match({"status": "aborted", "reason": reason}) == {
+        "status": "aborted",
+        "reason": reason,
+        "bot_a_environment": "platform_low",
+        "bot_b_environment": "platform_low",
+        "time_control": None,
+    }
+
+
 def test_crash_recovery_never_revives_eventful_match(queue_store):
     store = queue_store
     pair = (_bot(store, "recover-a"), _bot(store, "recover-b"))
@@ -5000,7 +8030,9 @@ def test_crash_recovery_never_revives_eventful_match(queue_store):
     job = _enqueue_pair(store, pair)
     first = _claim(store, slots=1, units=2)
     first_match = first["current_match_id"]
-    recovered = store.executions.recover_after_namespace_cleanup()
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
     assert store.get_match(first_match) is None
     assert store.executions.get(job["public_id"])["status"] == "queued"
@@ -5010,7 +8042,9 @@ def test_crash_recovery_never_revives_eventful_match(queue_store):
     assert second_match != first_match
     store.update_match(second_match, status="running")
     store.upsert_replay(second_match, json.dumps([{"type": "match_start"}]))
-    recovered = store.executions.recover_after_namespace_cleanup()
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert recovered == {"requeued": 0, "interrupted": 1, "settling": 0}
     assert store.get_match(second_match)["status"] == "aborted"
     interrupted = store.executions.get(job["public_id"])
@@ -5021,6 +8055,561 @@ def test_crash_recovery_never_revives_eventful_match(queue_store):
     )["status"] == "queued"
     third = _claim(store, slots=1, units=2)
     assert third["current_match_id"] not in {first_match, second_match}
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+@pytest.mark.parametrize("replay_shape", ("missing", "stale", "malformed"))
+def test_terminal_match_namespace_recovery_repairs_canonical_replay_and_log(
+    execution_api,
+    terminal_status,
+    replay_shape,
+):
+    """The terminal Match row wins a crash race and repairs durable replay."""
+    store = execution_api.store
+    users = (
+        _api_user(store, f"terminal_recovery_{terminal_status}_{replay_shape}_a"),
+        _api_user(store, f"terminal_recovery_{terminal_status}_{replay_shape}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"terminal-{terminal_status}-{replay_shape}-a"),
+        _owned_bot(store, users[1], f"terminal-{terminal_status}-{replay_shape}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    prefix = [{"type": "match_start", "game_id": "holdem", "num_hands": 70}]
+    authoritative_terminal = (
+        {
+            "type": "match_end",
+            "winner": 1,
+            "reason": "score",
+            "deltas": [-9, 9],
+        }
+        if terminal_status == "completed"
+        else {"type": "error", "reason": "orphan_after_restart"}
+    )
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_holdem SET status=?,winner=?,reason=?,result=?,ended_at=? "
+            "WHERE id=?",
+            (
+                terminal_status,
+                1 if terminal_status == "completed" else None,
+                "score" if terminal_status == "completed" else "orphan_after_restart",
+                json.dumps({"rounds_played": 1, "deltas": [-9, 9]}),
+                "2026-09-02T10:00:00",
+                match_id,
+            ),
+        )
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "stale":
+            conn.execute(
+                "UPDATE match_replays SET events_json=? WHERE match_id=?",
+                (
+                    json.dumps(
+                        [
+                            *prefix,
+                            {
+                                "type": "match_end",
+                                "winner": 0,
+                                "reason": "completed",
+                                "deltas": [99, -99],
+                            },
+                            {"type": "error", "reason": "platform_error"},
+                        ]
+                    ),
+                    match_id,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE match_replays SET events_json='{' WHERE match_id=?",
+                (match_id,),
+            )
+
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    )
+
+    assert recovered == {"requeued": 0, "interrupted": 0, "settling": 1}
+    expected_events = (
+        [*prefix, authoritative_terminal]
+        if replay_shape == "stale"
+        else [authoritative_terminal]
+    )
+    repaired = store.get_replay(match_id)
+    assert json.loads(repaired["events_json"]) == expected_events
+    stored_once = (repaired["events_json"], repaired["updated_at"])
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    ) == {"requeued": 0, "interrupted": 0, "settling": 1}
+    repaired_twice = store.get_replay(match_id)
+    assert (repaired_twice["events_json"], repaired_twice["updated_at"]) == stored_once
+    source = store.get_match_record_source(match_id)
+    assert source is not None and source["replay_finalized"] is True
+    exported = execution_api.client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == authoritative_terminal
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+def test_terminal_match_namespace_replay_failure_rolls_back_job_recovery(
+    execution_api,
+    terminal_status,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, f"terminal_failure_{terminal_status}_a"),
+        _api_user(store, f"terminal_failure_{terminal_status}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"terminal-failure-{terminal_status}-a"),
+        _owned_bot(store, users[1], f"terminal-failure-{terminal_status}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_holdem SET status=?,winner=?,reason=?,result=? WHERE id=?",
+            (
+                terminal_status,
+                0 if terminal_status == "completed" else None,
+                "score" if terminal_status == "completed" else "orphan_after_restart",
+                json.dumps({"rounds_played": 1, "deltas": [5, -5]}),
+                match_id,
+            ),
+        )
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "CREATE TRIGGER fail_terminal_recovery_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced terminal replay failure'); END"
+        )
+    before = store.executions.get(job["public_id"])
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced terminal replay failure"
+    ):
+        store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_runtime_recovery"
+        )
+
+    after = store.executions.get(job["public_id"])
+    assert (after["status"], after["cleanup_state"]) == (
+        before["status"],
+        before["cleanup_state"],
+    )
+    assert store.get_match(match_id)["status"] == terminal_status
+    assert store.get_replay(match_id) is None
+
+
+@pytest.mark.parametrize(
+    ("case", "invalid_result", "replay_json"),
+    (
+        ("missing", {}, None),
+        ("missing-with-stale-terminal", {}, json.dumps([
+            {
+                "type": "match_end",
+                "winner": 1,
+                "reason": "completed",
+                "deltas": [10, -10],
+                "final_chips": [10, -10],
+            }
+        ])),
+        ("wrong-type", {"deltas": [True, -1]}, "{"),
+        ("non-zero-sum", {"deltas": [4, -3]}, "{"),
+    ),
+)
+def test_terminal_match_namespace_recovery_rejects_invalid_result_without_writes(
+    execution_api,
+    case,
+    invalid_result,
+    replay_json,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, f"invalid_terminal_result_{case}_a"),
+        _api_user(store, f"invalid_terminal_result_{case}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"invalid-terminal-result-{case}-a"),
+        _owned_bot(store, users[1], f"invalid-terminal-result-{case}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE matches_holdem SET status='completed',winner=0,reason='score',"
+            "result=? WHERE id=?",
+            (json.dumps(invalid_result), match_id),
+        )
+        if replay_json is None:
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        else:
+            conn.execute(
+                "UPDATE match_replays SET events_json=? WHERE match_id=?",
+                (replay_json, match_id),
+            )
+    before_job = store.executions.get(job["public_id"])
+    replay_before = store.get_replay(match_id)
+
+    with pytest.raises(ValueError, match="completed Match result deltas"):
+        store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_runtime_recovery"
+        )
+
+    after_job = store.executions.get(job["public_id"])
+    assert (after_job["status"], after_job["cleanup_state"]) == (
+        before_job["status"],
+        before_job["cleanup_state"],
+    )
+    assert store.get_match(match_id)["status"] == "completed"
+    assert store.get_replay(match_id) == replay_before
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+@pytest.mark.parametrize("replay_shape", ("missing", "stale", "malformed"))
+def test_finalize_ready_repairs_terminal_replay_before_releasing_job(
+    execution_api,
+    terminal_status,
+    replay_shape,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, f"finalize_replay_{terminal_status}_{replay_shape}_a"),
+        _api_user(store, f"finalize_replay_{terminal_status}_{replay_shape}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"finalize-replay-{terminal_status}-{replay_shape}-a"),
+        _owned_bot(store, users[1], f"finalize-replay-{terminal_status}-{replay_shape}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    prefix = [{"type": "match_start", "game_id": "holdem", "num_hands": 70}]
+    terminal = (
+        {
+            "type": "match_end",
+            "winner": 0,
+            "reason": "score",
+            "deltas": [6, -6],
+        }
+        if terminal_status == "completed"
+        else {"type": "error", "reason": "platform_error"}
+    )
+    store.update_match(
+        match_id,
+        status=terminal_status,
+        winner=0 if terminal_status == "completed" else None,
+        reason="score" if terminal_status == "completed" else "platform_error",
+        result={"deltas": [6, -6]},
+        ended_at="2026-09-02T10:00:00",
+    )
+    store.executions.mark_cleanup_confirmed(job["public_id"], 1)
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if replay_shape == "missing":
+            conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        elif replay_shape == "stale":
+            conn.execute(
+                "UPDATE match_replays SET events_json=? WHERE match_id=?",
+                (
+                    json.dumps(
+                        [
+                            *prefix,
+                            {
+                                "type": "match_end",
+                                "winner": 1,
+                                "reason": "completed",
+                                "deltas": [-99, 99],
+                            },
+                        ]
+                    ),
+                    match_id,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE match_replays SET events_json='{' WHERE match_id=?",
+                (match_id,),
+            )
+
+    assert store.executions.finalize_ready() == 1
+
+    expected = [*prefix, terminal] if replay_shape == "stale" else [terminal]
+    assert json.loads(store.get_replay(match_id)["events_json"]) == expected
+    expected_job_status = "completed" if terminal_status == "completed" else "interrupted"
+    assert store.executions.get(job["public_id"])["status"] == expected_job_status
+    assert store.executions.finalize_ready() == 0
+    exported = execution_api.client.get(f"/api/matches/{match_id}/log")
+    assert exported.status_code == 200
+    assert exported.json()["replay"]["events"][-1] == terminal
+    if terminal_status == "aborted":
+        retried = store.executions.retry(
+            job["public_id"], owner_user_id=pair[0]["user_id"]
+        )
+        assert (retried["status"], retried["current_match_id"]) == ("queued", None)
+        assert execution_api.client.get(f"/api/matches/{match_id}/log").status_code == 200
+
+
+@pytest.mark.parametrize("terminal_status", ("completed", "aborted"))
+def test_finalize_ready_replay_failure_keeps_job_settling(
+    execution_api,
+    terminal_status,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, f"finalize_failure_{terminal_status}_a"),
+        _api_user(store, f"finalize_failure_{terminal_status}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"finalize-failure-{terminal_status}-a"),
+        _owned_bot(store, users[1], f"finalize-failure-{terminal_status}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    store.update_match(
+        match_id,
+        status=terminal_status,
+        winner=0 if terminal_status == "completed" else None,
+        reason="score" if terminal_status == "completed" else "platform_error",
+        result={"deltas": [6, -6]},
+    )
+    store.executions.mark_cleanup_confirmed(job["public_id"], 1)
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "CREATE TRIGGER fail_finalize_terminal_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced finalize replay failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced finalize replay failure"):
+        store.executions.finalize_ready()
+
+    assert store.executions.get(job["public_id"])["status"] == "settling"
+    assert store.get_match(match_id)["status"] == terminal_status
+    assert store.get_replay(match_id) is None
+
+
+def test_retry_repairs_historical_terminal_replay_before_clearing_match_binding(
+    execution_api,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, "retry_historical_replay_a"),
+        _api_user(store, "retry_historical_replay_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], "retry-historical-replay-a"),
+        _owned_bot(store, users[1], "retry-historical-replay-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        terminal_at = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE matches_holdem SET status='aborted',reason='platform_error' "
+            "WHERE id=?",
+            (match_id,),
+        )
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "cleanup_state='confirmed',terminal_at=? WHERE id=?",
+            (terminal_at, int(claimed["id"])),
+        )
+        conn.execute(
+            "UPDATE execution_job_attempts SET status='interrupted',terminal_at=? "
+            "WHERE job_id=? AND match_id=?",
+            (terminal_at, int(claimed["id"]), match_id),
+        )
+
+    retried = store.executions.retry(
+        job["public_id"], owner_user_id=pair[0]["user_id"]
+    )
+
+    assert (retried["status"], retried["current_match_id"]) == ("queued", None)
+    assert json.loads(store.get_replay(match_id)["events_json"]) == [
+        {"type": "error", "reason": "platform_error"}
+    ]
+    assert execution_api.client.get(f"/api/matches/{match_id}/log").status_code == 200
+
+
+def test_retry_terminal_replay_failure_preserves_interrupted_match_binding(
+    execution_api,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, "retry_replay_failure_a"),
+        _api_user(store, "retry_replay_failure_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], "retry-replay-failure-a"),
+        _owned_bot(store, users[1], "retry-replay-failure-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        terminal_at = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE matches_holdem SET status='aborted',reason='platform_error' "
+            "WHERE id=?",
+            (match_id,),
+        )
+        conn.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "cleanup_state='confirmed',terminal_at=? WHERE id=?",
+            (terminal_at, int(claimed["id"])),
+        )
+        conn.execute(
+            "CREATE TRIGGER fail_retry_terminal_replay BEFORE INSERT ON match_replays "
+            f"WHEN NEW.match_id='{match_id}' BEGIN "
+            "SELECT RAISE(ABORT, 'forced retry replay failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced retry replay failure"):
+        store.executions.retry(
+            job["public_id"], owner_user_id=pair[0]["user_id"]
+        )
+
+    unchanged = store.executions.get(job["public_id"])
+    assert (unchanged["status"], unchanged["current_match_id"]) == (
+        "interrupted",
+        match_id,
+    )
+    assert store.get_replay(match_id) is None
+
+
+@pytest.mark.parametrize("match_status", ("pending", "running"))
+def test_retry_refuses_to_detach_nonterminal_current_match(
+    execution_api,
+    match_status,
+):
+    store = execution_api.store
+    users = (
+        _api_user(store, f"retry_nonterminal_{match_status}_a"),
+        _api_user(store, f"retry_nonterminal_{match_status}_b"),
+    )
+    pair = (
+        _owned_bot(store, users[0], f"retry-nonterminal-{match_status}-a"),
+        _owned_bot(store, users[1], f"retry-nonterminal-{match_status}-b"),
+    )
+    job = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    if match_status == "running":
+        store.update_match(match_id, status="running")
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        terminal_at = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+            "cleanup_state='confirmed',terminal_at=? WHERE id=?",
+            (terminal_at, int(claimed["id"])),
+        )
+    before = store.executions.get(job["public_id"])
+
+    with pytest.raises(
+        ExecutionInvariantError, match="retry source match is not terminal"
+    ):
+        store.executions.retry(
+            job["public_id"], owner_user_id=pair[0]["user_id"]
+        )
+
+    after = store.executions.get(job["public_id"])
+    assert (after["status"], after["current_match_id"]) == (
+        before["status"],
+        before["current_match_id"],
+    )
+    assert store.get_match(match_id)["status"] == match_status
+
+
+@pytest.mark.parametrize(
+    "interruption_reason",
+    (
+        "orphan_after_service_restart",
+        "orphan_after_runtime_recovery",
+    ),
+)
+def test_unstarted_auto_recovery_audit_uses_exact_interruption_source(
+    queue_store,
+    interruption_reason,
+):
+    """An eventless attempt and its auto audit must not guess a restart."""
+    store = queue_store
+    pair = (
+        _bot(store, f"before-{interruption_reason}-a"),
+        _bot(store, f"before-{interruption_reason}-b"),
+    )
+    with store._tx() as conn:
+        decision_id = _insert_auto_decision(
+            conn,
+            pair[0],
+            pair[1],
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    automatic = store.executions.enqueue(
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+        game_id="holdem",
+        match_type=TYPE_LADDER,
+        bot_a_id=pair[0]["bot_id"],
+        bot_b_id=pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+        auto_decision_id=decision_id,
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+            (automatic["public_id"], decision_id),
+        )
+    claimed = _claim_auto(store)
+    assert claimed and claimed["public_id"] == automatic["public_id"]
+    match_id = claimed["current_match_id"]
+    assert json.loads(store.get_replay(match_id)["events_json"]) == []
+
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason=interruption_reason
+    )
+
+    assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
+    assert store.get_match(match_id) is None
+    assert store.get_replay(match_id) is None
+    attempt = store._conn.execute(
+        "SELECT status,events_observed,terminal_reason "
+        "FROM execution_job_attempts WHERE job_id=? AND match_id=?",
+        (claimed["id"], match_id),
+    ).fetchone()
+    assert tuple(attempt) == ("interrupted", 0, interruption_reason)
+    decision = store._conn.execute(
+        "SELECT lifecycle,match_id,last_attempt_error "
+        "FROM auto_match_decisions WHERE id=?",
+        (decision_id,),
+    ).fetchone()
+    assert tuple(decision) == ("queued", None, interruption_reason)
 
 
 def test_crash_recovery_preserves_auto_yield_reason_exactly_once(queue_store):
@@ -5042,8 +8631,12 @@ def test_crash_recovery_preserves_auto_yield_reason_exactly_once(queue_store):
     assert yielding["cancel_requested"] == 1
     assert yielding["terminal_reason"] == AUTO_YIELD_FOREGROUND_REASON
 
-    first = store.executions.recover_after_namespace_cleanup()
-    second = store.executions.recover_after_namespace_cleanup()
+    first = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
+    second = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert first["settling"] == 1
     assert second["settling"] == 1
     assert store.get_match(match_id)["reason"] == AUTO_YIELD_FOREGROUND_REASON
@@ -5085,8 +8678,20 @@ def test_repeated_runtime_recovery_uses_persistent_exponential_backoff(
             job["public_id"], int(claimed["attempt_count"])
         )
         before = datetime.now()
-        recovered = store.executions.recover_after_namespace_cleanup()
+        recovered = store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_runtime_recovery"
+        )
         assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
+        attempt = store._conn.execute(
+            "SELECT status,events_observed,terminal_reason "
+            "FROM execution_job_attempts WHERE job_id=? AND match_id=?",
+            (claimed["id"], claimed["current_match_id"]),
+        ).fetchone()
+        assert tuple(attempt) == (
+            "interrupted",
+            0,
+            "runtime_failure_before_start",
+        )
         row = store.executions.get(job["public_id"])
         assert row["status"] == "queued"
         assert row["failure_count"] == failure_count
@@ -5124,7 +8729,9 @@ def test_confirmed_cleanup_preserves_manual_and_contest_failure_semantics(
     store.executions.mark_cleanup_confirmed(
         manual["public_id"], int(claimed_manual["attempt_count"])
     )
-    assert store.executions.recover_after_namespace_cleanup() == {
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    ) == {
         "requeued": 0,
         "interrupted": 1,
         "settling": 0,
@@ -5154,6 +8761,7 @@ def test_confirmed_cleanup_preserves_manual_and_contest_failure_semantics(
         bot_a_version_id=contest_bots[0]["version_id"],
         bot_b_version_id=contest_bots[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     contest_job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=contest_bots[0]["user_id"],
@@ -5174,7 +8782,9 @@ def test_confirmed_cleanup_preserves_manual_and_contest_failure_semantics(
         contest_job["public_id"], int(claimed_contest["attempt_count"])
     )
     before = datetime.now()
-    assert store.executions.recover_after_namespace_cleanup() == {
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_runtime_recovery"
+    ) == {
         "requeued": 1,
         "interrupted": 0,
         "settling": 0,
@@ -5187,7 +8797,7 @@ def test_confirmed_cleanup_preserves_manual_and_contest_failure_semantics(
     recovered_pairing = store.list_pairings(contest["id"])[0]
     assert recovered_pairing["status"] == "pending"
     assert recovered_pairing["match_id"] is None
-    assert recovered_pairing["scheduled_at"] == recovered_contest["next_attempt_at"]
+    assert recovered_pairing["scheduled_at"] == retry_at.isoformat(timespec="seconds")
 
 
 def test_human_and_contest_eventful_restart_use_source_specific_recovery(queue_store):
@@ -5215,7 +8825,9 @@ def test_human_and_contest_eventful_restart_use_source_specific_recovery(queue_s
     human_match = claimed_human["current_match_id"]
     store.update_match(human_match, status="running")
     store.upsert_replay(human_match, json.dumps([{"type": "match_start"}]))
-    assert store.executions.recover_after_namespace_cleanup() == {
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {
         "requeued": 0,
         "interrupted": 1,
         "settling": 0,
@@ -5239,6 +8851,7 @@ def test_human_and_contest_eventful_restart_use_source_specific_recovery(queue_s
         bot_a_version_id=bots[1]["version_id"],
         bot_b_version_id=bots[2]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     contest_job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=bots[1]["user_id"],
@@ -5256,7 +8869,9 @@ def test_human_and_contest_eventful_restart_use_source_specific_recovery(queue_s
     contest_match = claimed_contest["current_match_id"]
     store.update_match(contest_match, status="running")
     store.upsert_replay(contest_match, json.dumps([{"type": "match_start"}]))
-    assert store.executions.recover_after_namespace_cleanup() == {
+    assert store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    ) == {
         "requeued": 1,
         "interrupted": 0,
         "settling": 0,
@@ -5725,6 +9340,9 @@ def test_auto_eventful_crash_requeues_and_public_projection_is_whitelisted(queue
     assert payload["ahead_sandbox_units"] == 2
     assert payload["capacity"]["match_slots"] == {"used": 0, "capacity": 2}
     assert payload["eta"]["dynamic"] is True
+    assert payload["eta"]["available"] is True
+    assert payload["eta"]["min_seconds"] == 0
+    assert payload["eta"]["max_seconds"] == 140
     serialized = json.dumps(payload, ensure_ascii=False)
     for forbidden in (
         "version_id",
@@ -5753,12 +9371,159 @@ def test_auto_eventful_crash_requeues_and_public_projection_is_whitelisted(queue
     match_id = claimed["current_match_id"]
     store.update_match(match_id, status="running")
     store.upsert_replay(match_id, json.dumps([{"type": "match_start"}]))
-    recovered = store.executions.recover_after_namespace_cleanup()
+    recovered = store.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert recovered["requeued"] == 1
     assert store.get_match(match_id)["status"] == "aborted"
     auto_job = store.executions.get(automatic["public_id"])
     assert auto_job["status"] == "queued"
     assert auto_job["current_match_id"] is None
+
+
+def test_public_request_eta_uses_active_and_ahead_frozen_time_controls(queue_store):
+    store = queue_store
+    gomoku = (
+        _bot(store, "eta-gomoku-a", game_id="gomoku"),
+        _bot(store, "eta-gomoku-b", game_id="gomoku"),
+    )
+    pencil = (
+        _bot(store, "eta-pencil-a", game_id="pencil"),
+        _bot(store, "eta-pencil-b", game_id="pencil"),
+    )
+    _verify_projection(store)
+
+    ahead = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=gomoku[0]["user_id"],
+        game_id="gomoku",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=gomoku[0]["bot_id"],
+        bot_b_id=gomoku[1]["bot_id"],
+        bot_a_version_id=gomoku[0]["version_id"],
+        bot_b_version_id=gomoku[1]["version_id"],
+        match_config={"time_control_id": "gomoku_per_side_total_900s_v1"},
+    )
+    target = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=pencil[0]["user_id"],
+        game_id="pencil",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=pencil[0]["bot_id"],
+        bot_b_id=pencil[1]["bot_id"],
+        bot_a_version_id=pencil[0]["version_id"],
+        bot_b_version_id=pencil[1]["version_id"],
+        match_config={"time_control_id": "pencil_per_decision_1s_v1"},
+    )
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=1, max_sandbox_units=2
+    )
+
+    queued = dispatcher.public_request(target["public_id"])
+    assert queued is not None
+    assert queued["ahead_jobs"] == 1
+    assert queued["eta"] == {
+        "min_seconds": 0,
+        "max_seconds": 1800,
+        "dynamic": True,
+        "available": True,
+        "note": "按前台活跃及前方任务的冻结时限上界估算，实际会随调度与资源变化",
+    }
+
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed is not None and claimed["public_id"] == ahead["public_id"]
+    active = dispatcher.public_request(target["public_id"])
+    assert active is not None
+    assert active["ahead_jobs"] == 0
+    assert active["eta"]["max_seconds"] == 1800
+
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE execution_jobs SET match_config=? WHERE public_id=?",
+            (
+                json.dumps({"time_control_id": "pencil_unknown_v1"}),
+                target["public_id"],
+            ),
+        )
+    malformed = dispatcher.public_request(target["public_id"])
+    assert malformed is not None
+    assert malformed["eta"]["available"] is False
+    assert malformed["eta"]["max_seconds"] == 0
+
+
+def test_public_request_eta_excludes_active_auto_that_is_yielding(queue_store):
+    store = queue_store
+    auto_pair = (
+        _bot(store, "eta-auto-a"),
+        _bot(store, "eta-auto-b"),
+    )
+    foreground_pair = (
+        _bot(store, "eta-front-a", game_id="pencil"),
+        _bot(store, "eta-front-b", game_id="pencil"),
+    )
+    _verify_projection(store)
+    automatic = _enqueue_pair(
+        store,
+        auto_pair,
+        source=EXECUTION_SOURCE_AUTO,
+        owner_user_id=None,
+    )
+    claimed = _claim_auto(store)
+    assert claimed is not None and claimed["public_id"] == automatic["public_id"]
+
+    target = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=foreground_pair[0]["user_id"],
+        game_id="pencil",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=foreground_pair[0]["bot_id"],
+        bot_b_id=foreground_pair[1]["bot_id"],
+        bot_a_version_id=foreground_pair[0]["version_id"],
+        bot_b_version_id=foreground_pair[1]["version_id"],
+        match_config={"time_control_id": "pencil_per_decision_1s_v1"},
+    )
+    active_auto = store.executions.get(automatic["public_id"])
+    assert active_auto["status"] == "starting"
+    assert active_auto["cancel_requested"] == 1
+    assert active_auto["terminal_reason"] == AUTO_YIELD_FOREGROUND_REASON
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET match_config=? WHERE public_id=?",
+            ("[]", automatic["public_id"]),
+        )
+
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=1, max_sandbox_units=2
+    )
+    payload = dispatcher.public_request(target["public_id"])
+    assert payload is not None
+    assert payload["ahead_jobs"] == 0
+    assert payload["eta"] == {
+        "min_seconds": 0,
+        "max_seconds": 0,
+        "dynamic": True,
+        "available": True,
+        "note": "按前台活跃及前方任务的冻结时限上界估算，实际会随调度与资源变化",
+    }
+
+
+def test_public_request_eta_excludes_target_own_active_runtime(queue_store):
+    store = queue_store
+    pair = (_bot(store, "eta-self-a"), _bot(store, "eta-self-b"))
+    _verify_projection(store)
+    target = _enqueue_pair(store, pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed is not None and claimed["public_id"] == target["public_id"]
+
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(), store, max_match_slots=1, max_sandbox_units=2
+    )
+    payload = dispatcher.public_request(target["public_id"])
+    assert payload is not None
+    assert payload["request"]["status"] == "starting"
+    assert payload["eta"]["available"] is True
+    assert payload["eta"]["max_seconds"] == 0
 
 
 def test_execution_environment_snapshots_are_source_owned(queue_store):
@@ -5802,6 +9567,7 @@ def test_execution_environment_snapshots_are_source_owned(queue_store):
         bot_a_version_id=pair[0]["version_id"],
         bot_b_version_id=pair[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     official = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=pair[0]["user_id"],
@@ -5992,6 +9758,7 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
         )
         for offset in (0, 2, 4)
     ]
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
     jobs = [
         store.executions.enqueue(
@@ -6082,6 +9849,7 @@ def test_dual_official_matches_require_full_aggregate_host_budget(
         )
         for offset in (0, 2)
     ]
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
     jobs = [
         store.executions.enqueue(
@@ -6143,6 +9911,7 @@ def test_untracked_running_match_charges_max_profile_before_second_slot_claim(
         bot_a_version_id=bots[2]["version_id"],
         bot_b_version_id=bots[3]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
     queued = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
@@ -6221,6 +9990,7 @@ def test_official_profile_waits_on_undersized_host_without_downgrade(
         bot_a_version_id=pair[0]["version_id"],
         bot_b_version_id=pair[1]["version_id"],
     )
+    _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     job = store.executions.enqueue(
         source=EXECUTION_SOURCE_CONTEST,
         owner_user_id=pair[0]["user_id"],
@@ -7922,7 +11692,10 @@ def test_concurrent_admin_resume_has_one_atomic_recovery_gate(queue_store):
 
     orch = Orch()
 
-    async def reconcile() -> int:
+    reconcile_reasons: list[str] = []
+
+    async def reconcile(*, interruption_reason: str) -> int:
+        reconcile_reasons.append(interruption_reason)
         reconcile_entered.set()
         await release_reconcile.wait()
         return 0
@@ -7961,6 +11734,7 @@ def test_concurrent_admin_resume_has_one_atomic_recovery_gate(queue_store):
     assert asyncio.run(exercise()) == (True, True)
     assert runtime.cleanup_calls == 1
     assert orch.quiesce_calls == 1
+    assert reconcile_reasons == ["orphan_after_runtime_recovery"]
     assert store.executions.control()["dispatcher_state"] == "running"
 
 
@@ -8421,7 +12195,9 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
     assert migrated.get_setting("auto_match_daily_cap") is None
     assert migrated.get_setting("auto_match_enabled") is None
     assert migrated.get_auto_match_enabled() is False
-    recovered = migrated.executions.recover_after_namespace_cleanup()
+    recovered = migrated.executions.recover_after_namespace_cleanup(
+        interruption_reason="orphan_after_service_restart"
+    )
     assert recovered == {"requeued": 1, "interrupted": 0, "settling": 0}
     first_reconcile = migrated.executions.reconcile_auto_scheduler_policy()
     assert first_reconcile["changed"] is True

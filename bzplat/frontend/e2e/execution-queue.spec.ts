@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
+import { GAME_TIME_CONTROL_REGISTRY_RESPONSE } from './time-control-fixtures'
 
 const USER = {
   id: 42,
@@ -213,6 +214,14 @@ async function mockBase(
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[]}' })
       return
     }
+    if (path === '/api/games') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(GAME_TIME_CONTROL_REGISTRY_RESPONSE),
+      })
+      return
+    }
     unexpectedBackendRequests.push(`${route.request().method()} ${path}`)
     await route.fulfill({
       status: 418,
@@ -221,6 +230,7 @@ async function mockBase(
     })
   })
   await page.route('**/api/auth/me', async (route) => {
+    expect(route.request().headers().authorization).toBeUndefined()
     await route.fulfill(loggedIn ? {
       status: 200,
       contentType: 'application/json',
@@ -231,12 +241,6 @@ async function mockBase(
       body: JSON.stringify({ detail: '未登录' }),
     })
   })
-  if (loggedIn) {
-    await page.addInitScript((user) => {
-      localStorage.setItem('bzplat_token', 'queue-test-token')
-      localStorage.setItem('bzplat_user', JSON.stringify(user))
-    }, activeUser)
-  }
   return { unexpectedBackendRequests, forbiddenMainRequests }
 }
 

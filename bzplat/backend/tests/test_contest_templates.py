@@ -74,6 +74,7 @@ def test_code_template_list_filters_by_game():
     gomoku = list_templates(game_id="gomoku")
     assert all(t["game_id"] == "gomoku" for t in gomoku)
     assert {t["id"] for t in gomoku} == {
+        "gomoku_seeded_group_drr_final",
         "board_rr",
         "gomoku_rr",
         "gomoku_swiss_ranked",
@@ -97,6 +98,22 @@ def test_validate_template_ok():
 def test_validate_rejects_bad_type():
     with pytest.raises(ValueError, match="type"):
         validate_stage({"type": "nope"}, 0, "holdem")
+
+
+@pytest.mark.parametrize(
+    "stage_type", ["group_round_robin", "group_double_round_robin"]
+)
+def test_validate_stage_rejects_group_global_advance_count(stage_type):
+    with pytest.raises(ValueError, match="不接受 advance_count"):
+        validate_stage(
+            {
+                "type": stage_type,
+                "group_count": 2,
+                "advance_count": 1,
+            },
+            0,
+            "holdem",
+        )
 
 
 def test_validate_rejects_bad_scoring():
@@ -287,6 +304,88 @@ def test_create_rejects_template_game_mismatch(store: Store):
         )
 
     assert store.list_contests() == []
+
+
+@pytest.mark.parametrize(
+    ("stages", "message"),
+    [
+        (
+            [
+                {"key": "q", "type": "round_robin", "advance_count": 2},
+                {"key": "f", "type": "swiss", "rounds": 1},
+            ],
+            "终局须使用",
+        ),
+        (
+            [
+                {"key": "q0", "type": "round_robin", "advance_count": 3},
+                {"key": "q1", "type": "swiss", "rounds": 1, "advance_count": 2},
+                {"key": "f", "type": "single_elimination"},
+            ],
+            "仅支持一次",
+        ),
+    ],
+)
+def test_create_rejects_unrepresentable_multi_stage_official_rankings(
+    store: Store, stages, message
+):
+    manager = ContestManager(store, object())
+
+    with pytest.raises(ValueError, match=message):
+        manager.create(1, "无法完整排名", game_id="holdem", stages=stages)
+
+    assert store.list_contests() == []
+
+
+@pytest.mark.parametrize("ranking_scope", [4, 5])
+def test_replace_top_scope_covers_complete_planned_finalist_cohort(ranking_scope):
+    normalized = validate_template(
+        "scope_ok",
+        "范围完整",
+        "holdem",
+        {},
+        [
+            {"key": "q", "type": "round_robin", "advance_count": 4},
+            {
+                "key": "f",
+                "type": "double_round_robin",
+                "ranking_mode": "replace_top",
+                "ranking_scope": ranking_scope,
+            },
+        ],
+    )
+    assert normalized["stages"][1]["ranking_scope"] == ranking_scope
+
+
+@pytest.mark.parametrize(
+    ("advance_count", "ranking_scope"),
+    [(4, 2), (9, None)],
+)
+def test_replace_top_scope_cannot_truncate_planned_finalist_cohort(
+    advance_count, ranking_scope
+):
+    final = {
+        "key": "f",
+        "type": "double_round_robin",
+        "ranking_mode": "replace_top",
+    }
+    if ranking_scope is not None:
+        final["ranking_scope"] = ranking_scope
+    with pytest.raises(ValueError, match="不得小于"):
+        validate_template(
+            "scope_bad",
+            "范围截断",
+            "holdem",
+            {},
+            [
+                {
+                    "key": "q",
+                    "type": "round_robin",
+                    "advance_count": advance_count,
+                },
+                final,
+            ],
+        )
 
 
 def test_historical_holdem_template_cannot_be_used_for_new_contest(store: Store):

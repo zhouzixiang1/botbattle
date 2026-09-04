@@ -9,16 +9,25 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
+  type Request,
   type Response,
+  type Route,
 } from '@playwright/test'
 
 import {
+  cookieOriginHeaders,
   loginThroughUi,
   monitorBrowser,
+  PASSWORD,
   runCleanupTasks,
   versionRow,
   withCleanup,
 } from './helpers'
+import {
+  GOMOKU_TEMPLATE_TIME_CONTROLS,
+  HOLDEM_TEMPLATE_TIME_CONTROL,
+  PENCIL_TEMPLATE_TIME_CONTROLS,
+} from './time-control-fixtures'
 
 const USER = process.env.BZ_E2E_USER || 'tester1'
 const OTHER_USER = process.env.BZ_E2E_OTHER_USER || 'tester2'
@@ -28,6 +37,56 @@ const HOLDEM_SAMPLE = fileURLToPath(
   new URL('../../../samples/callbot_linux_amd64', import.meta.url),
 )
 const PREFLIGHT_FAILURE_SAMPLE = process.env.BZ_E2E_BAD_BOT || '/usr/bin/true'
+
+async function loginAndProjectCookieIdentity(page: Page, username: string): Promise<number> {
+  const loginRequest = page.waitForRequest((request) => (
+    request.method() === 'POST' && new URL(request.url()).pathname === '/api/auth/login'
+  ))
+  const projected = await page.evaluate(async ({ nextUsername, password }) => {
+    const api = await import('/src/api.ts')
+    const result = await api.apiPost('/api/auth/login', 'POST', {
+      username: nextUsername,
+      password,
+      captcha_id: 'e2e-cookie-session-switch',
+      captcha_answer: 'skip',
+    }) as {
+      user: {
+        id: number
+        username: string
+        email: string
+        role: 'user' | 'organizer' | 'admin'
+        display_name: string
+        is_active: number
+      }
+    }
+    // AuthProvider performs this projection after its login call. These race
+    // tests intentionally keep MyBots mounted, so perform the same in-memory
+    // projection without navigating away and aborting the request under test.
+    api.currentUserStore.set(result.user)
+    return {
+      id: result.user.id,
+      username: result.user.username,
+      legacyToken: localStorage.getItem('bzplat_token'),
+      legacyUser: localStorage.getItem('bzplat_user'),
+    }
+  }, { nextUsername: username, password: PASSWORD })
+  const request = await loginRequest
+  expect(request.headers().authorization).toBeUndefined()
+  expect(projected.username).toBe(username)
+  expect(projected.legacyToken).toBeNull()
+  expect(projected.legacyUser).toBeNull()
+  const sessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === 'bz_session')
+  expect(sessionCookie?.httpOnly).toBe(true)
+  return projected.id
+}
+
+async function inMemoryIdentity(page: Page): Promise<{ id: number | null; username: string | null }> {
+  return page.evaluate(async () => {
+    const { currentUserStore } = await import('/src/api.ts')
+    const user = currentUserStore.get()
+    return { id: user?.id ?? null, username: user?.username ?? null }
+  })
+}
 
 /**
  * 生产回放 20260809205002-ede64ea8 的可审计局面检查点。
@@ -206,6 +265,7 @@ async function createDisposableBot(
   runtimeMode: 'traditional' | 'longrunning' = 'traditional',
 ) {
   const response = await page.request.post('/api/bots', {
+    headers: cookieOriginHeaders(page),
     multipart: {
       name,
       display_name: name,
@@ -252,7 +312,9 @@ async function getOrCreateChallengeFixtureBot(page: Page) {
   expect(existing.runtime_mode, `${name} must retain its LongRunning fixture contract`).toBe('longrunning')
   expect(existing.runnable, `${name} must remain runnable`).not.toBe(false)
   if (!existing.is_active) {
-    const activated = await page.request.post(`/api/bots/${existing.id}/active?active=true`)
+    const activated = await page.request.post(`/api/bots/${existing.id}/active?active=true`, {
+      headers: cookieOriginHeaders(page),
+    })
     expect(activated.status(), await activated.text()).toBe(200)
   }
   return { id: existing.id, name: existing.name }
@@ -271,7 +333,9 @@ async function hardDeleteBots(
     await runCleanupTasks([...new Set(botIds)].reverse().map((botId) => ({
       label: `hard-delete Bot ${botId}`,
       run: async () => {
-        const remove = await page.request.delete(`/api/admin/bots/${botId}`)
+        const remove = await page.request.delete(`/api/admin/bots/${botId}`, {
+          headers: cookieOriginHeaders(page),
+        })
         expect(remove.status(), await remove.text()).toBe(200)
         const verify = await page.request.get(`/api/bots/${botId}`)
         expect(verify.status(), await verify.text()).toBe(404)
@@ -303,6 +367,7 @@ async function ensureMatchTerminal(
     try {
       await loginThroughUi(adminPage, ADMIN)
       const abort = await adminPage.request.patch(`/api/admin/matches/${matchId}`, {
+        headers: cookieOriginHeaders(adminPage),
         data: { status: 'aborted' },
       })
       expect(abort.status(), await abort.text()).toBe(200)
@@ -868,11 +933,11 @@ for (const lateStatus of [200, 401] as const) {
     await loginThroughUi(page, USER)
     let mineReads = 0
     let accountBReads = 0
+    let identitySwitched = false
     await page.route('**/api/bots/mine?**', async (route) => {
+      expect(route.request().headers().authorization).toBeUndefined()
       mineReads += 1
-      if (route.request().headers().authorization === 'Bearer account-b-token') {
-        accountBReads += 1
-      }
+      if (identitySwitched) accountBReads += 1
       await route.continue()
     })
     let release!: () => void
@@ -885,6 +950,7 @@ for (const lateStatus of [200, 401] as const) {
         await route.continue()
         return
       }
+      expect(route.request().headers().authorization).toBeUndefined()
       observed()
       await gate
       await route.fulfill({
@@ -898,7 +964,7 @@ for (const lateStatus of [200, 401] as const) {
 
     await page.goto('/#/my-bots')
     await expect.poll(() => mineReads).toBeGreaterThan(0)
-    await page.waitForLoadState('networkidle')
+    await monitor.settle()
     await page.locator('#upload-name').fill(`delayed_a_${lateStatus}`)
     await page.locator('#upload-file').setInputFiles({
       name: 'tiny.elf',
@@ -909,36 +975,66 @@ for (const lateStatus of [200, 401] as const) {
       .getByRole('button', { name: '上传', exact: true })
       .click()
     await started
-    await page.evaluate(() => {
-      localStorage.setItem('bzplat_token', 'account-b-token')
-      localStorage.setItem('bzplat_user', JSON.stringify({
-        id: 900002,
-        username: 'account_b',
-        email: 'b@example.test',
-        role: 'user',
-        display_name: '账号 B',
-        is_active: 1,
-      }))
+    // A real cookie identity transition may cancel the old account's in-flight
+    // XHR before the mocked response is delivered.  Register both terminal
+    // outcomes before switching accounts: either a late response is discarded
+    // by the generation guard, or the stronger bounded abort path wins.
+    const uploadTerminals: Array<
+      | { kind: 'response'; status: number }
+      | { kind: 'requestfailed'; errorText: string }
+    > = []
+    page.on('response', (response) => {
+      if (
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/bots'
+      ) uploadTerminals.push({ kind: 'response', status: response.status() })
     })
-    const lateResponse = page.waitForResponse((response) => (
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/api/bots'
-    ))
+    page.on('requestfailed', (request) => {
+      if (
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname === '/api/bots'
+      ) {
+        uploadTerminals.push({
+          kind: 'requestfailed',
+          errorText: request.failure()?.errorText || '',
+        })
+      }
+    })
+    const accountBId = await loginAndProjectCookieIdentity(page, OTHER_USER)
+    identitySwitched = true
     release()
-    expect((await lateResponse).status()).toBe(lateStatus)
-    await page.waitForTimeout(150)
-    expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe('account-b-token')
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bzplat_user') || '{}').id)).toBe(900002)
+    await expect.poll(() => uploadTerminals.length).toBe(1)
+    const outcome = uploadTerminals[0]
+    const expectedUploadIssues = []
+    if (outcome.kind === 'response') {
+      expect(outcome.status).toBe(lateStatus)
+      if (lateStatus === 401) {
+        expectedUploadIssues.push({
+          kind: 'http' as const,
+          method: 'POST',
+          status: 401,
+          pathname: '/api/bots',
+        })
+      }
+    } else {
+      expect(outcome.errorText).toMatch(
+        /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+      )
+      expectedUploadIssues.push({
+        kind: 'requestfailed' as const,
+        method: 'POST',
+        pathname: '/api/bots',
+        errorText: outcome.errorText,
+      })
+    }
+    await monitor.settle()
+    expect(await inMemoryIdentity(page)).toEqual({ id: accountBId, username: OTHER_USER })
     await expect(page).toHaveURL(/\/#\/my-bots$/)
     expect(accountBReads).toBe(0)
     await expect(page.getByText('Bot 上传成功', { exact: true })).toHaveCount(0)
     await expect(page.getByText(/expired account A upload|上传失败/)).toHaveCount(0)
-    await monitor.expectClean(lateStatus === 401 ? [{
-      kind: 'http',
-      method: 'POST',
-      status: 401,
-      pathname: '/api/bots',
-    }] : [])
+    await monitor.expectClean(expectedUploadIssues)
+    expect(uploadTerminals).toHaveLength(1)
   })
 }
 
@@ -955,6 +1051,7 @@ test('late API 401 from account A cannot clear account B', async ({ page }) => {
       await route.continue()
       return
     }
+    expect(route.request().headers().authorization).toBeUndefined()
     observed()
     await gate
     await route.fulfill({
@@ -969,17 +1066,7 @@ test('late API 401 from account A cannot clear account B', async ({ page }) => {
   await filter.click()
   await page.getByRole('option', { name: '五子棋', exact: true }).click()
   await started
-  await page.evaluate(() => {
-    localStorage.setItem('bzplat_token', 'account-b-token')
-    localStorage.setItem('bzplat_user', JSON.stringify({
-      id: 900002,
-      username: 'account_b',
-      email: 'b@example.test',
-      role: 'user',
-      display_name: '账号 B',
-      is_active: 1,
-    }))
-  })
+  const accountBId = await loginAndProjectCookieIdentity(page, OTHER_USER)
   const lateResponse = page.waitForResponse((response) => (
     response.request().method() === 'GET' &&
     new URL(response.url()).pathname === '/api/bots/mine' &&
@@ -988,8 +1075,7 @@ test('late API 401 from account A cannot clear account B', async ({ page }) => {
   release()
   expect((await lateResponse).status()).toBe(401)
   await page.waitForTimeout(150)
-  expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe('account-b-token')
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bzplat_user') || '{}').id)).toBe(900002)
+  expect(await inMemoryIdentity(page)).toEqual({ id: accountBId, username: OTHER_USER })
   await expect(page).toHaveURL(/\/#\/my-bots$/)
   await monitor.expectClean([{
     kind: 'http',
@@ -1008,6 +1094,7 @@ for (const lateMeStatus of [200, 401] as const) {
     let observed!: () => void
     const started = new Promise<void>((resolve) => { observed = resolve })
     await page.route('**/api/auth/me', async (route) => {
+      expect(route.request().headers().authorization).toBeUndefined()
       observed()
       await gate
       await route.fulfill({
@@ -1027,13 +1114,15 @@ for (const lateMeStatus of [200, 401] as const) {
     })
     const login = loginThroughUi(page, USER)
     await started
-    await login
-    const newerSession = await page.evaluate(() => ({
+    const loginResponse = await login
+    expect(loginResponse.request().headers().authorization).toBeUndefined()
+    expect(await page.evaluate(() => ({
       token: localStorage.getItem('bzplat_token'),
       user: localStorage.getItem('bzplat_user'),
-    }))
-    expect(newerSession.token).toBeTruthy()
-    expect(JSON.parse(newerSession.user || '{}').username).toBe(USER)
+    }))).toEqual({ token: null, user: null })
+    const sessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === 'bz_session')
+    expect(sessionCookie?.httpOnly).toBe(true)
+    expect((await inMemoryIdentity(page)).username).toBe(USER)
     const lateResponse = page.waitForResponse((response) => (
       response.request().method() === 'GET' &&
       new URL(response.url()).pathname === '/api/auth/me'
@@ -1041,8 +1130,12 @@ for (const lateMeStatus of [200, 401] as const) {
     release()
     expect((await lateResponse).status()).toBe(lateMeStatus)
     await page.waitForTimeout(150)
-    expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe(newerSession.token)
-    expect(await page.evaluate(() => localStorage.getItem('bzplat_user'))).toBe(newerSession.user)
+    expect(await page.evaluate(() => ({
+      token: localStorage.getItem('bzplat_token'),
+      user: localStorage.getItem('bzplat_user'),
+    }))).toEqual({ token: null, user: null })
+    expect((await inMemoryIdentity(page)).username).toBe(USER)
+    await expect(page.locator(`a[href="#/user/${USER}"]`).first()).toBeVisible()
     await expect(page).toHaveURL(/\/#\/$/)
     await monitor.expectClean()
   })
@@ -1078,7 +1171,12 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          templates: [{ id: 'gomoku_stale', name: '不应回填的五子棋模板', game_id: 'gomoku' }],
+          templates: [{
+            id: 'gomoku_stale',
+            name: '不应回填的五子棋模板',
+            game_id: 'gomoku',
+            ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+          }],
         }),
       }).catch(() => undefined)
       return
@@ -1086,20 +1184,32 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
     const templates = game === 'pencil'
       ? [
           // A malformed server response must not make a cross-game template submittable.
-          { id: 'gomoku_leak', name: '错误混入模板', game_id: 'gomoku' },
-          { id: 'pencil_race_safe', name: '点格棋竞态模板', game_id: 'pencil' },
+          {
+            id: 'gomoku_leak',
+            name: '错误混入模板',
+            game_id: 'gomoku',
+            ...GOMOKU_TEMPLATE_TIME_CONTROLS,
+          },
+          {
+            id: 'pencil_race_safe',
+            name: '点格棋竞态模板',
+            game_id: 'pencil',
+            ...PENCIL_TEMPLATE_TIME_CONTROLS,
+          },
         ]
       : [
           {
             id: 'holdem_fast',
             name: '德州快速模板',
             game_id: 'holdem',
+            ...HOLDEM_TEMPLATE_TIME_CONTROL,
             summary: '大规模快速完成，样本较少。',
           },
           {
             id: 'holdem_race_safe',
             name: '德州公平模板',
             game_id: 'holdem',
+            ...HOLDEM_TEMPLATE_TIME_CONTROL,
             recommended: true,
             summary: '同一副牌交换座位，公平优先。',
           },
@@ -1268,12 +1378,16 @@ test('contest recovery finish trusts terminal matches when pairing status is sta
 
 test('contest detail ignores a stale response after navigating to another contest', async ({ page }) => {
   const monitor = monitorBrowser(page)
-  await loginThroughUi(page, ORGANIZER)
-  const organizerId = await page.evaluate(() => {
-    const raw = localStorage.getItem('bzplat_user')
-    return raw ? Number((JSON.parse(raw) as { id?: number }).id) : 0
-  })
+  const cancelledSlowRequests: string[] = []
+  const loginResponse = await loginThroughUi(page, ORGANIZER)
+  expect(loginResponse.request().headers().authorization).toBeUndefined()
+  const loginBody = await loginResponse.json() as { user?: { id?: number } }
+  const organizerId = Number(loginBody.user?.id || 0)
   expect(organizerId).toBeGreaterThan(0)
+  expect(await page.evaluate(() => ({
+    token: localStorage.getItem('bzplat_token'),
+    user: localStorage.getItem('bzplat_user'),
+  }))).toEqual({ token: null, user: null })
 
   const slowContestId = 987_654_310
   const targetContestId = 987_654_311
@@ -1297,6 +1411,15 @@ test('contest detail ignores a stale response after navigating to another contes
     standings: [],
     entries_total: 0,
     my_entry: null,
+  })
+
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() === 'GET' &&
+      url.pathname === `/api/contests/${slowContestId}` &&
+      url.search === '?entries_page=1&entries_per_page=20'
+    ) cancelledSlowRequests.push(request.failure()?.errorText || '')
   })
 
   await page.route(
@@ -1357,7 +1480,17 @@ test('contest detail ignores a stale response after navigating to another contes
   await expect(staleConfirm).toHaveCount(0)
   await expect(page.getByRole('button', { name: '强制结束赛事', exact: true })).toBeEnabled()
   expect(staleFinishRequests).toBe(0)
-  await monitor.expectClean()
+  await expect.poll(() => cancelledSlowRequests.length).toBe(1)
+  expect(cancelledSlowRequests[0]).toMatch(
+    /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+  )
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: `/api/contests/${slowContestId}`,
+    search: '?entries_page=1&entries_per_page=20',
+    errorText: cancelledSlowRequests[0],
+  }])
 })
 
 async function chooseBot(page: Page, trigger: Locator, query: string, mineOnly: boolean) {
@@ -1416,6 +1549,118 @@ async function waitForAcceptedExecutionMatch(
   return matchId
 }
 
+/**
+ * Challenge persists the opaque request id before awaiting its POST so a lost
+ * 202 can be recovered by owner-scoped polling. Firefox can otherwise let that
+ * first page GET overtake the still-committing POST. Hold only the GET for the
+ * exact id carried by this page's POST, then release it to the real backend as
+ * soon as the real 202 is observable; no response is mocked or ignored.
+ */
+async function submitExecutionWithCommittedPoll(
+  page: Page,
+  submissionPathname: '/api/matches/challenge' | '/api/matches/human',
+  submit: () => Promise<void>,
+): Promise<Response> {
+  const routePattern = '**/api/execution-requests/*'
+  let submissionRequest: Request | null = null
+  let submittedRequestId: string | null = null
+  let resolveSubmittedRequestId!: (value: string) => void
+  let rejectSubmittedRequestId!: (reason: unknown) => void
+  const submittedRequestIdPromise = new Promise<string>((resolve, reject) => {
+    resolveSubmittedRequestId = resolve
+    rejectSubmittedRequestId = reject
+  })
+
+  const onSubmissionRequest = (request: Request) => {
+    if (
+      submissionRequest
+      || request.method() !== 'POST'
+      || new URL(request.url()).pathname !== submissionPathname
+    ) return
+    submissionRequest = request
+    try {
+      const requestId = (request.postDataJSON() as { request_id?: unknown }).request_id
+      if (typeof requestId !== 'string' || !/^req_[A-Za-z0-9_-]{24}$/.test(requestId)) {
+        throw new Error(`${submissionPathname} did not carry a valid opaque request_id`)
+      }
+      submittedRequestId = requestId
+      resolveSubmittedRequestId(requestId)
+    } catch (error) {
+      rejectSubmittedRequestId(error)
+    }
+  }
+  page.on('request', onSubmissionRequest)
+
+  const acceptedResponsePromise = page.waitForResponse((response) => (
+    submissionRequest !== null && response.request() === submissionRequest
+  ))
+  const exactPollResponsePromise = page.waitForResponse((response) => {
+    if (!submittedRequestId || response.request().method() !== 'GET') return false
+    return new URL(response.url()).pathname
+      === `/api/execution-requests/${encodeURIComponent(submittedRequestId)}`
+  })
+  const pollBarrier = async (route: Route) => {
+    const request = route.request()
+    if (request.method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    const requestId = await submittedRequestIdPromise
+    if (
+      new URL(request.url()).pathname
+      !== `/api/execution-requests/${encodeURIComponent(requestId)}`
+    ) {
+      await route.fallback()
+      return
+    }
+    const acceptedResponse = await acceptedResponsePromise
+    expect(acceptedResponse.status()).toBe(202)
+    await route.continue()
+  }
+
+  await page.route(routePattern, pollBarrier)
+  try {
+    await submit()
+    const [acceptedResponse, requestId] = await Promise.all([
+      acceptedResponsePromise,
+      submittedRequestIdPromise,
+    ])
+    expect(acceptedResponse.status(), await acceptedResponse.text()).toBe(202)
+    const accepted = await acceptedResponse.json() as { public_id?: string }
+    expect(accepted.public_id).toBe(requestId)
+    const exactPollResponse = await exactPollResponsePromise
+    expect(exactPollResponse.status(), await exactPollResponse.text()).toBe(200)
+    return acceptedResponse
+  } finally {
+    page.off('request', onSubmissionRequest)
+    await page.unroute(routePattern, pollBarrier)
+  }
+}
+
+const HUMAN_ACTION_RATE_REFILL_PER_SECOND = 2
+const HUMAN_ACTION_QUOTA_INTERVAL_MS = Math.ceil(1_000 / HUMAN_ACTION_RATE_REFILL_PER_SECOND) + 50
+const HUMAN_ACTION_RATE_BURST = 10
+const HUMAN_WS_FIRST_RECONNECT_DELAY_MS = 500
+
+/**
+ * Keep the normal human-play path inside the public two-actions-per-second
+ * protocol budget. The 50ms transport margin is attached to that quota rather
+ * than being an arbitrary flake sleep, and polling never delays an already
+ * eligible action.
+ */
+async function waitForHumanActionQuota(previousSentAt: number): Promise<void> {
+  if (previousSentAt <= 0) return
+  const eligibleAt = previousSentAt + HUMAN_ACTION_QUOTA_INTERVAL_MS
+  await expect.poll(
+    () => Date.now(),
+    {
+      timeout: HUMAN_ACTION_QUOTA_INTERVAL_MS + 1_000,
+      intervals: [10, 25, 50],
+      message: 'human action sender did not reach the documented two-per-second quota window',
+    },
+  ).toBeGreaterThanOrEqual(eligibleAt)
+}
+
 /** 把 Pencil 交错坐标转换成当前响应式 canvas 内的 CSS 点击位置。 */
 async function pencilCanvasPoint(canvas: Locator, x: number, y: number) {
   return canvas.evaluate(async (element, coordinate) => {
@@ -1464,13 +1709,11 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
         new URL(browserRequest.url()).pathname === '/api/matches/challenge'
       ) challengePosts += 1
     })
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'POST' &&
-        new URL(response.url()).pathname === '/api/matches/challenge',
+    const response = await submitExecutionWithCommittedPoll(
+      page,
+      '/api/matches/challenge',
+      () => page.getByRole('button', { name: '开始对局', exact: true }).dblclick(),
     )
-    await page.getByRole('button', { name: '开始对局', exact: true }).dblclick()
-    const response = await responsePromise
     matchId = await waitForAcceptedExecutionMatch(page, response, 'manual')
     expect(matchId).toBeTruthy()
     const expectedDetailCancellations = captureExactGetCancellations(
@@ -1506,6 +1749,9 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     const groupHeadings = searchDialogs.locator('[cmdk-group-heading]')
     await expect(groupHeadings.filter({ hasText: /^Bot$/ })).toHaveCount(1)
     await expect(groupHeadings.filter({ hasText: /^对局$/ })).toHaveCount(1)
+    // Let the monitor observe any WebKit navigation/effect cancellation before
+    // snapshotting the exact GET + dynamic match pathname evidence below.
+    await monitor.settle()
     await monitor.expectClean(expectedDetailCancellations())
   }, async () => {
     const tasks: Array<{ label: string; run: () => Promise<void> }> = []
@@ -1559,12 +1805,30 @@ test('terminal SSE snapshot switches a raced live page to replay without reconne
 test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page }) => {
   const viewerId = 'mock-canonical-terminal-viewer'
   const humanId = 'mock-canonical-terminal-human'
+  await page.addInitScript(() => {
+    // Simulate residue from a pre-cookie-only release. It is hostile legacy
+    // state, not an authentication fixture; the current client must delete it
+    // at startup and never emit it as an Authorization header.
+    localStorage.setItem('bzplat_token', 'legacy-secret-must-be-cleared')
+    localStorage.setItem('bzplat_user', JSON.stringify({
+      id: 999_999,
+      username: 'legacy-user',
+      email: 'legacy@example.test',
+    }))
+  })
   const expectedViewerDetailCancellations = captureExactGetCancellations(
     page,
     `/api/matches/${viewerId}`,
   )
   const monitor = monitorBrowser(page)
   let humanPlayWsSearch: string | null = null
+  const forbiddenAuthorizationRequests: string[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname.startsWith('/api/') && request.headers().authorization) {
+      forbiddenAuthorizationRequests.push(`${request.method()} ${url.pathname}`)
+    }
+  })
 
   // Register WebSocket interception before the first navigation. Vite creates
   // its HMR socket on that navigation; Playwright must install page-level WS
@@ -1677,6 +1941,10 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   })
 
   await page.goto(`/#/match/${viewerId}`)
+  expect(await page.evaluate(() => ({
+    token: localStorage.getItem('bzplat_token'),
+    user: localStorage.getItem('bzplat_user'),
+  }))).toEqual({ token: null, user: null })
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   const viewerSeatOne = page.locator('[data-match-participant][data-seat="1"]')
   await expect(viewerSeatOne.getByText('canonical_a', { exact: true })).toBeVisible()
@@ -1687,10 +1955,9 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('+37')
   await expect(page.getByTestId('holdem-seat-state-2')).toContainText('-37')
 
-  // REST still supports the legacy localStorage Bearer. Even when it is present,
-  // the WebSocket URL must stay credential-free and rely on the HttpOnly cookie.
+  // WebSocket authentication stays credential-free in the URL and relies on
+  // the browser-managed HttpOnly cookie when a signed-in session exists.
   await page.evaluate((matchId) => {
-    localStorage.setItem('bzplat_token', 'ws-secret-must-not-enter-url')
     window.location.hash = `#/play/${matchId}`
   }, humanId)
   await expect(page).toHaveURL(new RegExp(`#\/play\/${humanId}$`))
@@ -1698,6 +1965,7 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   const humanStatus = page.getByRole('region', { name: '人类对战状态' })
   await expect(humanStatus).toContainText('对局结束 · canonical_bot（@alpha）胜')
   expect(humanTerminalDetailRequests).toBe(1)
+  expect(forbiddenAuthorizationRequests).toEqual([])
   await expect(page.getByText('本场净胜 +23 / -23', { exact: true })).toBeVisible()
   await monitor.expectClean(expectedViewerDetailCancellations())
 })
@@ -4818,13 +5086,11 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
     `${OTHER_USER}_holdem`,
     false,
   )
-  const startResponsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/api/matches/human',
+  const startResponse = await submitExecutionWithCommittedPoll(
+    page,
+    '/api/matches/human',
+    () => page.getByRole('button', { name: '开始人类对战', exact: true }).click(),
   )
-  await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
-  const startResponse = await startResponsePromise
   const createdMatchId = await waitForAcceptedExecutionMatch(page, startResponse, 'human')
   matchId = createdMatchId
   await expect(page.getByRole('button', { name: '弃牌', exact: true })).toBeEnabled({
@@ -5084,12 +5350,11 @@ test('real Pencil human play accepts several canvas-picked edges without illegal
       })
     })
 
-    const startResponsePromise = page.waitForResponse(
-      (response) => response.request().method() === 'POST'
-        && new URL(response.url()).pathname === '/api/matches/human',
+    const startResponse = await submitExecutionWithCommittedPoll(
+      page,
+      '/api/matches/human',
+      () => page.getByRole('button', { name: '开始人类对战', exact: true }).click(),
     )
-    await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
-    const startResponse = await startResponsePromise
     matchId = await waitForAcceptedExecutionMatch(page, startResponse, 'human')
 
     const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
@@ -5213,13 +5478,11 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
   const socketsWithSnapshot = () => sockets.filter(
     (socket) => socket.received.some((frame) => frame.includes('"type":"snapshot"')),
   )
-  const startResponse = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/api/matches/human',
+  const startedResponse = await submitExecutionWithCommittedPoll(
+    page,
+    '/api/matches/human',
+    () => page.getByRole('button', { name: '开始人类对战', exact: true }).click(),
   )
-  await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
-  const startedResponse = await startResponse
   const createdMatchId = await waitForAcceptedExecutionMatch(page, startedResponse, 'human')
   matchId = createdMatchId
   await expect(page).toHaveURL(/\/#\/play\//)
@@ -5231,12 +5494,15 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
   const receivedActionCount = () => sockets
     .flatMap((socket) => socket.received)
     .filter((frame) => frame.includes('"type":"action"')).length
+  let lastHumanActionSentAt = 0
   const sendOneFold = async () => {
     await expect(fold).toBeEnabled({ timeout: 20_000 })
+    await waitForHumanActionQuota(lastHumanActionSentAt)
     const sentBefore = sentFoldCount()
     const actionsBefore = receivedActionCount()
     await fold.click()
     await expect.poll(sentFoldCount).toBe(sentBefore + 1)
+    lastHumanActionSentAt = Date.now()
     // Wait until the engine has consumed this turn. Merely waiting for disabled is
     // racy with a local fast Bot: the next your_turn can re-enable before assertion.
     await expect.poll(receivedActionCount).toBeGreaterThan(actionsBefore)
@@ -5244,6 +5510,7 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
   }
   const sendRapidDoubleFold = async () => {
     await expect(fold).toBeEnabled({ timeout: 20_000 })
+    await waitForHumanActionQuota(lastHumanActionSentAt)
     const sentBefore = sentFoldCount()
     const actionsBefore = receivedActionCount()
     // Two native clicks in one browser task reproduce the same-render race: React
@@ -5254,6 +5521,7 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
       button.click()
     })
     await expect.poll(sentFoldCount).toBe(sentBefore + 1)
+    lastHumanActionSentAt = Date.now()
     await expect.poll(receivedActionCount).toBeGreaterThan(actionsBefore)
     // A duplicate frame can be rejected only after the accepted frame advances
     // the engine, so assert again after the authoritative action arrives.
@@ -5304,5 +5572,157 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
     if (matchId) {
       await ensureMatchTerminal(browser, baseURL!, request, matchId)
     }
+  })
+})
+
+test('human play stops reconnecting after a real action rate policy close', async ({
+  page,
+  request,
+  browser,
+  baseURL,
+}) => {
+  test.setTimeout(90_000)
+  expect(baseURL).toBeTruthy()
+  let matchId: string | null = null
+  await withCleanup(async () => {
+    const monitor = monitorBrowser(page)
+    await page.addInitScript(() => {
+      type CloseRecord = { code: number; reason: string; wasClean: boolean }
+      type Probe = {
+        sockets: WebSocket[]
+        closes: CloseRecord[]
+        rejectReasons: string[]
+      }
+      const qaWindow = window as typeof window & { __qaHumanWsProbe?: Probe }
+      const probe: Probe = { sockets: [], closes: [], rejectReasons: [] }
+      qaWindow.__qaHumanWsProbe = probe
+      const NativeWebSocket = window.WebSocket
+      class QaObservedWebSocket extends NativeWebSocket {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          if (protocols === undefined) super(url)
+          else super(url, protocols)
+          let pathname = ''
+          try {
+            pathname = new URL(String(url), window.location.href).pathname
+          } catch {
+            return
+          }
+          if (!/^\/api\/matches\/[^/]+\/play$/.test(pathname)) return
+          probe.sockets.push(this)
+          this.addEventListener('message', (event) => {
+            try {
+              const payload = JSON.parse(String(event.data)) as { type?: unknown; reason?: unknown }
+              if (payload.type === 'reject' && typeof payload.reason === 'string') {
+                probe.rejectReasons.push(payload.reason)
+              }
+            } catch {
+              // The application owns protocol validation; this probe records
+              // only bounded reject reasons needed for transport evidence.
+            }
+          })
+          this.addEventListener('close', (event) => {
+            probe.closes.push({
+              code: event.code,
+              reason: event.reason,
+              wasClean: event.wasClean,
+            })
+          })
+        }
+      }
+      Object.defineProperty(window, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: QaObservedWebSocket,
+      })
+    })
+
+    const probe = () => page.evaluate(() => {
+      const state = (window as typeof window & {
+        __qaHumanWsProbe?: {
+          sockets: WebSocket[]
+          closes: Array<{ code: number; reason: string; wasClean: boolean }>
+          rejectReasons: string[]
+        }
+      }).__qaHumanWsProbe
+      return {
+        socketCount: state?.sockets.length ?? 0,
+        closes: state?.closes ?? [],
+        rejectReasons: state?.rejectReasons ?? [],
+      }
+    })
+
+    await loginThroughUi(page, OTHER_USER)
+    await page.goto('/#/challenge')
+    await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+    await chooseBot(
+      page,
+      page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
+      `${OTHER_USER}_holdem`,
+      false,
+    )
+    const startResponse = await submitExecutionWithCommittedPoll(
+      page,
+      '/api/matches/human',
+      () => page.getByRole('button', { name: '开始人类对战', exact: true }).click(),
+    )
+    const createdMatchId = await waitForAcceptedExecutionMatch(
+      page,
+      startResponse,
+      'human',
+    )
+    matchId = createdMatchId
+    await expect(page).toHaveURL(new RegExp(`/\\#\\/play\\/${createdMatchId}$`))
+    const fold = page.getByRole('button', { name: '弃牌', exact: true })
+    await expect(fold).toBeEnabled({ timeout: 20_000 })
+    await expect.poll(async () => (await probe()).socketCount).toBe(1)
+
+    // Charge the real server-side burst bucket with bounded invalid envelopes.
+    // Validation rejects consume the same token as a legal action, and the
+    // first over-budget frame must produce the actual 1008 policy close.
+    await page.evaluate((frameCount) => {
+      const state = (window as typeof window & {
+        __qaHumanWsProbe?: { sockets: WebSocket[] }
+      }).__qaHumanWsProbe
+      const socket = state?.sockets.at(-1)
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new Error('human play WebSocket is not open')
+      }
+      for (let index = 0; index < frameCount; index += 1) {
+        socket.send(JSON.stringify({ unexpected: index }))
+      }
+    }, HUMAN_ACTION_RATE_BURST + 2)
+
+    await expect.poll(async () => (await probe()).closes).toHaveLength(1)
+    const [policyClose] = (await probe()).closes
+    expect(policyClose).toMatchObject({
+      code: 1008,
+      reason: 'rate_limit_exceeded',
+    })
+    expect(typeof policyClose.wasClean).toBe('boolean')
+    expect((await probe()).rejectReasons).toContain('rate_limit_exceeded')
+    await expect(page.getByRole('alert')).toHaveText(
+      '操作过于频繁，连接已关闭。请稍后再试。',
+    )
+    await expect(fold).toBeDisabled()
+    await expect(page.getByText(/正在重连/)).toHaveCount(0)
+
+    // The old client scheduled its first reconnect after 500ms. Observe two
+    // complete retry intervals and require the original socket/close cardinality
+    // to remain unchanged instead of accepting an instantaneous count.
+    const observationEndsAt = Date.now() + HUMAN_WS_FIRST_RECONNECT_DELAY_MS * 2
+    await expect.poll(async () => {
+      const snapshot = await probe()
+      return {
+        observationComplete: Date.now() >= observationEndsAt,
+        socketCount: snapshot.socketCount,
+        closeCount: snapshot.closes.length,
+      }
+    }, {
+      timeout: HUMAN_WS_FIRST_RECONNECT_DELAY_MS * 2 + 1_000,
+      intervals: [50, 100, 250],
+    }).toEqual({ observationComplete: true, socketCount: 1, closeCount: 1 })
+    await monitor.expectClean()
+  }, async () => {
+    if (matchId) await ensureMatchTerminal(browser, baseURL!, request, matchId)
   })
 })

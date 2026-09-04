@@ -79,7 +79,7 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
     <section
       data-testid="pencil-position-overview"
       aria-label="点格棋局面概览"
-      className="min-w-0 overflow-hidden rounded-xl border border-border bg-card p-2 shadow-sm 2xl:flex 2xl:flex-col"
+      className="min-w-0 overflow-hidden rounded-xl border border-border bg-card p-2 shadow-sm 2xl:flex 2xl:flex-col 2xl:py-1.5"
     >
       <div className="flex min-w-0 items-center gap-2">
         <div className="min-w-0">
@@ -101,7 +101,7 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
         <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${edgeProgress}%` }} />
       </div>
 
-      <div className="mt-2 grid grid-cols-2 gap-2 2xl:grid-cols-1">
+      <div className="mt-2 grid grid-cols-2 gap-2 2xl:grid-cols-1 2xl:gap-1.5">
         {([0, 1] as const).map((seat) => {
           const identity = identities[seat]
           const isActing = !state.matchOver && state.toAct === seat
@@ -113,7 +113,7 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
             <div
               key={seat}
               data-testid={`pencil-seat-score-${seat + 1}`}
-              className={`min-w-0 rounded-lg border px-2.5 py-2 ${tint} ${isActing ? 'border-primary/50 ring-2 ring-primary/25' : 'border-border'}`}
+              className={`min-w-0 rounded-lg border px-2.5 py-2 2xl:py-1.5 ${tint} ${isActing ? 'border-primary/50 ring-2 ring-primary/25' : 'border-border'}`}
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{identity.subject}</span>

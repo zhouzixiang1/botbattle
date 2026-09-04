@@ -1,12 +1,15 @@
 """管理员赛事状态接口必须复用 ContestManager 生命周期，而非直接改状态列。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password, new_session_token, session_expires
 from bzplat.backend.main import create_app
 
@@ -60,10 +63,48 @@ def _published_pairings(store, contest_id):
         stage_key="rr",
         scheduled_at="2099-01-03T10:30:00",
     )
+    # This helper intentionally builds a low-level two-row schedule rather
+    # than a complete RR graph.  Give that imported fixture an exact manifest
+    # so schedule-transaction tests reach their intended CAS/write boundary.
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET published_stage_pairing_count=2 WHERE id=?",
+            (contest_id,),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest_id,),
+        )
     return bot_a, bot_b, first, third
 
 
-def _running_two_player_contest(store, contest_id):
+def _set_imported_contest_status(
+    store,
+    contest_id: int,
+    status: str,
+    *,
+    official_results_ready: int | None = None,
+) -> None:
+    """Create an intentional legacy status fixture without using a live writer."""
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if official_results_ready is None:
+            connection.execute(
+                "UPDATE contests SET status=? WHERE id=?",
+                (status, contest_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE contests SET status=?,official_results_ready=? WHERE id=?",
+                (status, official_results_ready, contest_id),
+            )
+
+
+def _running_two_player_contest(
+    store, contest_id, *, materialize_pairings: bool = True
+):
     """Build a valid current-stage roster without bypassing entry identity."""
     owner = store.get_user_by_username("statusadmin")
     opponent = store.create_user(
@@ -71,17 +112,22 @@ def _running_two_player_contest(store, contest_id):
         f"status-player-{contest_id}@example.com",
         "hash",
     )
+    fixture_root = Path(store.path).resolve().parent
+    bot_a_path = fixture_root / f"status-finish-a-{contest_id}.bin"
+    bot_b_path = fixture_root / f"status-finish-b-{contest_id}.bin"
+    bot_a_path.write_bytes(b"status fixture a")
+    bot_b_path.write_bytes(b"status fixture b")
     bot_a = store.create_bot(
         owner["id"],
         f"status-finish-a-{contest_id}",
-        binary_path="/tmp",
+        binary_path=str(bot_a_path),
         format="elf",
         game_id="holdem",
     )
     bot_b = store.create_bot(
         opponent["id"],
         f"status-finish-b-{contest_id}",
-        binary_path="/tmp",
+        binary_path=str(bot_b_path),
         format="elf",
         game_id="holdem",
     )
@@ -91,19 +137,34 @@ def _running_two_player_contest(store, contest_id):
     )
     store.update_contest(
         contest_id,
-        status="running",
+        status="published",
         current_stage_idx=0,
         stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
     )
-    return owner, bot_a, bot_b, entry_a, entry_b
+    pairing = None
+    if materialize_pairings:
+        manager = ContestManager(store, object())  # type: ignore[arg-type]
+        asyncio.run(
+            manager._begin_stage(
+                contest_id,
+                0,
+                schedule_immediately=True,
+                dispatch_pending=False,
+            )
+        )
+        pairing = store.list_contest_pairings(contest_id, stage_idx=0)[0]
+    else:
+        _set_imported_contest_status(store, contest_id, "running")
+    return owner, bot_a, bot_b, entry_a, entry_b, pairing
 
 
 def test_admin_finish_uses_manager_and_returns_success(tmp_path):
     """旧实现先写 finished，随后引用未定义 admin 而 500；现在须完整收尾并返回 200。"""
     app, store, contest_id, headers = _setup(tmp_path)
-    owner, bot_a, bot_b, entry_a, entry_b = _running_two_player_contest(
+    owner, bot_a, bot_b, _entry_a, _entry_b, pairing = _running_two_player_contest(
         store, contest_id
     )
+    assert pairing is not None
     match_id = f"admin-finish-completed-{contest_id}"
     store.create_match(
         match_id,
@@ -114,23 +175,19 @@ def test_admin_finish_uses_manager_and_returns_success(tmp_path):
         match_type="contest",
         game_id="holdem",
     )
+    store.bind_contest_pairing_match(
+        contest_id,
+        pairing["id"],
+        match_id,
+        require_execution_admission=False,
+    )
     store.update_match(
         match_id,
         status="completed",
         winner=0,
         result={"deltas": [100, -100]},
     )
-    store.add_contest_pairing(
-        contest_id,
-        bot_a["id"],
-        bot_b["id"],
-        match_id=match_id,
-        status="completed",
-        stage_idx=0,
-        stage_key="rr",
-        entry_a_id=entry_a["id"],
-        entry_b_id=entry_b["id"],
-    )
+    assert store.complete_contest_pairing_for_match(contest_id, match_id)
 
     response = TestClient(app).patch(
         f"/api/admin/contests/{contest_id}", json={"status": "finished"}, headers=headers
@@ -148,7 +205,9 @@ def test_admin_finish_uses_manager_and_returns_success(tmp_path):
 def test_admin_finish_rejects_two_player_zero_pairing_graph(tmp_path):
     """Admin cannot freeze a missing current-stage batch into a zero table."""
     app, store, contest_id, headers = _setup(tmp_path)
-    _running_two_player_contest(store, contest_id)
+    _running_two_player_contest(
+        store, contest_id, materialize_pairings=False
+    )
 
     response = TestClient(app).patch(
         f"/api/admin/contests/{contest_id}",
@@ -157,7 +216,10 @@ def test_admin_finish_rejects_two_player_zero_pairing_graph(tmp_path):
     )
 
     assert response.status_code == 400
-    assert "未完成对阵" in response.json()["detail"]
+    assert any(
+        marker in response.json()["detail"]
+        for marker in ("未完成对阵", "批次完整性")
+    )
     saved = store.get_contest(contest_id)
     assert saved["status"] == "running"
     assert saved["official_results_ready"] == 0
@@ -166,7 +228,7 @@ def test_admin_finish_rejects_two_player_zero_pairing_graph(tmp_path):
 
 def test_admin_terminal_contest_cannot_be_cancelled(tmp_path):
     app, store, contest_id, headers = _setup(tmp_path)
-    store.update_contest(contest_id, status="finished")
+    _set_imported_contest_status(store, contest_id, "finished")
 
     response = TestClient(app).patch(
         f"/api/admin/contests/{contest_id}", json={"status": "cancelled"}, headers=headers
@@ -487,10 +549,47 @@ def test_store_published_schedule_update_rolls_back_contest_when_pairing_write_f
     ] == before_schedules
 
 
+def test_store_published_schedule_update_requires_exact_lifecycle_seal(tmp_path):
+    _app, store, contest_id, _headers = _setup(tmp_path)
+    _published_pairings(store, contest_id)
+    before = store.get_contest(contest_id)
+    pairings = store.list_contest_pairings(contest_id)
+    before_schedules = [pairing["scheduled_at"] for pairing in pairings]
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision=NULL "
+            "WHERE id=?",
+            (contest_id,),
+        )
+
+    with pytest.raises(ValueError, match="manifest|seal"):
+        store.update_published_contest_schedule(
+            contest_id,
+            {"starts_at": "2099-05-01T00:00:00"},
+            stage_idx=0,
+            pending_pairing_schedules=[
+                {
+                    "id": pairing["id"],
+                    "round_num": pairing["round_num"],
+                    "scheduled_at": "2099-05-01T00:00:00",
+                }
+                for pairing in pairings
+            ],
+        )
+
+    saved = store.get_contest(contest_id)
+    assert saved["starts_at"] == before["starts_at"]
+    assert [
+        pairing["scheduled_at"]
+        for pairing in store.list_contest_pairings(contest_id)
+    ] == before_schedules
+
+
 @pytest.mark.parametrize("status", ["running", "rest", "finished", "cancelled"])
 def test_admin_active_and_terminal_schedule_is_read_only(tmp_path, status):
     app, store, contest_id, headers = _setup(tmp_path)
-    store.update_contest(contest_id, status=status)
+    _set_imported_contest_status(store, contest_id, status)
 
     response = TestClient(app).patch(
         f"/api/admin/contests/{contest_id}",
@@ -568,6 +667,49 @@ def test_contest_create_time_validation_is_audited_and_does_not_insert(tmp_path,
     assert calls[0]["result"] == "fail"
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["2099-01-03 00:00:00", "20990103T000000"],
+)
+def test_contest_create_rejects_noncanonical_time_without_insert(
+    tmp_path, value
+):
+    app, store, _contest_id, headers = _setup(tmp_path)
+    before = len(store.list_contests())
+
+    response = TestClient(app).post(
+        "/api/contests",
+        json={"title": "非规范时间赛", "starts_at": value},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "规范" in response.json()["detail"]
+    assert len(store.list_contests()) == before
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2099-01-03 00:00:00", "20990103T000000"],
+)
+def test_admin_time_patch_rejects_noncanonical_value_atomically(
+    tmp_path, value
+):
+    app, store, contest_id, headers = _setup(tmp_path)
+
+    response = TestClient(app).patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"title": "不得写入", "starts_at": value},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "规范" in response.json()["detail"]
+    saved = store.get_contest(contest_id)
+    assert saved["title"] == "状态回归赛"
+    assert saved["starts_at"] is None
+
+
 def test_admin_time_patch_success_and_failure_are_audited(tmp_path, monkeypatch):
     app, _store, contest_id, headers = _setup(tmp_path)
     calls: list[dict] = []
@@ -599,7 +741,7 @@ def test_admin_time_patch_success_and_failure_are_audited(tmp_path, monkeypatch)
 @pytest.mark.parametrize("status", ["running", "rest"])
 def test_admin_delete_rejects_active_contest_states(tmp_path, status):
     app, store, contest_id, headers = _setup(tmp_path)
-    store.update_contest(contest_id, status=status)
+    _set_imported_contest_status(store, contest_id, status)
 
     response = TestClient(app).delete(
         f"/api/admin/contests/{contest_id}", headers=headers
@@ -611,8 +753,11 @@ def test_admin_delete_rejects_active_contest_states(tmp_path, status):
 
 def test_admin_delete_rejects_finished_and_preserves_official_result_container(tmp_path):
     app, store, contest_id, headers = _setup(tmp_path)
-    store.update_contest(
-        contest_id, status="finished", official_results_ready=1,
+    _set_imported_contest_status(
+        store,
+        contest_id,
+        "finished",
+        official_results_ready=1,
     )
 
     response = TestClient(app).delete(

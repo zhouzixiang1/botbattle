@@ -25,6 +25,21 @@ GRID_BOX = 2
 _DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
+def max_timed_decisions(n_dots: int = DEFAULT_N) -> int:
+    """Return the strict request-count upper bound for one normal game.
+
+    Every edge consumes one move request.  After a scoring move the protocol
+    also asks the opponent to acknowledge one forced ``pass``; the final box
+    ends the game before that acknowledgement, so at most ``boxes - 1`` pass
+    requests are timed.  For N=6 this is 60 edge moves + 24 passes = 84.
+    """
+    if isinstance(n_dots, bool) or not isinstance(n_dots, int) or n_dots < 2:
+        raise ValueError("n_dots 必须是至少 2 的整数")
+    edges = 2 * n_dots * (n_dots - 1)
+    boxes = (n_dots - 1) ** 2
+    return edges + boxes - 1
+
+
 class PencilBoard:
     """交错网格：偶偶=点，奇偶/偶奇=边，奇奇=格心。追踪 edge/box 归属。"""
 
@@ -111,4 +126,5 @@ __all__ = [
     "GRID_EDGE_USED",
     "GRID_BOX",
     "PencilBoard",
+    "max_timed_decisions",
 ]

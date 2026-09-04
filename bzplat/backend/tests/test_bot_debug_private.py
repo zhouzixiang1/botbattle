@@ -466,7 +466,17 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
     assert not store.get_match_debug_for_user(
         "contest-match", user_id=owner_a["id"], is_admin=False,
     )["allowed"]
-    store.update_contest(contest["id"], status="finished")
+    # This permission test needs only a historical terminal status; it does not
+    # exercise lifecycle advancement or official results.  Seed that imported
+    # read-only shape explicitly instead of bypassing the production
+    # decision/finish transaction through generic ``update_contest``.
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        updated = connection.execute(
+            "UPDATE contests SET status='finished' WHERE id=? AND status='running'",
+            (contest["id"],),
+        )
+        assert updated.rowcount == 1
     assert store.get_match_debug_for_user(
         "contest-match", user_id=owner_a["id"], is_admin=False,
     )["allowed"]

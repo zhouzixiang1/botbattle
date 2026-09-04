@@ -35,20 +35,20 @@ def test_each_game_has_templates_module():
 def test_specs_reference_local_templates():
     """各 spec.templates 引用本包 templates.TEMPLATES（不经 contests）。"""
     assert len(registry.get("holdem").templates) == 8
-    assert len(registry.get("gomoku").templates) == 6
-    assert len(registry.get("pencil").templates) == 5
+    assert len(registry.get("gomoku").templates) == 7
+    assert len(registry.get("pencil").templates) == 6
 
 
 # ── DEFAULT_TEMPLATES 从注册表派生 ────────────────────────────
 def test_default_templates_derived_from_registry():
-    """DEFAULT_TEMPLATES 是三个 GameSpec 共 19 个模板的无损聚合。"""
+    """DEFAULT_TEMPLATES 是三个 GameSpec 共 21 个模板的无损聚合。"""
     # 聚合注册表
     aggregated = {}
     for gid in registry.all_ids():
         for t in registry.get(gid).templates:
             aggregated[t["id"]] = t
     assert set(aggregated.keys()) == set(DEFAULT_TEMPLATES.keys())
-    assert len(DEFAULT_TEMPLATES) == 19
+    assert len(DEFAULT_TEMPLATES) == 21
 
 
 def test_default_templates_has_all():
@@ -58,10 +58,10 @@ def test_default_templates_has_all():
         "holdem_swiss_top8_ranked", "holdem_swiss_ko",
         "holdem_top8_ranked", "holdem_prelim_swiss",
         "holdem_final_ranked",
-        "board_rr", "gomoku_rr", "gomoku_swiss_ranked",
+        "gomoku_seeded_group_drr_final", "board_rr", "gomoku_rr", "gomoku_swiss_ranked",
         "gomoku_swiss_top8_ranked", "gomoku_group_drr_ko",
         "gomoku_swiss_ko",
-        "pencil_drr", "pencil_group_drr_ko", "pencil_swiss_ranked",
+        "pencil_drr", "pencil_group_drr", "pencil_group_drr_ko", "pencil_swiss_ranked",
         "pencil_swiss_ko", "pencil_ko",
     }
     assert ids == expected
@@ -185,11 +185,15 @@ def test_omitted_template_uses_game_scoped_registry_default():
     assert (tid, gid, match_config) == ("holdem_dup_rr", "holdem", {})
     assert stages == get_template("holdem_dup_rr")["stages"]
 
-    # 没有 recommended 元数据的游戏继续使用自己的代码顺序，不猜成德州。
-    board_default = list_templates(game_id="gomoku")[0]
-    assert default_template_id("gomoku") == board_default["id"]
-    _tid, board_gid, _stages, _config = resolve_template(None, game_id="gomoku")
-    assert board_gid == "gomoku"
+    # 正式保护种子模板列在目录前部，也不能取代该游戏显式推荐的通用默认。
+    assert list_templates(game_id="gomoku")[0]["id"] == (
+        "gomoku_seeded_group_drr_final"
+    )
+    assert default_template_id("gomoku") == "board_rr"
+    board_tid, board_gid, _stages, _config = resolve_template(
+        None, game_id="gomoku"
+    )
+    assert (board_tid, board_gid) == ("board_rr", "gomoku")
 
 
 def test_omitted_game_stays_with_first_game_when_another_game_is_recommended(
@@ -227,7 +231,7 @@ def test_get_template_unknown_returns_none():
 def test_list_templates_returns_only_creation_enabled_by_default():
     tpls = list_templates()
     ids = {t["id"] for t in tpls}
-    assert len(tpls) == 18
+    assert len(tpls) == 20
     assert ids == set(DEFAULT_TEMPLATES) - {"holdem_final_ranked"}
     assert {t["id"] for t in list_templates(include_disabled=True)} == set(
         DEFAULT_TEMPLATES

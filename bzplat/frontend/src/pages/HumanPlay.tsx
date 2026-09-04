@@ -5,6 +5,7 @@ import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/l
 import MatchBoard from '@/components/MatchBoard'
 import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { ErrorMsg, Loading } from '@/components/ui/status'
@@ -20,6 +21,8 @@ import {
   resolveWinnerLabel,
 } from '@/lib/match-seats'
 import type { HumanActionEnvelope, RawEvent } from '@/games/base'
+import { parseMatchTimeControl, timeControlDescription, timeControlLabel } from '@/lib/time-controls'
+import { resolveHumanWebSocketClosePolicy } from './human-play-websocket-policy'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -70,33 +73,17 @@ function humanTurnCursor(events: Ev[], humanSeat: number): { ordinal: number; pe
 const HUMAN_TIMEOUT_SEC = 120
 const HUMAN_EVENT_CONTEXT_SIZE = 7
 
-function cumulativeClockRemaining(events: Ev[], seat: number): number | null {
-  let remaining: number | null = null
-  for (const event of events) {
-    if (event.type === 'match_start') {
-      const budget = Number(event.time_budget_per_side)
-      if (Number.isFinite(budget) && budget >= 0) remaining = budget
-    } else if (event.type === 'time_used' && Number(event.seat) === seat) {
-      const value = Number(event.remaining)
-      if (Number.isFinite(value) && value >= 0) remaining = value
-    } else if (event.type === 'time_out' && Number(event.seat) === seat) {
-      remaining = 0
-    }
-  }
-  return remaining
+function humanTurnDeadline(): number {
+  // Selected game time controls are Bot-only in human practice. Never derive
+  // the real person's deadline from match_start/time_used Bot clock events.
+  return Date.now() + HUMAN_TIMEOUT_SEC * 1000
 }
 
-function humanTurnDeadline(events: Ev[], seat: number): number {
-  const cumulative = cumulativeClockRemaining(events, seat)
-  const allowed = cumulative === null
-    ? HUMAN_TIMEOUT_SEC
-    : Math.min(HUMAN_TIMEOUT_SEC, Math.max(0, cumulative))
-  return Date.now() + allowed * 1000
-}
+type HumanMatchRow = MatchSeatRow & { time_control?: unknown }
 
 export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
-  const [match, setMatch] = useState<MatchSeatRow | null>(null)
+  const [match, setMatch] = useState<HumanMatchRow | null>(null)
   const [events, setEvents] = useState<Ev[]>([])
   const eventsRef = useRef<Ev[]>([])
   const [over, setOver] = useState(false)
@@ -142,7 +129,7 @@ export default function HumanPlay() {
     // MatchViewer 共用后端的权威白名单投影。effect 级 disposed 同时防止路由
     // 切换后旧对局的迟到响应覆盖新页面。
     const refreshTerminalMatch = () => {
-      void apiGet<{ match: MatchSeatRow }>(`/api/matches/${encodeURIComponent(id)}`)
+      void apiGet<{ match: HumanMatchRow }>(`/api/matches/${encodeURIComponent(id)}`)
         .then((detail) => {
           if (disposed || String(detail.match?.id || '') !== id) return
           if (detail.match.status === 'completed' || detail.match.status === 'aborted') {
@@ -157,14 +144,18 @@ export default function HumanPlay() {
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
       const ws = new WebSocket(playWsUrl(id))
       wsRef.current = ws
+      let lastRejectReason = ''
+      let lastProtocolError = ''
       ws.onmessage = (e) => {
         if (disposed) return
         try {
           const ev = JSON.parse(e.data)
           if (ev.type === 'snapshot') {
             // 重连后服务端重发 snapshot：resync 状态（含已发生事件）
-            attempt = 0
-            const snapshotMatch = (ev.match || {}) as MatchSeatRow
+            // A snapshot proves authorization and replay availability, but it
+            // does not prove transport stability. Keep the effect-lifetime
+            // retry budget bounded across snapshot-then-close loops.
+            const snapshotMatch = (ev.match || {}) as HumanMatchRow
             const history = (Array.isArray(ev.events) ? ev.events : []) as Ev[]
             const terminal = history.slice().reverse().find(
               (item) => item.type === 'match_end' || item.type === 'error',
@@ -204,7 +195,7 @@ export default function HumanPlay() {
                 actionSubmittedRef.current = false
                 setActionSubmitted(false)
                 setError('')
-                setTurnDeadline(humanTurnDeadline(history, snapshotHumanSeat))
+                setTurnDeadline(humanTurnDeadline())
               } else if (!cursor.pending) {
                 // No action is currently legal. Preserve the submitted lock; the
                 // next live `your_turn` is the only normal path that unlocks it.
@@ -226,7 +217,7 @@ export default function HumanPlay() {
             })
             setMatch((prev) => {
               if (!prev) return prev
-              const next: MatchSeatRow = {
+              const next: HumanMatchRow = {
                 ...prev,
                 status: ev.type === 'error' ? 'aborted' : 'completed',
                 winner: ev.winner as number | null | undefined,
@@ -254,13 +245,26 @@ export default function HumanPlay() {
               actionSubmittedRef.current = false
               setActionSubmitted(false)
               setError('')
-              setTurnDeadline(humanTurnDeadline(nextEvents, Number(ev.player)))
+              setTurnDeadline(humanTurnDeadline())
             } else if (ev.type === 'reject') {
-              // The backend explicitly did not consume this frame, so this same
-              // turn may be retried. Do not unlock for ordinary action/move events.
-              actionSubmittedRef.current = false
-              setActionSubmitted(false)
-              setError(String(ev.message || '动作未被接受，请重试。'))
+              lastRejectReason = typeof ev.reason === 'string' ? ev.reason : ''
+              lastProtocolError = String(ev.message || '动作未被接受，请重试。')
+              const rejectPolicy = resolveHumanWebSocketClosePolicy({
+                code: 1006,
+                reason: '',
+                lastRejectReason,
+                lastProtocolError,
+              })
+              lastProtocolError = rejectPolicy.retry
+                ? lastProtocolError
+                : rejectPolicy.message
+              // Ordinary validation rejects leave this turn retryable. A
+              // terminal policy reject is followed by a close and must lock the
+              // action immediately so a same-render click cannot send again.
+              actionSubmittedRef.current = !rejectPolicy.retry
+              setActionSubmitted(!rejectPolicy.retry)
+              if (!rejectPolicy.retry) setTurnDeadline(null)
+              setError(lastProtocolError)
             }
           }
         } catch {
@@ -268,9 +272,24 @@ export default function HumanPlay() {
         }
       }
       ws.onerror = () => { if (!disposed) setError('连接异常') }
-      ws.onclose = () => {
-        // match 结束后服务端正常关闭；否则尝试重连
+      ws.onclose = (event) => {
+        if (wsRef.current === ws) wsRef.current = null
+        // match 结束后服务端正常关闭；否则只重试明确的瞬时传输关闭。
         if (overRef.current || disposed) return
+        const closePolicy = resolveHumanWebSocketClosePolicy({
+          code: event.code,
+          reason: event.reason,
+          lastRejectReason,
+          lastProtocolError,
+        })
+        if (!closePolicy.retry) {
+          actionSubmittedRef.current = true
+          setActionSubmitted(true)
+          setTurnDeadline(null)
+          setError(closePolicy.message)
+          setReconnecting(false)
+          return
+        }
         attempt += 1
         if (attempt > 5) {
           setError('连接已断开，重连失败。请刷新页面。')
@@ -302,6 +321,8 @@ export default function HumanPlay() {
 
   const gameId = normalizeGameId(match?.game_id)
   const gameSpec = match ? findGame(gameId) : undefined
+  const parsedTimeControl = parseMatchTimeControl(match?.time_control, gameId)
+  const timeControl = parsedTimeControl?.applies_to === 'bot_only' ? parsedTimeControl : null
   const humanSeat = match?.human_seat ?? 1
   const seats = seatInfos(match)
 
@@ -462,6 +483,15 @@ export default function HumanPlay() {
       <StickyToolbar label="人类对战状态" className="justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
           {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
+          <Badge variant="outline">Bot：{timeControl ? timeControlLabel(timeControl) : '时限不可用'}</Badge>
+          <span
+            className="text-xs text-muted-foreground"
+            title={timeControl
+              ? timeControlDescription(timeControl, true)
+              : 'Bot 时限配置暂不可用；页面不会猜测或代填 Bot 棋钟。'}
+          >
+            非对称练习：真人仅用防挂机时限
+          </span>
           {over ? (
             <span className="min-w-0 break-words font-medium text-foreground">
               对局结束 · {winnerLabel}
@@ -520,9 +550,9 @@ export default function HumanPlay() {
         <div
           data-testid="human-canvas-layout"
           className={viewportDashboard
-            ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
+            ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-19rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-19rem)))_minmax(17rem,19rem)]'
             : viewportFitCanvas
-              ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
+              ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-19rem)))_22rem]'
             : 'grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}
         >
           {viewportDashboard && ReplayHud && currentVm !== null && (
@@ -530,7 +560,7 @@ export default function HumanPlay() {
               <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
             </div>
           )}
-          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
+          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-19rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
             {TurnSurface ? (
               <TurnSurface
                 gameId={gameSpec.id}

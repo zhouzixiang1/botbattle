@@ -59,6 +59,84 @@ def test_game_labels_derived_from_registry():
         assert GAME_LABELS[gid] == registry.get(gid).label
 
 
+def test_time_control_registry_has_stable_ids_and_defaults():
+    expected = {
+        "holdem": (
+            "holdem_per_decision_60s_v1",
+            ["holdem_per_decision_60s_v1"],
+        ),
+        "gomoku": (
+            "gomoku_per_side_total_900s_v1",
+            [
+                "gomoku_per_side_total_900s_v1",
+                "gomoku_per_side_total_300s_v1",
+            ],
+        ),
+        "pencil": (
+            "pencil_per_side_total_900s_v1",
+            [
+                "pencil_per_side_total_900s_v1",
+                "pencil_per_decision_1s_v1",
+            ],
+        ),
+    }
+    for game_id, (default_id, allowed_ids) in expected.items():
+        spec = registry.get(game_id)
+        assert spec.default_time_control_id == default_id
+        assert [item.id for item in spec.time_controls] == allowed_ids
+        assert spec.resolve_time_control(None).id == default_id
+        assert all(item.applies_to == "both_bots" for item in spec.time_controls)
+
+
+@pytest.mark.parametrize(
+    ("game_id", "bad_id"),
+    [
+        ("gomoku", "pencil_per_decision_1s_v1"),
+        ("pencil", "PENCIL_PER_DECISION_1S_V1"),
+        ("pencil", " pencil_per_decision_1s_v1"),
+        ("holdem", ""),
+    ],
+)
+def test_time_control_resolution_is_exact_and_cross_game_closed(game_id, bad_id):
+    with pytest.raises(ValueError, match="不支持时限"):
+        registry.get(game_id).resolve_time_control(bad_id)
+
+
+def test_time_control_eta_uses_frozen_option():
+    assert registry.get("gomoku").eta_for_match(
+        {"time_control_id": "gomoku_per_side_total_300s_v1"}
+    ) == 600
+    assert registry.get("gomoku").eta_for_match(
+        {"time_control_id": "gomoku_per_side_total_900s_v1"}
+    ) == 1800
+    assert registry.get("pencil").eta_for_match(
+        {"time_control_id": "pencil_per_decision_1s_v1"}
+    ) == 84
+
+
+def test_contest_source_candidate_capabilities_are_game_registered():
+    """来源候选类型由 GameSpec 声明；通用 API 不枚举具体游戏。"""
+    assert registry.get("gomoku").contest_source_candidate_kind == "protected_seed"
+    assert registry.get("pencil").contest_source_candidate_kind == "navigation"
+    assert registry.get("holdem").contest_source_candidate_kind is None
+
+
+def test_contest_source_candidate_capability_must_match_local_templates():
+    """GameSpec 与模板能力漂移应在注册阶段失败，而不是路由时猜测。"""
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="必须与赛事模板来源能力一致"):
+        replace(
+            registry.get("gomoku"),
+            contest_source_candidate_kind="navigation",
+        )
+    with pytest.raises(ValueError, match="不是受支持"):
+        replace(
+            registry.get("holdem"),
+            contest_source_candidate_kind="unknown",
+        )
+
+
 # ── 未知 game_id 报错（行为修正）──────────────────────────────
 def test_unknown_game_id_raises_in_registry_get():
     """registry.get 对未知 game_id 抛 KeyError（不再静默兜底 holdem）。"""

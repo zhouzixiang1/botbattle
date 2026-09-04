@@ -89,6 +89,8 @@ def _series_rows(
                 "pairing_seed": seed_base + index,
                 "series_index": index,
                 "series_size": size,
+                "published_at": "2026-01-01T00:00:00",
+                "scheduled_at": None,
             }
         )
     return rows
@@ -442,6 +444,7 @@ def test_store_rejects_partial_series_bad_seeds_and_identity_mutation(tmp_path):
     )
     for field, value in (
         ("pairing_seed", 99),
+        ("published_at", "2026-09-02T01:02:03"),
         ("series_index", 2),
         ("series_size", 4),
     ):
@@ -470,7 +473,9 @@ def _published_series_fixture(tmp_path: Path, prefix: str, *, duplicate: bool = 
     return store, manager, contest["id"], bots
 
 
-def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
+def test_published_series_identity_is_idempotent_and_corruption_is_preserved(
+    tmp_path,
+):
     store, manager, contest_id, bots = _published_series_fixture(
         tmp_path, "publish-series"
     )
@@ -500,9 +505,6 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
     asyncio.run(manager.ensure_published_pairings(contest_id, 0))
     assert [row["id"] for row in store.list_contest_pairings(contest_id)] == first_ids
 
-    expected_topology = manager._pairing_batch_signature(
-        first, include_pairing_seed=False
-    )
     same_pair = sorted(next(iter(grouped.values())), key=lambda row: row["series_index"])
     with store._tx() as conn:
         conn.execute(
@@ -512,23 +514,23 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
                 same_pair[1]["id"],
             ),
         )
-    asyncio.run(manager.ensure_published_pairings(contest_id, 0))
-    seed_recovered = store.list_contest_pairings(contest_id, stage_idx=0)
-    assert manager._pairing_batch_signature(
-        seed_recovered, include_pairing_seed=False
-    ) == expected_topology
-    assert manager._published_series_seeds_are_valid(seed_recovered)
-    assert {row["id"] for row in seed_recovered}.isdisjoint(first_ids)
+    corrupted_seed = store.list_contest_pairings(contest_id, stage_idx=0)
+    with pytest.raises(ValueError, match="前序阶段证据不完整"):
+        asyncio.run(manager.ensure_published_pairings(contest_id, 0))
+    assert store.list_contest_pairings(contest_id, stage_idx=0) == corrupted_seed
+
+    # Restore only the deliberate fixture damage and precisely reseal it so
+    # the next corruption proves its own fail-closed branch.
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_pairings SET pairing_seed=? WHERE id=?",
+            (same_pair[1]["pairing_seed"], same_pair[1]["id"]),
+        )
+    _reseal_imported_active_pairings(store, contest_id)
 
     # A coordinate swap retains the same aggregate 1..K index set, so this
-    # specifically proves recovery compares each frozen row identity rather
-    # than only batch counts/sets.
-    regrouped: dict[frozenset[int], list[dict]] = defaultdict(list)
-    for row in seed_recovered:
-        regrouped[frozenset((row["bot_a_id"], row["bot_b_id"]))].append(row)
-    same_pair = sorted(
-        next(iter(regrouped.values())), key=lambda row: row["series_index"]
-    )
+    # specifically proves the immutable seal rejects row-identity drift rather
+    # than deleting and regenerating a new private schedule.
     with store._tx() as conn:
         conn.execute(
             "UPDATE contest_pairings SET series_index=CASE id "
@@ -541,29 +543,38 @@ def test_publish_recovery_freezes_series_identity_and_is_idempotent(tmp_path):
                 same_pair[1]["id"],
             ),
         )
-    asyncio.run(manager.ensure_published_pairings(contest_id, 0))
-    coordinate_recovered = store.list_contest_pairings(contest_id, stage_idx=0)
-    assert manager._pairing_batch_signature(
-        coordinate_recovered, include_pairing_seed=False
-    ) == expected_topology
-    assert manager._published_series_seeds_are_valid(coordinate_recovered)
-    assert {row["id"] for row in coordinate_recovered}.isdisjoint(
-        {row["id"] for row in seed_recovered}
+    corrupted_coordinate = store.list_contest_pairings(contest_id, stage_idx=0)
+    with pytest.raises(ValueError, match="前序阶段证据不完整"):
+        asyncio.run(manager.ensure_published_pairings(contest_id, 0))
+    assert (
+        store.list_contest_pairings(contest_id, stage_idx=0)
+        == corrupted_coordinate
     )
 
     with store._tx() as conn:
         conn.execute(
-            "DELETE FROM contest_pairings WHERE id=?",
-            (coordinate_recovered[4]["id"],),
+            "UPDATE contest_pairings SET series_index=CASE id "
+            "WHEN ? THEN 1 WHEN ? THEN 2 ELSE series_index END "
+            "WHERE id IN (?,?)",
+            (
+                same_pair[0]["id"],
+                same_pair[1]["id"],
+                same_pair[0]["id"],
+                same_pair[1]["id"],
+            ),
         )
-    asyncio.run(manager.ensure_published_pairings(contest_id, 0))
-    recovered = store.list_contest_pairings(contest_id, stage_idx=0)
-    assert len(recovered) == 9
-    assert manager._pairing_batch_signature(
-        recovered, include_pairing_seed=False
-    ) == expected_topology
-    assert manager._published_series_seeds_are_valid(recovered)
-    assert manager.estimate(contest_id)["estimated_matches"] == 9
+    _reseal_imported_active_pairings(store, contest_id)
+
+    with store._tx() as conn:
+        conn.execute(
+            "DELETE FROM contest_pairings WHERE id=?",
+            (first[4]["id"],),
+        )
+    partial = store.list_contest_pairings(contest_id, stage_idx=0)
+    assert len(partial) == 8
+    with pytest.raises(ValueError, match="前序阶段证据不完整"):
+        asyncio.run(manager.ensure_published_pairings(contest_id, 0))
+    assert store.list_contest_pairings(contest_id, stage_idx=0) == partial
     store.close()
 
 
@@ -641,7 +652,7 @@ def _legacy_seed_cas_fixture(
     contest = store.create_contest(
         f"{prefix} contest",
         users[0]["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=stages_json,
     )
@@ -649,19 +660,66 @@ def _legacy_seed_cas_fixture(
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    store.add_pairing(
+    pairing = store.create_contest_stage_pairings(
         contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-        bot_a_version_id=versions[0]["id"],
-        bot_b_version_id=versions[1]["id"],
-        stage_key="legacy",
-        pairing_seed=pairing_seed,
-    )
-    pairing = store.list_contest_pairings(contest["id"], stage_idx=0)[0]
+        0,
+        [
+            {
+                "entry_a_id": entries[0]["id"],
+                "entry_b_id": entries[1]["id"],
+                "bot_a_id": bots[0]["id"],
+                "bot_b_id": bots[1]["id"],
+                "bot_a_version_id": versions[0]["id"],
+                "bot_b_version_id": versions[1]["id"],
+                "round_num": 1,
+                "stage_key": "legacy",
+                "pairing_seed": pairing_seed,
+                "series_index": 1,
+                "series_size": 1,
+                "published_at": "2026-01-01T00:00:00",
+                "scheduled_at": None,
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
+    assert store.contest_stage_manifest_is_valid(contest["id"], 0)
     return store, contest, pairing, users, bots, versions
+
+
+def _reseal_imported_active_pairings(store: Store, contest_id: int) -> None:
+    """Seal a deliberate low-level legacy shape after all target damage exists."""
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=0",
+                (contest_id,),
+            ).fetchone()[0]
+        )
+        conn.execute(
+            "UPDATE contests SET published_stage_pairing_count=? "
+            "WHERE id=? AND status IN ('published','running') "
+            "AND current_stage_idx=0",
+            (count, contest_id),
+        )
+        revision = int(
+            conn.execute(
+                "SELECT pairing_topology_revision FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()[0]
+        )
+        sealed = conn.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision=? "
+            "WHERE id=? AND status IN ('published','running') "
+            "AND current_stage_idx=0 "
+            "AND pairing_topology_revision=?",
+            (revision, contest_id, revision),
+        )
+        assert sealed.rowcount == 1
+    assert store.contest_stage_manifest_is_valid(contest_id, 0)
 
 
 @pytest.mark.parametrize(
@@ -790,21 +848,26 @@ def test_existing_pairing_seed_rejects_cross_coordinate_reuse(tmp_path):
         marker=None,
         pairing_seed=seed,
     )
+    entries = store.list_contest_entries(contest["id"])
     second = store.add_pairing(
         contest["id"],
         bots[0]["id"],
         bots[1]["id"],
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
         bot_a_version_id=versions[0]["id"],
         bot_b_version_id=versions[1]["id"],
         stage_key="legacy",
         round_num=2,
         pairing_seed=seed + 1,
+        published_at="2026-01-01T00:00:00",
     )
     with store._tx() as conn:
         conn.execute(
             "UPDATE contest_pairings SET pairing_seed=? WHERE id=?",
             (seed, second["id"]),
         )
+    _reseal_imported_active_pairings(store, contest["id"])
 
     with pytest.raises(ValueError, match="其他坐标复用"):
         store.ensure_contest_pairing_seed_for_enqueue(

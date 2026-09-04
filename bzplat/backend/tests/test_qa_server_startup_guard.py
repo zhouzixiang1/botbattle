@@ -16,6 +16,20 @@ from bzplat.backend.runtime.limits import MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES
 
 SOURCE_ROOT = Path(main.__file__).resolve().parents[2]
 PRIMARY_ROOT = primary_checkout_root(SOURCE_ROOT)
+_INHERITED_TEST_ONLY_FLAGS = (
+    "BZ_BOT_LOCAL",
+    "BZ_SKIP_CAPTCHA",
+    "BZ_TEST_CAPTCHA",
+    "BZ_QA_INSTANCE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_inherited_test_only_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every production-startup case declare its own QA state."""
+
+    for name in _INHERITED_TEST_ONLY_FLAGS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_platform_ctl_creates_runtime_state_with_private_umask():

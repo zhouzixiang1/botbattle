@@ -27,14 +27,21 @@ type StorageState = Awaited<ReturnType<BrowserContext['storageState']>>
 const roleStates: Partial<Record<Exclude<Role, 'guest'>, StorageState>> = {}
 
 test.beforeAll(async ({ browser, baseURL }) => {
-  // Authenticate each real role once and reuse its localStorage-backed bearer
-  // session at every viewport. Repeating the login form for every role/viewport
-  // combinations would test the login rate limiter instead of the leaderboard.
+  // Authenticate each real role once and reuse only its HttpOnly session cookie
+  // at every viewport. Repeating the login form for every role/viewport
+  // combination would test the login rate limiter instead of the leaderboard.
   for (const role of Object.keys(USERS) as Array<keyof typeof USERS>) {
     const context = await browser.newContext({ baseURL })
     const page = await context.newPage()
-    await loginThroughUi(page, USERS[role])
-    roleStates[role] = await context.storageState()
+    const loginResponse = await loginThroughUi(page, USERS[role])
+    expect(loginResponse.request().headers().authorization).toBeUndefined()
+    const state = await context.storageState()
+    const sessionCookie = state.cookies.find((cookie) => cookie.name === 'bz_session')
+    expect(sessionCookie?.httpOnly, `${role} session cookie must be HttpOnly`).toBe(true)
+    expect(state.origins.flatMap((origin) => origin.localStorage).filter(
+      (entry) => entry.name === 'bzplat_token' || entry.name === 'bzplat_user',
+    )).toEqual([])
+    roleStates[role] = state
     await context.close()
   }
 })
@@ -237,12 +244,13 @@ for (const viewport of VIEWPORTS) {
       })
       await page.goto('/#/leaderboard')
       const authResponse = await authProbe
+      expect(authResponse.request().headers().authorization).toBeUndefined()
+      expect(await page.evaluate(() => ({
+        token: localStorage.getItem('bzplat_token'),
+        user: localStorage.getItem('bzplat_user'),
+      }))).toEqual({ token: null, user: null })
       if (role === 'guest') {
         expect(authResponse.status(), 'guest must remain anonymous').toBe(401)
-        expect(await page.evaluate(() => ({
-          token: localStorage.getItem('bzplat_token'),
-          user: localStorage.getItem('bzplat_user'),
-        }))).toEqual({ token: null, user: null })
       } else {
         expect(authResponse.status(), `${role} /api/auth/me`).toBe(200)
         const authBody = await authResponse.json() as {

@@ -670,7 +670,9 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
         assert store.executions.control()["dispatcher_state"] == "paused"
         public_detail = match_detail(match_id, _api_request(store, match_id))
         assert "/private" not in json.dumps(public_detail, ensure_ascii=False)
-        assert store.executions.recover_after_namespace_cleanup() == {
+        assert store.executions.recover_after_namespace_cleanup(
+            interruption_reason="orphan_after_runtime_recovery"
+        ) == {
             "requeued": 0,
             "interrupted": 1,
             "settling": 0,

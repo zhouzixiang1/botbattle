@@ -4,6 +4,7 @@ import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, C
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchParticipants } from '@/components/MatchParticipants'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
+import { FormatSnapshotAudit } from '@/components/contest/FormatSnapshotAudit'
 import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
 import {
   EliminationTiebreakStatus,
@@ -11,6 +12,7 @@ import {
 } from '@/components/contest/elimination-tiebreak-status'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
@@ -37,6 +39,12 @@ import { findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
 import { outcomeParticipantStates, type PublicMatchOutcome } from '@/lib/match-outcome'
+import {
+  parseCrossGroupTiebreak,
+  parseRankingCoordinates,
+  parseStageFormatConfigs,
+  type StageFormatConfig,
+} from '@/lib/contest-format'
 import { toast } from 'sonner'
 import {
   StageSeriesSettingsEditor,
@@ -57,6 +65,13 @@ import {
   templateHasUnboundedTiebreak,
   type ContestTemplateGuidance,
 } from '@/components/contest/template-guidance'
+import {
+  parseMatchTimeControl,
+  parseTimeControlRegistry,
+  timeControlDescription,
+  timeControlLabel,
+  type TimeControlOption,
+} from '@/lib/time-controls'
 
 const STAGE_TYPE_LABEL: Record<string, string> = {
   swiss: '瑞士轮',
@@ -94,6 +109,11 @@ interface Contest {
   showcase_key?: string | null
   games_per_pair?: number
   stage_series_settings?: StageSeriesSettings
+  stage_format_settings?: StageFormatSettings
+  time_control_id?: string | null
+  time_control?: unknown
+  source_contest_id?: number | null
+  format_snapshot?: unknown
 }
 interface Stage {
   /** Internal read-model sentinel for malformed historical stage JSON. */
@@ -123,6 +143,20 @@ interface Stage {
   round_stagger_minutes?: number
   allow_large_round_robin?: boolean
   tiebreak?: string
+  group_assignment?: 'secure_random_balanced_v1' | 'protected_seed_random_balanced_v1'
+  overall_ranking?: 'cross_group_fair_v1'
+}
+
+type StageFormatSettings = Record<string, { group_count: number }>
+
+interface DetailTemplate extends ContestTemplateGuidance {
+  game_id: string
+  stages?: Stage[]
+  stage_series_configs?: StageSeriesConfig[]
+  stage_format_configs?: unknown
+  time_controls?: unknown[]
+  default_time_control_id?: string
+  requires_source_contest?: boolean
 }
 
 type StageDisplayContract = 'plain' | 'independent' | 'aggregate' | 'invalid'
@@ -143,8 +177,8 @@ const COMMON_STAGE_FIELDS = new Set([
 const STAGE_TYPE_FIELDS: Record<string, Set<string>> = {
   round_robin: new Set(['duplicate', 'allow_large_round_robin', 'games_per_pair', 'series_scoring']),
   double_round_robin: new Set(['duplicate', 'allow_large_round_robin', 'ranking_mode', 'ranking_scope', 'games_per_pair', 'series_scoring']),
-  group_round_robin: new Set(['group_count', 'advance_per_group']),
-  group_double_round_robin: new Set(['group_count', 'advance_per_group']),
+  group_round_robin: new Set(['group_count', 'advance_per_group', 'group_assignment', 'overall_ranking']),
+  group_double_round_robin: new Set(['group_count', 'advance_per_group', 'group_assignment', 'overall_ranking']),
   swiss: new Set(['rounds', 'duplicate', 'games_per_pair', 'series_scoring', 'swiss_extra_rounds', 'effective_rounds', 'swiss_round_bands']),
   single_elimination: new Set(['tiebreak']),
 }
@@ -160,6 +194,17 @@ function hasOwn(source: object, key: string): boolean {
 
 function exactIntegerAtLeast(value: unknown, minimum: number): boolean {
   return typeof value === 'number' && Number.isInteger(value) && value >= minimum
+}
+
+function lastRosterPage(total: unknown, perPage: number): number | null {
+  if (
+    typeof total !== 'number'
+    || !Number.isInteger(total)
+    || total < 0
+    || !Number.isInteger(perPage)
+    || perPage < 1
+  ) return null
+  return Math.max(1, Math.ceil(total / perPage))
 }
 
 function swissRoundBandsValid(value: unknown): boolean {
@@ -222,6 +267,14 @@ function stageDisplayContract(
   if (hasOwn(stage, 'allow_large_round_robin') && typeof stage.allow_large_round_robin !== 'boolean') return 'invalid'
   if (hasOwn(stage, 'tiebreak') && (
     type !== 'single_elimination' || stage.tiebreak !== PAIRED_SWAP_TIEBREAK
+  )) return 'invalid'
+  if (hasOwn(stage, 'group_assignment') && (
+    !['group_round_robin', 'group_double_round_robin'].includes(type || '')
+    || !['secure_random_balanced_v1', 'protected_seed_random_balanced_v1'].includes(stage.group_assignment || '')
+  )) return 'invalid'
+  if (hasOwn(stage, 'overall_ranking') && (
+    !['group_round_robin', 'group_double_round_robin'].includes(type || '')
+    || stage.overall_ranking !== 'cross_group_fair_v1'
   )) return 'invalid'
   if (hasOwn(stage, 'swiss_round_bands') && (
     type !== 'swiss'
@@ -320,6 +373,22 @@ interface Pairing extends MatchParticipantSource {
   tiebreak_group?: number | null
   tiebreak_game?: number | null
 }
+interface ContestTiebreaks {
+  points?: number
+  buchholz?: number
+  buchholz_cut1?: number
+  sonneborn_berger?: number
+  head_to_head?: number
+  normalized_delta?: number
+  technical_losses?: number
+  seed?: number
+  group_rank?: number
+  points_rate?: number
+  opponent_strength?: number
+  normalized_delta_rate?: number
+  technical_loss_rate?: number
+  draw_order?: number
+}
 interface Standing {
   bot_id: number | null
   points: number
@@ -329,8 +398,12 @@ interface Standing {
   byes: number
   delta_total: number
   group_id?: string
+  overall_rank?: number | null
+  rank_in_group?: number | null
+  rank?: number | null
   bot_name?: string
   counts?: ContestStandingCounts
+  tiebreaks?: ContestTiebreaks
 }
 interface ContestStandingCounts {
   unique_opponents?: number
@@ -357,8 +430,11 @@ interface StageStandingRow {
   delta_total: number
   group_id?: string
   rank: number
+  overall_rank?: number | null
+  rank_in_group?: number | null
   advancement?: 'advanced' | 'in_zone' | 'eliminated' | 'outside_zone' | null
   counts?: ContestStandingCounts
+  tiebreaks?: ContestTiebreaks
 }
 interface StageStandingSummary {
   stage_idx: number
@@ -374,6 +450,9 @@ interface StageStandingSummary {
 }
 interface OfficialResult {
   rank: number
+  overall_rank: number
+  group_id?: string | null
+  rank_in_group?: number | null
   entry_id: number
   bot_id?: number | null
   user_id?: number | null
@@ -385,15 +464,7 @@ interface OfficialResult {
   awarded?: string
   source_stage?: number
   ranking_cohort?: string
-  tiebreaks?: {
-    points?: number
-    buchholz_cut1?: number
-    sonneborn_berger?: number
-    head_to_head?: number
-    normalized_delta?: number
-    technical_losses?: number
-    seed?: number
-  }
+  tiebreaks?: ContestTiebreaks
 }
 
 function parseStages(c: Contest | null): Stage[] {
@@ -414,16 +485,20 @@ function parseStages(c: Contest | null): Stage[] {
 function matchesTemplateStageTopology(
   templateStages: Stage[] | undefined,
   contestStages: Stage[],
+  formatConfigs: StageFormatConfig[] = [],
 ): boolean {
   if (!Array.isArray(templateStages) || templateStages.length !== contestStages.length) return false
-  const configurable = new Set([
+  const commonConfigurable = new Set([
     'games_per_pair',
     'series_scoring',
     'swiss_extra_rounds',
     'effective_rounds',
   ])
+  const formatStageKeys = new Set(formatConfigs.map((config) => config.stage_key))
   const projection = (stage: Stage | undefined) => {
     if (!stage || stage._display_invalid) return null
+    const configurable = new Set(commonConfigurable)
+    if (stage.key && formatStageKeys.has(stage.key)) configurable.add('group_count')
     return JSON.stringify(Object.fromEntries(
       Object.entries(stage)
         .filter(([key]) => !configurable.has(key) && key !== '_display_invalid')
@@ -602,11 +677,34 @@ function OfficialTiebreakDetail({
   result,
   hasPointTie,
   sourceLabel,
+  rankingMode = 'overall',
 }: {
-  result: OfficialResult
-  hasPointTie: boolean
+  result: { tiebreaks?: ContestTiebreaks }
+  hasPointTie: boolean | null
   sourceLabel?: string | null
+  rankingMode?: 'overall' | 'group_only' | 'cross_group'
 }) {
+  const crossGroup = parseCrossGroupTiebreak(result.tiebreaks)
+  if (rankingMode === 'cross_group') {
+    if (!crossGroup) {
+      return <span className="text-xs text-warning">跨组破同分明细缺失</span>
+    }
+    return (
+      <span className="block min-w-0 whitespace-normal text-xs leading-relaxed text-muted-foreground">
+        {[
+          `组内第 ${crossGroup.group_rank} 名`,
+          `每局积分率 ${TIEBREAK_NUMBER.format(crossGroup.points_rate * 100)}%`,
+          `标准化对手强度 ${TIEBREAK_NUMBER.format(crossGroup.opponent_strength * 100)}%`,
+          `每局归一分差 ${TIEBREAK_NUMBER.format(crossGroup.normalized_delta_rate)}`,
+          `技术负率 ${TIEBREAK_NUMBER.format(crossGroup.technical_loss_rate * 100)}%`,
+          `冻结抽签序 ${crossGroup.draw_order}`,
+        ].join(' · ')}
+      </span>
+    )
+  }
+  if (hasPointTie === null) {
+    return <span className="text-xs text-warning">破同分范围不可用</span>
+  }
   if (!hasPointTie) {
     return (
       <span className="text-xs text-muted-foreground">
@@ -630,6 +728,60 @@ function OfficialTiebreakDetail({
   )
 }
 
+function stageRankingMode(stage?: Stage): 'overall' | 'group_only' | 'cross_group' {
+  if (stage?.overall_ranking === 'cross_group_fair_v1') return 'cross_group'
+  if (['group_round_robin', 'group_double_round_robin'].includes(stage?.type || '')) {
+    return 'group_only'
+  }
+  return 'overall'
+}
+
+function stagePointTieKey(
+  standing: { points: number; group_id?: unknown },
+  rankingMode: 'overall' | 'group_only' | 'cross_group',
+): string | null {
+  if (!Number.isFinite(standing.points) || rankingMode === 'cross_group') return null
+  if (rankingMode === 'group_only') {
+    const groupId = standing.group_id
+    if (
+      typeof groupId !== 'string'
+      || groupId.length === 0
+      || groupId !== groupId.trim()
+      || Array.from(groupId).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ) return null
+    return `group:${groupId}:points:${standing.points}`
+  }
+  return `overall:points:${standing.points}`
+}
+
+function officialResultRankingMode(
+  result: Pick<OfficialResult, 'ranking_cohort' | 'source_stage'>,
+  stages: Stage[],
+): 'overall' | 'group_only' | 'cross_group' | null {
+  const sourceStage = result.source_stage
+  if (
+    typeof sourceStage !== 'number'
+    || !Number.isInteger(sourceStage)
+    || sourceStage < 0
+    || sourceStage >= stages.length
+    || result.ranking_cohort !== `stage:${sourceStage}`
+  ) return null
+  return stageRankingMode(stages[sourceStage])
+}
+
+function officialPointTieKey(
+  result: Pick<OfficialResult, 'points' | 'group_id' | 'ranking_cohort' | 'source_stage'>,
+  stages: Stage[],
+): string | null {
+  const rankingMode = officialResultRankingMode(result, stages)
+  if (rankingMode === null) return null
+  const pointScope = stagePointTieKey(result, rankingMode)
+  if (pointScope === null) return null
+  const cohort = result.ranking_cohort
+  if (typeof cohort !== 'string') return null
+  return `${cohort}:${pointScope}`
+}
+
 export default function ContestDetail() {
   const { id } = useParams()
   const { user, isLoggedIn } = useAuth()
@@ -642,22 +794,33 @@ export default function ContestDetail() {
   const [serverIsOrganizer, setServerIsOrganizer] = useState(false)
   const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<ContestEstimate | null>(null)
-  const [templateCatalog, setTemplateCatalog] = useState<ContestTemplateGuidance[]>([])
+  const [templateCatalog, setTemplateCatalog] = useState<DetailTemplate[]>([])
   const [stageSeriesConfigs, setStageSeriesConfigs] = useState<StageSeriesConfig[]>([])
   const [savedStageSeriesSettings, setSavedStageSeriesSettings] = useState<StageSeriesSettings>({})
   const [draftStageSeriesSettings, setDraftStageSeriesSettings] = useState<StageSeriesSettings>({})
   const [seriesSettingsError, setSeriesSettingsError] = useState('')
   const [seriesSettingsNotice, setSeriesSettingsNotice] = useState('')
+  const [stageFormatConfigs, setStageFormatConfigs] = useState<StageFormatConfig[]>([])
+  const [savedStageFormatSettings, setSavedStageFormatSettings] = useState<StageFormatSettings>({})
+  const [draftStageFormatSettings, setDraftStageFormatSettings] = useState<StageFormatSettings>({})
+  const [templateTimeControls, setTemplateTimeControls] = useState<TimeControlOption[]>([])
+  const [savedTimeControlId, setSavedTimeControlId] = useState('')
+  const [draftTimeControlId, setDraftTimeControlId] = useState('')
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>([])
   const [botId, setBotId] = useState('')
   const [stageTab, setStageTab] = useState(0)
   // 对阵视图：'tree'（对阵树）/ 'table'（一览表）。淘汰赛默认 tree，其余默认 table，可手动切换。
   const [pairingView, setPairingView] = useState<'tree' | 'table'>('tree')
   const [error, setError] = useState('')
+  const [entriesError, setEntriesError] = useState('')
   const [busyAction, setBusyAction] = useState(false)
   const actionLockRef = useRef(false)
   const activeContestIdRef = useRef<string | undefined>(id)
   const loadGenerationRef = useRef(0)
+  const loadAbortRef = useRef<AbortController | null>(null)
+  const entriesLoadGenerationRef = useRef(0)
+  const entriesLoadAbortRef = useRef<AbortController | null>(null)
+  const entriesLoadedIdentityRef = useRef<string | null>(null)
   const lastLoadedStatusRef = useRef<string | null>(null)
   const [confirm, confirmDialog, cancelConfirm] = useConfirm()
   // Params can change while this component instance is reused. Keep the authority
@@ -666,8 +829,12 @@ export default function ContestDetail() {
   activeContestIdRef.current = id
   // 报名列表分页（115 人赛事场景：服务端分页，避免一次性渲染全部）
   const [entriesPage, setEntriesPage] = useState(1)
+  const entriesPageRef = useRef(entriesPage)
   const [entriesTotal, setEntriesTotal] = useState(0)
   const entriesPerPage = 20
+  // Async actions and child callbacks can outlive the render that created them.
+  // Keep the current page authoritative without waiting for an effect.
+  entriesPageRef.current = entriesPage
   // 内容区按生命周期显示：报名期优先选手，赛中优先对阵，完赛优先正式名次。
   const [contentTab, setContentTab] = useState<'matchups' | 'entries' | 'standings' | 'official'>('entries')
   // 积分榜客户端分页（量级通常 < 200，客户端 slice 足够；每页 30 行）
@@ -702,6 +869,20 @@ export default function ContestDetail() {
     stageSeriesConfigs,
     draftStageSeriesSettings,
   )
+  const stageFormatSettingsReady = stageFormatConfigs.every((config) => {
+    const value = draftStageFormatSettings[config.stage_key]?.group_count
+    return Number.isInteger(value) && value >= config.min && (config.max == null || value <= config.max)
+  })
+  const stageFormatSettingsDirty = stageFormatConfigs.length > 0 && stageFormatConfigs.some((config) => (
+    draftStageFormatSettings[config.stage_key]?.group_count
+    !== savedStageFormatSettings[config.stage_key]?.group_count
+  ))
+  const timeControlReady = templateTimeControls.length === 0 || templateTimeControls.some((control) => (
+    control.id === draftTimeControlId
+  ))
+  const timeControlDirty = templateTimeControls.length > 0 && draftTimeControlId !== savedTimeControlId
+  const contestSettingsDirty = seriesSettingsDirty || stageFormatSettingsDirty || timeControlDirty
+  const contestSettingsReady = seriesSettingsReady && stageFormatSettingsReady && timeControlReady
   const projectedStageEstimates = useMemo(() => (
     (estimate?.stages || []).map((stageEstimate) => projectStageSeriesEstimate(
       stageEstimate,
@@ -782,13 +963,22 @@ export default function ContestDetail() {
         ? '组复式交锋'
         : '场计分'
 
-  const load = useCallback(async () => {
-    if (!id) return Promise.resolve()
+  const load = useCallback(async (requestedEntriesPage?: number) => {
+    // A child action can finish after React Router has reused this component for
+    // another contest. Reject that old callback before it can invalidate the new
+    // contest's in-flight generation.
+    if (!id || activeContestIdRef.current !== id) return Promise.resolve()
     const targetId = id
-    const targetEntriesPage = entriesPage
+    const pageIdentity = requestedEntriesPage ?? entriesPageRef.current
+    let targetEntriesPage = pageIdentity
+    loadAbortRef.current?.abort()
+    entriesLoadAbortRef.current?.abort()
+    entriesLoadGenerationRef.current += 1
+    const controller = new AbortController()
+    loadAbortRef.current = controller
     const generation = ++loadGenerationRef.current
     try {
-      const d = await apiGet<{
+      type DetailPayload = {
         contest: Contest
         entries: Entry[]
         pairings: Pairing[]
@@ -800,9 +990,34 @@ export default function ContestDetail() {
         entries_total?: number
         my_entry?: Entry | null
         is_organizer?: boolean
-      }>(`/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`)
+      }
+      let d: DetailPayload
+      while (true) {
+        d = await apiGet<DetailPayload>(
+          `/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`,
+          { signal: controller.signal },
+        )
+        if (
+          controller.signal.aborted
+          || activeContestIdRef.current !== targetId
+          || loadGenerationRef.current !== generation
+          || entriesPageRef.current !== pageIdentity
+          || (d.entries_page !== undefined && d.entries_page !== targetEntriesPage)
+          || (d.entries_per_page !== undefined && d.entries_per_page !== entriesPerPage)
+        ) return
+        const lastPage = lastRosterPage(d.entries_total ?? d.entries.length, entriesPerPage)
+        if (lastPage === null) throw new Error('名册分页数据格式无效')
+        if (targetEntriesPage <= lastPage) break
+        // Keep the old visible page intact until the replacement full projection
+        // arrives. This preserves action authority without briefly committing an
+        // empty page that no longer exists.
+        targetEntriesPage = lastPage
+      }
       let nextStageSeriesConfigs: StageSeriesConfig[] = []
-      let nextTemplateCatalog: ContestTemplateGuidance[] = []
+      let nextStageFormatConfigs: StageFormatConfig[] = []
+      let nextTimeControls: TimeControlOption[] = []
+      let nextDefaultTimeControlId = ''
+      let nextTemplateCatalog: DetailTemplate[] = []
       let nextSeriesSettingsError = ''
       let nextSeriesSettingsNotice = ''
       if (
@@ -811,21 +1026,51 @@ export default function ContestDetail() {
         d.contest.game_id && d.contest.template_id
       ) {
         try {
-          const templateResponse = await apiGet<{ templates: Array<ContestTemplateGuidance & {
-            stages?: Stage[]
-            stage_series_configs?: StageSeriesConfig[]
-          }> }>(`/api/contests/templates?game=${encodeURIComponent(d.contest.game_id)}`)
+          const templateResponse = await apiGet<{ templates: DetailTemplate[] }>(
+            `/api/contests/templates?game=${encodeURIComponent(d.contest.game_id)}`,
+            { signal: controller.signal },
+          )
           nextTemplateCatalog = templateResponse.templates || []
           const matchedTemplate = templateResponse.templates
             .find((template) => template.id === d.contest.template_id)
+          const parsedFormatConfigs = parseStageFormatConfigs(matchedTemplate?.stage_format_configs)
+          const formatConfigContractReady = parsedFormatConfigs !== null && parsedFormatConfigs.every((config) => (
+            matchedTemplate?.stages?.some((stage) => (
+              stage.key === config.stage_key
+              && (stage.type === 'group_round_robin' || stage.type === 'group_double_round_robin')
+            )) === true
+          ))
           const topologyMatches = matchesTemplateStageTopology(
             matchedTemplate?.stages,
             parseStages(d.contest),
+            formatConfigContractReady ? parsedFormatConfigs : [],
           )
           nextStageSeriesConfigs = topologyMatches
             ? matchedTemplate?.stage_series_configs || []
             : []
-          if (!topologyMatches && (matchedTemplate?.stage_series_configs?.length ?? 0) > 0) {
+          nextStageFormatConfigs = topologyMatches && formatConfigContractReady
+            ? parsedFormatConfigs
+            : []
+          const timeRegistry = matchedTemplate
+            ? parseTimeControlRegistry({
+                game_id: matchedTemplate.game_id,
+                time_controls: matchedTemplate.time_controls,
+                default_time_control_id: matchedTemplate.default_time_control_id,
+              })
+            : null
+          if (!formatConfigContractReady) {
+            nextSeriesSettingsError = '赛事分组能力格式无效；已停止发布与修改。'
+          }
+          if (!timeRegistry) {
+            nextSeriesSettingsError = `${nextSeriesSettingsError}${nextSeriesSettingsError ? ' ' : ''}赛事时限配置格式无效；已停止发布与修改。`
+          } else {
+            nextTimeControls = timeRegistry.time_controls
+            nextDefaultTimeControlId = timeRegistry.default_time_control_id
+          }
+          if (!topologyMatches && (
+            (matchedTemplate?.stage_series_configs?.length ?? 0) > 0
+            || matchedTemplate?.stage_format_configs !== undefined
+          )) {
             nextSeriesSettingsNotice = '冻结阶段拓扑与内置模板不一致，已停用公平性设置编辑；发布时将保留当前冻结阶段。'
           }
         } catch (cause) {
@@ -838,6 +1083,7 @@ export default function ContestDetail() {
         try {
           const official = await apiGet<{ results: OfficialResult[] }>(
             `/api/contests/${targetId}/official-results`,
+            { signal: controller.signal },
           )
           nextOfficialResults = official.results || []
         } catch (e) {
@@ -846,8 +1092,15 @@ export default function ContestDetail() {
       }
       if (
         activeContestIdRef.current !== targetId ||
-        loadGenerationRef.current !== generation
+        loadGenerationRef.current !== generation ||
+        entriesPageRef.current !== pageIdentity ||
+        (d.entries_page !== undefined && d.entries_page !== targetEntriesPage) ||
+        (d.entries_per_page !== undefined && d.entries_per_page !== entriesPerPage)
       ) return
+      if (targetEntriesPage !== pageIdentity) {
+        entriesPageRef.current = targetEntriesPage
+        setEntriesPage(targetEntriesPage)
+      }
       setContest(d.contest)
       setEntries(d.entries || [])
       setPairings(d.pairings || [])
@@ -862,10 +1115,25 @@ export default function ContestDetail() {
       setDraftStageSeriesSettings(nextStageSeriesConfigs.length > 0
         ? defaultStageSeriesSettings(nextStageSeriesConfigs, persistedSettings)
         : persistedSettings)
+      const persistedFormatSettings = d.contest.stage_format_settings || {}
+      setStageFormatConfigs(nextStageFormatConfigs)
+      setSavedStageFormatSettings(persistedFormatSettings)
+      setDraftStageFormatSettings(Object.fromEntries(nextStageFormatConfigs.map((config) => [
+        config.stage_key,
+        persistedFormatSettings[config.stage_key] || { group_count: config.min },
+      ])))
+      const persistedTimeControlId = typeof d.contest.time_control_id === 'string'
+        ? d.contest.time_control_id
+        : nextDefaultTimeControlId
+      setTemplateTimeControls(nextTimeControls)
+      setSavedTimeControlId(persistedTimeControlId)
+      setDraftTimeControlId(persistedTimeControlId)
       setSeriesSettingsError(nextSeriesSettingsError)
       setSeriesSettingsNotice(nextSeriesSettingsNotice)
       setStageTab(d.contest.current_stage_idx ?? 0)
       setEntriesTotal(d.entries_total ?? d.entries.length)
+      entriesLoadedIdentityRef.current = `${targetId}:${targetEntriesPage}`
+      setEntriesError('')
       setMyEntry(d.my_entry ?? null)
       setServerIsOrganizer(d.is_organizer === true)
       const status = d.contest.status
@@ -883,11 +1151,80 @@ export default function ContestDetail() {
       setError(officialResultsError)
     } catch (e) {
       if (
+        !controller.signal.aborted &&
         activeContestIdRef.current === targetId &&
-        loadGenerationRef.current === generation
+        loadGenerationRef.current === generation &&
+        entriesPageRef.current === pageIdentity
       ) setError(errMsg(e))
+    } finally {
+      if (loadAbortRef.current === controller) loadAbortRef.current = null
     }
-  }, [id, entriesPage, entriesPerPage])
+  }, [id, entriesPerPage])
+
+  const loadEntries = useCallback(async (requestedPage: number) => {
+    if (!id || activeContestIdRef.current !== id) return
+    const targetId = id
+    const pageIdentity = requestedPage
+    let targetPage = pageIdentity
+    loadAbortRef.current?.abort()
+    loadAbortRef.current = null
+    loadGenerationRef.current += 1
+    entriesLoadAbortRef.current?.abort()
+    const controller = new AbortController()
+    entriesLoadAbortRef.current = controller
+    entriesLoadedIdentityRef.current = null
+    const generation = ++entriesLoadGenerationRef.current
+    try {
+      type EntriesPayload = {
+        entries: Entry[]
+        page: number
+        per_page: number
+        total: number
+      }
+      let result: EntriesPayload
+      while (true) {
+        result = await apiGet<EntriesPayload>(
+          `/api/contests/${targetId}/entries?page=${targetPage}&per_page=${entriesPerPage}`,
+          { signal: controller.signal },
+        )
+        if (
+          controller.signal.aborted ||
+          activeContestIdRef.current !== targetId ||
+          entriesLoadGenerationRef.current !== generation ||
+          entriesPageRef.current !== pageIdentity ||
+          result.page !== targetPage ||
+          result.per_page !== entriesPerPage
+        ) return
+        const lastPage = lastRosterPage(result.total, entriesPerPage)
+        if (lastPage === null) throw new Error('名册分页数据格式无效')
+        if (targetPage <= lastPage) break
+        targetPage = lastPage
+      }
+      if (targetPage !== pageIdentity) {
+        entriesPageRef.current = targetPage
+        setEntriesPage(targetPage)
+      }
+      setEntries(result.entries || [])
+      setEntriesTotal(result.total)
+      entriesLoadedIdentityRef.current = `${targetId}:${targetPage}`
+      setEntriesError('')
+    } catch (cause) {
+      if (
+        !controller.signal.aborted &&
+        activeContestIdRef.current === targetId &&
+        entriesLoadGenerationRef.current === generation &&
+        entriesPageRef.current === pageIdentity
+      ) setEntriesError(errMsg(cause))
+    } finally {
+      if (entriesLoadAbortRef.current === controller) entriesLoadAbortRef.current = null
+    }
+  }, [id, entriesPerPage])
+
+  const reloadEntriesAfterAdminAssignment = useCallback(() => {
+    const targetId = id
+    if (!targetId || activeContestIdRef.current !== targetId) return Promise.resolve()
+    return load(entriesPageRef.current)
+  }, [id, load])
 
   // React Router reuses this component for /contests/A → /contests/B. Invalidate
   // every A request/action before B can render, and clear A's privileged controls.
@@ -897,7 +1234,13 @@ export default function ContestDetail() {
     // reappear after the next contest finishes loading.
     cancelConfirm()
     activeContestIdRef.current = id
+    loadAbortRef.current?.abort()
+    loadAbortRef.current = null
+    entriesLoadAbortRef.current?.abort()
+    entriesLoadAbortRef.current = null
     loadGenerationRef.current += 1
+    entriesLoadGenerationRef.current += 1
+    entriesLoadedIdentityRef.current = null
     setContest(null)
     setEntries([])
     setPairings([])
@@ -911,10 +1254,17 @@ export default function ContestDetail() {
     setStageSeriesConfigs([])
     setSavedStageSeriesSettings({})
     setDraftStageSeriesSettings({})
+    setStageFormatConfigs([])
+    setSavedStageFormatSettings({})
+    setDraftStageFormatSettings({})
+    setTemplateTimeControls([])
+    setSavedTimeControlId('')
+    setDraftTimeControlId('')
     setSeriesSettingsError('')
     setBots([])
     setBotId('')
     setError('')
+    setEntriesError('')
     setEntriesPage(1)
     setStageTab(0)
     setStandingsPage(1)
@@ -923,14 +1273,32 @@ export default function ContestDetail() {
     actionLockRef.current = false
     setBusyAction(false)
     return () => {
+      loadAbortRef.current?.abort()
+      loadAbortRef.current = null
+      entriesLoadAbortRef.current?.abort()
+      entriesLoadAbortRef.current = null
       if (activeContestIdRef.current === id) activeContestIdRef.current = undefined
       loadGenerationRef.current += 1
+      entriesLoadGenerationRef.current += 1
+      entriesLoadedIdentityRef.current = null
     }
   }, [id, cancelConfirm])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    // React StrictMode runs an effect setup/cleanup probe before the real mount.
+    // Defer the initial request by one task so that probe only clears a timer,
+    // rather than emitting and immediately aborting a duplicate full-detail GET.
+    const timer = window.setTimeout(() => {
+      void load(1)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [id, load])
+
+  useEffect(() => {
+    if (!id || !contest || String(contest.id) !== id) return
+    if (entriesLoadedIdentityRef.current === `${id}:${entriesPage}`) return
+    void loadEntries(entriesPage)
+  }, [contest, entriesPage, id, loadEntries])
 
   useEffect(() => {
     let cancelled = false
@@ -969,7 +1337,7 @@ export default function ContestDetail() {
     try {
       await apiJson(path, 'POST', body)
       if (activeContestIdRef.current !== targetId) return
-      await load()
+      await load(entriesPageRef.current)
       if (okMsg) toast.success(okMsg)
     } catch (e) {
       if (activeContestIdRef.current === targetId) setError(errMsg(e))
@@ -981,26 +1349,28 @@ export default function ContestDetail() {
     }
   }
 
-  const saveSeriesSettings = async () => {
+  const saveContestSettings = async () => {
     const targetId = id
     if (
       !targetId ||
       activeContestIdRef.current !== targetId ||
       actionLockRef.current ||
-      stageSeriesConfigs.length === 0 ||
+      (stageSeriesConfigs.length === 0 && stageFormatConfigs.length === 0 && templateTimeControls.length === 0) ||
       hasInvalidStageContract ||
-      !seriesSettingsReady
+      !contestSettingsReady
     ) return
     actionLockRef.current = true
     setBusyAction(true)
     setError('')
     try {
-      await apiJson(`/api/contests/${targetId}`, 'PATCH', {
-        stage_series_settings: draftStageSeriesSettings,
-      })
+      const body: Record<string, unknown> = {}
+      if (stageSeriesConfigs.length > 0) body.stage_series_settings = draftStageSeriesSettings
+      if (stageFormatConfigs.length > 0) body.stage_format_settings = draftStageFormatSettings
+      if (templateTimeControls.length > 0) body.time_control_id = draftTimeControlId
+      await apiJson(`/api/contests/${targetId}`, 'PATCH', body)
       if (activeContestIdRef.current !== targetId) return
-      await load()
-      toast.success('公平性设置已保存')
+      await load(entriesPageRef.current)
+      toast.success('赛制与时限设置已保存')
     } catch (cause) {
       if (activeContestIdRef.current === targetId) setError(errMsg(cause))
     } finally {
@@ -1013,7 +1383,7 @@ export default function ContestDetail() {
 
   const publishContest = async () => {
     const targetId = id
-    if (!targetId || !contest || hasInvalidStageContract || !seriesSettingsReady || seriesSettingsError) return
+    if (!targetId || !contest || hasInvalidStageContract || !contestSettingsReady || seriesSettingsError) return
     const totalMatches = projectedEstimatedMatches
     const totalScoringGames = projectedEstimatedScoringGames
     const totalSeconds = projectedEtaSeconds
@@ -1055,9 +1425,12 @@ export default function ContestDetail() {
     const tiebreakNotice = hasUnboundedTiebreak
       ? '淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶，不计入基础场数与 ETA。'
       : ''
+    const frozenTimeControl = templateTimeControls.find((control) => control.id === draftTimeControlId)
+      || parseMatchTimeControl(contest.time_control, contest.game_id ?? '')
+    const frozenTimeControlLabel = frozenTimeControl ? timeControlLabel(frozenTimeControl) : '配置暂不可用'
     if (!await confirm({
       title: '截止报名并发布排期？',
-      desc: `${frozenStages ? `${frozenStages}。` : ''}${scale}。${tiebreakNotice}发布后公平性设置与参赛名单冻结。`,
+      desc: `${frozenStages ? `${frozenStages}。` : ''}${scale}。${tiebreakNotice}时限：${frozenTimeControlLabel}。发布后赛制、时限、抽签与参赛名单冻结。`,
       confirmText: '确认发布',
       dismissOnOutside: false,
       buttonClassName: 'min-h-11',
@@ -1067,15 +1440,17 @@ export default function ContestDetail() {
     setBusyAction(true)
     setError('')
     try {
-      if (stageSeriesConfigs.length > 0) {
-        await apiJson(`/api/contests/${targetId}`, 'PATCH', {
-          stage_series_settings: draftStageSeriesSettings,
-        })
+      if (stageSeriesConfigs.length > 0 || stageFormatConfigs.length > 0 || templateTimeControls.length > 0) {
+        const body: Record<string, unknown> = {}
+        if (stageSeriesConfigs.length > 0) body.stage_series_settings = draftStageSeriesSettings
+        if (stageFormatConfigs.length > 0) body.stage_format_settings = draftStageFormatSettings
+        if (templateTimeControls.length > 0) body.time_control_id = draftTimeControlId
+        await apiJson(`/api/contests/${targetId}`, 'PATCH', body)
       }
       if (activeContestIdRef.current !== targetId) return
       await apiJson(`/api/contests/${targetId}/publish`, 'POST')
       if (activeContestIdRef.current !== targetId) return
-      await load()
+      await load(entriesPageRef.current)
       toast.success('排期已发布')
     } catch (cause) {
       if (activeContestIdRef.current === targetId) setError(errMsg(cause))
@@ -1119,7 +1494,7 @@ export default function ContestDetail() {
     try {
       await apiJson(`/api/contests/${targetId}/entries/${entry.user_id}`, 'DELETE')
       if (activeContestIdRef.current !== targetId) return
-      await load()
+      await load(entriesPageRef.current)
       toast.success('已移除报名选手')
     } catch (e) {
       if (activeContestIdRef.current === targetId) setError(errMsg(e))
@@ -1138,6 +1513,7 @@ export default function ContestDetail() {
   const currentStageContractAvailable = currentStageContract !== 'invalid'
   const currentStageDuplicate = currentStageContractAvailable && stages[stageTab]?.duplicate === true
   const currentStageLegacyAggregate = currentStageContract === 'aggregate'
+  const currentStageRankingMode = stageRankingMode(stages[stageTab])
   const stageConceptualPairings = new Set(stagePairings.map((pairing) => contestPairingSeriesKey(pairing, curStageType))).size
   const stageEncounterTotal = selectedStageStanding?.counts?.encounter_groups?.total ?? stageConceptualPairings
   const stageEncounterCompleted = selectedStageStanding?.counts?.encounter_groups?.completed
@@ -1166,25 +1542,32 @@ export default function ContestDetail() {
     return map
   }, [pairings])
 
-  // 积分榜客户端分页：当前页 slice + 越界回退（如 standings 缩短到当前页之外）
-  const standingsTotal = standings.length
+  // 阶段积分表只消费后端已组装的阶段排名读模型；不用顶层积分数组的
+  // 位置重建名次或破同分范围。
+  const stageScoreRows = selectedStageStanding?.rows ?? []
+  const standingsTotal = stageScoreRows.length
   const standingsTotalPages = Math.max(1, Math.ceil(standingsTotal / standingsPerPage))
   const safeStandingsPage = Math.min(standingsPage, standingsTotalPages)
-  const standingsPageItems = standings.slice(
+  const standingsPageItems = stageScoreRows.slice(
     (safeStandingsPage - 1) * standingsPerPage,
     safeStandingsPage * standingsPerPage,
   )
-  // 行号需要按全量排序位置计算（而非当前页内序），保证翻页后名次连续
-  const standingsPageBase = (safeStandingsPage - 1) * standingsPerPage
+  const standingsPointTieCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const standing of stageScoreRows) {
+      const key = stagePointTieKey(standing, currentStageRankingMode)
+      if (key !== null) counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [currentStageRankingMode, stageScoreRows])
   const officialCohortPointCounts = useMemo(() => {
     const counts = new Map<string, number>()
     for (const result of officialResults) {
-      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
-      const key = `${cohort}:${Number(result.points ?? 0)}`
-      counts.set(key, (counts.get(key) ?? 0) + 1)
+      const key = officialPointTieKey(result, stages)
+      if (key !== null) counts.set(key, (counts.get(key) ?? 0) + 1)
     }
     return counts
-  }, [officialResults])
+  }, [officialResults, stages])
   const stageRowsByEntry = useMemo(() => {
     const rows = new Map<string, StageStandingRow>()
     for (const summary of stageStandings) {
@@ -1216,11 +1599,16 @@ export default function ContestDetail() {
 
   const contestScheduleIssue = scheduleIssue(contest)
   const contestGame = findGame(contest.game_id)
+  const parsedContestTimeControl = parseMatchTimeControl(contest.time_control, contest.game_id ?? '')
+  const contestTimeControl = parsedContestTimeControl?.applies_to === 'both_bots'
+    ? parsedContestTimeControl
+    : null
   const isShowcase = Boolean(contest.showcase_key)
   const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
   const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
   const showOfficial = contest.status === 'finished'
   const showLiveCta = ['published', 'running', 'rest'].includes(contest.status)
+  const hasCrossGroupOverall = stages.some((stage) => stage.overall_ranking === 'cross_group_fair_v1')
   const selectedContestStageContract = stageContracts[contest.current_stage_idx ?? 0] ?? 'invalid'
   const currentScoringLabel = selectedContestStageContract === 'invalid'
     ? '赛制配置暂不可用'
@@ -1252,6 +1640,9 @@ export default function ContestDetail() {
       : null,
     hasLegacyAggregateStage
       ? '历史阶段标注为“旧版系列结算”，继续按完整系列一次性结算，不会改写为新版独立计分场。'
+      : null,
+    hasCrossGroupOverall
+      ? '分组阶段同时保留各组榜与公平跨组总榜：依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和冻结抽签序；不同组之间不使用直接交手。决赛选手的总榜顺序完全取决于积分清零后的决赛，未晋级选手再按跨组总榜列于其后，两阶段积分不可直接比较。'
       : null,
     contest.require_real_name
       ? '公开成绩 CSV 永不包含报名时实名资料。'
@@ -1341,6 +1732,24 @@ export default function ContestDetail() {
               <dd className="font-mono font-medium tabular-nums text-foreground">{entriesTotal}</dd>
             </div>
             <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">时限</dt>
+              <dd className="font-medium text-foreground">
+                {contestTimeControl ? timeControlLabel(contestTimeControl) : '配置暂不可用'}
+              </dd>
+            </div>
+            {contest.source_contest_id != null && (
+              <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                <dt className="text-muted-foreground">
+                  {contest.template_id === 'gomoku_seeded_group_drr_final' ? '保护种子来源' : '关联赛事'}
+                </dt>
+                <dd>
+                  <Link className="font-medium text-primary hover:underline" to={`/contests/${contest.source_contest_id}`}>
+                    {contest.template_id === 'gomoku_seeded_group_drr_final' ? '模拟赛' : '赛事'} #{contest.source_contest_id}
+                  </Link>
+                </dd>
+              </div>
+            )}
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
               <dt className="text-muted-foreground">阶段</dt>
               <dd className="font-mono font-medium tabular-nums text-foreground">{stageLabel}</dd>
             </div>
@@ -1367,6 +1776,12 @@ export default function ContestDetail() {
               </div>
             )}
           </dl>
+          {contestTimeControl && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {timeControlDescription(contestTimeControl)}
+            </p>
+          )}
+          <FormatSnapshotAudit value={contest.format_snapshot} />
           {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="flex min-w-0 items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
               <Timer aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -1399,24 +1814,28 @@ export default function ContestDetail() {
         </div>
       )}
 
-      {(selectedTemplateGuidance || projectedEstimate || displayStageSeriesConfigs.length > 0) && (
+      {(selectedTemplateGuidance || projectedEstimate || displayStageSeriesConfigs.length > 0 || stageFormatConfigs.length > 0 || templateTimeControls.length > 0) && (
         <DataRegion
           title="赛制公平性与规模"
           description={displayStageSeriesConfigs.length > 0
             ? contest.status === 'draft' || contest.status === 'open'
               ? '人数只影响推荐；组织者可在发布前调整系列强度，页面会立即投影基础计分场数与耗时。'
               : '人数只影响推荐；排期发布时系列设置已冻结，后续阶段沿用这组设置。'
-            : '人数区间仅用于推荐，不限制创建或发布；基础场数按当前报名名单估算。'}
-          actions={isOrg && (contest.status === 'draft' || contest.status === 'open') && stageSeriesConfigs.length > 0 ? (
+            : selectedTemplateGuidance?.participant_range_is_strict
+              ? '人数区间是发布硬门槛；基础场数按当前报名名单估算，人数不符会拒绝发布。'
+              : '人数区间仅用于推荐，不限制创建或发布；基础场数按当前报名名单估算。'}
+          actions={isOrg && (contest.status === 'draft' || contest.status === 'open') && (
+            stageSeriesConfigs.length > 0 || stageFormatConfigs.length > 0 || templateTimeControls.length > 0
+          ) ? (
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="min-h-11 sm:min-h-[var(--control-height)]"
-              disabled={busyAction || !seriesSettingsDirty || !seriesSettingsReady}
-              onClick={() => void saveSeriesSettings()}
+              disabled={busyAction || !contestSettingsDirty || !contestSettingsReady}
+              onClick={() => void saveContestSettings()}
             >
-              {seriesSettingsDirty ? '保存设置' : '设置已保存'}
+              {contestSettingsDirty ? '保存设置' : '设置已保存'}
             </Button>
           ) : undefined}
           contentClassName="min-w-0"
@@ -1442,6 +1861,59 @@ export default function ContestDetail() {
               />
             </div>
           )}
+          {(templateTimeControls.length > 0 || stageFormatConfigs.length > 0) && (
+            <div className="grid min-w-0 gap-3 border-t p-3 md:grid-cols-2">
+              {templateTimeControls.length > 0 && (
+                <div className="min-w-0 space-y-1.5">
+                  <span id="contest-detail-time-control-label" className="block text-sm font-medium">对局时限</span>
+                  <Select
+                    value={draftTimeControlId}
+                    onValueChange={setDraftTimeControlId}
+                    disabled={busyAction || !['draft', 'open'].includes(contest.status) || templateTimeControls.length <= 1}
+                  >
+                    <SelectTrigger className="min-h-11 w-full" aria-labelledby="contest-detail-time-control-label" aria-describedby="contest-detail-time-control-help">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {templateTimeControls.map((control) => (
+                        <SelectItem key={control.id} value={control.id}>
+                          {timeControlLabel(control)}{control.is_default ? ' · 默认' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p id="contest-detail-time-control-help" className="text-xs leading-relaxed text-muted-foreground">
+                    {templateTimeControls.find((control) => control.id === draftTimeControlId)
+                      ? timeControlDescription(templateTimeControls.find((control) => control.id === draftTimeControlId)!)
+                      : '时限配置暂不可用。'}
+                  </p>
+                </div>
+              )}
+              {stageFormatConfigs.map((config) => (
+                <div key={`${config.stage_key}-${config.field}`} className="min-w-0 space-y-1.5">
+                  <label htmlFor={`contest-detail-${config.stage_key}-groups`} className="block text-sm font-medium">分组数量</label>
+                  <Input
+                    id={`contest-detail-${config.stage_key}-groups`}
+                    type="number"
+                    inputMode="numeric"
+                    min={config.min}
+                    max={config.max ?? undefined}
+                    step={1}
+                    value={draftStageFormatSettings[config.stage_key]?.group_count ?? config.min}
+                    onChange={(event) => setDraftStageFormatSettings((current) => ({
+                      ...current,
+                      [config.stage_key]: { group_count: Number(event.target.value) },
+                    }))}
+                    disabled={busyAction || !['draft', 'open'].includes(contest.status)}
+                    className="min-h-11 w-full"
+                  />
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    至少 {config.min} 组；发布时还会校验每组至少 2 人。随机均衡抽签只执行一次并随排期冻结。
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </DataRegion>
       )}
 
@@ -1465,7 +1937,7 @@ export default function ContestDetail() {
           </Button>
         )}
         {isOrg && contest.status === 'open' && (
-          <Button variant="outline" disabled={busyAction || hasInvalidStageContract || !seriesSettingsReady || Boolean(seriesSettingsError)} onClick={() => void publishContest()} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
+          <Button variant="outline" disabled={busyAction || hasInvalidStageContract || !contestSettingsReady || Boolean(seriesSettingsError)} onClick={() => void publishContest()} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
             <ListOrdered className="size-4" />截止报名·出排期
           </Button>
         )}
@@ -1720,6 +2192,7 @@ export default function ContestDetail() {
               summary={selectedStageStanding}
               duplicate={currentStageDuplicate}
               legacyAggregate={currentStageLegacyAggregate}
+              rankingMode={currentStageRankingMode}
             />
           ) : (
             <DataRegion title="阶段排名与晋级" description="赛制配置暂不可用" className="h-full min-w-0">
@@ -1758,12 +2231,13 @@ export default function ContestDetail() {
             }
             contentClassName="min-w-0"
           >
+                {entriesError && <ErrorMsg msg={entriesError} className="px-3 pt-3" />}
                 {canAssignEntries && user?.role === 'admin' && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
                   <AdminContestRosterAssign
                     contestId={contest.id}
                     gameId={contest.game_id}
                     existingUserIds={entries.map((entry) => entry.user_id)}
-                    onDone={load}
+                    onDone={reloadEntriesAfterAdminAssignment}
                     className="m-3"
                   />
                 )}
@@ -1836,7 +2310,10 @@ export default function ContestDetail() {
                   page={entriesPage}
                   perPage={entriesPerPage}
                   total={entriesTotal}
-                  onPageChange={setEntriesPage}
+                  disabled={busyAction}
+                  onPageChange={(page) => {
+                    if (!actionLockRef.current) setEntriesPage(page)
+                  }}
                   />
                 </div>
           </DataRegion>
@@ -1847,27 +2324,38 @@ export default function ContestDetail() {
           <DataRegion
             title="阶段积分"
             description={currentStageContractAvailable
-              ? `赛事积分与平台 Rating 相互独立；本阶段计分：${currentScoringLabel}。${currentStageLegacyAggregate ? '本历史阶段沿用旧版系列结算，完整系列只产生 1 次胜、平、负，页面不会将其改写为独立计分场；' : currentStageDuplicate ? '复式每组的两场 70 手计分场分别记胜、平、负；' : ''}计分场战绩不包含瑞士轮轮空，轮空分与次数单独列出。正式结果以完赛后的名次为准。`
+              ? `赛事积分与平台 Rating 相互独立；本阶段计分：${currentScoringLabel}。${currentStageLegacyAggregate ? '本历史阶段沿用旧版系列结算，完整系列只产生 1 次胜、平、负，页面不会将其改写为独立计分场；' : currentStageDuplicate ? '复式每组的两场 70 手计分场分别记胜、平、负；' : ''}计分场战绩不包含瑞士轮轮空，轮空分与次数单独列出。同分行显示后端实际使用的完整破同分链；正式结果以完赛后的权威名次为准。`
               : '赛制配置暂不可用；已停止推断本阶段积分、计分场战绩和晋级。'}
           >
               <DataTable className="rounded-none border-0 border-b" scrollLabel="阶段积分表">
-                <Table className="min-w-[38rem]">
+                <Table className="min-w-[58rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">名次</TableHead>
                       <TableHead className="min-w-[6rem]">Bot</TableHead>
                       <TableHead>积分</TableHead>
                       <TableHead className="min-w-[13rem]">{currentStageContractAvailable ? (currentStageLegacyAggregate ? '旧版系列战绩 / 轮空' : '计分场战绩 / 轮空') : '计分构成'}</TableHead>
-                      <TableHead className="hidden md:table-cell">阶段合计分差</TableHead>
+                      <TableHead className="min-w-[22rem]">排名依据</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {!currentStageContractAvailable || standings.length === 0 ? (
+                    {!currentStageContractAvailable || stageScoreRows.length === 0 ? (
                       <TableRow><TableCell colSpan={5}><EmptyState text={currentStageContractAvailable ? '暂无积分数据' : '赛制配置暂不可用，积分未展示'} icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
                     ) : (
-                      standingsPageItems.map((s, i) => (
-                        <TableRow key={`${s.bot_id ?? 'deleted'}-${standingsPageBase + i}`}>
-                          <TableCell className="font-mono text-xs text-muted-foreground">{standingsPageBase + i + 1}</TableCell>
+                      standingsPageItems.map((s) => {
+                        const rankingCoordinates = parseRankingCoordinates(s, currentStageRankingMode)
+                        const displayedRank = currentStageRankingMode === 'group_only'
+                          ? rankingCoordinates?.rank_in_group
+                          : rankingCoordinates?.overall_rank
+                        const tieKey = stagePointTieKey(s, currentStageRankingMode)
+                        const hasPointTie = currentStageRankingMode === 'cross_group'
+                          ? false
+                          : tieKey === null
+                            ? null
+                            : (standingsPointTieCounts.get(tieKey) ?? 0) > 1
+                        return (
+                        <TableRow key={s.entry_id}>
+                          <TableCell className="font-mono text-xs text-muted-foreground">{displayedRank ?? '—'}</TableCell>
                           <TableCell className="max-w-[10rem]">
                             {s.bot_id != null ? (
                               <Link to={`/bot/${s.bot_id}`} className="block min-w-0 hover:text-primary">
@@ -1886,9 +2374,16 @@ export default function ContestDetail() {
                             </span>
                             {scoreBreakdown(s)}
                           </TableCell>
-                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.delta_total}</TableCell>
+                          <TableCell className="min-w-[22rem] max-w-[30rem]">
+                            <OfficialTiebreakDetail
+                              result={s}
+                              hasPointTie={hasPointTie}
+                              rankingMode={currentStageRankingMode}
+                            />
+                          </TableCell>
                         </TableRow>
-                      ))
+                        )
+                      })
                     )}
                   </TableBody>
                 </Table>
@@ -1927,11 +2422,17 @@ export default function ContestDetail() {
               </>
             }
           >
+              {hasCrossGroupOverall && (
+                <p className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                  页面和公开成绩 CSV 均使用后端冻结字段：overall_rank、group_id、rank_in_group，以及完整的六项跨组破同分值；缺失或错类型时不会按数组位置推断。
+                </p>
+              )}
               <DataTable className="rounded-none border-0" scrollLabel="赛事正式名次表">
-                <Table className="min-w-[72rem]">
+                <Table className="min-w-[78rem]">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-14">名次</TableHead>
+                      <TableHead className="w-14">总榜</TableHead>
+                      <TableHead className="min-w-[6rem]">分组名次</TableHead>
                       <TableHead>Bot</TableHead>
                       <TableHead>选手</TableHead>
                       <TableHead>积分</TableHead>
@@ -1943,7 +2444,7 @@ export default function ContestDetail() {
                   <TableBody>
                     {officialResults.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7}>
+                        <TableCell colSpan={8}>
                           <EmptyState
                             text={contest.official_results_ready ? '正式名次为空' : '正式名次尚未生成'}
                             icon={<Trophy className="size-7 opacity-40" />}
@@ -1951,10 +2452,17 @@ export default function ContestDetail() {
                         </TableCell>
                       </TableRow>
                     ) : officialResults.map((result) => {
-                      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
-                      const tieKey = `${cohort}:${Number(result.points ?? 0)}`
-                      const hasPointTie = (officialCohortPointCounts.get(tieKey) ?? 0) > 1
                       const sourceStage = result.source_stage
+                      const sourceRankingMode = officialResultRankingMode(result, stages)
+                      const tieKey = officialPointTieKey(result, stages)
+                      const hasPointTie = sourceRankingMode === null
+                        ? null
+                        : sourceRankingMode === 'cross_group'
+                          ? false
+                          : tieKey === null
+                            ? null
+                            : (officialCohortPointCounts.get(tieKey) ?? 0) > 1
+                      const rankingCoordinates = parseRankingCoordinates(result, 'official')
                       const scoreRow = stageRowsByEntry.get(`${sourceStage ?? 0}:${result.entry_id}`)
                       const sourceLabel = typeof sourceStage === 'number'
                         ? (STAGE_TYPE_LABEL[stages[sourceStage]?.type || ''] || `阶段 ${sourceStage + 1}`)
@@ -1971,7 +2479,12 @@ export default function ContestDetail() {
                       return (
                       <TableRow key={result.entry_id}>
                         <TableCell className="font-mono text-base font-semibold text-primary">
-                          {result.rank}
+                          {rankingCoordinates?.overall_rank ?? '—'}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {rankingCoordinates?.group_id && rankingCoordinates.rank_in_group
+                            ? `${rankingCoordinates.group_id.endsWith('组') ? rankingCoordinates.group_id : `${rankingCoordinates.group_id}组`} · ${rankingCoordinates.rank_in_group}`
+                            : '—'}
                         </TableCell>
                         <TableCell className="max-w-[12rem]">
                           {result.bot_id ? (
@@ -2026,6 +2539,7 @@ export default function ContestDetail() {
                             result={result}
                             hasPointTie={hasPointTie}
                             sourceLabel={stages.length > 1 ? sourceLabel : null}
+                            rankingMode={sourceRankingMode ?? 'overall'}
                           />
                         </TableCell>
                         <TableCell className="hidden text-muted-foreground md:table-cell">
@@ -2049,10 +2563,12 @@ function StageStandingPanel({
   summary,
   duplicate,
   legacyAggregate,
+  rankingMode,
 }: {
   summary?: StageStandingSummary
   duplicate: boolean
   legacyAggregate: boolean
+  rankingMode: 'overall' | 'group_only' | 'cross_group'
 }) {
   const sourceLabel = summary?.source === 'persisted'
     ? '阶段结果已固化'
@@ -2100,7 +2616,16 @@ function StageStandingPanel({
               {summary.rows.map((row) => (
                 <TableRow key={row.entry_id}>
                   <TableCell className="px-2 py-2 font-mono text-xs text-muted-foreground">
-                    {row.group_id ? `${row.group_id}-${row.rank}` : row.rank}
+                    {(() => {
+                      const coordinates = parseRankingCoordinates(row, rankingMode)
+                      if (!coordinates) return '名次不可用'
+                      if (coordinates.group_id && coordinates.rank_in_group) {
+                        return coordinates.overall_rank === null
+                          ? `${coordinates.group_id}组 · 组内 ${coordinates.rank_in_group}`
+                          : `总${coordinates.overall_rank} · ${coordinates.group_id}-${coordinates.rank_in_group}`
+                      }
+                      return coordinates.overall_rank ?? '名次不可用'
+                    })()}
                   </TableCell>
                   <TableCell className="max-w-0 px-2 py-2">
                     {row.bot_id ? (

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 
 import pytest
 
@@ -246,6 +247,585 @@ def test_one_agent_has_only_one_unresolved_turn():
     asyncio.run(scenario())
 
 
+def test_relative_decision_timeout_starts_after_lock_and_delivery_prep():
+    """Hub contention and request copying are outside the Bot decision clock."""
+
+    async def scenario() -> None:
+        clock = _Clock(10)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+
+        class SlowPayload:
+            def __deepcopy__(self, _memo):
+                clock.now += 2
+                return SlowPayload()
+
+        await hub._lock.acquire()
+        elapsed: list[float] = []
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-relative-deadline",
+                match_id="match-relative-deadline",
+                seat=0,
+                turn=1,
+                decision_timeout=3,
+                input=SlowPayload(),
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        await asyncio.sleep(0)
+        clock.now = 15
+        hub._lock.release()
+
+        message = await hub.next_turn("bot-a", "connection-a")
+        assert message is not None
+        assert message.phase == "prepare"
+        assert message.input is None
+        assert message.deadline_at == pytest.approx(25)
+        clock.now = 17
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=message.request_id,
+            match_id=message.match_id,
+            turn=message.turn,
+        )
+        active = await hub.next_turn("bot-a", "connection-a")
+        assert active is not None
+        assert active.phase == "decision"
+        assert isinstance(active.input, SlowPayload)
+        assert active.deadline_at == pytest.approx(22)
+        clock.now = 20
+        await hub.submit_response(
+            "bot-a",
+            "connection-a",
+            request_id="request-relative-deadline",
+            match_id="match-relative-deadline",
+            turn=1,
+            output={"response": 0},
+        )
+        assert await decision == {"response": 0}
+        assert elapsed == pytest.approx([1])
+
+    asyncio.run(scenario())
+
+
+def test_relative_timeout_stays_frozen_after_delivered_reconnect():
+    """Once delivered, reconnect cannot restart a relative decision clock."""
+
+    async def scenario() -> None:
+        clock = _Clock(100)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+        elapsed: list[float] = []
+
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-relative-reconnect",
+                match_id="match-relative-reconnect",
+                seat=0,
+                turn=1,
+                decision_timeout=3,
+                input={"request": "move"},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None and preparation.phase == "prepare"
+        assert preparation.input is None
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        first = await hub.next_turn("bot-a", "connection-a")
+        assert first is not None and first.phase == "decision"
+        assert first.deadline_at == pytest.approx(103)
+
+        # Keep the elapsed interval small while making the reconnect timestamps
+        # visibly different from the original deadline's clock domain.
+        clock.now = 101
+        await hub.close("bot-a", "connection-a")
+        clock.now = 102
+        await hub.register("bot-a", connection_id="connection-b")
+        repeated = await hub.next_turn("bot-a", "connection-b")
+        assert repeated is not None
+        assert repeated.request_id == first.request_id
+        assert repeated.deadline_at == first.deadline_at
+        assert await hub.next_turn(
+            "bot-a", "connection-b", timeout=0.001
+        ) is None
+
+        await hub.submit_response(
+            "bot-a",
+            "connection-b",
+            request_id="request-relative-reconnect",
+            match_id="match-relative-reconnect",
+            turn=1,
+            output={"response": "move"},
+        )
+        assert await decision == {"response": "move"}
+        assert elapsed == pytest.approx([2])
+
+    asyncio.run(scenario())
+
+
+def test_relative_request_waits_bounded_reconnect_without_clock_charge():
+    async def scenario() -> None:
+        clock = _Clock(100)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+        await hub.close("bot-a", "connection-a")
+        elapsed: list[float] = []
+
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-offline-before-delivery",
+                match_id="match-offline-before-delivery",
+                seat=0,
+                turn=1,
+                decision_timeout=3,
+                input={"request": "move"},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        await asyncio.sleep(0)
+        status = await hub.status("bot-a")
+        assert status.online is False and status.busy is True
+        assert status.pending_request_id == "request-offline-before-delivery"
+        assert status.pending_deadline_at == 108
+        assert elapsed == []
+        assert "request-offline-before-delivery" in hub._seen_request_ids
+        assert "request-offline-before-delivery" not in hub._terminal
+
+        clock.now = 104
+        await hub.register("bot-a", connection_id="connection-b")
+        preparation = await hub.next_turn("bot-a", "connection-b")
+        assert preparation is not None and preparation.phase == "prepare"
+        assert preparation.input is None and preparation.deadline_at == 108
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-b",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        message = await hub.next_turn("bot-a", "connection-b")
+        assert message is not None and message.deadline_at == 107
+        clock.now = 105
+        await hub.submit_response(
+            "bot-a",
+            "connection-b",
+            request_id=message.request_id,
+            match_id=message.match_id,
+            turn=message.turn,
+            output={"response": "move"},
+        )
+        assert await decision == {"response": "move"}
+        assert elapsed == pytest.approx([1])
+
+    asyncio.run(scenario())
+
+
+def test_relative_preparation_timeout_is_bounded_without_clock_charge_or_input_leak():
+    async def scenario() -> None:
+        clock = _Clock(10)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+        elapsed: list[float] = []
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-preparation-timeout",
+                match_id="match-preparation-timeout",
+                seat=0,
+                turn=1,
+                decision_timeout=1,
+                input={"secret_position": "must-not-leak"},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None
+        assert preparation.phase == "prepare" and preparation.input is None
+        clock.now = preparation.deadline_at
+        with pytest.raises(LocalAIResponseRejected) as rejected:
+            await hub.mark_prepared(
+                "bot-a",
+                "connection-a",
+                request_id=preparation.request_id,
+                match_id=preparation.match_id,
+                turn=preparation.turn,
+            )
+        assert rejected.value.reason == "preparation_deadline_exceeded"
+        with pytest.raises(LocalAITechnicalError) as failed:
+            await decision
+        assert failed.value.error_code == "local_ai_unavailable"
+        assert elapsed == []
+        assert (await hub.status("bot-a")).busy is False
+
+    asyncio.run(scenario())
+
+
+def test_response_elapsed_is_frozen_at_hub_acceptance_not_task_resume():
+    async def scenario() -> None:
+        clock = _Clock(100)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+        elapsed: list[float] = []
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-frozen-elapsed",
+                match_id="match-frozen-elapsed",
+                seat=0,
+                turn=1,
+                decision_timeout=10,
+                input={"request": "move"},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        active = await hub.next_turn("bot-a", "connection-a")
+        assert active is not None and active.deadline_at == 110
+        clock.now = 101
+        await hub.submit_response(
+            "bot-a",
+            "connection-a",
+            request_id=active.request_id,
+            match_id=active.match_id,
+            turn=active.turn,
+            output={"response": "move"},
+        )
+        clock.now = 109
+        assert await decision == {"response": "move"}
+        assert elapsed == pytest.approx([1])
+
+    asyncio.run(scenario())
+
+
+def test_late_response_caps_elapsed_at_the_frozen_decision_deadline():
+    async def scenario() -> None:
+        clock = _Clock(50)
+        hub = LocalAIHub(clock=clock)
+        await hub.register("bot-a", connection_id="connection-a")
+        elapsed: list[float] = []
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-capped-elapsed",
+                match_id="match-capped-elapsed",
+                seat=0,
+                turn=1,
+                decision_timeout=3,
+                input={},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        active = await hub.next_turn("bot-a", "connection-a")
+        assert active is not None and active.deadline_at == 53
+        clock.now = 60
+        with pytest.raises(LocalAIResponseRejected, match="deadline_exceeded"):
+            await hub.submit_response(
+                "bot-a",
+                "connection-a",
+                request_id=active.request_id,
+                match_id=active.match_id,
+                turn=active.turn,
+                output={"response": "late"},
+            )
+        with pytest.raises(LocalAITechnicalError) as failed:
+            await decision
+        assert failed.value.error_code == "local_ai_timeout"
+        assert elapsed == pytest.approx([3])
+
+    asyncio.run(scenario())
+
+
+def test_relative_timer_expiry_reports_the_full_frozen_allowance():
+    async def scenario() -> None:
+        hub = LocalAIHub()
+        await hub.register("bot-a", connection_id="connection-a")
+        elapsed: list[float] = []
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-real-timeout",
+                match_id="match-real-timeout",
+                seat=0,
+                turn=1,
+                decision_timeout=0.02,
+                input={},
+                on_decision_elapsed=elapsed.append,
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        await hub.next_turn("bot-a", "connection-a")
+        with pytest.raises(LocalAITechnicalError) as failed:
+            await decision
+        assert failed.value.error_code == "local_ai_timeout"
+        assert elapsed == pytest.approx([0.02])
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("terminal_mode", ["cancel", "failure", "timeout"])
+def test_closed_queued_decision_cannot_reach_the_next_request(terminal_mode):
+    async def scenario() -> None:
+        hub = LocalAIHub()
+        await hub.register("bot-a", connection_id="connection-a")
+        timeout = 0.01 if terminal_mode == "timeout" else 1.0
+        old = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id=f"request-old-{terminal_mode}",
+                match_id="match-old",
+                seat=0,
+                turn=1,
+                decision_timeout=timeout,
+                input={"secret_old_position": "must-not-be-delivered"},
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None and preparation.phase == "prepare"
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        # Deliberately leave the full decision frame queued in the transport.
+        if terminal_mode == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        elif terminal_mode == "failure":
+            await hub.submit_failure(
+                "bot-a",
+                "connection-a",
+                request_id=preparation.request_id,
+                match_id=preparation.match_id,
+                turn=preparation.turn,
+                reason="bot_output_invalid",
+            )
+            with pytest.raises(LocalAITechnicalError):
+                await old
+        else:
+            with pytest.raises(LocalAITechnicalError) as timed_out:
+                await old
+            assert timed_out.value.error_code == "local_ai_timeout"
+
+        connection_id = "connection-a"
+        if terminal_mode in {"cancel", "timeout"}:
+            status = await hub.status("bot-a")
+            assert status.online is False and hub.available_now("bot-a") is False
+            connection_id = "connection-b"
+            await hub.register("bot-a", connection_id=connection_id)
+        fresh = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id=f"request-fresh-{terminal_mode}",
+                match_id="match-fresh",
+                seat=0,
+                turn=2,
+                decision_timeout=1,
+                input={"fresh_position": True},
+            )
+        )
+        delivered = await hub.next_turn(
+            "bot-a", connection_id, timeout=0.1
+        )
+        assert delivered is not None
+        assert delivered.request_id == f"request-fresh-{terminal_mode}"
+        assert delivered.match_id == "match-fresh"
+        assert delivered.phase == "prepare" and delivered.input is None
+        fresh.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fresh
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("terminal_mode", ["cancel", "timeout"])
+def test_delivered_terminal_request_disconnects_transport_before_reuse(
+    terminal_mode,
+):
+    async def scenario() -> None:
+        hub = LocalAIHub()
+        await hub.register("bot-a", connection_id="connection-a")
+        old = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id=f"request-delivered-{terminal_mode}",
+                match_id="match-delivered",
+                seat=0,
+                turn=1,
+                decision_timeout=(0.01 if terminal_mode == "timeout" else 1),
+                input={"secret_old_position": True},
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None
+        await hub.mark_prepared(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+        )
+        delivered = await hub.next_turn("bot-a", "connection-a")
+        assert delivered is not None and delivered.phase == "decision"
+        # This is the API sender's next loop iteration.  A terminal request
+        # must wake it so the endpoint closes the socket and the v2 client
+        # kills its in-flight process.
+        sender_waiter = asyncio.create_task(
+            hub.next_turn("bot-a", "connection-a")
+        )
+        await asyncio.sleep(0)
+
+        if terminal_mode == "cancel":
+            old.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old
+        else:
+            with pytest.raises(LocalAITechnicalError) as timed_out:
+                await old
+            assert timed_out.value.error_code == "local_ai_timeout"
+
+        status = await hub.status("bot-a")
+        assert status.online is False and status.busy is False
+        assert hub.available_now("bot-a") is False
+        with pytest.raises(LocalAIConnectionError, match="connection_closed"):
+            await sender_waiter
+
+        await hub.register("bot-a", connection_id="connection-b")
+        assert hub.available_now("bot-a") is True
+
+    asyncio.run(scenario())
+
+
+def test_prepare_phase_accepts_only_start_failure_category():
+    async def scenario() -> None:
+        hub = LocalAIHub()
+        await hub.register("bot-a", connection_id="connection-a")
+        decision = asyncio.create_task(
+            hub.request_decision(
+                "bot-a",
+                request_id="request-prepare-failure",
+                match_id="match-prepare-failure",
+                seat=0,
+                turn=1,
+                decision_timeout=1,
+                input={},
+            )
+        )
+        preparation = await hub.next_turn("bot-a", "connection-a")
+        assert preparation is not None and preparation.phase == "prepare"
+        with pytest.raises(LocalAIResponseRejected) as invalid:
+            await hub.submit_failure(
+                "bot-a",
+                "connection-a",
+                request_id=preparation.request_id,
+                match_id=preparation.match_id,
+                turn=preparation.turn,
+                reason="bot_decision_timeout",
+            )
+        assert invalid.value.reason == "invalid_failure_phase"
+        assert (await hub.status("bot-a")).busy is True
+        await hub.submit_failure(
+            "bot-a",
+            "connection-a",
+            request_id=preparation.request_id,
+            match_id=preparation.match_id,
+            turn=preparation.turn,
+            reason="bot_start_failed",
+        )
+        with pytest.raises(LocalAITechnicalError) as failed:
+            await decision
+        assert failed.value.error_code == "local_ai_unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_failure_then_caller_cancel_race_consumes_internal_future_exception():
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        unhandled: list[dict] = []
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        try:
+            hub = LocalAIHub()
+            await hub.register("bot-a", connection_id="connection-a")
+            decision = asyncio.create_task(
+                hub.request_decision(
+                    "bot-a",
+                    request_id="request-failure-cancel-race",
+                    match_id="match-failure-cancel-race",
+                    seat=0,
+                    turn=1,
+                    decision_timeout=1,
+                    input={},
+                )
+            )
+            preparation = await hub.next_turn("bot-a", "connection-a")
+            assert preparation is not None
+            await hub._lock.acquire()
+            failure = asyncio.create_task(
+                hub.submit_failure(
+                    "bot-a",
+                    "connection-a",
+                    request_id=preparation.request_id,
+                    match_id=preparation.match_id,
+                    turn=preparation.turn,
+                    reason="bot_start_failed",
+                )
+            )
+            await asyncio.sleep(0)
+            decision.cancel()
+            hub._lock.release()
+            await failure
+            with pytest.raises(asyncio.CancelledError):
+                await decision
+            gc.collect()
+            await asyncio.sleep(0)
+            assert unhandled == []
+        finally:
+            loop.set_exception_handler(previous)
+
+    asyncio.run(scenario())
+
+
 def test_disconnect_reconnect_redelivers_same_request_without_extending_deadline():
     async def scenario() -> None:
         clock = _Clock(100)
@@ -292,7 +872,7 @@ def test_disconnect_reconnect_redelivers_same_request_without_extending_deadline
     asyncio.run(scenario())
 
 
-def test_disconnect_between_turns_waits_for_reconnect_with_original_deadline():
+def test_absolute_request_waits_for_reconnect_without_extending_deadline():
     async def scenario() -> None:
         clock = _Clock(200)
         hub = LocalAIHub(clock=clock)
@@ -315,20 +895,22 @@ def test_disconnect_between_turns_waits_for_reconnect_with_original_deadline():
         assert status.online is False
         assert status.busy is True
         assert status.pending_deadline_at == 210
+        assert "request-between-turns" in hub._seen_request_ids
 
-        clock.now = 204
+        clock.now = 205
         await hub.register("bot-a", connection_id="connection-b")
-        repeated = await hub.next_turn("bot-a", "connection-b")
-        assert repeated is not None
-        assert repeated.request_id == "request-between-turns"
-        assert repeated.deadline_at == 210
-
+        message = await hub.next_turn("bot-a", "connection-b")
+        assert message is not None
+        assert message.phase == "decision"
+        assert message.deadline_at == 210
+        assert message.input == {"request": "next-move"}
+        clock.now = 206
         await hub.submit_response(
             "bot-a",
             "connection-b",
-            request_id="request-between-turns",
-            match_id="match-1",
-            turn=5,
+            request_id=message.request_id,
+            match_id=message.match_id,
+            turn=message.turn,
             output={"response": "move"},
         )
         assert await decision == {"response": "move"}

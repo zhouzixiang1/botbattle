@@ -62,17 +62,13 @@ async function mockApp(page: Page, initialBots?: MockBot[]) {
   await page.route('https://fonts.googleapis.com/**', async (route) => {
     await route.fulfill({ status: 200, contentType: 'text/css', body: '' })
   })
-  await page.addInitScript((user) => {
-    localStorage.setItem('bzplat_token', 'bot-owner-delete-token')
-    localStorage.setItem('bzplat_user', JSON.stringify(user))
-  }, USER)
-
   // Register the fallback first: Playwright evaluates the newest matching route
   // first, so the feature routes below remain authoritative.
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname === '/api/auth/me') {
+      expect(request.headers().authorization).toBeUndefined()
       await route.fulfill({
         status: 200,
         contentType: 'application/json',

@@ -28,6 +28,7 @@ from bzplat.backend.runtime.local_ai_service import LocalAIHandshakeGate
 
 
 PASSWORD = "pw123456"
+WS_SUBPROTOCOLS = [api_routes_module.LOCAL_AI_WEBSOCKET_SUBPROTOCOL]
 
 
 def _auth(app, username: str) -> dict[str, str]:
@@ -293,6 +294,19 @@ def test_pre_auth_gate_has_a_process_wide_inflight_cap():
     asyncio.run(scenario())
 
 
+def test_pre_auth_gate_hard_caps_active_peer_keys():
+    async def scenario() -> None:
+        gate = LocalAIHandshakeGate()
+        for number in range(2048):
+            assert await gate.begin(f"198.51.{number // 256}.{number % 256}") is True
+            await gate.end()
+        assert await gate.begin("203.0.113.1") is False
+        assert len(gate._hits) == 2048
+        assert gate._inflight == 0
+
+    asyncio.run(scenario())
+
+
 def test_rotate_business_limit_uses_stable_owner_and_agent_id(
     tmp_path, monkeypatch
 ):
@@ -473,8 +487,16 @@ def test_local_ai_websocket_rejects_url_and_browser_credentials(
         assert denied.value.code == 1008
         assert denied.value.reason == "invalid_credentials"
 
+    with pytest.raises(WebSocketDisconnect) as outdated:
+        with client.websocket_connect(
+            "/api/local-ai/connect", headers=bearer
+        ):
+            pass
+    assert outdated.value.code == 1008
+    assert outdated.value.reason == "client_protocol_upgrade_required"
+
     with client.websocket_connect(
-        "/api/local-ai/connect", headers=bearer
+        "/api/local-ai/connect", headers=bearer, subprotocols=WS_SUBPROTOCOLS
     ) as websocket:
         ready = websocket.receive_json()
         assert ready == {
@@ -505,6 +527,7 @@ def test_local_ai_websocket_enforces_exact_request_binding(
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
         ) as websocket:
             assert websocket.receive_json()["type"] == "ready"
             future = client.portal.start_task_soon(
@@ -559,6 +582,93 @@ def test_local_ai_websocket_enforces_exact_request_binding(
             assert future.result(timeout=2) == '{"response":{"x":0,"y":0}}'
 
 
+def test_local_ai_websocket_prepares_without_input_before_starting_game_clock(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+    app = create_app(db_path=str(tmp_path / "local-ai-ws-prepare.db"))
+    owner = _user(app, "wsprepare")
+    bot = _bot(app, owner, "ws_prepare_bot")
+    private_input = '{"requests":[{"secret":"position"}],"responses":[]}'
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/local-ai/agents",
+            headers=_auth(app, owner["username"]),
+            json={"bot_id": bot["id"], "label": "两阶段计时"},
+        ).json()
+        public_id = created["agent"]["public_id"]
+        with client.websocket_connect(
+            "/api/local-ai/connect",
+            headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            future = client.portal.start_task_soon(
+                functools.partial(
+                    app.state.local_ai_service.hub.request_decision,
+                    public_id,
+                    request_id="request-prepare-1",
+                    match_id="match-prepare-1",
+                    seat=1,
+                    turn=2,
+                    decision_timeout=3,
+                    input=private_input,
+                )
+            )
+            preparation = websocket.receive_json()
+            assert set(preparation) == {
+                "type",
+                "request_id",
+                "match_id",
+                "turn",
+                "seat",
+                "prepare_timeout_ms",
+            }
+            assert preparation["type"] == "prepare_turn"
+            assert preparation["seat"] == 2
+            assert 0 < preparation["prepare_timeout_ms"] <= 8_000
+            assert private_input not in json.dumps(preparation)
+            assert "input_line" not in preparation
+
+            websocket.send_json(
+                {
+                    "type": "response",
+                    "request_id": "request-prepare-1",
+                    "match_id": "match-prepare-1",
+                    "turn": 2,
+                    "output": '{"response":0}',
+                }
+            )
+            assert websocket.receive_json() == {
+                "type": "reject",
+                "reason": "decision_not_started",
+            }
+            websocket.send_json(
+                {
+                    "type": "prepared",
+                    "request_id": "request-prepare-1",
+                    "match_id": "match-prepare-1",
+                    "turn": 2,
+                }
+            )
+            turn = websocket.receive_json()
+            assert turn["type"] == "turn"
+            assert turn["input_line"] == private_input
+            assert 0 < turn["timeout_ms"] <= 3_000
+            websocket.send_json(
+                {
+                    "type": "response",
+                    "request_id": "request-prepare-1",
+                    "match_id": "match-prepare-1",
+                    "turn": 2,
+                    "output": '{"response":0}',
+                }
+            )
+            assert websocket.receive_json()["type"] == "accepted"
+            assert future.result(timeout=2) == '{"response":0}'
+
+
 def test_local_ai_websocket_failure_is_bound_bounded_and_terminal(
     tmp_path, monkeypatch
 ):
@@ -577,6 +687,7 @@ def test_local_ai_websocket_failure_is_bound_bounded_and_terminal(
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
         ) as websocket:
             assert websocket.receive_json()["type"] == "ready"
             future = client.portal.start_task_soon(
@@ -665,6 +776,7 @@ def test_local_ai_websocket_coalesces_heartbeat_db_writes(
     with client.websocket_connect(
         "/api/local-ai/connect",
         headers={"Authorization": f"Bearer {created['token']}"},
+        subprotocols=WS_SUBPROTOCOLS,
     ) as websocket:
         assert websocket.receive_json()["type"] == "ready"
         for _ in range(10):
@@ -691,6 +803,7 @@ def test_local_ai_websocket_limits_inbound_ping_bursts(tmp_path, monkeypatch):
     with client.websocket_connect(
         "/api/local-ai/connect",
         headers={"Authorization": f"Bearer {created['token']}"},
+        subprotocols=WS_SUBPROTOCOLS,
     ) as websocket:
         assert websocket.receive_json()["type"] == "ready"
         for _ in range(2):
@@ -725,6 +838,7 @@ def test_local_ai_websocket_does_not_rate_limit_referee_bound_turns(
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
         ) as websocket:
             assert websocket.receive_json()["type"] == "ready"
             for turn_number in range(1, 26):
@@ -795,6 +909,7 @@ def test_local_ai_websocket_only_refunds_an_accepted_bound_turn(
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
         ) as websocket:
             assert websocket.receive_json()["type"] == "ready"
             future = client.portal.start_task_soon(
@@ -852,6 +967,7 @@ def test_local_ai_websocket_closes_after_oversized_message(tmp_path, monkeypatch
     with client.websocket_connect(
         "/api/local-ai/connect",
         headers={"Authorization": f"Bearer {created['token']}"},
+        subprotocols=WS_SUBPROTOCOLS,
     ) as websocket:
         assert websocket.receive_json()["type"] == "ready"
         websocket.send_text(
@@ -891,6 +1007,7 @@ def test_local_ai_websocket_ready_failure_releases_live_state(
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": f"Bearer {created['token']}"},
+            subprotocols=WS_SUBPROTOCOLS,
         ) as websocket:
             websocket.receive_json()
 

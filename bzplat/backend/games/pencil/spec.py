@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.pencil.engine import DEFAULT_N, PencilSession
+from bzplat.backend.games.pencil.pencil_judge import max_timed_decisions
 from bzplat.backend.games.pencil import protocol as proto
 from bzplat.backend.games.pencil import templates as _templates_mod
 
@@ -58,10 +59,15 @@ def _progress_from_events(events: list[dict[str, Any]]) -> int:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    _validate_match_params(match_config)
-    # 点格棋使用每方 900 秒累计棋钟。赛事 ETA 采用两方棋钟总和作为
-    # 保守上界，避免把长考 Bot 的大型赛程错误展示成几分钟即可完成。
-    return 1800
+    cfg = dict(match_config)
+    time_control_id = cfg.pop("time_control_id", None)
+    _validate_match_params(cfg)
+    control = SPEC.resolve_time_control(time_control_id)
+    if control.mode == "per_side_total":
+        return control.seconds * 2
+    # Move requests and the opponent's forced-pass acknowledgements are both
+    # timed protocol decisions.  The judge owns the exact upper bound.
+    return max_timed_decisions(DEFAULT_N) * control.seconds
 
 
 async def _preflight_check(
@@ -121,6 +127,19 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/pencil/engine.py",
     summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
     preflight_check=_preflight_check,
-    time_budget_per_side=900.0,  # 象棋钟：每方累计 15 分钟
+    time_controls=(
+        TimeControlSpec(
+            id="pencil_per_side_total_900s_v1",
+            mode="per_side_total",
+            seconds=900,
+        ),
+        TimeControlSpec(
+            id="pencil_per_decision_1s_v1",
+            mode="per_decision",
+            seconds=1,
+        ),
+    ),
+    default_time_control_id="pencil_per_side_total_900s_v1",
     shared_source_files=("_board_protocol.py",),
+    contest_source_candidate_kind="navigation",
 )

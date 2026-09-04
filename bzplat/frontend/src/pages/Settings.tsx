@@ -46,7 +46,7 @@ interface FavBot {
 }
 
 export default function Settings() {
-  const { user, refresh, logout } = useAuth()
+  const { user, refresh, confirmServerInvalidatedSession } = useAuth()
   const navigate = useNavigate()
   const [tab, setTab] = useState<'profile' | 'password' | 'notifications' | 'favorites'>('profile')
   const [error, setError] = useState('')
@@ -198,11 +198,11 @@ export default function Settings() {
     e.preventDefault()
     setError(''); setMsg('')
     apiJson('/api/auth/change-password', 'POST', { old_password: oldPw, new_password: newPw })
-      .then(async () => {
-        // 后端已清除所有会话——前端必须同步清理本地 token/user，否则停留在无效会话上后续操作全 401。
+      .then(() => {
+        // 2xx 已确认后端清除了全部会话；此时才提交本地登出投影并通知其他标签页。
         setMsg('密码已修改，正在跳转登录…')
         setOldPw(''); setNewPw('')
-        await logout()
+        confirmServerInvalidatedSession()
         navigate('/login', { replace: true })
       })
       .catch((e) => setError(errMsg(e)))

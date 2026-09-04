@@ -17,37 +17,50 @@ from starlette.datastructures import UploadFile
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager, validate_phone
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
 from .dependencies import require_user
-from bzplat.backend.security import audit_log, client_ip
-from bzplat.backend.security import _env_bool
+from bzplat.backend.security import (
+    _env_bool,
+    audit_log,
+    client_ip,
+    credentialed_no_store_headers,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_MAX_AGE = 7 * 24 * 3600
+_MAX_EMAIL_CHARS = 254
+_MAX_PASSWORD_CHARS = 1024
+_MAX_CAPTCHA_ID_CHARS = 128
+_MAX_CAPTCHA_ANSWER_CHARS = 64
+_MAX_EMAIL_CODE_CHARS = 64
 
 
 class RegisterReq(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
-    email: str
-    password: str = Field(..., min_length=8)
+    email: str = Field(..., max_length=_MAX_EMAIL_CHARS)
+    password: str = Field(
+        ..., min_length=8, max_length=_MAX_PASSWORD_CHARS
+    )
     display_name: str = Field("", max_length=64)
     real_name: str | None = Field(None, max_length=32)
     phone: str | None = Field(None, max_length=20)
     school: str | None = Field(None, max_length=64)
     student_id: str | None = Field(None, max_length=32)
-    captcha_id: str
-    captcha_answer: str
+    captcha_id: str = Field(..., max_length=_MAX_CAPTCHA_ID_CHARS)
+    captcha_answer: str = Field(..., max_length=_MAX_CAPTCHA_ANSWER_CHARS)
 
 
 class LoginReq(BaseModel):
-    username: str
-    password: str
-    captcha_id: str
-    captcha_answer: str
+    username: str = Field(..., max_length=32)
+    password: str = Field(..., max_length=_MAX_PASSWORD_CHARS)
+    captcha_id: str = Field(..., max_length=_MAX_CAPTCHA_ID_CHARS)
+    captcha_answer: str = Field(..., max_length=_MAX_CAPTCHA_ANSWER_CHARS)
 
 
 class ChangePasswordReq(BaseModel):
-    old_password: str
-    new_password: str = Field(..., min_length=8)
+    old_password: str = Field(..., max_length=_MAX_PASSWORD_CHARS)
+    new_password: str = Field(
+        ..., min_length=8, max_length=_MAX_PASSWORD_CHARS
+    )
 
 
 class ProfileUpdateReq(BaseModel):
@@ -70,26 +83,28 @@ class ProfileUpdateReq(BaseModel):
 
 
 class RequestResetReq(BaseModel):
-    email_or_username: str
-    captcha_id: str
-    captcha_answer: str
+    email_or_username: str = Field(..., max_length=_MAX_EMAIL_CHARS)
+    captcha_id: str = Field(..., max_length=_MAX_CAPTCHA_ID_CHARS)
+    captcha_answer: str = Field(..., max_length=_MAX_CAPTCHA_ANSWER_CHARS)
 
 
 class ResetPasswordReq(BaseModel):
-    email_or_username: str
-    code: str
-    new_password: str = Field(..., min_length=8)
+    email_or_username: str = Field(..., max_length=_MAX_EMAIL_CHARS)
+    code: str = Field(..., max_length=_MAX_EMAIL_CODE_CHARS)
+    new_password: str = Field(
+        ..., min_length=8, max_length=_MAX_PASSWORD_CHARS
+    )
 
 
 class VerifyEmailReq(BaseModel):
-    email_or_username: str
-    code: str
+    email_or_username: str = Field(..., max_length=_MAX_EMAIL_CHARS)
+    code: str = Field(..., max_length=_MAX_EMAIL_CODE_CHARS)
 
 
 class ResendVerifyReq(BaseModel):
-    email_or_username: str
-    captcha_id: str
-    captcha_answer: str
+    email_or_username: str = Field(..., max_length=_MAX_EMAIL_CHARS)
+    captcha_id: str = Field(..., max_length=_MAX_CAPTCHA_ID_CHARS)
+    captcha_answer: str = Field(..., max_length=_MAX_CAPTCHA_ANSWER_CHARS)
 
 
 def _secure_cookie() -> bool:
@@ -111,6 +126,19 @@ def _set_session_cookie(resp: Response, token: str) -> None:
         path="/",
         secure=_secure_cookie(),
     )
+
+
+def _set_credential_no_store(response: Response) -> None:
+    response.headers.update(
+        credentialed_no_store_headers(response.headers.get("Vary"))
+    )
+
+
+def _credential_error(exc: HTTPException) -> HTTPException:
+    headers = dict(exc.headers or {})
+    headers.update(credentialed_no_store_headers(headers.get("Vary")))
+    exc.headers = headers
+    return exc
 
 
 def _err(exc: AuthError) -> HTTPException:
@@ -143,7 +171,8 @@ def _require_captcha(request: Request, captcha_id: str, answer: str) -> None:
 
 
 @router.get("/captcha")
-async def get_captcha(request: Request) -> dict:
+async def get_captcha(request: Request, response: Response) -> dict:
+    _set_credential_no_store(response)
     store: CaptchaStore = request.app.state.captcha
     cid, answer, png = store.create()
     # 测试模式：暴露答案便于自动化测试走完整验证码流程（仅 BZ_TEST_CAPTCHA 开启时）
@@ -217,12 +246,15 @@ async def resend_verify(req: ResendVerifyReq, request: Request) -> dict:
 
 @router.post("/login")
 async def login(req: LoginReq, request: Request, response: Response) -> dict:
+    # Both the JSON bearer and Set-Cookie value are credentials. This response
+    # is private even though the inbound login request is normally anonymous.
+    _set_credential_no_store(response)
     try:
         _require_captcha(request, req.captcha_id, req.captcha_answer)
-    except HTTPException:
+    except HTTPException as exc:
         # 验证码失败也要审计（暴力试探的早期信号）
         audit_log(request, "login", result="fail", target=req.username, detail="captcha_failed")
-        raise
+        raise _credential_error(exc)
     auth: AuthManager = request.app.state.auth
     # 只有命中 trusted-proxy CIDR 的原始 socket peer 才可提交代理身份头。
     from bzplat.backend.security import _env_int
@@ -241,7 +273,7 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
         )
     except AuthError as exc:
         audit_log(request, "login", result="fail", target=req.username, detail=exc.code)
-        raise _err(exc) from exc
+        raise _credential_error(_err(exc)) from exc
     audit_log(request, "login", result="ok", user=user.get("username") or user.get("id"))
     _set_session_cookie(response, token)
     return {"user": user, "token": token}

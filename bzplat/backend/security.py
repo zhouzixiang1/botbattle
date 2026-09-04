@@ -6,6 +6,7 @@ BZ_TRUSTED_PROXY_CIDRS；直连 LAN 永远使用真实 peer。
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -35,6 +36,10 @@ _CHALLENGE_STRICT = (8, 60)
 _FEEDBACK_STRICT = (5, 60)
 _LOCAL_AI_ROTATE_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
+_API_GLOBAL_PER_IP = (600, 60)
+_MAX_RATE_LIMIT_BUCKETS = 50_000
+AUTH_JSON_BODY_MAX_BYTES = 64 * 1024
+API_JSON_BODY_MAX_BYTES = 1024 * 1024
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = MULTIPART_OVERHEAD_BYTES
 BOT_UPLOAD_BODY_MAX_BYTES = (
@@ -49,6 +54,18 @@ _BUG_ATTACHMENT_UPLOAD_PATH = re.compile(
 )
 _LOCAL_AI_ROTATE_PATH = re.compile(
     r"^/api/local-ai/agents/[^/]+/rotate$"
+)
+_AUTH_JSON_BODY_ROUTES = frozenset(
+    {
+        ("POST", "/api/auth/register"),
+        ("POST", "/api/auth/verify-email"),
+        ("POST", "/api/auth/resend-verify"),
+        ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/change-password"),
+        ("PUT", "/api/auth/profile"),
+        ("POST", "/api/auth/request-reset"),
+        ("POST", "/api/auth/reset-password"),
+    }
 )
 _BOT_UPLOAD_TOO_LARGE = {
     "code": "upload_body_too_large",
@@ -65,6 +82,14 @@ _AVATAR_TOO_LARGE = {
     "code": "avatar_body_too_large",
     "message": "头像最大 2 MiB，上传请求体超过允许的 multipart 上限",
 }
+_AUTH_JSON_TOO_LARGE = {
+    "code": "auth_body_too_large",
+    "message": "认证请求体超过 64 KiB 上限",
+}
+_API_JSON_TOO_LARGE = {
+    "code": "api_body_too_large",
+    "message": "API 请求体超过 1 MiB 上限",
+}
 _STATIC_SKIP_EXT = (
     ".js",
     ".css",
@@ -80,6 +105,55 @@ _STATIC_SKIP_EXT = (
 )
 _DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/32", "::1/128")
 ProxyNetwork = IPv4Network | IPv6Network
+_LOG_FIELD_MAX_CHARS = 1024
+
+
+def _single_line_log_field(
+    value: object,
+    *,
+    max_chars: int = _LOG_FIELD_MAX_CHARS,
+) -> str:
+    """Return printable, single-line, bounded text for security logs."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+    escaped: list[str] = []
+    for char in str(value):
+        codepoint = ord(char)
+        if char == "\\":
+            escaped.append("\\\\")
+        elif char == '"':
+            escaped.append('\\"')
+        elif char == "\r":
+            escaped.append("\\r")
+        elif char == "\n":
+            escaped.append("\\n")
+        elif char == "\t":
+            escaped.append("\\t")
+        elif not char.isprintable():
+            escaped.append(
+                f"\\u{codepoint:04x}"
+                if codepoint <= 0xFFFF
+                else f"\\U{codepoint:08x}"
+            )
+        else:
+            escaped.append(char)
+    result = "".join(escaped)
+    if len(result) > max_chars:
+        return result[: max_chars - 1] + "…" if max_chars > 1 else "…"
+    return result
+
+
+def _log_field(name: str, value: object) -> str:
+    """Encode one logfmt-style field without changing ordinary values."""
+    safe = _single_line_log_field(value)
+    if safe and all(
+        not char.isspace() and char not in {'=', '"', "\\"}
+        for char in safe
+    ):
+        rendered = safe
+    else:
+        rendered = json.dumps(safe, ensure_ascii=False)
+    return f"{name}={rendered}"
 
 
 def normalize_public_origin(value: str) -> str:
@@ -135,19 +209,44 @@ def websocket_origin_allowed(
         return False
 
 
-class _UploadBodyTooLarge(MultiPartException):
-    """Enter Starlette's multipart error cleanup path for open spool files."""
+def credentialed_no_store_headers(
+    existing_vary: str | None = None,
+) -> dict[str, str]:
+    """Return the canonical private cache boundary and a merged Vary value."""
+    tokens = [
+        token.strip()
+        for token in (existing_vary or "").split(",")
+        if token.strip()
+    ]
+    if not any(token == "*" for token in tokens):
+        seen = {token.lower() for token in tokens}
+        for token in ("Authorization", "Cookie"):
+            if token.lower() not in seen:
+                tokens.append(token)
+                seen.add(token.lower())
+    return {
+        "Cache-Control": "private, no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+        "Vary": "*" if any(token == "*" for token in tokens) else ", ".join(tokens),
+    }
+
+
+class _ProtectedBodyTooLarge(MultiPartException):
+    """Enter Starlette's cleanup path while retaining one private signal."""
 
     def __init__(self) -> None:
-        super().__init__("Upload request body exceeded its route limit.")
+        super().__init__("Protected request body exceeded its route limit.")
 
 
 class BotUploadBodyLimitMiddleware:
-    """Bound protected multipart bodies before Starlette creates spooled files.
+    """Bound protected request bodies before FastAPI parses them.
 
     ``Content-Length`` is only an early-reject hint.  Every delivered ASGI body
     chunk is still counted, so a missing or forged-small header cannot bypass the
-    limit.  Proxy identity headers are deliberately irrelevant to this boundary.
+    limit. Multipart routes are bounded before Starlette creates spooled files;
+    auth JSON is bounded before JSON/Pydantic allocation and validation. Proxy
+    identity headers are deliberately irrelevant to this boundary.
     """
 
     def __init__(
@@ -177,18 +276,30 @@ class BotUploadBodyLimitMiddleware:
     def _policy_for_scope(
         self, scope: Scope
     ) -> tuple[int, dict[str, str]] | None:
-        if scope.get("type") != "http" or scope.get("method") != "POST":
+        if scope.get("type") != "http":
             return None
         path = str(scope.get("path") or "")
-        if self._is_bot_upload(scope):
+        method = str(scope.get("method") or "")
+        if (method, path) in _AUTH_JSON_BODY_ROUTES:
+            limit = AUTH_JSON_BODY_MAX_BYTES
+            detail = _AUTH_JSON_TOO_LARGE
+        elif self._is_bot_upload(scope):
             limit = BOT_UPLOAD_BODY_MAX_BYTES
             detail = _BOT_UPLOAD_TOO_LARGE
-        elif _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
+        elif method == "POST" and _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
             limit = BUG_ATTACHMENT_BODY_MAX_BYTES
             detail = _BUG_ATTACHMENT_TOO_LARGE
-        elif path == "/api/auth/avatar":
+        elif method == "POST" and path == "/api/auth/avatar":
             limit = AVATAR_BODY_MAX_BYTES
             detail = _AVATAR_TOO_LARGE
+        elif method in {"POST", "PUT", "PATCH", "DELETE"} and path.startswith(
+            "/api/"
+        ):
+            # All remaining API bodies are JSON/form control payloads. Known
+            # multipart endpoints above retain their larger route-specific
+            # envelopes; everything else gets a conservative pre-parser cap.
+            limit = API_JSON_BODY_MAX_BYTES
+            detail = _API_JSON_TOO_LARGE
         else:
             return None
         return self.max_body_bytes or limit, detail
@@ -256,7 +367,7 @@ class BotUploadBodyLimitMiddleware:
                 rejected = True
                 # The crossing chunk is never returned to Starlette, so its
                 # multipart spool cannot grow past the configured body limit.
-                raise _UploadBodyTooLarge
+                raise _ProtectedBodyTooLarge
             return message
 
         async def limited_send(message: Message) -> None:
@@ -267,10 +378,101 @@ class BotUploadBodyLimitMiddleware:
 
         try:
             await self.app(scope, limited_receive, limited_send)
-        except _UploadBodyTooLarge:
+        except _ProtectedBodyTooLarge:
             pass
         if rejected:
             await self._reject(scope, limited_receive, send, detail)
+
+
+class CookieOriginCSRFMiddleware(BaseHTTPMiddleware):
+    """Require the configured browser origin for cookie-authenticated writes.
+
+    Session dependencies deliberately prefer ``Authorization: Bearer`` over the
+    session cookie. Such API calls do not authenticate with ambient browser
+    credentials and therefore retain their existing origin-agnostic contract.
+    Cookie-only unsafe requests fail closed when ``BZ_PUBLIC_ORIGIN`` is absent,
+    malformed, or does not match the request ``Origin`` exactly after canonical
+    HTTP(S) origin normalization.
+    """
+
+    _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        cookie_name: str,
+        public_origin: str,
+    ) -> None:
+        super().__init__(app)
+        if not cookie_name:
+            raise ValueError("cookie_name must not be empty")
+        self.cookie_name = cookie_name
+        self.public_origin = public_origin
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.method in self._SAFE_METHODS:
+            return await call_next(request)
+
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return await call_next(request)
+        if not request.cookies.get(self.cookie_name):
+            return await call_next(request)
+
+        if not websocket_origin_allowed(
+            request.headers.get("origin"),
+            public_origin=self.public_origin,
+        ):
+            logger.warning(
+                "cookie CSRF origin rejected: method=%s path=%s",
+                _single_line_log_field(request.method),
+                _single_line_log_field(request.url.path),
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "Cookie 认证的写请求必须来自平台同源页面",
+                    "code": "csrf_origin_invalid",
+                },
+            )
+        return await call_next(request)
+
+
+class CredentialedAPINoStoreMiddleware(BaseHTTPMiddleware):
+    """Keep credential-varying and authentication API responses out of caches."""
+
+    def __init__(self, app: ASGIApp, *, cookie_name: str) -> None:
+        super().__init__(app)
+        if not cookie_name:
+            raise ValueError("cookie_name must not be empty")
+        self.cookie_name = cookie_name
+
+    @staticmethod
+    def _merge_vary(response: Response) -> None:
+        response.headers["Vary"] = credentialed_no_store_headers(
+            response.headers.get("Vary")
+        )["Vary"]
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        path = request.url.path
+        is_api = path == "/api" or path.startswith("/api/")
+        is_auth_api = path == "/api/auth" or path.startswith("/api/auth/")
+        has_credentials = (
+            "authorization" in request.headers
+            or self.cookie_name in request.cookies
+        )
+        response = await call_next(request)
+        # Anonymous authentication requests still carry passwords, verification
+        # codes or PII in their request/validation lifecycle. Protect every
+        # response in this namespace, including pre-routing 413/422/404 errors.
+        if not is_auth_api and (not is_api or not has_credentials):
+            return response
+
+        response.headers.update(
+            credentialed_no_store_headers(response.headers.get("Vary"))
+        )
+        return response
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -420,7 +622,10 @@ def client_ip(
 class InMemoryRateLimiter:
     """滑动窗口限流（按 key 记时间戳列表）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_buckets: int = _MAX_RATE_LIMIT_BUCKETS) -> None:
+        if max_buckets < 1:
+            raise ValueError("max_buckets must be positive")
+        self.max_buckets = int(max_buckets)
         self._hits: dict[str, list[float]] = {}
 
     def check(
@@ -429,6 +634,15 @@ class InMemoryRateLimiter:
         now = time.monotonic()
         start = now - window
         bucket = [t for t in self._hits.get(key, []) if t > start]
+        if not bucket:
+            self._hits.pop(key, None)
+        if key not in self._hits and len(self._hits) >= self.max_buckets:
+            # Reclaim expired buckets without evicting a live allowance. If the
+            # table is still full, fail closed instead of allocating attacker-
+            # controlled keys or resetting another caller's budget.
+            self.cleanup(max_age=window)
+            if len(self._hits) >= self.max_buckets:
+                return False, 0, max(1, int(window))
         if len(bucket) >= max_requests:
             oldest = min(bucket) if bucket else now
             retry = int(oldest + window - now) + 1
@@ -475,6 +689,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         *,
         enabled: bool | None = None,
         trusted_proxy_cidrs: tuple[ProxyNetwork, ...] | None = None,
+        max_buckets: int = _MAX_RATE_LIMIT_BUCKETS,
     ) -> None:
         super().__init__(app)
         self.enabled = (
@@ -487,7 +702,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if trusted_proxy_cidrs is None
             else trusted_proxy_cidrs
         )
-        self._limiter = InMemoryRateLimiter()
+        self._limiter = InMemoryRateLimiter(max_buckets=max_buckets)
         self._last_cleanup = time.monotonic()
 
     def _limits_for(self, method: str, path: str) -> tuple[int, float] | None:
@@ -495,9 +710,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return None
         if path in {"/api/health", "/"}:
             return None
-        if any(path.endswith(ext) for ext in _STATIC_SKIP_EXT):
-            return None
-        if path.startswith("/assets/"):
+        if not path.startswith("/api/") and (
+            any(path.endswith(ext) for ext in _STATIC_SKIP_EXT)
+            or path.startswith("/assets/")
+        ):
             return None
 
         if path in {
@@ -542,6 +758,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if method == "POST" and _LOCAL_AI_ROTATE_PATH.fullmatch(path):
             return "/api/local-ai/agents/{agent}/rotate"
+        if method == "POST" and _BOT_VERSION_UPLOAD_PATH.fullmatch(path):
+            return "/api/bots/{bot}/versions"
+        if method == "POST" and _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
+            return "/api/feedback/bugs/{bug}/attachments"
         return path
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -564,6 +784,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             hops=self.proxy_hops,
             trusted_proxy_cidrs=self.trusted_proxy_cidrs,
         )
+        global_max, global_window = _API_GLOBAL_PER_IP
+        global_key = f"{ip}:*:/api/*"
+        global_ok, global_remaining, global_retry = self._limiter.check(
+            global_key,
+            global_max,
+            global_window,
+        )
+        if not global_ok:
+            logger.warning(
+                "rate limit: ip=%s path=%s",
+                _single_line_log_field(ip),
+                _single_line_log_field(request.url.path),
+            )
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "请求过于频繁,请稍后再试",
+                    "code": "rate_limit_exceeded",
+                },
+                headers={
+                    "Retry-After": str(global_retry),
+                    "X-RateLimit-Limit": str(global_max),
+                    "X-RateLimit-Remaining": str(global_remaining),
+                },
+            )
         # The same resource commonly has a cheap GET and a stricter mutating
         # POST budget (notably Bot version history vs version upload). Sharing a
         # path-only bucket lets harmless reads consume the write allowance.
@@ -571,7 +816,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         key = f"{ip}:{request.method}:{bucket_path}"
         ok, remaining, retry = self._limiter.check(key, max_req, window)
         if not ok:
-            logger.warning("rate limit: ip=%s path=%s", ip, request.url.path)
+            logger.warning(
+                "rate limit: ip=%s path=%s",
+                _single_line_log_field(ip),
+                _single_line_log_field(request.url.path),
+            )
             return JSONResponse(
                 status_code=429,
                 content={
@@ -632,9 +881,13 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
         # 跳过静态资源与健康检查（与 RateLimitMiddleware 一致）
-        if path in {"/api/health", "/"} or any(
-            path.endswith(ext) for ext in _STATIC_SKIP_EXT
-        ) or path.startswith("/assets/"):
+        if path in {"/api/health", "/"} or (
+            not path.startswith("/api/")
+            and (
+                any(path.endswith(ext) for ext in _STATIC_SKIP_EXT)
+                or path.startswith("/assets/")
+            )
+        ):
             return await call_next(request)
 
         start = time.monotonic()
@@ -652,8 +905,16 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
                 trusted_proxy_cidrs=self.trusted_proxy_cidrs,
             )
             _access_logger.info(
-                "ip=%s method=%s path=%s status=%s dt=%dms",
-                ip, request.method, path, status, dt_ms,
+                "%s",
+                " ".join(
+                    (
+                        _log_field("ip", ip),
+                        _log_field("method", request.method),
+                        _log_field("path", path),
+                        f"status={status}",
+                        f"dt={dt_ms}ms",
+                    )
+                ),
             )
             raise
         dt_ms = int((time.monotonic() - start) * 1000)
@@ -664,8 +925,16 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             trusted_proxy_cidrs=self.trusted_proxy_cidrs,
         )
         _access_logger.info(
-            "ip=%s method=%s path=%s status=%d dt=%dms",
-            ip, request.method, path, status, dt_ms,
+            "%s",
+            " ".join(
+                (
+                    _log_field("ip", ip),
+                    _log_field("method", request.method),
+                    _log_field("path", path),
+                    f"status={status}",
+                    f"dt={dt_ms}ms",
+                )
+            ),
         )
         return response
 
@@ -703,13 +972,16 @@ def audit_log(
         hops=hops,
         trusted_proxy_cidrs=networks,
     )
-    parts = [f"ip={ip}", f"action={action}", f"result={result}"]
+    parts = [
+        _log_field("ip", ip),
+        _log_field("action", action),
+        _log_field("result", result),
+    ]
     if user is not None:
-        parts.append(f"user={user}")
+        parts.append(_log_field("user", user))
     if target is not None:
-        parts.append(f"target={target}")
+        parts.append(_log_field("target", target))
     if detail is not None:
-        # detail 可能含空格，用引号包住便于解析
-        parts.append(f'detail="{detail}"')
+        parts.append(_log_field("detail", detail))
     level = logging.WARNING if result == "fail" else logging.INFO
     _audit_logger.log(level, " ".join(parts))

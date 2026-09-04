@@ -709,18 +709,34 @@ def test_malformed_completed_duplicate_blocks_stage_swiss_and_force_finish(tmp_p
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    pairing = store.add_pairing(
+    versions = [
+        store.add_bot_version(bot["id"], binary_path=bot["binary_path"])
+        for bot in bots
+    ]
+    pairing = store.create_contest_stage_pairings(
         contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-        stage_idx=0,
-        stage_key="swiss",
-        round_num=1,
-        series_index=1,
-        series_size=1,
-    )
+        0,
+        [
+            {
+                "bot_a_id": bots[0]["id"],
+                "bot_b_id": bots[1]["id"],
+                "bot_a_version_id": versions[0]["id"],
+                "bot_b_version_id": versions[1]["id"],
+                "entry_a_id": entries[0]["id"],
+                "entry_b_id": entries[1]["id"],
+                "stage_key": "swiss",
+                "round_num": 1,
+                "series_index": 1,
+                "series_size": 1,
+                "pairing_seed": 123,
+                "published_at": "2026-01-01T00:00:00",
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
+    assert store.contest_stage_manifest_is_valid(contest["id"], 0)
     match_id = "malformed-duplicate"
     store.create_match(
         match_id,
@@ -730,7 +746,11 @@ def test_malformed_completed_duplicate_blocks_stage_swiss_and_force_finish(tmp_p
         contest_id=contest["id"],
         match_type="contest",
         game_id="holdem",
-        match_config={"duplicate": True},
+        match_config={
+            "duplicate": True,
+            "_bot_a_version_id": versions[0]["id"],
+            "_bot_b_version_id": versions[1]["id"],
+        },
     )
     store.bind_contest_pairing_match(
         contest["id"],
@@ -748,7 +768,6 @@ def test_malformed_completed_duplicate_blocks_stage_swiss_and_force_finish(tmp_p
         ended_at="2026-08-28T12:00:00+08:00",
     )
     store.complete_contest_pairing_for_match(contest["id"], match_id)
-    store.update_contest(contest["id"], status="running")
     manager = ContestManager(store, None)
 
     assert manager._stage_done(contest["id"], 0) is False
@@ -774,6 +793,9 @@ class _TopologyStore:
 
     def list_contest_pairings(self, _contest_id, *, stage_idx=None):
         return list(self.pairings)
+
+    def contest_stage_has_incomplete_pairings(self, _contest_id, _stage_idx):
+        return any(row.get("status") != "completed" for row in self.pairings)
 
     def list_contest_entries(self, _contest_id):
         return list(self.entries)
@@ -1141,6 +1163,10 @@ def test_strict_later_stage_standings_keep_missing_participant_row():
         contest=contest,
         entries=_entries(4),
         pairings=pairings,
+        # This unit isolates the scoring projection after the lifecycle/read
+        # model has already proved the exact current cohort.  A later stage may
+        # no longer derive that authority from active flags alone.
+        expected_current_entry_ids={1, 2, 3, 4},
     )
     assert {row["entry_id"] for row in rows} == {1, 2, 3, 4}
     missing = next(row for row in rows if row["entry_id"] == 4)

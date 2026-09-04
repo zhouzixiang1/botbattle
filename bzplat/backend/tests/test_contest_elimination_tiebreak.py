@@ -38,6 +38,8 @@ STAGE = {
     "rest_after_minutes": 0,
 }
 
+PAIRING_PUBLISHED_AT = "2026-01-01T00:00:00"
+
 
 class _RecordingOrchestrator:
     """Legacy prepared-Match double which records the internal seed contract."""
@@ -123,15 +125,17 @@ def _players(store: Store, tmp_path: Path) -> tuple[list[dict], list[dict], list
 
 def _fixture(
     tmp_path: Path,
+    *,
+    stage: dict | None = None,
 ) -> tuple[Store, ContestManager, _RecordingOrchestrator, dict, list[dict], list[dict], list[dict]]:
     store = Store(str(tmp_path / "elimination.db"))
     users, bots, versions = _players(store, tmp_path)
     contest = store.create_contest(
         "paired tiebreak",
         users[0]["id"],
-        status="running",
+        status="published",
         game_id="holdem",
-        stages_json=json.dumps([STAGE]),
+        stages_json=json.dumps([STAGE if stage is None else stage]),
         current_stage_idx=0,
     )
     entries = [
@@ -140,7 +144,7 @@ def _fixture(
     ]
     orch = _RecordingOrchestrator(store)
     manager = ContestManager(store, orch)  # type: ignore[arg-type]
-    asyncio.run(manager._begin_stage(contest["id"], 0))
+    asyncio.run(manager._begin_stage(contest["id"], 0, schedule_immediately=True))
     return store, manager, orch, contest, entries, bots, versions
 
 
@@ -207,6 +211,7 @@ def _tiebreak_group_rows(primary: dict, group: int) -> list[dict]:
             "round_num": 1,
             "stage_key": "ko",
             "bracket_slot": 0,
+            "published_at": PAIRING_PUBLISHED_AT,
             "tiebreak_group": group,
             "tiebreak_game": 1,
         },
@@ -220,10 +225,61 @@ def _tiebreak_group_rows(primary: dict, group: int) -> list[dict]:
             "round_num": 1,
             "stage_key": "ko",
             "bracket_slot": 0,
+            "published_at": PAIRING_PUBLISHED_AT,
             "tiebreak_group": group,
             "tiebreak_game": 2,
         },
     ]
+
+
+def test_sealed_tiebreak_append_moves_current_stage_manifest(tmp_path):
+    store, _manager, _orch, contest, _entries, _bots, _versions = _fixture(tmp_path)
+    primary = _by_group(store, contest["id"])[0][0]
+    _finish(store, primary, None)
+    initial_count = len(store.list_contest_pairings(contest["id"], stage_idx=0))
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET published_stage_pairing_count=? WHERE id=?",
+            (initial_count, contest["id"]),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest["id"],),
+        )
+
+    inserted = _append_first_tiebreak_group(store, contest, primary)
+
+    assert len(inserted) == 2
+    assert store.get_contest(contest["id"])["published_stage_pairing_count"] == (
+        initial_count + 2
+    )
+    assert store.contest_stage_manifest_is_valid(
+        contest["id"], 0, include_terminal_orphans=True
+    )
+    store.close()
+
+
+def test_running_null_manifest_cannot_append_elimination_tiebreak(tmp_path):
+    store, _manager, _orch, contest, _entries, _bots, _versions = _fixture(
+        tmp_path
+    )
+    primary = _by_group(store, contest["id"])[0][0]
+    _finish(store, primary, None)
+    before = store.list_contest_pairings(contest["id"], stage_idx=0)
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET published_stage_pairing_count=NULL,"
+            "sealed_pairing_topology_revision=NULL WHERE id=?",
+            (contest["id"],),
+        )
+
+    with pytest.raises(ValueError, match="批次|冻结|manifest|seal"):
+        _append_first_tiebreak_group(store, contest, primary)
+
+    assert store.list_contest_pairings(contest["id"], stage_idx=0) == before
+    store.close()
 
 
 def test_primary_win_decides_without_extra_games(tmp_path):
@@ -429,7 +485,7 @@ def test_partial_tiebreak_is_waiting_but_completed_without_match_is_invalid(tmp_
     assert snapshot is not None
     summaries = build_stage_summaries(
         manager,
-        store.get_contest(contest["id"]),
+        snapshot["contest"],
         store.list_contest_entries(contest["id"]),
         snapshot["pairings"],
     )
@@ -490,34 +546,7 @@ def test_append_is_concurrent_and_restart_idempotent(tmp_path, monkeypatch):
     restarted = ContestManager(store, _RecordingOrchestrator(store))  # type: ignore[arg-type]
     monkeypatch.setattr(manager, "_dispatch_pending_locked", no_dispatch)
     monkeypatch.setattr(restarted, "_dispatch_pending_locked", no_dispatch)
-    rows = [
-        {
-            "bot_a_id": primary["bot_a_id"],
-            "bot_b_id": primary["bot_b_id"],
-            "entry_a_id": primary["entry_a_id"],
-            "entry_b_id": primary["entry_b_id"],
-            "bot_a_version_id": primary["bot_a_version_id"],
-            "bot_b_version_id": primary["bot_b_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "tiebreak_group": 1,
-            "tiebreak_game": 1,
-        },
-        {
-            "bot_a_id": primary["bot_b_id"],
-            "bot_b_id": primary["bot_a_id"],
-            "entry_a_id": primary["entry_b_id"],
-            "entry_b_id": primary["entry_a_id"],
-            "bot_a_version_id": primary["bot_b_version_id"],
-            "bot_b_version_id": primary["bot_a_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "tiebreak_group": 1,
-            "tiebreak_game": 2,
-        },
-    ]
+    rows = _tiebreak_group_rows(primary, 1)
     barrier = threading.Barrier(2)
 
     def append() -> int:
@@ -556,36 +585,9 @@ def test_append_rejects_caller_injected_group_seed(tmp_path, seeds):
     )
     primary = _by_group(store, contest["id"])[0][0]
     _finish(store, primary, None)
-    rows = [
-        {
-            "bot_a_id": primary["bot_a_id"],
-            "bot_b_id": primary["bot_b_id"],
-            "entry_a_id": primary["entry_a_id"],
-            "entry_b_id": primary["entry_b_id"],
-            "bot_a_version_id": primary["bot_a_version_id"],
-            "bot_b_version_id": primary["bot_b_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "pairing_seed": seeds[0],
-            "tiebreak_group": 1,
-            "tiebreak_game": 1,
-        },
-        {
-            "bot_a_id": primary["bot_b_id"],
-            "bot_b_id": primary["bot_a_id"],
-            "entry_a_id": primary["entry_b_id"],
-            "entry_b_id": primary["entry_a_id"],
-            "bot_a_version_id": primary["bot_b_version_id"],
-            "bot_b_version_id": primary["bot_a_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "pairing_seed": seeds[1],
-            "tiebreak_group": 1,
-            "tiebreak_game": 2,
-        },
-    ]
+    rows = _tiebreak_group_rows(primary, 1)
+    rows[0]["pairing_seed"] = seeds[0]
+    rows[1]["pairing_seed"] = seeds[1]
 
     with pytest.raises(ValueError, match="只能由存储事务私密分配"):
         store.append_contest_elimination_tiebreak_pairings(
@@ -610,34 +612,7 @@ def test_append_rejects_retry_after_persisted_seed_diverges(tmp_path):
     _finish(store, primary, None)
 
     def rows() -> list[dict]:
-        return [
-            {
-                "bot_a_id": primary["bot_a_id"],
-                "bot_b_id": primary["bot_b_id"],
-                "entry_a_id": primary["entry_a_id"],
-                "entry_b_id": primary["entry_b_id"],
-                "bot_a_version_id": primary["bot_a_version_id"],
-                "bot_b_version_id": primary["bot_b_version_id"],
-                "round_num": 1,
-                "stage_key": "ko",
-                "bracket_slot": 0,
-                "tiebreak_group": 1,
-                "tiebreak_game": 1,
-            },
-            {
-                "bot_a_id": primary["bot_b_id"],
-                "bot_b_id": primary["bot_a_id"],
-                "entry_a_id": primary["entry_b_id"],
-                "entry_b_id": primary["entry_a_id"],
-                "bot_a_version_id": primary["bot_b_version_id"],
-                "bot_b_version_id": primary["bot_a_version_id"],
-                "round_num": 1,
-                "stage_key": "ko",
-                "bracket_slot": 0,
-                "tiebreak_group": 1,
-                "tiebreak_game": 2,
-            },
-        ]
+        return _tiebreak_group_rows(primary, 1)
 
     inserted = store.append_contest_elimination_tiebreak_pairings(
         contest["id"],
@@ -657,7 +632,9 @@ def test_append_rejects_retry_after_persisted_seed_diverges(tmp_path):
             (persisted_seed + 1, inserted[1]["id"]),
         )
 
-    with pytest.raises(ValueError, match="重试冻结契约不一致"):
+    # Direct topology corruption invalidates the active-stage seal before the
+    # coordinate-specific retry parser may inspect the damaged seed.
+    with pytest.raises(ValueError, match="批次完整性"):
         store.append_contest_elimination_tiebreak_pairings(
             contest["id"],
             0,
@@ -695,7 +672,7 @@ def test_append_rejects_non_integer_persisted_previous_group_coordinate(tmp_path
         )
 
     next_group = _tiebreak_group_rows(primary, 2)
-    with pytest.raises(ValueError, match="淘汰决胜坐标损坏"):
+    with pytest.raises(ValueError, match="批次完整性"):
         store.append_contest_elimination_tiebreak_pairings(
             contest["id"],
             0,
@@ -737,7 +714,7 @@ def test_append_rechecks_previous_group_seed_and_identity_in_transaction(
             (damaged_value, second_game["id"]),
         )
 
-    with pytest.raises(ValueError, match="上一淘汰决胜组冻结契约损坏"):
+    with pytest.raises(ValueError, match="批次完整性"):
         store.append_contest_elimination_tiebreak_pairings(
             contest["id"],
             0,
@@ -812,34 +789,7 @@ def test_append_idempotent_retry_rejects_seed_reused_by_other_coordinate(tmp_pat
     )
     primary = _by_group(store, contest["id"])[0][0]
     _finish(store, primary, None)
-    rows = [
-        {
-            "bot_a_id": primary["bot_a_id"],
-            "bot_b_id": primary["bot_b_id"],
-            "entry_a_id": primary["entry_a_id"],
-            "entry_b_id": primary["entry_b_id"],
-            "bot_a_version_id": primary["bot_a_version_id"],
-            "bot_b_version_id": primary["bot_b_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "tiebreak_group": 1,
-            "tiebreak_game": 1,
-        },
-        {
-            "bot_a_id": primary["bot_b_id"],
-            "bot_b_id": primary["bot_a_id"],
-            "entry_a_id": primary["entry_b_id"],
-            "entry_b_id": primary["entry_a_id"],
-            "bot_a_version_id": primary["bot_b_version_id"],
-            "bot_b_version_id": primary["bot_a_version_id"],
-            "round_num": 1,
-            "stage_key": "ko",
-            "bracket_slot": 0,
-            "tiebreak_group": 1,
-            "tiebreak_game": 2,
-        },
-    ]
+    rows = _tiebreak_group_rows(primary, 1)
     inserted = store.append_contest_elimination_tiebreak_pairings(
         contest["id"],
         0,
@@ -856,7 +806,7 @@ def test_append_idempotent_retry_rejects_seed_reused_by_other_coordinate(tmp_pat
             (seed, primary["id"]),
         )
 
-    with pytest.raises(ValueError, match="重试冻结契约不一致"):
+    with pytest.raises(ValueError, match="批次完整性"):
         store.append_contest_elimination_tiebreak_pairings(
             contest["id"],
             0,
@@ -890,7 +840,7 @@ def test_tiebreak_seed_is_never_backfilled_when_missing_or_damaged(
         if row["id"] == inserted[0]["id"]
     )
 
-    with pytest.raises(ValueError, match="seed|pairing_seed"):
+    with pytest.raises(ValueError, match="批次完整性"):
         store.ensure_contest_pairing_seed_for_enqueue(
             contest["id"],
             damaged,
@@ -920,7 +870,7 @@ def test_existing_tiebreak_seed_rejects_damaged_pair_contract(tmp_path):
         if row["id"] == inserted[0]["id"]
     )
 
-    with pytest.raises(ValueError, match="其他坐标复用"):
+    with pytest.raises(ValueError, match="批次完整性"):
         store.ensure_contest_pairing_seed_for_enqueue(
             contest["id"],
             first,
@@ -948,9 +898,10 @@ def test_paired_swap_frozen_contract_rejects_duplicate_lifecycle(tmp_path):
 
 
 def test_legacy_draw_without_marker_remains_blocked(tmp_path):
-    store, manager, _orch, contest, _entries, _bots, _versions = _fixture(tmp_path)
     legacy = {key: value for key, value in STAGE.items() if key != "tiebreak"}
-    store.update_contest(contest["id"], stages_json=json.dumps([legacy]))
+    store, manager, _orch, contest, _entries, _bots, _versions = _fixture(
+        tmp_path, stage=legacy
+    )
     primary = _by_group(store, contest["id"])[0][0]
 
     app = create_app(db_path=store.path)
@@ -998,13 +949,37 @@ def test_legacy_draw_without_marker_remains_blocked(tmp_path):
 
     # A current marker uses the supported unbounded policy, never the legacy
     # blocked sentinel even while its first decision group is still absent.
-    store.update_contest(contest["id"], stages_json=json.dumps([STAGE]))
-    marker_detail, marker_live = projections()
+    marker_path = tmp_path / "current-marker"
+    marker_path.mkdir()
+    (
+        marker_store,
+        _marker_manager,
+        _marker_orch,
+        marker_contest,
+        _marker_entries,
+        _marker_bots,
+        _marker_versions,
+    ) = _fixture(marker_path)
+    marker_app = create_app(db_path=marker_store.path)
+    marker_client = TestClient(marker_app)
+    marker_detail_response = marker_client.get(
+        f"/api/contests/{marker_contest['id']}"
+    )
+    marker_live_response = marker_client.get(
+        f"/api/contests/{marker_contest['id']}/live"
+    )
+    assert marker_detail_response.status_code == 200
+    assert marker_live_response.status_code == 200
+    marker_detail = marker_detail_response.json()["stage_standings"][0][
+        "elimination_tiebreak"
+    ]
+    marker_live = marker_live_response.json()["elimination_tiebreak"]
     assert marker_detail["mode"] == ELIMINATION_TIEBREAK_PAIRED_SWAP
     assert marker_live["mode"] == ELIMINATION_TIEBREAK_PAIRED_SWAP
+    marker_app.state.store.close()
+    marker_store.close()
 
     # A decisive historical result is not blocked.
-    store.update_contest(contest["id"], stages_json=json.dumps([legacy]))
     store.update_match(
         primary["match_id"],
         winner=0,
@@ -1032,8 +1007,18 @@ def test_legacy_draw_without_marker_remains_blocked(tmp_path):
     ) == "blocked"
     assert set(_by_group(store, contest["id"])) == {0}
 
-    store.update_contest(contest["id"], status="finished")
+    # Model a pre-atomic-lifecycle terminal import.  Current writers correctly
+    # refuse to mark an unresolved legacy draw finished; the read path must still
+    # fail closed for that unsupported historical shape without mutating replay.
+    match_before_read = store.get_match(primary["match_id"])
+    replay_before_read = store.get_replay(primary["match_id"])
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contests SET status='finished' WHERE id=?", (contest["id"],)
+        )
     assert projections() == (None, None)
+    assert store.get_match(primary["match_id"]) == match_before_read
+    assert store.get_replay(primary["match_id"]) == replay_before_read
     app.state.store.close()
     store.close()
 
@@ -1193,7 +1178,7 @@ def test_publish_freezes_every_swiss_round_policy(
     store.close()
 
 
-def test_publish_freezes_later_swiss_against_planned_advanced_cohort(tmp_path):
+def test_publish_rejects_later_swiss_after_cohort_shrink(tmp_path):
     store = Store(str(tmp_path / "later-swiss-cohort.db"))
     users: list[dict] = []
     bots: list[dict] = []
@@ -1239,12 +1224,12 @@ def test_publish_freezes_later_swiss_against_planned_advanced_cohort(tmp_path):
     manager = ContestManager(store, _RecordingOrchestrator(store))  # type: ignore[arg-type]
 
     estimate = manager.estimate(contest["id"])
-    published = asyncio.run(manager.publish(contest["id"]))
-
-    frozen = json.loads(published["stages_json"])
     assert estimate["stages"][1]["participant_count"] == 4
     assert estimate["stages"][1]["effective_rounds"] == 2
-    assert frozen[1]["effective_rounds"] == 2
+    with pytest.raises(ValueError, match="cohort 缩减后的终局"):
+        asyncio.run(manager.publish(contest["id"]))
+    assert store.get_contest(contest["id"])["status"] == "open"
+    assert store.list_contest_pairings(contest["id"]) == []
     store.close()
 
 
@@ -1255,13 +1240,22 @@ def test_live_stage_projects_tiebreak_marker(tmp_path):
     contest = store.create_contest(
         "live marker",
         users[0]["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=json.dumps([STAGE]),
         current_stage_idx=0,
     )
     for user, bot in zip(users, bots):
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
+    manager = ContestManager(store, _RecordingOrchestrator(store))  # type: ignore[arg-type]
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
+    )
 
     response = TestClient(app).get(f"/api/contests/{contest['id']}/live")
 
@@ -1276,6 +1270,13 @@ def test_pairing_coordinate_migration_is_idempotent(tmp_path):
     connection = sqlite3.connect(db_path)
     connection.executescript(
         """
+        DROP TRIGGER IF EXISTS trg_contest_pairing_topology_insert;
+        DROP TRIGGER IF EXISTS trg_contest_pairing_topology_delete;
+        DROP TRIGGER IF EXISTS trg_contest_pairing_topology_update;
+        DROP TRIGGER IF EXISTS trg_contest_pairing_topology_stage_cursor;
+        DROP TRIGGER IF EXISTS trg_contest_pairing_topology_manifest;
+        DROP TRIGGER IF EXISTS trg_execution_contest_pairing_ref_insert;
+        DROP TRIGGER IF EXISTS trg_execution_contest_pairing_ref_update;
         DROP INDEX IF EXISTS idx_contest_pairings_elimination_coordinate;
         ALTER TABLE contest_pairings RENAME TO contest_pairings_current;
         CREATE TABLE contest_pairings (

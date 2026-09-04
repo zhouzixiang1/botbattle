@@ -158,6 +158,12 @@ BUG_REPORT_STATUSES = frozenset({
     "duplicate", "wont_fix",
 })
 
+# Six-digit email credentials are intentionally human-enterable, so each
+# durable credential gets a small, cross-process failure budget.  The Store
+# consumes this budget transactionally; HTTP/IP rate limits are only a second
+# layer and cannot replace it.
+EMAIL_CODE_MAX_FAILED_ATTEMPTS = 5
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,6 +291,26 @@ CREATE TABLE IF NOT EXISTS contests (
     rest_ends_at            TEXT,
     phase                   TEXT    NOT NULL DEFAULT 'standalone',  -- P2: preliminary/final/standalone
     source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
+    time_control_id         TEXT,  -- NULL 仅供历史记录，按 game_id 解释为该游戏旧默认时限
+    format_snapshot_json    TEXT    NOT NULL DEFAULT '{}',  -- 发布时冻结的分组/来源/抽签有界快照
+    published_stage_pairing_count INTEGER CHECK (
+        published_stage_pairing_count IS NULL
+        OR (
+            typeof(published_stage_pairing_count) = 'integer'
+            AND published_stage_pairing_count >= 0
+        )
+    ),  -- published 当前阶段原子冻结的完整批次行数；NULL 仅供待校验历史记录
+    pairing_topology_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+        typeof(pairing_topology_revision) = 'integer'
+        AND pairing_topology_revision >= 0
+    ),  -- 对阵行增删/身份坐标变化的持久版本；由 canonical trigger 单调推进
+    sealed_pairing_topology_revision INTEGER CHECK (
+        sealed_pairing_topology_revision IS NULL
+        OR (
+            typeof(sealed_pairing_topology_revision) = 'integer'
+            AND sealed_pairing_topology_revision >= 0
+        )
+    ),  -- 与当前阶段 manifest 同事务冻结；NULL 表示 legacy/unsealed
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
     require_real_name       INTEGER NOT NULL DEFAULT 0,  -- 报名是否要求实名
     showcase_key            TEXT,  -- 非空=长期只读的合成演示快照（由专用 seed 管理）
@@ -1041,6 +1067,9 @@ CREATE TABLE IF NOT EXISTS email_codes (
     code            TEXT    NOT NULL,
     expires_at      TEXT    NOT NULL,
     used_at         TEXT,
+    failed_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (typeof(failed_attempts)='integer'
+                           AND failed_attempts BETWEEN 0 AND __EMAIL_CODE_MAX_FAILED_ATTEMPTS__),
     created_at      TEXT    NOT NULL,
     CONSTRAINT chk_purpose CHECK (purpose IN ('verify', 'reset'))
 );
@@ -1357,6 +1386,8 @@ CREATE TABLE IF NOT EXISTS contest_official_results (
     points          REAL    NOT NULL DEFAULT 0,
     bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     user_id         INTEGER,
+    group_id        TEXT    NOT NULL DEFAULT '',
+    rank_in_group   INTEGER,
     tiebreaks_json  TEXT    NOT NULL DEFAULT '{}',  -- 各破同分项明细（buchholz/sonneborn/...）
     awarded         TEXT    NOT NULL DEFAULT '',    -- 奖项标注（如 suggested_finalist）
     UNIQUE(contest_id, entry_id)
@@ -1407,8 +1438,127 @@ SCHEMA = SCHEMA.replace(
     "__MATCH_DEBUG_MAX_BYTES__", str(MATCH_DEBUG_MAX_BYTES_PER_MATCH)
 )
 SCHEMA = SCHEMA.replace(
+    "__EMAIL_CODE_MAX_FAILED_ATTEMPTS__",
+    str(EMAIL_CODE_MAX_FAILED_ATTEMPTS),
+)
+SCHEMA = SCHEMA.replace(
     "__MATCH_DEBUG_MAX_ENTRY_BYTES__", str(MATCH_DEBUG_MAX_ENTRY_BYTES)
 )
+
+# These indexes name columns that are appended during legacy execution-queue
+# migration, so they cannot live in the initial executescript.  The migration
+# installs and certifies the same definitions for fresh, legacy and reopen.
+EXECUTION_CLAIM_SOURCE_ORDER_INDEX_SQL = (
+    "CREATE INDEX idx_execution_jobs_claim_source_order "
+    "ON execution_jobs(source,status,cancel_requested,created_at,id)"
+)
+EXECUTION_CLAIM_CONTEST_ORDER_INDEX_SQL = (
+    "CREATE INDEX idx_execution_jobs_claim_contest_order "
+    "ON execution_jobs(source,status,cancel_requested,contest_id,created_at,id)"
+)
+EXECUTION_CONTEST_DISPATCH_GAP_INDEX_SQL = (
+    "CREATE INDEX idx_execution_jobs_contest_dispatch_gap "
+    "ON execution_jobs(source,contest_id,status,contest_pairing_id)"
+)
+
+# Public roster pages use ``id`` as the final, immutable tie-breaker.  Install
+# this canonical definition after legacy contest-table rebuilds so both the
+# ORDER BY and the join-free total count stay on the contest-local index range.
+CONTEST_ENTRY_PAGE_INDEX_SQL = (
+    "CREATE INDEX idx_contest_entries_page_order "
+    "ON contest_entries(contest_id,seed,registered_at,id)"
+)
+
+# Contest titles feed a write-amplifying substring projection.  Keep the hard
+# product limit in the shared schema contract so API, manager, Store and raw
+# SQLite writers all enforce exactly the same resource boundary.
+CONTEST_TITLE_MAX_LENGTH = 120
+# Python and SQLite do not share one built-in definition of edge whitespace:
+# ``str.strip`` covers Unicode separators while SQLite ``trim`` only removes
+# U+0020. Keep the exact accepted boundary in data so every writer can enforce
+# the same rule without depending on either runtime's implicit character set.
+CONTEST_TITLE_EDGE_WHITESPACE_CODEPOINTS = (
+    *range(0x0009, 0x000E),
+    *range(0x001C, 0x0021),
+    0x0085,
+    0x00A0,
+    0x1680,
+    *range(0x2000, 0x200B),
+    0x2028,
+    0x2029,
+    0x202F,
+    0x205F,
+    0x3000,
+)
+
+# Source-contest lookup has two bounded paths. Empty-query navigation uses
+# contest-local B-tree ranges. Literal substring search uses a contest-first
+# canonical projection for cheap update/delete/reopen, plus scope-specific
+# ordered indexes that can stop after ``limit + 1`` without a temp sort. The
+# mirrored columns are only search hints: every result joins ``contests`` and
+# rechecks current eligibility, ACL, ordering metadata and the complete LIKE.
+CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL = (
+    "CREATE TABLE contest_source_search_grams ("
+    "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,"
+    "gram_len INTEGER NOT NULL CHECK(gram_len IN (1,2,3)),"
+    "gram TEXT NOT NULL COLLATE NOCASE,"
+    "game_id TEXT NOT NULL,created_at TEXT NOT NULL,organizer_id INTEGER NOT NULL,"
+    "is_nonshowcase INTEGER NOT NULL CHECK(typeof(is_nonshowcase)='integer' "
+    "AND is_nonshowcase IN (0,1)),"
+    "is_protected INTEGER NOT NULL CHECK(typeof(is_protected)='integer' "
+    "AND is_protected IN (0,1)),"
+    "is_nav_public INTEGER NOT NULL CHECK(typeof(is_nav_public)='integer' "
+    "AND is_nav_public IN (0,1)),"
+    "is_nav_hidden INTEGER NOT NULL CHECK(typeof(is_nav_hidden)='integer' "
+    "AND is_nav_hidden IN (0,1)),"
+    "PRIMARY KEY(contest_id,gram_len,gram)) WITHOUT ROWID"
+)
+CONTEST_SOURCE_PROTECTED_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_protected "
+    "ON contest_source_search_grams(gram_len,gram,game_id,created_at DESC,"
+    "contest_id DESC) WHERE is_protected=1"
+)
+CONTEST_SOURCE_NAVIGATION_ALL_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_navigation_all "
+    "ON contest_source_search_grams(gram_len,gram,game_id,created_at DESC,"
+    "contest_id DESC) WHERE is_nonshowcase=1"
+)
+CONTEST_SOURCE_NAVIGATION_PUBLIC_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_navigation_public "
+    "ON contest_source_search_grams(gram_len,gram,game_id,created_at DESC,"
+    "contest_id DESC) WHERE is_nav_public=1"
+)
+CONTEST_SOURCE_NAVIGATION_OWNER_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_navigation_owner "
+    "ON contest_source_search_grams(organizer_id,gram_len,gram,game_id,"
+    "created_at DESC,contest_id DESC) WHERE is_nav_hidden=1"
+)
+CONTEST_SOURCE_DEFAULT_PROTECTED_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_default_protected "
+    "ON contests(game_id,created_at DESC,id DESC) WHERE showcase_key IS NULL "
+    "AND status='finished' AND typeof(official_results_ready)='integer' "
+    "AND official_results_ready=1"
+)
+CONTEST_SOURCE_DEFAULT_NAVIGATION_ALL_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_default_navigation_all "
+    "ON contests(game_id,created_at DESC,id DESC) WHERE showcase_key IS NULL"
+)
+CONTEST_SOURCE_DEFAULT_NAVIGATION_PUBLIC_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_default_navigation_public "
+    "ON contests(game_id,created_at DESC,id DESC) WHERE showcase_key IS NULL "
+    "AND status NOT IN ('draft','cancelled')"
+)
+CONTEST_SOURCE_DEFAULT_NAVIGATION_OWNER_INDEX_SQL = (
+    "CREATE INDEX idx_contests_source_default_navigation_owner "
+    "ON contests(organizer_id,game_id,created_at DESC,id DESC) "
+    "WHERE showcase_key IS NULL AND status IN ('draft','cancelled')"
+)
+# ``SCHEMA`` is also executed for legacy databases, so use IF NOT EXISTS here;
+# _migrate later certifies the exact sqlite_master definition and fails closed
+# on a same-name object with any other shape.
+SCHEMA += "\n" + CONTEST_SOURCE_SEARCH_GRAMS_TABLE_SQL.replace(
+    "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1
+) + ";\n"
 
 # ``SCHEMA`` executes before legacy columns are added, so an index that names
 # ``pairing_seed`` cannot live in the executescript without breaking upgrades
@@ -1418,6 +1568,24 @@ CONTEST_PAIRING_SEED_LOOKUP_INDEX_SQL = (
     "CREATE INDEX idx_contest_pairings_seed_lookup "
     "ON contest_pairings(contest_id,stage_idx,pairing_seed) "
     "WHERE pairing_seed IS NOT NULL"
+)
+
+# Scheduler ticks repeatedly ask for the current stage's due, still-pending
+# pairings.  Keep this definition outside ``SCHEMA`` for the same legacy reason
+# as the seed index above: old ``contest_pairings`` tables may not yet have all
+# four columns when the base schema script first runs.
+CONTEST_PAIRING_SCHEDULE_INDEX_SQL = (
+    "CREATE INDEX idx_contest_pairings_schedule "
+    "ON contest_pairings(contest_id,stage_idx,status,scheduled_at)"
+)
+
+# Completion reconciliation only needs pairings already bound to a Match.
+# Keep unbound O(n^2) schedules out of this index so an idle scheduler tick is
+# proportional to durable dispatch progress rather than the whole stage.
+CONTEST_PAIRING_SYNC_INDEX_SQL = (
+    "CREATE INDEX idx_contest_pairings_completion_sync "
+    "ON contest_pairings(contest_id,stage_idx,id,status,match_id) "
+    "WHERE match_id IS NOT NULL AND status<>'completed'"
 )
 
 # 角色
@@ -1496,6 +1664,45 @@ TECHNICAL_MATCH_COMPLETED_REASONS = frozenset(
 # 管理员 reason 或未知值在公共边界一律归一为 platform_error；诊断详情只进日志。
 AUTO_IDLE_POLICY_CUTOVER_REASON = "auto_idle_policy_cutover"
 AUTO_YIELD_FOREGROUND_REASON = "auto_yield_foreground"
+# ``orphan_after_restart`` was historically written by both process startup
+# and same-process execution namespace recovery, so it is read-only legacy
+# data.  New writes must state which recovery boundary actually interrupted
+# the Match; callers cannot inject an arbitrary public terminal reason.
+ORPHAN_AFTER_RESTART_REASON = "orphan_after_restart"
+ORPHAN_AFTER_SERVICE_RESTART_REASON = "orphan_after_service_restart"
+ORPHAN_AFTER_RUNTIME_RECOVERY_REASON = "orphan_after_runtime_recovery"
+ORPHAN_PENDING_AFTER_RESTART_REASON = "orphan_pending_after_restart"
+ORPHAN_PENDING_AFTER_SERVICE_RESTART_REASON = (
+    "orphan_pending_after_service_restart"
+)
+ORPHAN_PENDING_AFTER_RUNTIME_RECOVERY_REASON = (
+    "orphan_pending_after_runtime_recovery"
+)
+WRITABLE_ORPHAN_RECOVERY_REASONS = frozenset(
+    {
+        ORPHAN_AFTER_SERVICE_RESTART_REASON,
+        ORPHAN_AFTER_RUNTIME_RECOVERY_REASON,
+    }
+)
+
+
+def validate_orphan_recovery_reason(value: object) -> str:
+    """Accept only an explicit current recovery source for new Match writes."""
+    if not isinstance(value, str) or value not in WRITABLE_ORPHAN_RECOVERY_REASONS:
+        raise ValueError("recovery reason 必须明确为服务重启或同进程执行环境恢复")
+    return value
+
+
+def pending_orphan_recovery_reason(value: object) -> str:
+    """Map one validated recovery source to its pending-Match reason code."""
+    reason = validate_orphan_recovery_reason(value)
+    return (
+        ORPHAN_PENDING_AFTER_SERVICE_RESTART_REASON
+        if reason == ORPHAN_AFTER_SERVICE_RESTART_REASON
+        else ORPHAN_PENDING_AFTER_RUNTIME_RECOVERY_REASON
+    )
+
+
 PUBLIC_MATCH_ERROR_REASONS = frozenset(
     {
         "admin_aborted",
@@ -1508,8 +1715,12 @@ PUBLIC_MATCH_ERROR_REASONS = frozenset(
         "human_inactive",
         "invalid_game_id",
         "invalid_match_config",
-        "orphan_after_restart",
-        "orphan_pending_after_restart",
+        ORPHAN_AFTER_RESTART_REASON,
+        ORPHAN_AFTER_SERVICE_RESTART_REASON,
+        ORPHAN_AFTER_RUNTIME_RECOVERY_REASON,
+        ORPHAN_PENDING_AFTER_RESTART_REASON,
+        ORPHAN_PENDING_AFTER_SERVICE_RESTART_REASON,
+        ORPHAN_PENDING_AFTER_RUNTIME_RECOVERY_REASON,
         "orphan_pending_no_contest",
         "platform_error",
         "version_unavailable",
@@ -1542,6 +1753,33 @@ CONTEST_RUNNING = "running"
 CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
+
+
+def validate_contest_title(value: object) -> str:
+    """Return one canonical bounded title or raise the shared business error."""
+    # Python ``str`` can contain lone UTF-16 surrogate code points, but they are
+    # not Unicode scalar values and sqlite3 cannot UTF-8 encode them for a TEXT
+    # bind. Reject them here so Manager/Store callers receive the same bounded
+    # business error instead of a driver-level UnicodeEncodeError. Raw SQLite
+    # cannot bind such a value in the first place, so the SQL triggers only need
+    # to guard values that can actually cross that lower boundary.
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > CONTEST_TITLE_MAX_LENGTH
+        or ord(value[0]) in CONTEST_TITLE_EDGE_WHITESPACE_CODEPOINTS
+        or ord(value[-1]) in CONTEST_TITLE_EDGE_WHITESPACE_CODEPOINTS
+        or any(
+            ord(char) < 32
+            or 127 <= ord(char) <= 159
+            or 0xD800 <= ord(char) <= 0xDFFF
+            for char in value
+        )
+    ):
+        raise ValueError(
+            f"赛事标题必须为 1..{CONTEST_TITLE_MAX_LENGTH} 个有效 Unicode、无控制字符的非空文本，且首尾不能留空"
+        )
+    return value
 ELIMINATION_TIEBREAK_PAIRED_SWAP = "paired_swap_until_decided"
 
 # 赛事报名实名来源。持久化只写报名时快照；旧报名在私有读边界派生 legacy

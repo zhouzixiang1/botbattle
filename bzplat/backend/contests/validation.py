@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -52,8 +54,12 @@ _STAGE_TYPE_KEYS: dict[str, frozenset[str]] = {
         "games_per_pair",
         "series_scoring",
     }),
-    "group_round_robin": frozenset({"group_count", "advance_per_group"}),
-    "group_double_round_robin": frozenset({"group_count", "advance_per_group"}),
+    "group_round_robin": frozenset({
+        "group_count", "advance_per_group", "group_assignment", "overall_ranking",
+    }),
+    "group_double_round_robin": frozenset({
+        "group_count", "advance_per_group", "group_assignment", "overall_ranking",
+    }),
     "swiss": frozenset({
         "duplicate",
         "rounds",
@@ -73,6 +79,336 @@ SERIES_SCORING_INDEPENDENT = "independent_scoring_game_points_v1"
 _SERIES_STAGE_FIELDS = frozenset(
     {"games_per_pair", "series_scoring", "swiss_extra_rounds", "effective_rounds"}
 )
+_RESERVED_GROUP_FORMAT_BINDINGS = {
+    "pencil_group_drr": "secure_random_balanced_v1",
+    "gomoku_seeded_group_drr_final": "protected_seed_random_balanced_v1",
+}
+_RESERVED_GROUP_GAME_BINDINGS = {
+    "pencil_group_drr": "pencil",
+    "gomoku_seeded_group_drr_final": "gomoku",
+}
+_FORMAT_SNAPSHOT_BASE_KEYS = frozenset({
+    "version",
+    "algorithm",
+    "audit_nonce",
+    "audit_digest",
+    "group_count",
+    "group_sizes",
+    "draw_order",
+    "groups",
+})
+_GOMOKU_PROTECTED_MATCH_COUNTS = {
+    22: 156,
+    23: 166,
+    24: 176,
+    25: 190,
+    26: 200,
+}
+
+
+def reserved_group_markers_match_template(
+    template_id: object, stages: object, *, game_id: object
+) -> bool:
+    """Bind reserved random-draw markers to their exact game/template pair.
+
+    The markers authorize lifecycle and cross-group ranking behavior which a
+    custom or damaged persisted stage must never acquire merely by spelling the
+    same strings.  Conversely, the two code templates fail closed if their
+    stage-zero marker is missing/drifted or appears on any later stage.
+    """
+    if not isinstance(stages, list) or any(
+        not isinstance(stage, dict) for stage in stages
+    ):
+        return False
+    expected = _RESERVED_GROUP_FORMAT_BINDINGS.get(template_id)
+    expected_game_id = _RESERVED_GROUP_GAME_BINDINGS.get(template_id)
+    marker_keys = {"group_assignment", "overall_ranking"}
+    marked = [index for index, stage in enumerate(stages) if marker_keys & set(stage)]
+    if expected is None:
+        return not marked
+    if expected_game_id is None or game_id != expected_game_id:
+        return False
+    if not stages or marked != [0]:
+        return False
+    return bool(
+        stages[0].get("type") == "group_double_round_robin"
+        and stages[0].get("group_assignment") == expected
+        and stages[0].get("overall_ranking") == "cross_group_fair_v1"
+    )
+
+
+def _stable_group_labels(count: int) -> list[str]:
+    """Return the canonical A..Z, AA.. labels used by frozen draws."""
+
+    labels: list[str] = []
+    for index in range(count):
+        value = index + 1
+        chars: list[str] = []
+        while value:
+            value, remainder = divmod(value - 1, 26)
+            chars.append(chr(ord("A") + remainder))
+        labels.append("".join(reversed(chars)))
+    return labels
+
+
+def validated_random_group_format_snapshot(
+    contest: object,
+) -> dict[str, Any] | None:
+    """Parse one code-owned random draw snapshot, or fail closed.
+
+    This is the shared read-side boundary for recovery and public projection.
+    A self-consistent signed JSON object is not sufficient: its algorithm,
+    stage markers, participant band and final topology must also belong to the
+    exact built-in template which owns those reserved semantics.
+    """
+
+    if not isinstance(contest, dict):
+        return None
+    template_id = contest.get("template_id")
+    expected_algorithm = _RESERVED_GROUP_FORMAT_BINDINGS.get(template_id)
+    expected_game_id = _RESERVED_GROUP_GAME_BINDINGS.get(template_id)
+    if (
+        expected_algorithm is None
+        or expected_game_id is None
+        or contest.get("game_id") != expected_game_id
+    ):
+        return None
+
+    raw_stages = contest.get("stages_json")
+    if isinstance(raw_stages, list):
+        stages = raw_stages
+    elif isinstance(raw_stages, str):
+        try:
+            stages = json.loads(raw_stages)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if (
+        not isinstance(stages, list)
+        or any(not isinstance(stage, dict) for stage in stages)
+        or not reserved_group_markers_match_template(
+            template_id, stages, game_id=contest.get("game_id")
+        )
+    ):
+        return None
+
+    raw_snapshot = contest.get("format_snapshot_json")
+    if not isinstance(raw_snapshot, str) or not raw_snapshot or raw_snapshot == "{}":
+        return None
+    try:
+        snapshot = json.loads(raw_snapshot)
+    except (TypeError, ValueError):
+        return None
+    expected_keys = set(_FORMAT_SNAPSHOT_BASE_KEYS)
+    if expected_algorithm == "protected_seed_random_balanced_v1":
+        expected_keys.update({"source", "expected_match_count"})
+    if not isinstance(snapshot, dict) or set(snapshot) != expected_keys:
+        return None
+
+    version = snapshot.get("version")
+    algorithm = snapshot.get("algorithm")
+    group_count = snapshot.get("group_count")
+    sizes = snapshot.get("group_sizes")
+    groups = snapshot.get("groups")
+    draw_order = snapshot.get("draw_order")
+    audit_nonce = snapshot.get("audit_nonce")
+    audit_digest = snapshot.get("audit_digest")
+    unsigned = {
+        key: value for key, value in snapshot.items() if key != "audit_digest"
+    }
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        isinstance(version, bool)
+        or version != 1
+        or algorithm != expected_algorithm
+        or isinstance(group_count, bool)
+        or not isinstance(group_count, int)
+        or group_count < 2
+        or not isinstance(audit_nonce, str)
+        or len(audit_nonce) != 64
+        or any(char not in "0123456789abcdef" for char in audit_nonce)
+        or not isinstance(audit_digest, str)
+        or audit_digest != expected_digest
+        or not isinstance(sizes, dict)
+        or not isinstance(groups, dict)
+        or not isinstance(draw_order, list)
+    ):
+        return None
+    labels = _stable_group_labels(group_count)
+    if set(sizes) != set(labels) or set(groups) != set(labels):
+        return None
+    if (
+        stages[0].get("group_count") != group_count
+        or any(
+            isinstance(sizes[label], bool)
+            or not isinstance(sizes[label], int)
+            or sizes[label] < 2
+            for label in labels
+        )
+        or max(sizes.values()) - min(sizes.values()) > 1
+    ):
+        return None
+
+    entry_group: dict[int, str] = {}
+    for label in labels:
+        members = groups[label]
+        if not isinstance(members, list) or len(members) != sizes[label]:
+            return None
+        for entry_id in members:
+            if (
+                isinstance(entry_id, bool)
+                or not isinstance(entry_id, int)
+                or entry_id < 1
+                or entry_id in entry_group
+            ):
+                return None
+            entry_group[entry_id] = label
+    participant_count = len(entry_group)
+    if (
+        len(draw_order) != participant_count
+        or any(
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            for entry_id in draw_order
+        )
+        or len(set(draw_order)) != len(draw_order)
+        or set(draw_order) != set(entry_group)
+    ):
+        return None
+
+    if expected_algorithm == "secure_random_balanced_v1":
+        if len(stages) != 1:
+            return None
+        return snapshot
+
+    expected_group_count = 4 if participant_count <= 24 else 5
+    expected_total = _GOMOKU_PROTECTED_MATCH_COUNTS.get(participant_count)
+    if (
+        expected_total is None
+        or group_count != expected_group_count
+        or stages[0].get("advance_per_group") != 2
+        or len(stages) != 2
+        or stages[1].get("type") != "double_round_robin"
+        or stages[1].get("ranking_mode") != "replace_top"
+        or stages[1].get("ranking_scope") != group_count * 2
+        or snapshot.get("expected_match_count") != expected_total
+    ):
+        return None
+    source = snapshot.get("source")
+    if not isinstance(source, dict) or set(source) != {"contest_id", "protected"}:
+        return None
+    source_id = source.get("contest_id")
+    protected = source.get("protected")
+    if (
+        isinstance(source_id, bool)
+        or not isinstance(source_id, int)
+        or source_id < 1
+        or contest.get("source_contest_id") != source_id
+        or not isinstance(protected, list)
+        or len(protected) != group_count
+    ):
+        return None
+    normalized: list[dict[str, int]] = []
+    for row in protected:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {"entry_id", "user_id", "source_entry_id", "source_rank"}
+            or any(
+                isinstance(row.get(key), bool)
+                or not isinstance(row.get(key), int)
+                or row[key] < 1
+                for key in row
+            )
+            or row["entry_id"] not in entry_group
+        ):
+            return None
+        normalized.append(row)
+    if (
+        len({row["entry_id"] for row in normalized}) != group_count
+        or len({row["user_id"] for row in normalized}) != group_count
+        or len({row["source_entry_id"] for row in normalized}) != group_count
+        or len({row["source_rank"] for row in normalized}) != group_count
+        or len({entry_group[row["entry_id"]] for row in normalized}) != group_count
+        or [row["source_rank"] for row in normalized]
+        != sorted(row["source_rank"] for row in normalized)
+    ):
+        return None
+    return snapshot
+
+
+def complete_group_rank_coordinates(
+    rows: object,
+    *,
+    expected_entry_groups: dict[int, str] | None = None,
+) -> bool:
+    """Validate one complete, gap-free set of authoritative group ranks.
+
+    A positive and unique coordinate is not enough: imported snapshots such as
+    ranks ``2..N+1`` would otherwise mark the wrong advancement zone.  When the
+    durable roster is available, bind every ranked entry back to its frozen
+    group and require the exact expected cohort as well.
+    """
+    if not isinstance(rows, list):
+        return False
+    expected: dict[int, str] | None = None
+    if expected_entry_groups is not None:
+        if not isinstance(expected_entry_groups, dict):
+            return False
+        expected = {}
+        for entry_id, group_id in expected_entry_groups.items():
+            if (
+                isinstance(entry_id, bool)
+                or not isinstance(entry_id, int)
+                or entry_id < 1
+                or not isinstance(group_id, str)
+                or not group_id
+                or group_id != group_id.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+            ):
+                return False
+            expected[entry_id] = group_id
+
+    seen_entries: set[int] = set()
+    ranks_by_group: dict[str, list[int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        entry_id = row.get("entry_id")
+        group_id = row.get("group_id")
+        rank = row.get("rank_in_group")
+        if (
+            isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id < 1
+            or entry_id in seen_entries
+            or not isinstance(group_id, str)
+            or not group_id
+            or group_id != group_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in group_id)
+            or isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or rank < 1
+            or (expected is not None and expected.get(entry_id) != group_id)
+        ):
+            return False
+        seen_entries.add(entry_id)
+        ranks_by_group.setdefault(group_id, []).append(rank)
+    if expected is not None and seen_entries != set(expected):
+        return False
+    return all(
+        sorted(ranks) == list(range(1, len(ranks) + 1))
+        for ranks in ranks_by_group.values()
+    )
 
 
 def contest_entry_eliminated(entry: Any) -> bool | None:
@@ -357,6 +693,18 @@ def stage_scoring_contract_is_valid(
         and stage.get("ranking_mode") != "replace_top"
     ):
         return False
+    group_assignment = stage.get("group_assignment")
+    overall_ranking = stage.get("overall_ranking")
+    if group_assignment is not None or overall_ranking is not None:
+        if (
+            stage.get("type") not in GROUP_TYPES
+            or group_assignment not in {
+                "secure_random_balanced_v1",
+                "protected_seed_random_balanced_v1",
+            }
+            or overall_ranking != "cross_group_fair_v1"
+        ):
+            return False
     for key in ("allow_bot_swap_in_rest", "allow_large_round_robin"):
         if key in stage and not isinstance(stage.get(key), bool):
             return False
@@ -465,6 +813,16 @@ def validate_stage(
         )
         if apg is not None:
             out["advance_per_group"] = apg
+        assignment = stage.get("group_assignment")
+        overall_ranking = stage.get("overall_ranking")
+        if assignment is not None or overall_ranking is not None:
+            if assignment not in {
+                "secure_random_balanced_v1",
+                "protected_seed_random_balanced_v1",
+            } or overall_ranking != "cross_group_fair_v1":
+                raise ValueError(f"阶段 {idx + 1} 随机分组或跨组排名版本非法")
+            out["group_assignment"] = assignment
+            out["overall_ranking"] = overall_ranking
 
     # swiss 专属
     if stype == "swiss":
@@ -516,6 +874,11 @@ def validate_stage(
         label=f"阶段 {idx + 1} advance_count",
     )
     if ac is not None:
+        if stype in GROUP_TYPES:
+            raise ValueError(
+                f"阶段 {idx + 1} 传统分组赛不接受 advance_count；"
+                "请使用 advance_per_group 或显式跨组公平排名"
+            )
         out["advance_count"] = ac
     rm = _int_field(
         stage,
@@ -645,6 +1008,84 @@ def validate_stage(
     return out
 
 
+def validate_nonterminal_elimination_advancement(
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require an explicit downstream cohort for every non-terminal KO.
+
+    This narrow gate is also safe for immutable finished history: it rejects
+    the former manager/read-model ambiguity without applying newer one-shrink
+    official-fold limits to exact stage snapshots that already exist.
+    """
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("stages 须为非空数组")
+    for index, stage in enumerate(stages[:-1]):
+        if (
+            isinstance(stage, dict)
+            and stage.get("type") == "single_elimination"
+            and "advance_count" not in stage
+        ):
+            raise ValueError(
+                f"阶段 {index + 1} 的非终局 single_elimination "
+                "必须显式配置 advance_count"
+            )
+    return stages
+
+
+def validate_stage_ranking_topology(
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reject new multi-stage graphs the official-rank fold cannot preserve.
+
+    The current durable contract can merge one finalist cohort with the exact
+    immediately preceding full-cohort snapshot.  It cannot recover entrants
+    eliminated by an older stage, nor can a terminal ordinary RR/Swiss table
+    represent entrants removed before it.  Freeze only graphs for which every
+    registered entrant can therefore receive one official rank.
+    """
+    validate_nonterminal_elimination_advancement(stages)
+    advancement_indices = [
+        index
+        for index, stage in enumerate(stages[:-1])
+        if isinstance(stage, dict)
+        and (
+            "advance_count" in stage
+            or "advance_per_group" in stage
+        )
+    ]
+    if not advancement_indices:
+        return stages
+    if len(advancement_indices) != 1:
+        raise ValueError("当前正式排名仅支持一次阶段 cohort 缩减")
+    advancement_idx = advancement_indices[0]
+    terminal_idx = len(stages) - 1
+    terminal = stages[terminal_idx]
+    if advancement_idx != terminal_idx - 1:
+        raise ValueError("cohort 缩减必须发生在终局前一阶段")
+    if not isinstance(terminal, dict) or not (
+        terminal.get("ranking_mode") == "replace_top"
+        or terminal.get("type") == "single_elimination"
+    ):
+        raise ValueError(
+            "cohort 缩减后的终局须使用 ranking_mode=replace_top 或单败淘汰"
+        )
+    if terminal.get("ranking_mode") == "replace_top":
+        qualifier = stages[advancement_idx]
+        if "advance_count" in qualifier:
+            finalist_limit = qualifier["advance_count"]
+        else:
+            finalist_limit = (
+                qualifier.get("group_count", 4)
+                * qualifier["advance_per_group"]
+            )
+        ranking_scope = terminal.get("ranking_scope", 8)
+        if ranking_scope < finalist_limit:
+            raise ValueError(
+                "replace_top ranking_scope 不得小于计划晋级 cohort"
+            )
+    return stages
+
+
 def configure_games_per_pair(
     stages: list[dict[str, Any]],
     game_id: str,
@@ -737,6 +1178,143 @@ def configure_games_per_pair(
 
     # Run the same strict stage validator here so direct Manager callers and the
     # HTTP model share one capability/range boundary.
+    gid = _game_spec(game_id).game_id
+    return [validate_stage(stage, idx, gid) for idx, stage in enumerate(copied)]
+
+
+def configure_stage_format_settings(
+    stages: list[dict[str, Any]],
+    game_id: str,
+    settings: dict[str, dict[str, Any]] | None,
+    *,
+    capabilities: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Freeze strictly advertised participant-topology choices into stages.
+
+    The first format capability is intentionally narrow: organizers may choose
+    only ``group_count`` for an advertised group stage.  Arbitrary stage JSON,
+    silent group-count clamping and settings for another stage all fail before
+    the contest snapshot is written.
+    """
+    import copy
+
+    copied = copy.deepcopy(stages)
+    if capabilities is None:
+        if settings is not None:
+            raise ValueError("当前赛事模板不支持 stage_format_settings")
+        return copied
+    if not isinstance(capabilities, list) or not capabilities:
+        raise ValueError("赛事模板 stage_format_configs 非法")
+    if settings is not None and (not isinstance(settings, dict) or not settings):
+        raise ValueError("stage_format_settings 须为非空对象")
+
+    stage_by_key = {
+        str(stage.get("key") or f"stage{idx + 1}"): stage
+        for idx, stage in enumerate(copied)
+    }
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw in capabilities:
+        if not isinstance(raw, dict):
+            raise ValueError("赛事模板 stage_format_configs 非法")
+        allowed = {
+            "stage_key", "label", "field", "min", "max", "default",
+            "required", "group_count",
+        }
+        if set(raw) - allowed:
+            raise ValueError("赛事模板 stage_format_configs 字段非法")
+        stage_key = raw.get("stage_key")
+        if (
+            not isinstance(stage_key, str)
+            or not stage_key
+            or stage_key in normalized
+            or stage_key not in stage_by_key
+            or stage_by_key[stage_key].get("type") not in GROUP_TYPES
+        ):
+            raise ValueError("赛事模板 stage_format_configs 阶段非法")
+        group_cap = raw.get("group_count")
+        if group_cap is not None:
+            if not isinstance(group_cap, dict) or set(group_cap) - {
+                "min", "max", "default", "required",
+            }:
+                raise ValueError(f"阶段 {stage_key} group_count 能力非法")
+            minimum = group_cap.get("min")
+            maximum = group_cap.get("max")
+            default = group_cap.get("default")
+            required = group_cap.get("required", raw.get("required", False))
+        else:
+            if raw.get("field", "group_count") != "group_count":
+                raise ValueError(f"阶段 {stage_key} 只允许配置 group_count")
+            minimum = raw.get("min")
+            maximum = raw.get("max")
+            default = raw.get("default")
+            required = raw.get("required", "default" not in raw)
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or minimum < 2
+            or (
+                maximum is not None
+                and (
+                    isinstance(maximum, bool)
+                    or not isinstance(maximum, int)
+                    or maximum < minimum
+                )
+            )
+            or not isinstance(required, bool)
+            or (
+                default is not None
+                and (
+                    isinstance(default, bool)
+                    or not isinstance(default, int)
+                    or default < minimum
+                    or (maximum is not None and default > maximum)
+                )
+            )
+        ):
+            raise ValueError(f"阶段 {stage_key} group_count 能力非法")
+        normalized[stage_key] = {
+            "min": minimum,
+            "max": maximum,
+            "default": default,
+            "required": required,
+        }
+
+    requested = settings or {}
+    unknown = set(requested) - set(normalized)
+    if unknown:
+        raise ValueError(
+            "stage_format_settings 包含未知阶段："
+            + ", ".join(sorted(str(key) for key in unknown))
+        )
+    for stage_key, capability in normalized.items():
+        raw_setting = requested.get(stage_key)
+        if raw_setting is not None and (
+            not isinstance(raw_setting, dict) or set(raw_setting) != {"group_count"}
+        ):
+            raise ValueError(f"阶段 {stage_key} 配置必须且只能包含 group_count")
+        selected = (
+            raw_setting.get("group_count")
+            if raw_setting is not None
+            else capability["default"]
+        )
+        if selected is None and capability["required"]:
+            raise ValueError(f"阶段 {stage_key} 必须选择 group_count")
+        if selected is None:
+            selected = stage_by_key[stage_key].get("group_count")
+        if (
+            isinstance(selected, bool)
+            or not isinstance(selected, int)
+            or selected < capability["min"]
+            or (
+                capability["max"] is not None
+                and selected > capability["max"]
+            )
+        ):
+            upper = capability["max"]
+            bound = f"{capability['min']}..{upper}" if upper is not None else f">={capability['min']}"
+            raise ValueError(f"阶段 {stage_key} group_count 须为 {bound} 的整数")
+        stage_by_key[stage_key]["group_count"] = selected
+
     gid = _game_spec(game_id).game_id
     return [validate_stage(stage, idx, gid) for idx, stage in enumerate(copied)]
 
@@ -965,6 +1543,7 @@ def validate_template(
     if not isinstance(stages, list) or len(stages) == 0:
         raise ValueError("stages 须为非空数组")
     norm_stages = [validate_stage(s, i, gid) for i, s in enumerate(stages)]
+    validate_stage_ranking_topology(norm_stages)
     norm_mc = validate_match_config(match_config, gid)
     return {
         "id": tid,
@@ -981,6 +1560,8 @@ __all__ = [
     "validate_template_id",
     "validate_match_config",
     "validate_stage",
+    "validate_nonterminal_elimination_advancement",
+    "validate_stage_ranking_topology",
     "validate_template",
     "configure_games_per_pair",
     "SERIES_SCORING_AGGREGATE",
@@ -988,4 +1569,6 @@ __all__ = [
     "stage_duplicate_mode",
     "stage_scoring_contract_is_valid",
     "stage_series_scoring_is_valid",
+    "reserved_group_markers_match_template",
+    "validated_random_group_format_snapshot",
 ]

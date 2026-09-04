@@ -11,8 +11,11 @@ import {
 import {
   apiGet,
   apiPost,
+  confirmAuthenticatedSession,
+  confirmServerInvalidatedSession as commitServerInvalidatedSession,
   currentUserStore,
-  userToken,
+  IdentityChangedError,
+  logoutCurrentSession,
   type CurrentUser,
 } from '../api'
 
@@ -28,6 +31,8 @@ interface AuthState {
   ) => Promise<CurrentUser>
   logout: () => Promise<void>
   refresh: () => Promise<CurrentUser | null>
+  /** Only for a preceding 2xx operation that already revoked this session. */
+  confirmServerInvalidatedSession: () => void
 }
 
 const AuthContext = createContext<AuthState | undefined>(undefined)
@@ -35,24 +40,49 @@ const AuthContext = createContext<AuthState | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(() => currentUserStore.get())
   const [loading, setLoading] = useState(true)
-  // Only the newest auth operation may project its result into shared storage
-  // and React state.  In particular, the initial /me probe can finish after a
+  // Only the newest auth operation may project its result into module memory
+  // and React state. In particular, the initial /me probe can finish after a
   // deliberate login or logout on a slow connection.
   const authGenerationRef = useRef(0)
+  const renderedStoreRevisionRef = useRef(currentUserStore.revision())
+
+  useEffect(() => {
+    const projectUser = (nextUser: CurrentUser | null) => {
+      setUser(nextUser)
+      setLoading(false)
+    }
+    const unsubscribe = currentUserStore.subscribe(projectUser)
+    // Close the render-to-effect window without turning the ordinary initial
+    // anonymous /me probe into an already-finished loading state.
+    if (currentUserStore.revision() !== renderedStoreRevisionRef.current) {
+      projectUser(currentUserStore.get())
+    }
+    return unsubscribe
+  }, [])
 
   const refresh = useCallback(async (): Promise<CurrentUser | null> => {
     const generation = ++authGenerationRef.current
+    const storeRevision = currentUserStore.revision()
     try {
       const d = await apiGet<{ user: CurrentUser }>('/api/auth/me')
-      if (authGenerationRef.current !== generation) return currentUserStore.get()
+      if (
+        authGenerationRef.current !== generation ||
+        currentUserStore.revision() !== storeRevision
+      ) return currentUserStore.get()
       currentUserStore.set(d.user)
       setUser(d.user)
       setLoading(false)
       return d.user
-    } catch {
-      if (authGenerationRef.current !== generation) return currentUserStore.get()
+    } catch (cause) {
+      if (
+        authGenerationRef.current !== generation ||
+        currentUserStore.revision() !== storeRevision
+      ) return currentUserStore.get()
+      if (cause instanceof IdentityChangedError) {
+        setLoading(false)
+        return currentUserStore.get()
+      }
       currentUserStore.clear()
-      userToken.clear()
       setUser(null)
       setLoading(false)
       return null
@@ -72,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ): Promise<CurrentUser> => {
       const generation = ++authGenerationRef.current
       try {
-        const d = await apiPost<{ user: CurrentUser; token?: string }>(
+        const d = await apiPost<{ user: CurrentUser }>(
           '/api/auth/login',
           'POST',
           {
@@ -83,8 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           },
         )
         if (authGenerationRef.current !== generation) return currentUserStore.get() ?? d.user
-        if (d.token) userToken.set(d.token)
-        currentUserStore.set(d.user)
+        confirmAuthenticatedSession(d.user)
         setUser(d.user)
         return d.user
       } finally {
@@ -96,21 +125,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async (): Promise<void> => {
     const generation = ++authGenerationRef.current
-    try {
-      await apiPost('/api/auth/logout', 'POST')
-    } catch {
-      /* 忽略服务端错误 */
-    }
+    await logoutCurrentSession()
     if (authGenerationRef.current !== generation) return
-    userToken.clear()
-    currentUserStore.clear()
+    setUser(null)
+    setLoading(false)
+  }, [])
+
+  const confirmServerInvalidatedSession = useCallback((): void => {
+    authGenerationRef.current += 1
+    commitServerInvalidatedSession()
     setUser(null)
     setLoading(false)
   }, [])
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, isLoggedIn: !!user, login, logout, refresh }}
+      value={{
+        user,
+        loading,
+        isLoggedIn: !!user,
+        login,
+        logout,
+        refresh,
+        confirmServerInvalidatedSession,
+      }}
     >
       {children}
     </AuthContext.Provider>

@@ -25,6 +25,12 @@ import {
   type ExecutionEnvironment,
   type LocalAIAgent,
 } from '@/components/runtime-environment'
+import {
+  parseTimeControlRegistries,
+  timeControlDescription,
+  timeControlLabel,
+  type TimeControlRegistry,
+} from '@/lib/time-controls'
 
 /** 版本列表条目（公开视图：id+version+upload_note+created_at+size_bytes；owner 视图字段更多）。 */
 interface VersionRow {
@@ -90,6 +96,10 @@ export default function Challenge() {
   const { isLoggedIn, user } = useAuth()
   const nav = useNavigate()
   const [gameId, setGameId] = useState<GameId>('holdem')
+  const [timeControlRegistries, setTimeControlRegistries] = useState<Record<string, TimeControlRegistry>>({})
+  const [timeControlId, setTimeControlId] = useState('')
+  const [timeControlsLoading, setTimeControlsLoading] = useState(true)
+  const [timeControlsError, setTimeControlsError] = useState('')
   const playerLabels = PLAYER_LABELS[gameId]
   // 两个位置内部仍 0 起计以对齐后端；五子棋显示角色而不预判交换后的棋色。
   const [seats, setSeats] = useState<[SeatState, SeatState]>([
@@ -117,6 +127,57 @@ export default function Challenge() {
   const pendingConfirmationUntil = useRef(0)
   const errorAlertRef = useRef<HTMLDivElement>(null)
   const [confirm, confirmDialog] = useConfirm()
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setTimeControlRegistries({})
+      setTimeControlId('')
+      setTimeControlsError('')
+      setTimeControlsLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    setTimeControlsLoading(true)
+    setTimeControlsError('')
+    // React StrictMode 的探测性首轮 effect 会立即 cleanup；延后一拍启动，
+    // 避免发出随后必然取消、会污染浏览器网络验收的无意义请求。
+    const startTimer = window.setTimeout(() => {
+      void apiFetch<unknown>('/api/games', { signal: controller.signal })
+        .then((payload) => {
+          if (controller.signal.aborted) return
+          const registries = parseTimeControlRegistries(payload)
+          if (!registries) throw new Error('游戏时限配置格式无效')
+          setTimeControlRegistries(Object.fromEntries(registries.map((registry) => [registry.game_id, registry])))
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return
+          setTimeControlRegistries({})
+          setTimeControlsError(errMsg(err, '游戏时限加载失败'))
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setTimeControlsLoading(false)
+        })
+    }, 0)
+    return () => {
+      window.clearTimeout(startTimer)
+      controller.abort()
+    }
+  }, [isLoggedIn])
+
+  const timeControlRegistry = timeControlRegistries[gameId]
+  const selectedTimeControl = timeControlRegistry?.time_controls.find((control) => control.id === timeControlId)
+  const timeControlReady = selectedTimeControl !== undefined
+  const alternateTimeControl = Boolean(
+    selectedTimeControl && selectedTimeControl.id !== timeControlRegistry?.default_time_control_id,
+  )
+
+  useEffect(() => {
+    setTimeControlId((current) => (
+      timeControlRegistry?.time_controls.some((control) => control.id === current)
+        ? current
+        : timeControlRegistry?.default_time_control_id || ''
+    ))
+  }, [gameId, timeControlRegistry])
 
   const executionStorageKey = user?.id == null
     ? null
@@ -382,6 +443,7 @@ export default function Challenge() {
     setBusy(true)
     setError('')
     try {
+      if (!timeControlReady) throw new Error('当前游戏的对局时限不可用')
       if (seat2Kind === 'human') {
         // 人类固定使用内部座位 1，平台 Bot 使用内部座位 0。
         if (!seats[0].bot) throw new Error(`请选择${playerLabels[0]}的 Bot`)
@@ -389,6 +451,7 @@ export default function Challenge() {
           bot_id: seats[0].bot.id,
           human_seat: 1,
           game_id: gameId,
+          time_control_id: timeControlId,
         }
         const requestId = createExecutionRequestId()
         body.request_id = requestId
@@ -425,6 +488,7 @@ export default function Challenge() {
         opponent_bot_id: selectedBotIds[mySeat === 0 ? 1 : 0],
         my_seat: mySeat,
         game_id: gameId,
+        time_control_id: timeControlId,
         my_environment: seats[mySeat].environment,
         opponent_environment: seats[mySeat === 0 ? 1 : 0].environment,
         my_local_agent_id: selectedLocalAgents[mySeat]?.public_id ?? null,
@@ -775,6 +839,7 @@ export default function Challenge() {
         selectedLocalAgents[0]
         && selectedLocalAgents[0]?.public_id === selectedLocalAgents[1]?.public_id
       )
+  const submissionReady = ready && timeControlReady && !timeControlsLoading && !timeControlsError
 
   return (
     <PageStub title="发起挑战" subtitle="选择双方如何运行；日常测试使用节能沙箱或自己的电脑。">
@@ -865,6 +930,48 @@ export default function Challenge() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-3">
+              <Label>对局时限</Label>
+              <Select
+                value={timeControlId || 'time-control-pending'}
+                onValueChange={(value) => { if (value !== 'time-control-pending') setTimeControlId(value) }}
+                disabled={timeControlsLoading || !timeControlRegistry || timeControlRegistry.time_controls.length <= 1}
+              >
+                <SelectTrigger className="w-full" aria-label="对局时限" aria-describedby="challenge-time-control-help">
+                  <SelectValue>
+                    {selectedTimeControl
+                      ? timeControlLabel(selectedTimeControl)
+                      : timeControlsLoading
+                        ? '正在读取时限…'
+                        : '时限不可用'}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {timeControlRegistry?.time_controls.map((control) => (
+                    <SelectItem key={control.id} value={control.id}>
+                      {timeControlLabel(control)}{control.is_default ? ' · 默认' : ' · 练习'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p id="challenge-time-control-help" className="text-xs leading-relaxed text-muted-foreground">
+                {selectedTimeControl
+                  ? timeControlDescription(selectedTimeControl, seat2Kind === 'human')
+                  : '只接受平台公开的固定时限，加载失败时不会提交对局。'}
+              </p>
+              {seat2Kind === 'human' && selectedTimeControl && (
+                <p className="text-xs font-medium text-primary">
+                  非对称练习：所选时限只约束 Bot；你仍使用页面的防挂机时限。
+                </p>
+              )}
+              {seat2Kind === 'bot' && alternateTimeControl && (
+                <p className="text-xs font-medium text-primary">
+                  替代时限属于练习模式，本局不计平台排行榜。
+                </p>
+              )}
+              {timeControlsError && <ErrorMsg msg={timeControlsError} className="text-xs" />}
             </div>
 
             <div className="rounded-lg border border-border p-3">
@@ -997,15 +1104,17 @@ export default function Challenge() {
             )}
             <Button
               type="submit"
-              disabled={busy || !ready}
+              disabled={busy || !submissionReady}
               className="w-full gap-1.5"
             >
               <Play className="size-4" />
               {busy ? '发起中…' : seat2Kind === 'human' ? '开始人类对战' : '开始对局'}
             </Button>
-            {!busy && !ready && (
+            {!busy && !submissionReady && (
               <p className="text-center text-xs text-muted-foreground">
-                {seat2Kind === 'human'
+                {!timeControlReady
+                  ? '对局时限尚未就绪，请稍后重试'
+                  : seat2Kind === 'human'
                   ? `请选择${playerLabels[0]}的 Bot`
                   : usesLocalBot
                     ? '请为双方选择可用连接；离线或正在对局的本地 Bot 不能开始'

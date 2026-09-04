@@ -1,14 +1,27 @@
 """赛事对阵图 + 显示 Bot 名测试（PR-6）。"""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.api_routes import _public_contest_pairings
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
 from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
+
+
+PAIRING_PUBLISHED_AT = "2026-01-01T00:00:00"
+
+
+class _NoDispatch:
+    max_concurrent = 1
+
+    async def challenge(self, *_args, **_kwargs):
+        raise AssertionError("sealed fixture must not dispatch a new match")
 
 
 def _store(tmp_path) -> Store:
@@ -277,7 +290,7 @@ def test_stage_summary_completion_uses_joined_match_truth(
     contest = store.create_contest(
         "Stage match truth",
         organizer_id=organizer["id"],
-        status="running",
+        status="published",
         game_id="holdem",
         stages_json=(
             '[{"key":"rr","type":"round_robin",'
@@ -289,7 +302,29 @@ def test_stage_summary_completion_uses_joined_match_truth(
         for user, bot in zip(users, bots)
     ]
     match_id = f"stage-match-{actual_match_status or 'missing'}"
-    if actual_match_status is not None:
+    pairing = store.create_contest_stage_pairings(
+        contest["id"],
+        0,
+        [
+            {
+                "bot_a_id": bots[0]["id"],
+                "bot_b_id": bots[1]["id"],
+                "entry_a_id": entries[0]["id"],
+                "entry_b_id": entries[1]["id"],
+                "round_num": 1,
+                "stage_key": "rr",
+                "published_at": PAIRING_PUBLISHED_AT,
+            }
+        ],
+        expected_current_stage_idx=0,
+        expected_status="published",
+        activate_running=True,
+    )[0]
+    if actual_match_status is None:
+        store.update_contest_pairing(
+            pairing["id"], match_id=match_id, status=pairing_status
+        )
+    else:
         store.create_match(
             match_id,
             bots[0]["id"],
@@ -298,25 +333,25 @@ def test_stage_summary_completion_uses_joined_match_truth(
             match_type="contest",
             game_id="holdem",
         )
+        store.bind_contest_pairing_match(
+            contest["id"],
+            pairing["id"],
+            match_id,
+            require_execution_admission=False,
+        )
         if actual_match_status != "pending":
             update: dict = {"status": actual_match_status}
             if actual_match_status == "completed":
                 update.update(
                     winner=0,
-                    result={"deltas": [100, -100]},
+                    result={
+                        "rounds_played": 70,
+                        "deltas": [100, -100],
+                        "normalized_delta": 1.0,
+                    },
                 )
             store.update_match(match_id, **update)
-    pairing = store.add_contest_pairing(
-        contest["id"],
-        bots[0]["id"],
-        bots[1]["id"],
-        match_id=match_id,
-        status=pairing_status,
-        stage_idx=0,
-        stage_key="rr",
-        entry_a_id=entries[0]["id"],
-        entry_b_id=entries[1]["id"],
-    )
+        store.update_contest_pairing(pairing["id"], status=pairing_status)
 
     raw_pairing = next(
         row for row in store.contest_bracket(contest["id"])
@@ -383,15 +418,15 @@ def test_legacy_pairing_recovers_unique_entries_without_guessing_bye(tmp_path):
     # 旧阶段快照同样可能只有 bot_id；唯一报名映射须在读边界恢复 entry_id。
     with store._tx() as conn:
         conn.executemany(
-            "INSERT INTO contest_stage_results("
-            "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
-            "losses,delta_total,group_id,payload_json) "
-            "VALUES(?,0,'rr',NULL,?,?,?,?,?,?, '', '{}')",
-            [
-                (contest["id"], bot_a["id"], 7.0, 2, 1, 0, 12),
-                (contest["id"], bot_b["id"], 4.0, 1, 1, 1, -12),
-            ],
-        )
+                "INSERT INTO contest_stage_results("
+                "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+                "losses,delta_total,group_id,rank_in_group,payload_json) "
+                "VALUES(?,0,'rr',NULL,?,?,?,?,?,?, '', ?, '{}')",
+                [
+                    (contest["id"], bot_a["id"], 7.0, 2, 1, 0, 12, 1),
+                    (contest["id"], bot_b["id"], 4.0, 1, 1, 1, -12, 2),
+                ],
+            )
     persisted = TestClient(app).get(f"/api/contests/{contest['id']}").json()
     persisted_rows = persisted["stage_standings"][0]["rows"]
     assert {row["owner_name"]: row["points"] for row in persisted_rows} == {
@@ -411,18 +446,24 @@ def test_persisted_swiss_stage_summary_derives_byes_from_pairing_graph(tmp_path)
         store.create_user(f"bye-player-{index}", f"bp{index}@example.com", "hash")
         for index in range(3)
     ]
-    bots = [
-        store.create_bot(
-            player["id"], f"bye-bot-{index}", binary_path="/tmp", format="elf",
-            game_id="holdem",
+    bots = []
+    for index, player in enumerate(players):
+        binary = tmp_path / f"bye-bot-{index}.elf"
+        binary.write_bytes(b"swiss-bye-fixture")
+        bots.append(
+            store.create_bot(
+                player["id"],
+                f"bye-bot-{index}",
+                binary_path=str(binary),
+                format="elf",
+                game_id="holdem",
+            )
         )
-        for index, player in enumerate(players)
-    ]
     contest = store.create_contest(
         "Persisted Swiss",
         organizer_id=organizer["id"],
         game_id="holdem",
-        status="finished",
+        status="published",
         stages_json=(
             '[{"key":"swiss","type":"swiss","rounds":1,'
             '"scoring":"poker_3_1_0"}]'
@@ -433,37 +474,57 @@ def test_persisted_swiss_stage_summary_derives_byes_from_pairing_graph(tmp_path)
         store.add_contest_entry(contest["id"], player["id"], bot["id"])
         for player, bot in zip(players, bots)
     ]
+    manager = ContestManager(store, _NoDispatch())  # type: ignore[arg-type]
+    asyncio.run(
+        manager._begin_stage(
+            contest["id"],
+            0,
+            schedule_immediately=True,
+            dispatch_pending=False,
+        )
+    )
+    pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
+    assert len(pairings) == 2
+    bye_pairing = next(pairing for pairing in pairings if pairing["bot_b_id"] is None)
+    real_pairing = next(pairing for pairing in pairings if pairing["bot_b_id"] is not None)
     match_id = "persisted-swiss-real-match"
+    match_config = {"duplicate": False}
+    for suffix in ("a", "b"):
+        version_id = real_pairing[f"bot_{suffix}_version_id"]
+        if version_id is not None:
+            match_config[f"_bot_{suffix}_version_id"] = version_id
     store.create_match(
-        match_id, bots[0]["id"], bots[1]["id"], game_id="holdem",
-        contest_id=contest["id"], match_type="contest",
+        match_id,
+        real_pairing["bot_a_id"],
+        real_pairing["bot_b_id"],
+        owner_id=organizer["id"],
+        game_id="holdem",
+        contest_id=contest["id"],
+        match_type="contest",
+        match_config=match_config,
+    )
+    store.bind_contest_pairing_match(
+        contest["id"],
+        real_pairing["id"],
+        match_id,
+        require_execution_admission=False,
     )
     store.update_match(
         match_id, status="completed", winner=0, reason="completed",
         result={"rounds_played": 70, "deltas": [10, -10], "normalized_delta": 0.1},
     )
-    store.add_contest_pairing(
-        contest["id"], bots[0]["id"], bots[1]["id"],
-        entry_a_id=entries[0]["id"], entry_b_id=entries[1]["id"],
-        match_id=match_id, status="completed", stage_idx=0, stage_key="swiss",
-    )
-    store.add_contest_pairing(
-        contest["id"], bots[2]["id"], None,
-        entry_a_id=entries[2]["id"], entry_b_id=None,
-        status="completed", stage_idx=0, stage_key="swiss",
-    )
+    completed = store.complete_contest_pairing_for_match(contest["id"], match_id)
+    assert completed and completed["status"] == "completed"
 
     client = TestClient(app)
+    match_before_read = store.get_match(match_id)
+    replay_before_read = store.get_replay(match_id)
     live_response = client.get(f"/api/contests/{contest['id']}")
     assert live_response.status_code == 200
     live_stage = live_response.json()["stage_standings"][0]
     public_bye = next(
         row for row in live_response.json()["pairings"]
-        if row["id"] != next(
-            pairing["id"]
-            for pairing in store.list_contest_pairings(contest["id"])
-            if pairing.get("match_id")
-        )
+        if row["id"] == bye_pairing["id"]
     )
     assert public_bye["is_bye"] is True
     assert live_stage["source"] == "live"
@@ -472,17 +533,15 @@ def test_persisted_swiss_stage_summary_derives_byes_from_pairing_graph(tmp_path)
         entry_id: (row["points"], row["wins"], row["losses"], row["byes"])
         for entry_id, row in live_rows.items()
     } == {
-        entries[0]["id"]: (3.0, 1, 0, 0),
-        entries[1]["id"]: (0.0, 0, 1, 0),
-        entries[2]["id"]: (3.0, 0, 0, 1),
+        real_pairing["entry_a_id"]: (3.0, 1, 0, 0),
+        real_pairing["entry_b_id"]: (0.0, 0, 1, 0),
+        bye_pairing["entry_a_id"]: (3.0, 0, 0, 1),
     }
+    assert store.get_match(match_id) == match_before_read
+    assert store.get_replay(match_id) == replay_before_read
 
-    for index, (entry, bot) in enumerate(zip(entries, bots)):
-        store.upsert_stage_result(
-            contest["id"], 0, entry["id"], bot_id=bot["id"],
-            stage_key="swiss", points=3.0 if index in (0, 2) else 0.0,
-            wins=1 if index == 0 else 0, losses=1 if index == 1 else 0,
-        )
+    finished = asyncio.run(manager.maybe_finish(contest["id"]))
+    assert finished and finished["status"] == "finished"
 
     response = client.get(f"/api/contests/{contest['id']}")
     assert response.status_code == 200
@@ -493,20 +552,20 @@ def test_persisted_swiss_stage_summary_derives_byes_from_pairing_graph(tmp_path)
         entry_id: (row["points"], row["wins"], row["draws"], row["losses"], row["byes"])
         for entry_id, row in rows.items()
     } == {
-        entries[0]["id"]: (3.0, 1, 0, 0, 0),
-        entries[1]["id"]: (0.0, 0, 0, 1, 0),
-        entries[2]["id"]: (3.0, 0, 0, 0, 1),
+        real_pairing["entry_a_id"]: (3.0, 1, 0, 0, 0),
+        real_pairing["entry_b_id"]: (0.0, 0, 0, 1, 0),
+        bye_pairing["entry_a_id"]: (3.0, 0, 0, 0, 1),
     }
 
     # Historical projection remains pairing-backed after the bye Bot is deleted;
     # entry identity survives and no stage-result schema column is required.
-    assert store.delete_bot(bots[2]["id"])
+    assert store.delete_bot(bye_pairing["bot_a_id"])
     historical_stage = client.get(
         f"/api/contests/{contest['id']}"
     ).json()["stage_standings"][0]
     historical_bye = next(
         row for row in historical_stage["rows"]
-        if row["entry_id"] == entries[2]["id"]
+        if row["entry_id"] == bye_pairing["entry_a_id"]
     )
     assert historical_bye["byes"] == 1
     assert (

@@ -434,7 +434,16 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     assert "replay" not in detail
     public_events = _replay_events(c, "mg0")
     assert public_events == [
-        {"type": "match_start", "game_id": "gomoku"},
+        {
+            "type": "match_start",
+            "game_id": "gomoku",
+            "time_control": {
+                "id": "gomoku_per_side_total_900s_v1",
+                "mode": "per_side_total",
+                "seconds": 900,
+                "applies_to": "both_bots",
+            },
+        },
         {"type": "error", "reason": "platform_error"},
     ]
     assert "/private" not in json.dumps(detail, ensure_ascii=False)
@@ -471,7 +480,16 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     completed = c.get("/api/matches/mh0").json()
     assert "replay" not in completed
     assert _replay_events(c, "mh0") == [
-        {"type": "match_start", "game_id": "holdem"},
+        {
+            "type": "match_start",
+            "game_id": "holdem",
+            "time_control": {
+                "id": "holdem_per_decision_60s_v1",
+                "mode": "per_decision",
+                "seconds": 60,
+                "applies_to": "both_bots",
+            },
+        },
         {
             "type": "match_end",
             "winner": 1,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from .schema import (
@@ -47,6 +48,19 @@ PUBLIC_CONTEST_TIEBREAK_FIELDS = (
     "seed",
 )
 
+# Present only for the two code-owned random-group formats.  They form one
+# atomic public contract: exposing a partial rate chain would make a damaged
+# snapshot look rankable and would let detail/live disagree with official
+# results.  Historical non-grouped rows legitimately omit the whole set.
+PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS = (
+    "group_rank",
+    "points_rate",
+    "opponent_strength",
+    "normalized_delta_rate",
+    "technical_loss_rate",
+    "draw_order",
+)
+
 # Replay/live events are a public protocol, not an arbitrary JSON transport.
 # Keep the complete set here so a future game/adapter must deliberately extend
 # the public projection before a new event type or field can cross REST/SSE/WS.
@@ -63,6 +77,7 @@ _PUBLIC_EVENT_FIELDS: dict[str, frozenset[str]] = {
             "ruleset",
             "protocol_version",
             "time_budget_per_side",
+            "time_control",
         }
     ),
     "turn": frozenset(
@@ -192,11 +207,40 @@ def sanitize_public_contest_tiebreaks(raw: Any) -> dict[str, int | float] | None
         if number is None:
             return None
         public[key] = number
+    present = [key in raw for key in PUBLIC_CROSS_GROUP_TIEBREAK_FIELDS]
+    if any(present):
+        if not all(present):
+            return None
+        for key in ("group_rank", "draw_order"):
+            value = raw.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                return None
+            public[key] = value
+        for key in (
+            "points_rate",
+            "opponent_strength",
+            "normalized_delta_rate",
+            "technical_loss_rate",
+        ):
+            number = _public_number(raw.get(key))
+            if number is None:
+                return None
+            if key in {
+                "points_rate",
+                "opponent_strength",
+                "technical_loss_rate",
+            } and not 0 <= number <= 1:
+                return None
+            public[key] = number
     return public
 
 
 def sanitize_public_stage_result_payload(raw: Any) -> dict[str, Any]:
-    """Parse a persisted stage envelope and retain only public tie-breaks."""
+    """Parse a persisted stage envelope and retain bounded ranking fields."""
     payload = raw
     if isinstance(raw, str):
         try:
@@ -206,7 +250,19 @@ def sanitize_public_stage_result_payload(raw: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     tiebreaks = sanitize_public_contest_tiebreaks(payload.get("tiebreaks"))
-    return {"tiebreaks": tiebreaks} if tiebreaks is not None else {}
+    if tiebreaks is None:
+        return {}
+    public: dict[str, Any] = {"tiebreaks": tiebreaks}
+    if "overall_rank" in payload:
+        overall_rank = payload.get("overall_rank")
+        if (
+            isinstance(overall_rank, bool)
+            or not isinstance(overall_rank, int)
+            or overall_rank < 1
+        ):
+            return {}
+        public["overall_rank"] = overall_rank
+    return public
 
 
 def _public_deltas(raw: Any) -> list[int | float] | None:
@@ -258,6 +314,47 @@ def _sanitize_public_request(raw: Any) -> dict[str, Any] | None:
         if value is not None:
             public[key] = value
     return public
+
+
+def _sanitize_public_time_control(
+    raw: Any, *, game_id: Any = None
+) -> dict[str, Any] | None:
+    """Return the bounded public clock contract embedded in match_start."""
+
+    if not isinstance(raw, dict):
+        return None
+    control_id = raw.get("id")
+    mode = raw.get("mode")
+    seconds = raw.get("seconds")
+    applies_to = raw.get("applies_to")
+    if (
+        not isinstance(control_id, str)
+        or re.fullmatch(
+            r"[a-z0-9]+(?:_[a-z0-9]+)*_v[1-9][0-9]*", control_id
+        ) is None
+        or mode not in {"per_decision", "per_side_total"}
+        or isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or seconds <= 0
+        or applies_to not in {"both_bots", "bot_only"}
+    ):
+        return None
+    try:
+        from bzplat.backend.games import registry as game_registry
+
+        if not isinstance(game_id, str) or not game_id:
+            return None
+        frozen = game_registry.get(game_id).resolve_time_control(control_id)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if frozen.mode != mode or frozen.seconds != seconds:
+        return None
+    return {
+        "id": control_id,
+        "mode": mode,
+        "seconds": seconds,
+        "applies_to": applies_to,
+    }
 
 
 def sanitize_public_result(raw: Any) -> dict[str, Any]:
@@ -349,16 +446,53 @@ def sanitize_public_match(match: dict | None) -> dict | None:
         if human_seat in (0, 1) and not isinstance(human_seat, bool):
             environments[int(human_seat)] = EXECUTION_ENV_HUMAN
     raw_config = public.get("match_config")
+    # Store parsing preserves a private marker when invalid JSON had to be
+    # replaced with an empty dict.  Do not reinterpret that replacement as a
+    # genuine legacy row, and never expose the marker itself.
+    config_malformed = bool(public.pop("_match_config_malformed", False))
     if isinstance(raw_config, str):
         try:
             raw_config = json.loads(raw_config)
         except (TypeError, ValueError):
-            raw_config = {}
+            raw_config = None
+            config_malformed = True
+    elif raw_config is not None and not isinstance(raw_config, dict):
+        raw_config = None
+        config_malformed = True
     if isinstance(raw_config, dict):
         for side in ("a", "b"):
             value = raw_config.get(f"_bot_{side}_environment")
             if value in EXECUTION_ENVIRONMENTS:
                 environments[0 if side == "a" else 1] = value
+    if config_malformed:
+        public["time_control"] = None
+    else:
+        try:
+            from bzplat.backend.games import registry as game_registry
+
+            spec = game_registry.get(str(public.get("game_id") or ""))
+            raw_id = (
+                raw_config.get("time_control_id")
+                if isinstance(raw_config, dict)
+                else None
+            )
+            if isinstance(raw_config, dict) and "time_control_id" in raw_config and (
+                not isinstance(raw_id, str) or not raw_id
+            ):
+                raise ValueError("invalid time_control_id")
+            control = spec.resolve_time_control(raw_id)
+            public["time_control"] = {
+                "id": control.id,
+                "mode": control.mode,
+                "seconds": control.seconds,
+                "applies_to": (
+                    "bot_only"
+                    if public.get("match_type") == TYPE_HUMAN
+                    else "both_bots"
+                ),
+            }
+        except (KeyError, TypeError, ValueError):
+            public["time_control"] = None
     public["bot_a_environment"] = environments[0]
     public["bot_b_environment"] = environments[1]
     # match_config stores frozen version ids and duplicate seeds for execution;
@@ -466,6 +600,13 @@ def sanitize_public_event(
             if request is not None:
                 public[key] = request
             continue
+        if key == "time_control":
+            control = _sanitize_public_time_control(
+                raw[key], game_id=raw.get("game_id")
+            )
+            if control is not None:
+                public[key] = control
+            continue
         value = _public_event_value(raw[key], nested=True)
         if value is not None:
             public[key] = value
@@ -491,6 +632,8 @@ def sanitize_public_event_prefix(
     *,
     redact_active_human: bool = False,
     human_viewer_seat: int | None = None,
+    expected_time_control: dict[str, Any] | None = None,
+    expected_game_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Project one non-terminal replay prefix onto the public event contract.
 
@@ -518,5 +661,60 @@ def sanitize_public_event_prefix(
             human_viewer_seat=human_viewer_seat,
         )
         if public_event is not None:
+            authority_supplied = (
+                expected_game_id is not None
+                or isinstance(expected_time_control, dict)
+            )
+            if public_event.get("type") == "match_start" and authority_supplied:
+                event_game_id = public_event.get("game_id")
+                binding_game_id = expected_game_id or (
+                    event_game_id if isinstance(event_game_id, str) else None
+                )
+                game_matches = (
+                    expected_game_id is None
+                    or event_game_id is None
+                    or event_game_id == expected_game_id
+                )
+                bounded_expected = (
+                    _sanitize_public_time_control(
+                        expected_time_control,
+                        game_id=binding_game_id,
+                    )
+                    if game_matches and isinstance(expected_time_control, dict)
+                    else None
+                )
+                if "time_control" not in event:
+                    # Historical events predate the public clock object.  The
+                    # Match's frozen config is the authoritative legacy-default
+                    # interpretation, so inject exactly that bounded projection.
+                    if bounded_expected is not None:
+                        public_event["time_control"] = bounded_expected
+                    else:
+                        # Authority exists but is unusable or contradicts the
+                        # event's game.  A present null is the bounded damaged
+                        # sentinel consumed by board reducers; omitting the key
+                        # would misclassify this as legacy and let clock-event
+                        # budget fields invent a valid-looking control.
+                        public_event["time_control"] = None
+                else:
+                    bounded_stored = (
+                        _sanitize_public_time_control(
+                            event.get("time_control"),
+                            game_id=binding_game_id,
+                        )
+                        if game_matches
+                        else None
+                    )
+                    if (
+                        bounded_stored is not None
+                        and bounded_stored == bounded_expected
+                    ):
+                        public_event["time_control"] = bounded_stored
+                    else:
+                        # An explicit stored clock that contradicts the Match
+                        # is damaged evidence. Do not overwrite it into
+                        # apparent consistency or omit it into the legacy
+                        # fallback path.
+                        public_event["time_control"] = None
             sanitized.append(public_event)
     return sanitized

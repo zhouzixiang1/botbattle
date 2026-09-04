@@ -9,14 +9,14 @@ import pytest
 from bzplat.backend.runtime.config import AUTO_MATCH_SCHEDULER_POLICY_VERSION
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import _ensure_trigger
-from bzplat.backend.store.schema import VALID_GAME_IDS
+from bzplat.backend.store.schema import CONTEST_ENTRY_PAGE_INDEX_SQL, VALID_GAME_IDS
 
 
 _PROJECTION_BUMP = (
     "UPDATE rating_projection_state SET "
     "mutation_revision=mutation_revision+1 WHERE singleton=1"
 )
-_EXPECTED_TRIGGER_COUNT = 46
+_EXPECTED_TRIGGER_COUNT = 65
 
 
 def _normalize_sql(sql: str) -> str:
@@ -75,6 +75,195 @@ def _assert_owner_delete_trigger_contract(triggers: dict[str, str]) -> None:
     }
     for name, fragments in contracts.items():
         _assert_fragments(triggers.get(name, ""), *fragments)
+
+
+def _assert_contest_pairing_topology_trigger_contract(
+    triggers: dict[str, str],
+) -> None:
+    contracts = {
+        "trg_contest_pairing_topology_insert": (
+            "AFTER INSERT ON contest_pairings",
+            "pairing_topology_revision=pairing_topology_revision+1",
+            "WHERE id=NEW.contest_id",
+        ),
+        "trg_contest_pairing_topology_delete": (
+            "AFTER DELETE ON contest_pairings",
+            "pairing_topology_revision=pairing_topology_revision+1",
+            "WHERE id=OLD.contest_id",
+        ),
+        "trg_contest_pairing_topology_update": (
+            "AFTER UPDATE OF id,contest_id,round_num,entry_a_id,entry_b_id,"
+            "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,stage_idx,"
+            "stage_key,group_id,bracket_slot,color_first,series_index,series_size,"
+            "tiebreak_group,tiebreak_game,pairing_seed,published_at ON contest_pairings",
+            "OLD.id IS NOT NEW.id",
+            "OLD.contest_id IS NOT NEW.contest_id",
+            "OLD.round_num IS NOT NEW.round_num",
+            "OLD.entry_a_id IS NOT NEW.entry_a_id",
+            "OLD.entry_b_id IS NOT NEW.entry_b_id",
+            "OLD.bot_a_id IS NOT NEW.bot_a_id",
+            "OLD.bot_b_id IS NOT NEW.bot_b_id",
+            "OLD.bot_a_version_id IS NOT NEW.bot_a_version_id",
+            "OLD.bot_b_version_id IS NOT NEW.bot_b_version_id",
+            "OLD.stage_idx IS NOT NEW.stage_idx",
+            "OLD.stage_key IS NOT NEW.stage_key",
+            "OLD.group_id IS NOT NEW.group_id",
+            "OLD.bracket_slot IS NOT NEW.bracket_slot",
+            "OLD.color_first IS NOT NEW.color_first",
+            "OLD.series_index IS NOT NEW.series_index",
+            "OLD.series_size IS NOT NEW.series_size",
+            "OLD.tiebreak_group IS NOT NEW.tiebreak_group",
+            "OLD.tiebreak_game IS NOT NEW.tiebreak_game",
+            "OLD.pairing_seed IS NOT NEW.pairing_seed",
+            "OLD.published_at IS NOT NEW.published_at",
+            "WHERE id=OLD.contest_id OR id=NEW.contest_id",
+        ),
+        "trg_contest_pairing_topology_stage_cursor": (
+            "AFTER UPDATE OF current_stage_idx ON contests",
+            "OLD.current_stage_idx IS NOT NEW.current_stage_idx",
+            "pairing_topology_revision=pairing_topology_revision+1",
+            "WHERE id=NEW.id",
+        ),
+        "trg_contest_pairing_topology_manifest": (
+            "AFTER UPDATE OF published_stage_pairing_count ON contests",
+            "OLD.published_stage_pairing_count IS NOT "
+            "NEW.published_stage_pairing_count",
+            "pairing_topology_revision=pairing_topology_revision+1",
+            "WHERE id=NEW.id",
+        ),
+        "trg_execution_contest_pairing_ref_insert": (
+            "BEFORE INSERT ON execution_jobs",
+            "NEW.source='contest'",
+            "NEW.contest_id IS NULL",
+            "NEW.contest_pairing_id IS NULL",
+            "pairing.id=NEW.contest_pairing_id",
+            "pairing.contest_id=NEW.contest_id",
+            "typeof(contest.current_stage_idx)='integer'",
+            "pairing.stage_idx=contest.current_stage_idx",
+            "contest execution job must reference its contest pairing",
+        ),
+        "trg_execution_contest_pairing_ref_update": (
+            "BEFORE UPDATE OF source,contest_id,contest_pairing_id "
+            "ON execution_jobs",
+            "NEW.source='contest'",
+            "NEW.contest_id IS NULL",
+            "NEW.contest_pairing_id IS NULL",
+            "pairing.id=NEW.contest_pairing_id",
+            "pairing.contest_id=NEW.contest_id",
+            "typeof(contest.current_stage_idx)='integer'",
+            "pairing.stage_idx=contest.current_stage_idx",
+            "contest execution job must reference its contest pairing",
+        ),
+    }
+    for name, fragments in contracts.items():
+        _assert_fragments(triggers.get(name, ""), *fragments)
+
+
+def _assert_contest_lifecycle_revision_trigger_contract(
+    triggers: dict[str, str],
+) -> None:
+    contracts = {
+        "trg_contest_lifecycle_revision_update": (
+            "AFTER UPDATE OF game_id,template_id,stages_json,format_snapshot_json,"
+            "source_contest_id,status ON contests",
+            "OLD.game_id IS NOT NEW.game_id",
+            "OLD.template_id IS NOT NEW.template_id",
+            "OLD.stages_json IS NOT NEW.stages_json",
+            "OLD.format_snapshot_json IS NOT NEW.format_snapshot_json",
+            "OLD.source_contest_id IS NOT NEW.source_contest_id",
+            "OLD.status IN ('rest','finished')",
+            "NEW.status IN ('rest','finished')",
+        ),
+        "trg_contest_entries_lifecycle_revision_insert": (
+            "AFTER INSERT ON contest_entries",
+            "WHERE id=NEW.contest_id",
+        ),
+        "trg_contest_entries_lifecycle_revision_delete": (
+            "AFTER DELETE ON contest_entries",
+            "WHERE id=OLD.contest_id",
+        ),
+        "trg_contest_entries_lifecycle_revision_update": (
+            "AFTER UPDATE OF id,contest_id,user_id,bot_id,group_id,seed,eliminated "
+            "ON contest_entries",
+            "OLD.id IS NOT NEW.id",
+            "OLD.contest_id IS NOT NEW.contest_id",
+            "OLD.user_id IS NOT NEW.user_id",
+            "OLD.bot_id IS NOT NEW.bot_id",
+            "OLD.group_id IS NOT NEW.group_id",
+            "OLD.seed IS NOT NEW.seed",
+            "OLD.eliminated IS NOT NEW.eliminated",
+            "WHERE id=OLD.contest_id OR id=NEW.contest_id",
+        ),
+        "trg_contest_stage_results_lifecycle_revision_insert": (
+            "AFTER INSERT ON contest_stage_results",
+            "WHERE id=NEW.contest_id",
+        ),
+        "trg_contest_stage_results_lifecycle_revision_delete": (
+            "AFTER DELETE ON contest_stage_results",
+            "WHERE id=OLD.contest_id",
+        ),
+        "trg_contest_stage_results_lifecycle_revision_update": (
+            "AFTER UPDATE OF id,contest_id,stage_idx,stage_key,entry_id,bot_id,"
+            "points,wins,draws,losses,delta_total,group_id,rank_in_group,payload_json "
+            "ON contest_stage_results",
+            "OLD.id IS NOT NEW.id",
+            "OLD.contest_id IS NOT NEW.contest_id",
+            "OLD.stage_idx IS NOT NEW.stage_idx",
+            "OLD.stage_key IS NOT NEW.stage_key",
+            "OLD.entry_id IS NOT NEW.entry_id",
+            "OLD.bot_id IS NOT NEW.bot_id",
+            "OLD.points IS NOT NEW.points",
+            "OLD.wins IS NOT NEW.wins",
+            "OLD.draws IS NOT NEW.draws",
+            "OLD.losses IS NOT NEW.losses",
+            "OLD.delta_total IS NOT NEW.delta_total",
+            "OLD.group_id IS NOT NEW.group_id",
+            "OLD.rank_in_group IS NOT NEW.rank_in_group",
+            "OLD.payload_json IS NOT NEW.payload_json",
+            "WHERE id=OLD.contest_id OR id=NEW.contest_id",
+        ),
+    }
+    for name, fragments in contracts.items():
+        _assert_fragments(
+            triggers.get(name, ""),
+            "pairing_topology_revision=pairing_topology_revision+1",
+            *fragments,
+        )
+
+
+def _assert_contest_source_search_trigger_contract(
+    triggers: dict[str, str],
+) -> None:
+    contracts = {
+        "trg_contest_source_search_insert": (
+            "AFTER INSERT ON contests",
+            "INSERT OR IGNORE INTO contest_source_search_grams",
+            "substr(NEW.title,pos,shape.gram_len)",
+        ),
+        "trg_contest_source_search_update": (
+            "AFTER UPDATE OF title,game_id,created_at,organizer_id,status,"
+            "official_results_ready,showcase_key ON contests",
+            "DELETE FROM contest_source_search_grams WHERE contest_id=OLD.id",
+            "substr(NEW.title,pos,shape.gram_len)",
+        ),
+        "trg_contest_source_search_delete": (
+            "AFTER DELETE ON contests",
+            "DELETE FROM contest_source_search_grams WHERE contest_id=OLD.id",
+        ),
+    }
+    for name, fragments in contracts.items():
+        _assert_fragments(triggers.get(name, ""), *fragments)
+
+    title_guards = {
+        "trg_contest_title_guard_insert": "BEFORE INSERT ON contests",
+        "trg_contest_title_guard_update": "BEFORE UPDATE OF title ON contests",
+    }
+    for name, fragment in title_guards.items():
+        _assert_fragments(
+            triggers.get(name, ""),
+            fragment,
+            "contest title invalid",
+        )
 
 
 def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
@@ -218,6 +407,17 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     version_before, triggers_before = _schema_state(db_path)
     _assert_rating_trigger_contract(triggers_before)
     _assert_owner_delete_trigger_contract(triggers_before)
+    _assert_contest_pairing_topology_trigger_contract(triggers_before)
+    _assert_contest_lifecycle_revision_trigger_contract(triggers_before)
+    _assert_contest_source_search_trigger_contract(triggers_before)
+    with sqlite3.connect(db_path) as conn:
+        entry_page_index_before = _normalize_sql(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_contest_entries_page_order",),
+            ).fetchone()[0]
+        )
+    assert entry_page_index_before == _normalize_sql(CONTEST_ENTRY_PAGE_INDEX_SQL)
 
     reopened = Store(str(db_path))
     reopened.close()
@@ -237,6 +437,12 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
             "SELECT dispatch_policy_version,next_eligible_at,gate_reason "
             "FROM auto_match_fair_state WHERE singleton=1"
         ).fetchone()
+        entry_page_index_after = _normalize_sql(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_contest_entries_page_order",),
+            ).fetchone()[0]
+        )
         assert {"dispatch_policy_version", "next_eligible_at", "gate_reason"} <= (
             auto_columns
         )
@@ -254,8 +460,12 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
 
     assert version_after == version_before
     assert triggers_after == triggers_before
+    assert entry_page_index_after == entry_page_index_before
     _assert_rating_trigger_contract(triggers_after)
     _assert_owner_delete_trigger_contract(triggers_after)
+    _assert_contest_pairing_topology_trigger_contract(triggers_after)
+    _assert_contest_lifecycle_revision_trigger_contract(triggers_after)
+    _assert_contest_source_search_trigger_contract(triggers_after)
 
 
 def test_pairing_seed_lookup_index_is_fresh_migrated_and_planned(tmp_path):

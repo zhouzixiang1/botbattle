@@ -4,7 +4,7 @@ import { Bug, CheckCircle2, Inbox, Paperclip, Send } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { toast } from 'sonner'
 
-import { apiFetch, apiGet, apiJson, apiUpload, errMsg, lastSafeApiFailure, userToken, type ApiRequestInit, type CurrentUser } from '@/api'
+import { apiFetch, apiGet, apiJson, apiUpload, errMsg, lastSafeApiFailure, type ApiRequestInit, type CurrentUser } from '@/api'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
 import type { BugDetail, BugSummary, ThreadDetail } from '@/components/communications/types'
 import { BUG_CATEGORY_LABELS, BUG_IMPACT_LABELS, BUG_STATUS_LABELS } from '@/components/communications/types'
@@ -28,7 +28,6 @@ interface IdentityOperation {
   controller: AbortController
   epoch: number
   userId: number | null
-  authToken: string | null
 }
 
 function readTracks(): GuestTrack[] {
@@ -83,13 +82,12 @@ async function guestFetch<T>(path: string, token: string, method: 'GET' | 'POST'
 
 function frozenAuthRequestOptions(
   signal: AbortSignal,
+  userId: number | null,
 ): Omit<ApiRequestInit, 'method' | 'body'> {
-  const authToken = userToken.get()
   return {
     signal,
-    suppressAuth: true,
-    credentials: authToken ? 'omit' : 'include',
-    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+    suppressAuth: userId === null,
+    credentials: userId === null ? 'omit' : 'include',
     cache: 'no-store',
     referrerPolicy: 'no-referrer',
   }
@@ -138,7 +136,6 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
       controller,
       epoch: identityEpochRef.current.epoch,
       userId: identityEpochRef.current.userId,
-      authToken: userToken.get(),
     }
   }
 
@@ -160,25 +157,12 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
   const identityRequestOptions = (
     operation: IdentityOperation,
   ): Omit<ApiRequestInit, 'method' | 'body'> => {
-    if (operation.userId === null) {
-      return {
-        signal: operation.controller.signal,
-        suppressAuth: true,
-        credentials: 'omit',
-      }
-    }
-    if (operation.authToken) {
-      return {
-        signal: operation.controller.signal,
-        suppressAuth: true,
-        credentials: 'omit',
-        headers: { Authorization: `Bearer ${operation.authToken}` },
-      }
-    }
     return {
       signal: operation.controller.signal,
-      suppressAuth: true,
-      credentials: 'include',
+      suppressAuth: operation.userId === null,
+      credentials: operation.userId === null ? 'omit' : 'include',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
     }
   }
 
@@ -190,7 +174,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     const controller = new AbortController()
     const seq = listRequestRef.current.seq + 1
     const identity = { ...identityEpochRef.current }
-    const requestOptions = frozenAuthRequestOptions(controller.signal)
+    const requestOptions = frozenAuthRequestOptions(controller.signal, identity.userId)
     listRequestRef.current = { seq, controller }
     const isCurrent = () => (
       listRequestRef.current.seq === seq &&
@@ -256,7 +240,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     const controller = new AbortController()
     const seq = detailRequestRef.current.seq + 1
     const identity = { ...identityEpochRef.current }
-    const requestOptions = frozenAuthRequestOptions(controller.signal)
+    const requestOptions = frozenAuthRequestOptions(controller.signal, identity.userId)
     detailRequestRef.current = { seq, controller }
     const isCurrent = () => (
       detailRequestRef.current.seq === seq &&
@@ -440,11 +424,10 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     }
     try {
       const headers = new Headers()
-      if (operation.authToken) headers.set('Authorization', `Bearer ${operation.authToken}`)
       if (operation.userId === null && track) headers.set('X-Feedback-Token', track.tracking_token)
       const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(reportPublicId)}/attachments/${encodeURIComponent(attachmentId)}`, {
         headers,
-        credentials: operation.userId === null || operation.authToken ? 'omit' : 'include',
+        credentials: operation.userId === null ? 'omit' : 'include',
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
         signal: operation.controller.signal,

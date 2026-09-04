@@ -5,14 +5,22 @@ import asyncio
 import json
 import os
 import sqlite3
+import threading
 
 import pytest
 
 from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.crypto import hash_password
-from bzplat.backend.matches.orchestrator import MatchOrchestrator
+from bzplat.backend.matches.orchestrator import (
+    HumanWebSocketLimitError,
+    MatchOrchestrator,
+)
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError
+from bzplat.backend.runtime.config import (
+    HUMAN_ACTION_MAX_BYTES,
+    HUMAN_ACTION_RATE_BURST,
+)
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import TYPE_HUMAN
 from bzplat.backend.tests.execution_helpers import (
@@ -144,8 +152,8 @@ def test_human_match_freezes_current_bot_version_before_task_runs(
     }
 
 
-def test_pencil_human_match_passes_game_clock_to_runner(store: Store):
-    """人类局也必须消费 GameSpec 的固有累计棋钟，不能只在 Bot-vs-Bot 生效。"""
+def test_pencil_human_match_passes_frozen_time_control_to_runner(store: Store):
+    """Human match freezes the stable id and passes it to the Bot-only clock."""
     from types import SimpleNamespace
 
     user, bot = _setup(store, game="pencil")
@@ -153,9 +161,9 @@ def test_pencil_human_match_passes_game_clock_to_runner(store: Store):
 
     class CapturingRunner:
         async def run_bot_vs_human(
-            self, _bot_path, *, time_budget_per_side=None, **_kwargs
+            self, _bot_path, *, time_control_id=None, **_kwargs
         ):
-            captured["time_budget_per_side"] = time_budget_per_side
+            captured["time_control_id"] = time_control_id
             return SimpleNamespace(
                 rounds_played=1,
                 rounds=[SimpleNamespace(deltas=[0, 0])],
@@ -176,7 +184,7 @@ def test_pencil_human_match_passes_game_clock_to_runner(store: Store):
 
     match_id = asyncio.run(exercise())
     assert store.get_match(match_id)["status"] == "completed"
-    assert captured == {"time_budget_per_side": 900.0}
+    assert captured == {"time_control_id": "pencil_per_side_total_900s_v1"}
 
 
 def test_human_claim_replay_failure_rolls_back_atomically(store: Store):
@@ -491,6 +499,8 @@ def test_human_match_api_and_websocket(store: Store, tmp_path, monkeypatch):
             "owner_id", "human_user_id", "match_seed", "_replay_events_json",
         ):
             assert internal not in snap["match"]
+        assert app.state.orch._human_ws_total == 0
+        assert app.state.orch._human_ws_subscriptions == {}
 
         # 该局刻意只读取快照、不落子；退出 client 前它应仍是编排器拥有的
         # 后台任务，精确覆盖曾导致 pytest 退出挂起的场景。
@@ -547,6 +557,60 @@ def test_completed_human_websocket_closes_after_one_snapshot(
                 ws.receive_json()
             assert closed.value.code == 1000
     assert mid not in app.state.orch._sse
+    assert app.state.orch._human_ws_total == 0
+    assert app.state.orch._human_ws_subscriptions == {}
+
+
+def test_human_websocket_quota_rejection_closes_with_stable_code(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    with TestClient(app) as client:
+        s = app.state.store
+        user = s.create_user(
+            "limitedws", "limitedws@example.test", hash_password("password1")
+        )
+        s.update_user(user["id"], email_verified=1)
+        bot = s.create_bot(
+            user["id"],
+            "limitedws-bot",
+            binary_path="/tmp/limitedws-bot",
+            format="elf",
+            game_id="gomoku",
+        )
+        match_id = "human-ws-limit"
+        s.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=user["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=user["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate("limitedws", "password1")
+        client.cookies.set(COOKIE_NAME, token)
+
+        def reject_subscribe(*_args, **_kwargs):
+            raise HumanWebSocketLimitError("user")
+
+        monkeypatch.setattr(app.state.orch, "subscribe", reject_subscribe)
+        with client.websocket_connect(
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            with pytest.raises(WebSocketDisconnect) as rejected:
+                websocket.receive_json()
+
+        assert rejected.value.code == 1013
+        assert rejected.value.reason == "connection_limit"
 
 
 def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(
@@ -629,13 +693,573 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(
     ]
 
 
+def test_human_websocket_rejects_oversized_frame_before_authority_reads(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    with TestClient(app) as client:
+        s = app.state.store
+        user = s.create_user(
+            "oversizedws", "oversizedws@example.test", hash_password("password1")
+        )
+        s.update_user(user["id"], email_verified=1)
+        bot = s.create_bot(
+            user["id"],
+            "oversizedws-bot",
+            binary_path="/tmp/oversizedws-bot",
+            format="elf",
+            game_id="gomoku",
+        )
+        match_id = "human-ws-oversized"
+        s.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=user["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=user["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate("oversizedws", "password1")
+        client.cookies.set(COOKIE_NAME, token)
+
+        authority_reads = {"session": 0, "match": 0}
+        original_verify = app.state.auth.verify_session
+        original_get_match = s.get_match
+
+        def counted_verify(value):
+            authority_reads["session"] += 1
+            return original_verify(value)
+
+        def counted_get_match(value):
+            authority_reads["match"] += 1
+            return original_get_match(value)
+
+        monkeypatch.setattr(app.state.auth, "verify_session", counted_verify)
+        monkeypatch.setattr(s, "get_match", counted_get_match)
+        with client.websocket_connect(
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "snapshot"
+            baseline = dict(authority_reads)
+            websocket.send_text("x" * (HUMAN_ACTION_MAX_BYTES + 1))
+            assert websocket.receive_json() == {
+                "type": "reject",
+                "reason": "message_too_large",
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1009
+            assert authority_reads == baseline
+
+
+def test_human_websocket_rate_limit_precedes_authority_reads(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    with TestClient(app) as client:
+        s = app.state.store
+        user = s.create_user(
+            "ratelimitedws",
+            "ratelimitedws@example.test",
+            hash_password("password1"),
+        )
+        s.update_user(user["id"], email_verified=1)
+        bot = s.create_bot(
+            user["id"],
+            "ratelimitedws-bot",
+            binary_path="/tmp/ratelimitedws-bot",
+            format="elf",
+            game_id="gomoku",
+        )
+        match_id = "human-ws-message-rate"
+        s.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=user["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=user["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate("ratelimitedws", "password1")
+        client.cookies.set(COOKIE_NAME, token)
+
+        authority_reads = {"session": 0, "match": 0}
+        original_verify = app.state.auth.verify_session
+        original_get_match = s.get_match
+
+        def counted_verify(value):
+            authority_reads["session"] += 1
+            return original_verify(value)
+
+        def counted_get_match(value):
+            authority_reads["match"] += 1
+            return original_get_match(value)
+
+        monkeypatch.setattr(app.state.auth, "verify_session", counted_verify)
+        monkeypatch.setattr(s, "get_match", counted_get_match)
+        with client.websocket_connect(
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "snapshot"
+            for _ in range(HUMAN_ACTION_RATE_BURST):
+                websocket.send_json({"not_response": 1})
+                assert websocket.receive_json()["type"] == "reject"
+            before_limited_frame = dict(authority_reads)
+
+            websocket.send_json({"not_response": 1})
+            assert websocket.receive_json() == {
+                "type": "reject",
+                "reason": "rate_limit_exceeded",
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1008
+            assert authority_reads == before_limited_frame
+
+
+@pytest.mark.parametrize(
+    "session_mutation",
+    ["revoke", "change_password", "disable_user"],
+)
+def test_human_websocket_rechecks_session_before_each_action(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    session_mutation: str,
+):
+    """An upgraded socket must not outlive the authority of its session.
+
+    Password changes, explicit session revocation, and account suspension all
+    invalidate an already-open browser connection.  The first later action is
+    rejected before it can resolve the pending human turn.
+    """
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    mid = f"human-session-{session_mutation}"
+    resolved: list[dict] = []
+
+    def record_resolve(match_id, seat, move):
+        resolved.append({"match_id": match_id, "seat": seat, "move": move})
+        # Keep the vulnerable implementation responsive enough to produce a
+        # deterministic red assertion instead of waiting forever for a frame.
+        return False
+
+    app.state.orch.resolve_human_turn = record_resolve
+
+    with TestClient(app) as client:
+        # Create the pending match after lifespan recovery so startup cleanup
+        # cannot turn this authorization regression into a terminal reconnect.
+        s = app.state.store
+        user = s.create_user(
+            f"ws-{session_mutation}",
+            f"ws-{session_mutation}@example.test",
+            hash_password("password1"),
+        )
+        s.update_user(user["id"], email_verified=1)
+        bot = s.create_bot(
+            user["id"],
+            f"ws-bot-{session_mutation}",
+            binary_path="/tmp/session-revalidation",
+            format="elf",
+            game_id="gomoku",
+        )
+        s.create_match(
+            mid,
+            bot["id"],
+            bot["id"],
+            owner_id=user["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=user["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate(
+            f"ws-{session_mutation}", "password1"
+        )
+        client.cookies.set(COOKIE_NAME, token)
+
+        with client.websocket_connect(
+            f"/api/matches/{mid}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "snapshot"
+
+            if session_mutation == "revoke":
+                s.delete_session(token)
+            elif session_mutation == "change_password":
+                app.state.auth.change_password(
+                    user["id"], "password1", "password2"
+                )
+            else:
+                s.update_user(user["id"], is_active=0)
+
+            websocket.send_json(
+                {"response": {"action": "move", "x": 7, "y": 7}}
+            )
+            rejection = websocket.receive_json()
+            assert rejection == {
+                "type": "reject",
+                "reason": "session_revoked",
+                "message": "会话已失效，请重新登录",
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1008
+
+    assert resolved == []
+    assert app.state.orch._human_ws_total == 0
+    assert app.state.orch._human_ws_subscriptions == {}
+
+
+@pytest.mark.parametrize(
+    "authority_mutation",
+    ["delete_session", "disable_user", "owner_drift"],
+)
+@pytest.mark.parametrize(
+    "queued_event",
+    [
+        {"type": "move", "player": 0, "x": 7, "y": 7},
+        {
+            "type": "deal_hole",
+            "hand": 1,
+            "holes": [["AS", "AH"], ["KS", "KH"]],
+        },
+    ],
+    ids=["ordinary-event", "private-deal-hole"],
+)
+def test_human_websocket_revocation_blocks_next_server_event(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_mutation: str,
+    queued_event: dict,
+):
+    """A passive revoked socket must not receive any later server event."""
+
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    match_id = f"human-private-revoke-{authority_mutation}"
+
+    with TestClient(app) as client:
+        current = app.state.store.create_user(
+            f"private_{authority_mutation}",
+            f"private-{authority_mutation}@example.test",
+            hash_password("password1"),
+        )
+        replacement = app.state.store.create_user(
+            f"replacement_{authority_mutation}",
+            f"replacement-{authority_mutation}@example.test",
+            hash_password("password1"),
+        )
+        app.state.store.update_user(current["id"], email_verified=1)
+        bot = app.state.store.create_bot(
+            current["id"],
+            f"private-bot-{authority_mutation}",
+            binary_path="/tmp/private-event-revalidation",
+            format="elf",
+            game_id="holdem",
+        )
+        app.state.store.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=current["id"],
+            match_type="human",
+            game_id="holdem",
+            human_user_id=current["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate(
+            current["username"], "password1"
+        )
+        client.cookies.set(COOKIE_NAME, token)
+
+        with client.websocket_connect(
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "snapshot"
+
+            if authority_mutation == "delete_session":
+                assert app.state.store.delete_session(token)
+            elif authority_mutation == "disable_user":
+                app.state.store.update_user(current["id"], is_active=0)
+            else:
+                app.state.store.update_match(
+                    match_id,
+                    human_user_id=replacement["id"],
+                )
+
+            app.state.orch._broadcast(match_id, queued_event)
+            # The first frame after revocation must be the generic denial, never
+            # the queued ordinary event or the human viewer's private cards.
+            assert websocket.receive_json() == {
+                "type": "reject",
+                "reason": "session_revoked",
+                "message": "会话已失效，请重新登录",
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1008
+            assert closed.value.reason == "session_revoked"
+
+    assert app.state.orch._human_ws_total == 0
+    assert app.state.orch._human_ws_subscriptions == {}
+
+
+def test_human_websocket_concurrent_revocation_waits_for_policy_close(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Concurrent sender/receiver revocation must complete one 1008 close."""
+
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocket, WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    match_id = "human-concurrent-revocation"
+    rejection_started = threading.Event()
+    release_rejection = threading.Event()
+    rejection_cancelled = threading.Event()
+    second_revoked_check = threading.Event()
+    revocation_armed = threading.Event()
+    revoked_checks = 0
+    revoked_checks_lock = threading.Lock()
+    original_send_json = WebSocket.send_json
+
+    async def gated_send_json(self, data, mode="text"):
+        if data.get("reason") == "session_revoked":
+            rejection_started.set()
+            try:
+                await asyncio.to_thread(release_rejection.wait)
+            except asyncio.CancelledError:
+                rejection_cancelled.set()
+                raise
+        return await original_send_json(self, data, mode=mode)
+
+    monkeypatch.setattr(WebSocket, "send_json", gated_send_json)
+
+    with TestClient(app) as client:
+        current = app.state.store.create_user(
+            "concurrent_revoke",
+            "concurrent-revoke@example.test",
+            hash_password("password1"),
+        )
+        app.state.store.update_user(current["id"], email_verified=1)
+        bot = app.state.store.create_bot(
+            current["id"],
+            "concurrent-revoke-bot",
+            binary_path="/tmp/concurrent-revocation",
+            format="elf",
+            game_id="holdem",
+        )
+        app.state.store.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=current["id"],
+            match_type="human",
+            game_id="holdem",
+            human_user_id=current["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate(
+            current["username"], "password1"
+        )
+        client.cookies.set(COOKIE_NAME, token)
+        original_verify = app.state.auth.verify_session
+
+        def tracked_verify(value):
+            nonlocal revoked_checks
+            result = original_verify(value)
+            if revocation_armed.is_set() and value == token and result is None:
+                with revoked_checks_lock:
+                    revoked_checks += 1
+                    if revoked_checks >= 2:
+                        second_revoked_check.set()
+            return result
+
+        monkeypatch.setattr(app.state.auth, "verify_session", tracked_verify)
+
+        try:
+            with client.websocket_connect(
+                f"/api/matches/{match_id}/play",
+                headers={"origin": "http://testserver"},
+            ) as websocket:
+                assert websocket.receive_json()["type"] == "snapshot"
+                assert app.state.store.delete_session(token)
+                revocation_armed.set()
+
+                # Hold the sender inside its policy rejection, then make the
+                # receiver discover the same revocation. The receiver must wait
+                # for the unique reject + 1008 sequence instead of completing
+                # FIRST_COMPLETED and cancelling the sender mid-close.
+                app.state.orch._broadcast(
+                    match_id,
+                    {
+                        "type": "deal_hole",
+                        "hand": 1,
+                        "holes": [["AS", "AH"], ["KS", "KH"]],
+                    },
+                )
+                assert rejection_started.wait(timeout=2)
+                websocket.send_json({"response": {"action": "fold"}})
+                assert second_revoked_check.wait(timeout=2)
+                assert not rejection_cancelled.wait(timeout=0.5)
+
+                release_rejection.set()
+                assert websocket.receive_json() == {
+                    "type": "reject",
+                    "reason": "session_revoked",
+                    "message": "会话已失效，请重新登录",
+                }
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_json()
+                assert closed.value.code == 1008
+                assert closed.value.reason == "session_revoked"
+        finally:
+            release_rejection.set()
+
+    assert app.state.orch._human_ws_total == 0
+    assert app.state.orch._human_ws_subscriptions == {}
+
+
+def test_human_websocket_rechecks_match_owner_after_payload_validation(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A concurrent ownership change must win before turn resolution."""
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+    from types import SimpleNamespace
+
+    import bzplat.backend.api_routes as api_routes
+    from bzplat.backend.games import registry as game_registry
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
+    app = create_app(db_path=store.path)
+    match_id = "human-owner-validation-race"
+    resolved: list[dict] = []
+
+    def record_resolve(requested_match_id, seat, move):
+        resolved.append({"match_id": requested_match_id, "seat": seat, "move": move})
+        return False
+
+    app.state.orch.resolve_human_turn = record_resolve
+    with TestClient(app) as client:
+        current = app.state.store.create_user(
+            "owner_race_current",
+            "owner-race-current@example.test",
+            hash_password("password1"),
+        )
+        replacement = app.state.store.create_user(
+            "owner_race_replacement",
+            "owner-race-replacement@example.test",
+            hash_password("password1"),
+        )
+        app.state.store.update_user(current["id"], email_verified=1)
+        bot = app.state.store.create_bot(
+            current["id"],
+            "owner-race-bot",
+            binary_path="/tmp/owner-race-bot",
+            format="elf",
+            game_id="gomoku",
+        )
+        app.state.store.create_match(
+            match_id,
+            bot["id"],
+            bot["id"],
+            owner_id=current["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=current["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate(
+            current["username"], "password1"
+        )
+        client.cookies.set(COOKIE_NAME, token)
+
+        protocol = game_registry.get("gomoku").protocol
+        original_validate = protocol.validate_response_payload
+
+        def validate_then_reassign(payload):
+            validated = original_validate(payload)
+            app.state.store.update_match(
+                match_id,
+                human_user_id=replacement["id"],
+            )
+            return validated
+
+        monkeypatch.setattr(
+            api_routes,
+            "game_registry",
+            SimpleNamespace(
+                get=lambda _game_id: SimpleNamespace(
+                    protocol=SimpleNamespace(
+                        validate_response_payload=validate_then_reassign
+                    )
+                )
+            ),
+        )
+        with client.websocket_connect(
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "snapshot"
+            websocket.send_json(
+                {"response": {"action": "move", "x": 7, "y": 7}}
+            )
+            rejection = websocket.receive_json()
+            assert rejection["reason"] == "session_revoked"
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1008
+
+    assert resolved == []
+    assert app.state.orch._human_ws_total == 0
+    assert app.state.orch._human_ws_subscriptions == {}
+
+
 # ── Bot 启动崩溃快速失败（PR-G1 治本）──────────────────────────
 def test_bot_crashed_aborts_human_match_quickly(store: Store):
     """Bot 启动崩溃 → BotCrashedError 向上传播 → 对局快速 abort，
     而非吞成 fold 死磕。验证 _run_human_match 的 abort + 锁清理。"""
     class CrashingHumanRunner:
         async def run_bot_vs_human(self, *args, **kwargs):
-            raise BotCrashedError("controlled human-bot startup crash")
+            raise BotCrashedError(
+                "controlled human-bot startup crash", crashed_seat=1
+            )
 
     u = store.create_user("crashusr", "c@ex.com", hash_password("password1"))
     b = store.create_bot(

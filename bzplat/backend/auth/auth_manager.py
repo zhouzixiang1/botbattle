@@ -138,13 +138,19 @@ class AuthManager:
                 "email_unverified", "邮箱未验证,请先完成邮箱验证后再登录"
             )
         token = new_session_token()
-        self.store.add_session(
+        issued = self.store.add_session_if_user_active(
             token,
             user["id"],
             session_expires(SESSION_TTL_SEC),
+            expected_password_hash=user["password_hash"],
             ip_addr=ip_addr,
             user_agent=user_agent,
         )
+        if not issued:
+            # The account may have been disabled or its password may have been
+            # rotated after the expensive verification above.  Do not reveal
+            # which concurrent authority change won the race.
+            raise AuthError("invalid_credentials", "用户名或密码错误")
         self.store.update_user(
             user["id"],
             last_login_at=datetime.now().isoformat(timespec="seconds"),
@@ -182,8 +188,12 @@ class AuthManager:
             raise AuthError("no_user", "用户不存在")
         if not verify_password(old_password or "", user["password_hash"]):
             raise AuthError("wrong_old_password", "旧密码错误")
-        self.store.update_user(user_id, password_hash=hash_password(new_password))
-        self.store.delete_sessions_for_user(user_id)
+        if not self.store.rotate_password_if_current(
+            user_id,
+            expected_password_hash=user["password_hash"],
+            password_hash=hash_password(new_password),
+        ):
+            raise AuthError("wrong_old_password", "旧密码错误或登录凭据已变化")
 
     def _gen_code(self) -> str:
         return f"{secrets.randbelow(1_000_000):06d}"
@@ -253,19 +263,10 @@ class AuthManager:
         ) or self.store.get_user_by_username(email_or_username or "")
         if not user:
             raise AuthError("no_user", "用户不存在")
-        row = self.store.get_latest_email_code(user["id"], CODE_RESET)
-        if not row or row["code"] != (code or "").strip():
-            raise AuthError("invalid_code", "验证码无效")
-        try:
-            if datetime.fromisoformat(row["expires_at"]) < datetime.now():
-                raise AuthError("expired_code", "验证码已过期,请重新获取")
-        except (TypeError, ValueError) as exc:
-            raise AuthError("invalid_code", "验证码无效") from exc
         result = self.store.reset_password_with_credential(
             user["id"],
             hash_password(new_password),
-            email_code_id=row["id"],
-            email_code=row["code"],
+            email_code=(code or "").strip(),
         )
         if result == "expired":
             raise AuthError("expired_code", "验证码已过期,请重新获取")

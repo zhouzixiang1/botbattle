@@ -11,10 +11,123 @@ from bzplat.backend.matches.public_outcome import (
     is_duplicate_match,
     scoring_games_for_match,
 )
+from bzplat.backend.store.public_contract import (
+    sanitize_public_contest_tiebreaks,
+    sanitize_public_event,
+    sanitize_public_event_prefix,
+)
 
 
 HOLDEM = registry.get("holdem")
 GOMOKU = registry.get("gomoku")
+
+
+def test_cross_group_tiebreak_projection_is_atomic_and_bounded():
+    base = {
+        "points": 6,
+        "buchholz": 8,
+        "buchholz_cut1": 5,
+        "sonneborn_berger": 4,
+        "head_to_head": 0.5,
+        "normalized_delta": -2.0,
+        "technical_losses": 0,
+        "seed": 7,
+    }
+    group = {
+        "group_rank": 1,
+        "points_rate": 0.75,
+        "opponent_strength": 0.625,
+        "normalized_delta_rate": -0.25,
+        "technical_loss_rate": 0.0,
+        "draw_order": 9,
+    }
+    assert sanitize_public_contest_tiebreaks({**base, **group}) == {
+        **base,
+        **group,
+    }
+    assert sanitize_public_contest_tiebreaks(base) == base
+    assert sanitize_public_contest_tiebreaks(
+        {**base, **group, "private_seed": "never public"}
+    ) == {**base, **group}
+    for malformed in (
+        {**base, **group, "draw_order": True},
+        {**base, **group, "technical_loss_rate": 1.1},
+        {**base, **group, "opponent_strength": float("inf")},
+        {**base, **{key: value for key, value in group.items() if key != "draw_order"}},
+    ):
+        assert sanitize_public_contest_tiebreaks(malformed) is None
+
+
+def test_match_start_time_control_binds_registry_and_historical_match_default():
+    control = {
+        "id": "gomoku_per_side_total_300s_v1",
+        "mode": "per_side_total",
+        "seconds": 300,
+        "applies_to": "both_bots",
+    }
+    start = {
+        "type": "match_start",
+        "game_id": "gomoku",
+        "size": 15,
+        "time_control": control,
+    }
+    assert sanitize_public_event(start)["time_control"] == control
+    malformed = {
+        **start,
+        "time_control": {**control, "mode": "per_decision", "seconds": 1},
+    }
+    assert "time_control" not in sanitize_public_event(malformed)
+
+    historical = sanitize_public_event_prefix(
+        [{"type": "match_start", "game_id": "gomoku", "size": 15}],
+        expected_time_control=control,
+    )
+    assert historical[0]["time_control"] == control
+    historical_without_game = sanitize_public_event_prefix(
+        [{"type": "match_start", "size": 15}],
+        expected_time_control=control,
+        expected_game_id="gomoku",
+    )
+    assert historical_without_game[0]["time_control"] == control
+    wrong_game = sanitize_public_event_prefix(
+        [{"type": "match_start", "game_id": "pencil", "size": 15}],
+        expected_time_control=control,
+        expected_game_id="gomoku",
+    )
+    assert wrong_game[0]["time_control"] is None
+    forged_expected = sanitize_public_event_prefix(
+        [{"type": "match_start", "game_id": "gomoku", "size": 15}],
+        expected_time_control={**control, "seconds": 301},
+        expected_game_id="gomoku",
+    )
+    assert forged_expected[0]["time_control"] is None
+    missing_authoritative = sanitize_public_event_prefix(
+        [start],
+        expected_time_control=None,
+        expected_game_id="gomoku",
+    )
+    assert missing_authoritative[0]["time_control"] is None
+    contradictory = sanitize_public_event_prefix(
+        [
+            {
+                "type": "match_start",
+                "game_id": "gomoku",
+                "size": 15,
+                "time_control": {
+                    "id": "gomoku_per_side_total_900s_v1",
+                    "mode": "per_side_total",
+                    "seconds": 900,
+                    "applies_to": "both_bots",
+                },
+            }
+        ],
+        expected_time_control=control,
+    )
+    assert contradictory[0]["time_control"] is None
+    genuinely_unbound = sanitize_public_event_prefix(
+        [{"type": "match_start", "game_id": "gomoku", "size": 15}]
+    )
+    assert "time_control" not in genuinely_unbound[0]
 
 
 def _completed(

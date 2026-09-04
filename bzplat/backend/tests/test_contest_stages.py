@@ -176,7 +176,8 @@ def _mk_bots(store: Store, n: int = 4, *, game_id: str = "holdem"):
     return users, bots
 
 
-def test_dispatch_does_not_touch_running_pairings(store: Store):
+def test_dispatch_rejects_rest_with_unsealed_running_pairings(store: Store):
+    """A fabricated rest state cannot swap around an in-flight stage."""
     users, bots = _mk_bots(store, 2)
     org = users[0]
     c = store.create_contest(
@@ -188,7 +189,6 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
             [{"key": "rr", "type": "round_robin", "allow_bot_swap_in_rest": True}]
         ),
     )
-    store.update_contest(c["id"], status="rest", rest_ends_at="2099-01-01T00:00:00")
     store.add_contest_entry(c["id"], users[0]["id"], bots[0]["id"])
     store.add_contest_entry(c["id"], users[1]["id"], bots[1]["id"])
     store.create_match(
@@ -205,6 +205,15 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
     p_pend = store.add_contest_pairing(
         c["id"], bots[0]["id"], bots[1]["id"], status="pending"
     )
+    # Deliberately persist an impossible pre-seal REST row.  Product setup must
+    # use the decision-bound transition APIs; this test needs the corrupt
+    # imported shape in order to prove dispatch rejects it without mutation.
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET status='rest',rest_ends_at=? WHERE id=?",
+            ("2099-01-01T00:00:00", c["id"]),
+        )
     new_binary_path = Path(store.path).resolve().parent / "bot-fixtures" / "fake0b"
     new_binary_path.write_bytes(b"test fixture")
     b_new = store.create_bot(
@@ -220,12 +229,17 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
         max_concurrent=1,
     )
     mgr = ContestManager(store, orch)
-    asyncio.run(mgr.dispatch(c["id"], users[0]["id"], b_new["id"]))
+    before_entries = store.list_contest_entries(c["id"])
+    before_pairings = store.list_contest_pairings(c["id"])
+    with pytest.raises(ValueError, match="赛事当前阶段 lifecycle seal 无法验证"):
+        asyncio.run(mgr.dispatch(c["id"], users[0]["id"], b_new["id"]))
 
     rows = {p["id"]: p for p in store.list_contest_pairings(c["id"])}
     assert rows[p_run["id"]]["bot_a_id"] == bots[0]["id"]
     assert rows[p_run["id"]]["status"] == "running"
-    assert rows[p_pend["id"]]["bot_a_id"] == b_new["id"]
+    assert rows[p_pend["id"]]["bot_a_id"] == bots[0]["id"]
+    assert store.list_contest_entries(c["id"]) == before_entries
+    assert store.list_contest_pairings(c["id"]) == before_pairings
 
 
 def test_swiss_ko_smoke_pairings(store: Store):
@@ -267,15 +281,14 @@ def test_swiss_ko_smoke_pairings(store: Store):
                 contest_id=contest_id,
                 match_type=match_type,
                 game_id=game_id,
-                match_config={},
+                match_config={"time_control_id": k["time_control_id"]},
             )
             return mid
 
     mgr = ContestManager(store, FakeOrch())  # type: ignore
 
     async def run():
-        store.update_contest(c["id"], status="running", current_stage_idx=0)
-        await mgr._begin_stage(c["id"], 0)
+        await mgr.start(c["id"])
         pairs = store.list_contest_pairings(c["id"], stage_idx=0)
         assert len(pairs) == 2
 
@@ -480,7 +493,8 @@ class _FakeOrch:
         mid = f"fake-match-{contest_id}-{self.n}"
         self.store.create_match(
             mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
-            match_type=match_type, game_id=game_id, match_config={},
+            match_type=match_type, game_id=game_id,
+            match_config={"time_control_id": k["time_control_id"]},
         )
         return mid
 
@@ -579,51 +593,117 @@ def test_pencil_group_template_manager_estimate_matches_full_lifecycle(
     final = store.get_contest(contest["id"])
     assert final["status"] == "finished"
     assert final["official_results_ready"] == 1
+    qualifier = manager._stage_ranking_from_recovery_snapshot(contest["id"], 0)
+    knockout = manager._stage_ranking_from_recovery_snapshot(contest["id"], 1)
+    assert qualifier is not None
+    assert knockout is not None
+    finalist_ids = [row["entry_id"] for row in knockout]
+    expected_ids = finalist_ids + [
+        row["entry_id"]
+        for row in qualifier
+        if row["entry_id"] not in set(finalist_ids)
+    ]
+    official = store.list_official_results(contest["id"])
+    assert len(official) == participant_count
+    assert [row["entry_id"] for row in official] == expected_ids
+    qualifier_by_entry = {row["entry_id"]: row for row in qualifier}
+    # Traditional groups are stage coordinates.  An all-blank legacy roster
+    # recovers them only from the complete qualifier snapshot, and the merged
+    # all-player table must preserve that frozen group/local rank provenance.
+    assert all(
+        row["group_id"]
+        == qualifier_by_entry[row["entry_id"]]["group_id"]
+        and row["rank_in_group"]
+        == qualifier_by_entry[row["entry_id"]]["rank_in_group"]
+        for row in official
+    )
+    public = with_official_result_provenance(
+        final,
+        official,
+        stage_entry_ids={1: set(finalist_ids)},
+    )
+    assert [row["source_stage"] for row in public] == (
+        [1] * expected_advancers + [0] * (participant_count - expected_advancers)
+    )
 
 
-def test_group_estimate_prefers_per_group_advancement_like_lifecycle(
+def test_group_stage_rejects_ambiguous_global_and_per_group_advancement(
     store: Store,
 ):
-    """When both fields exist, four groups × Top1 overrides global Top8."""
+    """Traditional groups cannot combine two conflicting advancement scopes."""
     users, bots = _mk_bots(store, 8, game_id="pencil")
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="不接受 advance_count"):
+        manager.create(
+            users[0]["id"],
+            "group-advance-priority",
+            game_id="pencil",
+            stages=[
+                {
+                    "key": "group",
+                    "type": "group_double_round_robin",
+                    "group_count": 4,
+                    "advance_per_group": 1,
+                    "advance_count": 8,
+                },
+                {"key": "ko", "type": "single_elimination"},
+            ],
+        )
+    assert store.list_contests() == []
+
+
+def test_custom_traditional_group_to_ko_preserves_source_coordinates(
+    store: Store,
+):
+    """Blank legacy roster groups recover only from the full qualifier snapshot."""
+    users, bots = _mk_bots(store, 4, game_id="holdem")
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
     contest = manager.create(
         users[0]["id"],
-        "group-advance-priority",
-        game_id="pencil",
+        "custom-group-to-ko",
+        game_id="holdem",
         stages=[
             {
-                "key": "group",
-                "type": "group_double_round_robin",
-                "group_count": 4,
+                "key": "groups",
+                "type": "group_round_robin",
+                "group_count": 2,
                 "advance_per_group": 1,
-                "advance_count": 8,
             },
-            {"key": "ko", "type": "single_elimination"},
+            {"key": "final", "type": "single_elimination"},
         ],
     )
     for user, bot in zip(users, bots):
         store.add_contest_entry(contest["id"], user["id"], bot["id"])
 
-    estimate = manager.estimate(contest["id"])
-
-    async def reach_ko():
+    async def run_full_lifecycle():
         await manager.start(contest["id"])
-        assert len(store.list_contest_pairings(contest["id"], stage_idx=0)) == 8
         _complete_all_pairs(
             store, contest["id"], 0, winner_fn=lambda _a, _b: 0
         )
         await manager.maybe_finish(contest["id"])
+        _complete_all_pairs(
+            store, contest["id"], 1, winner_fn=lambda _a, _b: 0
+        )
+        await manager.maybe_finish(contest["id"])
 
-    asyncio.run(reach_ko())
-    active_entries = [
-        entry
+    asyncio.run(run_full_lifecycle())
+    assert store.get_contest(contest["id"])["official_results_ready"] == 1
+    assert all(
+        entry["group_id"] == ""
         for entry in store.list_contest_entries(contest["id"])
-        if not entry["eliminated"]
-    ]
-    assert len(active_entries) == 4
-    assert len(store.list_contest_pairings(contest["id"], stage_idx=1)) == 2
-    assert estimate["estimated_matches"] == 11  # group DRR 8 + four-player KO 3.
+    )
+    qualifier = store.list_stage_results(contest["id"], stage_idx=0)
+    qualifier_by_entry = {row["entry_id"]: row for row in qualifier}
+    assert {row["group_id"] for row in qualifier} == {"G1", "G2"}
+    official = store.list_official_results(contest["id"])
+    assert len(official) == 4
+    assert all(
+        row["group_id"]
+        == qualifier_by_entry[row["entry_id"]]["group_id"]
+        and row["rank_in_group"]
+        == qualifier_by_entry[row["entry_id"]]["rank_in_group"]
+        for row in official
+    )
 
 
 def _complete_all_pairs(store: Store, cid: int, stage_idx: int, *, winner_fn) -> int:
@@ -652,12 +732,11 @@ def test_swiss_generates_next_round(store: Store):
     )["id"]
     for u, b in zip(users, bots):
         store.add_contest_entry(cid, u["id"], b["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
     orch = _FakeOrch(store)
     mgr = ContestManager(store, orch)  # type: ignore
 
     async def run():
-        await mgr._begin_stage(cid, 0)
+        await mgr.start(cid)
         # R1: 2 场
         r1 = store.list_contest_pairings(cid, stage_idx=0)
         assert len(r1) == 2, f"R1 应 2 场，实际 {len(r1)}"
@@ -689,11 +768,10 @@ def test_swiss_materializes_balanced_seats_into_pairing_and_challenge(store: Sto
     )["id"]
     for user, bot in zip(users, bots):
         store.add_contest_entry(cid, user["id"], bot["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
 
     async def run():
-        await manager._begin_stage(cid, 0)
+        await manager.start(cid)
         for _ in range(2):
             _complete_all_pairs(store, cid, 0, winner_fn=lambda _a, _b: 0)
             await manager.maybe_finish(cid)
@@ -736,11 +814,10 @@ def test_swiss_odd_multi_round_byes_are_scored_rotated_and_persisted(store: Stor
     )["id"]
     for user, bot in zip(users, bots):
         store.add_contest_entry(cid, user["id"], bot["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
 
     async def run():
-        await manager._begin_stage(cid, 0)
+        await manager.start(cid)
         first_round = store.list_contest_pairings(cid, stage_idx=0)
         first_bye = next(pairing for pairing in first_round if pairing["bot_b_id"] is None)
         initial_standings = {
@@ -852,6 +929,35 @@ def _deleted_opponent_no_match_fixture(
     assert persisted["bot_b_id"] is None
     assert persisted["match_id"] is None
     assert persisted["status"] == "completed"
+    # The corruption itself, rather than an earlier NULL-manifest guard, is the
+    # authority under test.  Give this deliberately imported graph an exact
+    # low-level lifecycle seal, then require the semantic opponent check below
+    # to reject it.
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET status='published',current_stage_idx=0,"
+            "published_stage_pairing_count=NULL,"
+            "sealed_pairing_topology_revision=NULL WHERE id=?",
+            (contest_id,),
+        )
+    store.seal_published_stage_pairing_count(
+        contest_id,
+        0,
+        expected_count=1,
+        expected_existing_ids=[int(pairing["id"])],
+    )
+    with store._tx() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE contests SET status='running' WHERE id=?",
+            (contest_id,),
+        )
+        connection.execute(
+            "UPDATE contests SET sealed_pairing_topology_revision="
+            "pairing_topology_revision WHERE id=?",
+            (contest_id,),
+        )
     return contest_id, entries, bots, persisted
 
 
@@ -945,7 +1051,15 @@ def test_swiss_history_drift_blocks_later_round_instead_of_counting_fake_bye(
         format="elf",
         game_id="holdem",
     )
-    store.update_entry(contest_id, users[0]["id"], bot_id=replacement["id"])
+    # Corrupt the legacy row directly: the public Store entry writer now
+    # rejects active Bot swaps unless the dedicated swap/reseal transaction is
+    # used.  This test intentionally needs the damaged historical shape.
+    with store._tx() as connection:
+        connection.execute(
+            "UPDATE contest_entries SET bot_id=? "
+            "WHERE contest_id=? AND user_id=?",
+            (replacement["id"], contest_id, users[0]["id"]),
+        )
 
     # R2: replacement A beats B; C receives the sole authoritative bye.
     match_id = "swiss-bye-drift-r2"
@@ -1016,57 +1130,22 @@ def test_swiss_fully_adjudicated_history_allows_next_round(store: Store):
         store.add_contest_entry(contest_id, user["id"], bot["id"])
         for user, bot in zip(users, bots)
     ]
-    store.update_contest(contest_id, status="running", current_stage_idx=0)
-
-    for round_num, seats, bye_index in (
-        (1, (0, 1), 2),
-        (2, (0, 2), 1),
-    ):
-        match_id = f"swiss-complete-history-r{round_num}"
-        a_index, b_index = seats
-        store.create_match(
-            match_id,
-            bots[a_index]["id"],
-            bots[b_index]["id"],
-            owner_id=users[0]["id"],
-            contest_id=contest_id,
-            match_type="contest",
-            game_id="holdem",
-        )
-        store.update_match(
-            match_id,
-            status="completed",
-            winner=0,
-            result={"deltas": [100, -100]},
-        )
-        store.add_contest_pairing(
-            contest_id,
-            bots[a_index]["id"],
-            bots[b_index]["id"],
-            round_num=round_num,
-            match_id=match_id,
-            status="completed",
-            stage_idx=0,
-            stage_key="swiss",
-            entry_a_id=entries[a_index]["id"],
-            entry_b_id=entries[b_index]["id"],
-        )
-        store.add_contest_pairing(
-            contest_id,
-            bots[bye_index]["id"],
-            None,
-            round_num=round_num,
-            status="completed",
-            stage_idx=0,
-            stage_key="swiss",
-            entry_a_id=entries[bye_index]["id"],
-            entry_b_id=None,
-        )
-
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
-    assert asyncio.run(
-        manager._maybe_next_swiss_round(contest_id, 0, stage)
-    ) is True
+
+    async def run():
+        await manager.start(contest_id)
+        _complete_all_pairs(store, contest_id, 0, winner_fn=lambda _a, _b: 0)
+        await manager.maybe_finish(contest_id)
+        assert {
+            pairing["round_num"]
+            for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
+        } == {1, 2}
+        _complete_all_pairs(store, contest_id, 0, winner_fn=lambda _a, _b: 0)
+        assert await manager._maybe_next_swiss_round(
+            contest_id, 0, stage
+        ) is True
+
+    asyncio.run(run())
     round_three = [
         pairing
         for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
@@ -1086,12 +1165,11 @@ def test_single_elimination_generates_final(store: Store):
     )["id"]
     for u, b in zip(users, bots):
         store.add_contest_entry(cid, u["id"], b["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
     orch = _FakeOrch(store)
     mgr = ContestManager(store, orch)  # type: ignore
 
     async def run():
-        await mgr._begin_stage(cid, 0)
+        await mgr.start(cid)
         r1 = store.list_contest_pairings(cid, stage_idx=0)
         assert len(r1) == 2, f"4人淘汰 R1 应 2 场，实际 {len(r1)}"
         # 完成 R1
@@ -1131,10 +1209,9 @@ def test_single_elimination_draw_blocks_without_finishing_or_losing_winners(
     )["id"]
     for user, bot in zip(users, bots):
         store.add_contest_entry(cid, user["id"], bot["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
 
     async def run():
-        await manager._begin_stage(cid, 0)
+        await manager.start(cid)
         first_round = store.list_contest_pairings(cid, stage_idx=0)
         assert len(first_round) == 4
         decisive_winners: set[int] = set()
@@ -1201,12 +1278,11 @@ def _run_single_elim_to_finish(store: Store, n: int, winner_fn):
     )["id"]
     for u, b in zip(users, bots):
         store.add_contest_entry(cid, u["id"], b["id"])
-    store.update_contest(cid, status="running", current_stage_idx=0)
     orch = _FakeOrch(store)
     mgr = ContestManager(store, orch)  # type: ignore
 
     async def run():
-        await mgr._begin_stage(cid, 0)
+        await mgr.start(cid)
         # 反复完成当前轮 + maybe_finish，直到 finished 或无进展
         for _ in range(20):  # 上限防死循环
             c = store.get_contest(cid)

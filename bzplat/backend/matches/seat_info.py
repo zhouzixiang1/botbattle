@@ -23,6 +23,7 @@ _PUBLIC_VIEWER_MATCH_FIELDS = frozenset(
         "outcome",
         "human_seat",
         "technical_loss",
+        "time_control",
         "started_at",
         "ended_at",
         "created_at",
