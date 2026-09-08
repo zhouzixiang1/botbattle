@@ -12,6 +12,32 @@ from bzplat.backend.main import create_app
 from bzplat.backend.qa_safety import primary_checkout_root
 
 
+def test_uvicorn_http_access_noise_suppressed_but_ws_lifecycle_kept(tmp_path):
+    """uvicorn.access 的 INFO 访问行不进 app.log（访问日志权威来源是 access.log），
+    而 uvicorn.error 上的 WebSocket 生命周期行保留。"""
+    log_dir = tmp_path / "logs"
+    setup_logging(log_dir=log_dir, level="INFO")
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1", 1234),
+        "GET",
+        "/api/site/info",
+        "1.1",
+        200,
+    )
+    logging.getLogger("uvicorn.error").info(
+        '%s - "WebSocket %s" [accepted]',
+        ("127.0.0.1", 1234),
+        "/api/matches/m1/play",
+    )
+    for name in ("", "uvicorn", "uvicorn.error", "uvicorn.access"):
+        for h in logging.getLogger(name).handlers:
+            h.flush()
+    content = (log_dir / "app.log").read_text(encoding="utf-8")
+    assert 'GET /api/site/info HTTP/1.1" 200' not in content
+    assert "WebSocket /api/matches/m1/play" in content
+
+
 def test_setup_logging_writes_file(tmp_path):
     """setup_logging 后日志落到指定目录的 app.log。"""
     log_dir = tmp_path / "logs"
