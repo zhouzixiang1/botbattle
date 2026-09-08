@@ -163,7 +163,7 @@ export default function BotsTab() {
                     <OverflowText>
                       {b.display_name || b.name}
                     </OverflowText>
-                    {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
+                    {b.is_builtin ? <span className="ml-1 text-[10px] text-primary">内置</span> : null}
                     {b.runnable === false && (
                       <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
                         诊断：{b.format}/{b.os}-{b.arch}

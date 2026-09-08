@@ -465,7 +465,9 @@ export function ExecutionQueuePanel({
     <div className="space-y-3 px-3 py-3 sm:px-4">
       <CapacityMeter capacity={snapshot.capacity} />
 
-      {paused && (
+      {/* 管理端（action 控制簇存在时）的队列头部已展示“队列异常暂停 + 原因”，
+          这里不再重复渲染同一条红色暂停横幅，避免同一屏双份告警。 */}
+      {paused && !action && (
         <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs">
           <PauseCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
           <span className="break-words [overflow-wrap:anywhere]">

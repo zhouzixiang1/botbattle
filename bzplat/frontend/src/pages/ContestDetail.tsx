@@ -40,6 +40,7 @@ import { fmtTime } from '@/lib/format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
 import { outcomeParticipantStates, type PublicMatchOutcome } from '@/lib/match-outcome'
 import {
+  formatScoringCountsLine,
   parseCrossGroupTiebreak,
   parseRankingCoordinates,
   parseStageFormatConfigs,
@@ -605,35 +606,6 @@ function scoreBreakdown({
   byes,
 }: Pick<Standing, 'wins' | 'draws' | 'losses' | 'byes'>) {
   return `${wins} 胜 / ${draws} 平 / ${losses} 负 · 轮空 ${byes || 0}`
-}
-
-function scoringCountBreakdown(
-  row: Pick<Standing, 'wins' | 'draws' | 'losses' | 'counts'>,
-  duplicate: boolean,
-  legacyAggregate = false,
-): string {
-  const scoringGames = row.counts?.scoring_games ?? row.wins + row.draws + row.losses
-  const opponents = row.counts?.unique_opponents
-  const matchJobs = row.counts?.match_jobs
-  if (legacyAggregate) {
-    return [
-      opponents == null ? null : `面对 ${opponents} 位对手`,
-      matchJobs == null ? null : `${matchJobs} 场历史系列对局`,
-      `${scoringGames} 次旧版系列结算`,
-    ].filter(Boolean).join(' · ')
-  }
-  if (!duplicate) {
-    return [
-      opponents == null ? null : `面对 ${opponents} 位对手`,
-      matchJobs == null ? null : `${matchJobs} 条对局记录`,
-      `${scoringGames} 场计分`,
-    ].filter(Boolean).join(' · ')
-  }
-  return [
-    opponents == null ? null : `面对 ${opponents} 位对手`,
-    matchJobs == null ? null : `${matchJobs} 组复式交锋`,
-    `${scoringGames} 场计分`,
-  ].filter(Boolean).join(' · ')
 }
 
 function stageStandingProgressLabel(
@@ -2244,9 +2216,9 @@ export default function ContestDetail() {
                 {entries.length === 0 ? (
                   <EmptyState text="暂无报名" className="py-8" />
                 ) : (
-                  <ul className="divide-y text-sm" aria-label="报名选手列表">
+                  <ul className="grid min-w-0 grid-cols-1 gap-2 p-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="报名选手列表">
                     {entries.map((e) => (
-                      <li key={e.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2.5">
+                      <li key={e.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border px-3 py-2">
                         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                           {e.bot_id != null ? (
                             <Link to={`/bot/${e.bot_id}`} className="min-w-0 max-w-full hover:text-primary sm:max-w-xs">
@@ -2370,7 +2342,7 @@ export default function ContestDetail() {
                           <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
                           <TableCell className="font-mono text-xs text-muted-foreground">
                             <span className="block font-sans font-medium text-foreground">
-                              {scoringCountBreakdown(s, currentStageDuplicate, currentStageLegacyAggregate)}
+                              {formatScoringCountsLine(s, currentStageDuplicate, currentStageLegacyAggregate)}
                             </span>
                             {scoreBreakdown(s)}
                           </TableCell>
@@ -2528,7 +2500,7 @@ export default function ContestDetail() {
                           {scoreRow && sourceContract !== 'invalid' ? (
                             <>
                               <span className="block font-sans font-medium text-foreground">
-                                {scoringCountBreakdown(scoreRow, sourceDuplicate, sourceLegacyAggregate)}
+                                {formatScoringCountsLine(scoreRow, sourceDuplicate, sourceLegacyAggregate)}
                               </span>
                               {scoreBreakdown(scoreRow)}
                             </>
@@ -2640,7 +2612,7 @@ function StageStandingPanel({
                     </OverflowText>
                     <span className="block font-mono text-xs leading-relaxed text-muted-foreground">
                       <span className="block font-sans font-medium text-foreground">
-                        {scoringCountBreakdown(row, duplicate, legacyAggregate)}
+                        {formatScoringCountsLine(row, duplicate, legacyAggregate)}
                       </span>
                       {scoreBreakdown(row)}
                     </span>

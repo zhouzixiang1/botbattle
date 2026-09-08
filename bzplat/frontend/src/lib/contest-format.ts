@@ -324,3 +324,51 @@ export function formatDrawAlgorithm(algorithm: GroupDrawAlgorithm): string {
     ? '保护种子安全随机均衡分组'
     : '安全随机均衡分组'
 }
+
+/** 行级计分构成（对手 / 对局记录 / 计分场）的共享展示行。 */
+export interface ScoringCountsRow {
+  wins: number
+  draws: number
+  losses: number
+  counts?: {
+    unique_opponents?: number
+    match_jobs?: number
+    scoring_games?: number
+  } | null
+}
+
+/**
+ * 详情页正式榜/阶段积分与赛事直播共用的行级计分构成文案。
+ * 历史/旧版赛事的行级 counts 可能固化为全零并与真实胜负矛盾：
+ * 此时零值段落不可信，回退为仅显示按胜负平推导的计分场数，绝不渲染“面对 0 位对手”式矛盾。
+ */
+export function formatScoringCountsLine(
+  row: ScoringCountsRow,
+  duplicate: boolean,
+  legacyAggregate = false,
+): string {
+  const played = row.wins + row.draws + row.losses
+  const counts = row.counts
+  const hasPositive = counts != null && (
+    (counts.unique_opponents ?? 0) > 0
+    || (counts.match_jobs ?? 0) > 0
+    || (counts.scoring_games ?? 0) > 0
+  )
+  // counts 缺失或全零且确有对局时，行级构成视为未记录。
+  const countsUsable = counts != null && (hasPositive || played === 0)
+  const scoringGames = countsUsable ? counts.scoring_games ?? played : played
+  const matchJobs = countsUsable ? counts.match_jobs ?? 0 : 0
+  const opponents = countsUsable ? counts.unique_opponents ?? 0 : 0
+  const segments = [
+    opponents > 0 ? `面对 ${opponents} 位对手` : null,
+    matchJobs > 0
+      ? legacyAggregate
+        ? `${matchJobs} 场历史系列对局`
+        : duplicate
+          ? `${matchJobs} 组复式交锋`
+          : `${matchJobs} 条对局记录`
+      : null,
+    `${scoringGames} ${legacyAggregate ? '次旧版系列结算' : '场计分'}`,
+  ]
+  return segments.filter(Boolean).join(' · ')
+}

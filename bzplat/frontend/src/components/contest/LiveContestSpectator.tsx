@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { EntityName } from '@/components/ui/overflow-text'
 import { fmtTime } from '@/lib/format'
 import {
+  formatScoringCountsLine,
   parseCrossGroupTiebreak,
   parseRankingCoordinates,
   type RankingCoordinateMode,
@@ -644,17 +645,7 @@ export function LiveContestSpectator({
                         </p>
                       )}
                       <p className="text-xs leading-relaxed text-muted-foreground">
-                        {row.counts?.unique_opponents != null
-                          ? `面对 ${row.counts.unique_opponents} 位对手 · `
-                          : ''}
-                        {legacyAggregate && row.counts?.match_jobs != null
-                          ? `${row.counts.match_jobs} 场历史系列对局 · `
-                          : duplicate && row.counts?.match_jobs != null
-                            ? `${row.counts.match_jobs} 组复式交锋 · `
-                            : row.counts?.match_jobs != null
-                              ? `${row.counts.match_jobs} 条对局记录 · `
-                              : ''}
-                        {row.counts?.scoring_games ?? row.wins + row.draws + row.losses} {legacyAggregate ? '次旧版系列结算' : '场计分'}
+                        {formatScoringCountsLine(row, duplicate, legacyAggregate)}
                         {' · '}{row.wins} 胜 / {row.draws} 平 / {row.losses} 负
                       </p>
                     </div>

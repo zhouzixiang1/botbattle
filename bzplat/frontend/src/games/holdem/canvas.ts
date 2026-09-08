@@ -323,11 +323,12 @@ function drawSeat(
     }
     return
   }
-  // 头像圆（首字母）—— 圆心/半径随 s 缩放
+  // 头像圆（首字母）—— 圆心/半径随 s 缩放。
+  // 座位身份色与全站 seat-1 红 / seat-2 蓝契约一致（同 pencil canvas 的 seat 色板）。
   const ax = x - 25 * s, ay = y - 45 * s + 25 * s
   const initial = (name[0] || '?').toUpperCase()
   ctx.beginPath(); ctx.arc(ax, ay, 18 * s, 0, Math.PI * 2)
-  ctx.fillStyle = idx === 0 ? '#3b82f6' : '#ef4444'; ctx.fill()
+  ctx.fillStyle = idx === 0 ? '#ef4444' : '#3b82f6'; ctx.fill()
   if (isMatchWinner) {
     ctx.strokeStyle = 'rgba(255,238,88,0.95)'
     ctx.lineWidth = 3 * s

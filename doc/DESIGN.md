@@ -466,7 +466,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
 - **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证共用的 `PageFrame width="readable"` 紧凑壳；品牌只在全局顶栏出现，正文沿单一中轴排列标题、说明和表单）、use-playback.ts（仅导出 SPEEDS 速度档常量；MatchViewer 内联实现事件 buffer/数值 cursor/playing/speed/稳定 interval 节拍的回放与直播 DVR 逻辑；节拍只依赖播放态和速度，通过 ref 读取最新事件长度，持续高频 SSE 不会反复重置 timer 而饿死游标）。通用 `SummaryStrip/SummaryMetric` 已删除，避免后续页面重新堆出与正文重复的装饰性概览带。
-- **时限与赛制读模型**：`lib/time-controls.ts` 镜像后端版本 ID 与字段白名单，挑战/人机注册表加载失败或任一项畸形时禁用提交；替代时限就地标记“不计排行榜”，人机明确“仅约束 Bot”。赛事创建把赛制、时限、分组数与来源控件拆开：Gomoku 显示必选“保护种子来源”，Pencil 全员/分组双循环显示可清空的“关联赛事”，并提供线上/线下组合快捷项。详情也分别标为“保护种子来源”与“关联赛事”。`lib/contest-format.ts` 只接受权威名次坐标、精确跨组破同分键和有界公开审计快照；详情、直播、导出说明及 `FormatSnapshotAudit` 共用这些语义，未知字段/私有 seed/别名均不渲染。相关选择器、复制按钮和审计卡在 390px 保持至少 44px 触控与零根横溢出。
+- **时限与赛制读模型**：`lib/time-controls.ts` 镜像后端版本 ID 与字段白名单，挑战/人机注册表加载失败或任一项畸形时禁用提交；替代时限就地标记“不计排行榜”，人机明确“仅约束 Bot”。赛事创建把赛制、时限、分组数与来源控件拆开：Gomoku 显示必选“保护种子来源”，Pencil 全员/分组双循环显示可清空的“关联赛事”，并提供线上/线下组合快捷项。详情也分别标为“保护种子来源”与“关联赛事”。`lib/contest-format.ts` 只接受权威名次坐标、精确跨组破同分键和有界公开审计快照；详情、直播、导出说明及 `FormatSnapshotAudit` 共用这些语义，未知字段/私有 seed/别名均不渲染。行级计分构成（对手/对局记录/计分场）文案由 `formatScoringCountsLine` 统一：历史/旧版赛事行级 counts 固化为全零且与真实胜负矛盾时按“构成未记录”回退为仅显示推导计分场数，绝不渲染“面对 0 位对手”式矛盾。相关选择器、复制按钮和审计卡在 390px 保持至少 44px 触控与零根横溢出。
 - **全局 Shell**：app-shell.tsx 按登录态分两套 chrome：
   - **已登录**：**lg+ 桌面左侧边栏**（Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知）；**<lg 移动端顶栏 + Sheet 抽屉**。
   - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
