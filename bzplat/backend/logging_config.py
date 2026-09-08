@@ -152,9 +152,12 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
             },
             "loggers": {
                 # Uvicorn HTTP/WS 共用平台 handler，确保 query 投影在序列化前生效。
+                # uvicorn.access 的 HTTP 访问行与 access.log（bzplat.access，真实
+                # 客户端 IP）完全重复，经反代只能看到 127.0.0.1，提到 WARNING 降噪；
+                # uvicorn.error 保留 WS 生命周期行。
                 "uvicorn": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
                 "uvicorn.error": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
-                "uvicorn.access": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
+                "uvicorn.access": {"level": "WARNING", "handlers": ["file", "console"], "propagate": False},
                 # access / audit 独立 logger，propagate=False 不污染 root(app.log)
                 ACCESS_LOGGER: {"level": "INFO", "handlers": ["access_file"], "propagate": False},
                 AUDIT_LOGGER: {"level": "INFO", "handlers": ["audit_file", "console"], "propagate": False},

@@ -169,7 +169,9 @@ def test_uvicorn_http_and_websocket_queries_never_reach_serialized_logs(
     assert ws_secret not in content
     assert http_secret not in console
     assert ws_secret not in console
-    assert 'GET /api/history HTTP/1.1" 200' in content
+    # uvicorn.access 已提级 WARNING：HTTP 访问行不再进 app.log（权威访问日志
+    # 在 access.log，bzplat.access，含真实客户端 IP）；WS 生命周期行保留。
+    assert 'GET /api/history HTTP/1.1" 200' not in content
     assert 'WebSocket /api/matches/m1/play" 403' in content
 
 

@@ -120,7 +120,10 @@ def serve(
         # them. Uvicorn's current SansIO backend pauses socket reads after
         # each complete message, so no unsupported queue-size promise is made.
         ws_max_size=MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
-        log_level="info",
+        # setup_logging() 的 dictConfig 是 logger 级别唯一真相源：log_level 非
+        # None 时 uvicorn 会把 uvicorn.access/error 强制 setLevel 回该级别，
+        # 覆盖 uvicorn.access=WARNING 的降噪配置。
+        log_level=None,
         # setup_logging() owns Uvicorn's handlers and request-target filter.
         # Reapplying Uvicorn's default config here would bypass both and write
         # path+query request targets to the stdout-backed web.log.
