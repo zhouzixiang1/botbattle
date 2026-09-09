@@ -41,3 +41,16 @@ export function fmtRating(r: number | null | undefined, fallback = '—'): strin
   if (r == null || Number.isNaN(r)) return fallback
   return Number(r).toFixed(1)
 }
+
+/**
+ * 统一内存展示（输入 MiB）：<1024 → `512 MiB`；整除 GiB → `16 GiB`；否则一位小数 `61.4 GiB`。
+ *
+ * 执行队列的主机容量/占用向量以 MiB 下发，分母来自主机探测（如 62874 MiB）通常不能整除
+ * GiB；分子分母必须走同一格式化，避免出现「16 GiB / 62874 MiB」混排单位。
+ */
+export function fmtMemoryMiB(value: number | null | undefined, fallback = '—'): string {
+  if (value == null || Number.isNaN(value) || value < 0) return fallback
+  if (value < 1024) return `${value} MiB`
+  const gib = value / 1024
+  return Number.isInteger(gib) ? `${gib} GiB` : `${gib.toFixed(1)} GiB`
+}
