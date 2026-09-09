@@ -248,7 +248,7 @@ export default function UsersTab() {
                 </TableCell>
                 <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</TableCell>
                 <TableCell className="px-3 py-2">
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-nowrap items-center justify-end gap-1">
                     <Button
                       type="button"
                       variant="outline"
