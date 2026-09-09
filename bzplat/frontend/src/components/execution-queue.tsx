@@ -18,7 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { ErrorMsg, Loading } from '@/components/ui/status'
-import { fmtTime } from '@/lib/format'
+import { fmtMemoryMiB, fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   RuntimeEnvironmentBadge,
@@ -317,57 +317,61 @@ function CapacityMeter({ capacity }: { capacity: ExecutionCapacity }) {
   const hostMemory = capacity.host_memory_mb
   const showHostResources = Boolean(hostCpu && hostMemory)
   const cpuLabel = (value: number) => `${Number((value / 1000).toFixed(1))} 核`
-  const memoryLabel = (value: number) => (
-    value >= 1024 && value % 1024 === 0 ? `${value / 1024} GiB` : `${value} MiB`
-  )
   return (
-    <dl
-      className={cn('grid grid-cols-2 gap-2 text-xs', showHostResources && 'lg:grid-cols-4')}
-      aria-label="执行容量"
-    >
-      <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
-        <dt className="inline-flex items-center gap-1 text-muted-foreground">
-          <Activity className="size-3.5" /> 同时运行
-        </dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-          {matchSlots.used} / {matchSlots.capacity} 场
-        </dd>
-      </div>
-      <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
-        <dt className="inline-flex items-center gap-1 text-muted-foreground">
-          <Cpu className="size-3.5" /> 平台 Bot 运行位
-        </dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-          {sandboxUnits.used} / {sandboxUnits.capacity}
-        </dd>
-      </div>
-      {hostCpu && (
-        <div
-          className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
-          data-testid="host-cpu-capacity"
-        >
+    <div className="space-y-1.5">
+      <dl
+        className={cn('grid grid-cols-2 gap-2 text-xs', showHostResources && 'lg:grid-cols-4')}
+        aria-label="执行容量"
+      >
+        <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
           <dt className="inline-flex items-center gap-1 text-muted-foreground">
-            <Cpu className="size-3.5" /> 主机 CPU
+            <Activity className="size-3.5" /> 同时运行
           </dt>
           <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-            {cpuLabel(hostCpu.used)} / {cpuLabel(hostCpu.capacity)}
+            {matchSlots.used} / {matchSlots.capacity} 场
           </dd>
         </div>
-      )}
-      {hostMemory && (
-        <div
-          className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
-          data-testid="host-memory-capacity"
-        >
+        <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
           <dt className="inline-flex items-center gap-1 text-muted-foreground">
-            <MemoryStick className="size-3.5" /> 主机内存
+            <Cpu className="size-3.5" /> 平台 Bot 运行位
           </dt>
           <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-            {memoryLabel(hostMemory.used)} / {memoryLabel(hostMemory.capacity)}
+            {sandboxUnits.used} / {sandboxUnits.capacity}
           </dd>
         </div>
+        {hostCpu && (
+          <div
+            className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
+            data-testid="host-cpu-capacity"
+          >
+            <dt className="inline-flex items-center gap-1 text-muted-foreground">
+              <Cpu className="size-3.5" /> 主机 CPU
+            </dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+              {cpuLabel(hostCpu.used)} / {cpuLabel(hostCpu.capacity)}
+            </dd>
+          </div>
+        )}
+        {hostMemory && (
+          <div
+            className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
+            data-testid="host-memory-capacity"
+          >
+            <dt className="inline-flex items-center gap-1 text-muted-foreground">
+              <MemoryStick className="size-3.5" /> 主机内存
+            </dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+              {fmtMemoryMiB(hostMemory.used)} / {fmtMemoryMiB(hostMemory.capacity)}
+            </dd>
+          </div>
+        )}
+      </dl>
+      {showHostResources && (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          主机 CPU / 内存按各任务入队时冻结的资源向量记账，并非实时占用；满载时新任务会等待资源释放。
+        </p>
       )}
-    </dl>
+    </div>
   )
 }
 
