@@ -5188,6 +5188,13 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_contests_showcase_key "
         "ON contests(showcase_key) WHERE showcase_key IS NOT NULL"
     )
+    # 组织者归档：NULL=未归档；非空=归档时间。软隐藏（默认列表排除、
+    # 显式筛选可见），不改生命周期状态，详情与历史数据保持可达。
+    _add_col(conn, "contests", "archived_at", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_contests_archived_at "
+        "ON contests(archived_at) WHERE archived_at IS NOT NULL"
+    )
 
     if "contest_official_results" in tables:
         _add_col(
@@ -15979,6 +15986,7 @@ class Store:
         exclude_statuses: list[str] | None = None,
         hidden_owner_id: int | None = None,
         exclude_showcases: bool = False,
+        archived: str = "exclude",
     ) -> list[dict] | dict:
         """列赛事，并在分页 SQL 内完成隐藏状态的可见性过滤。
 
@@ -15990,7 +15998,12 @@ class Store:
         不得拉取一页后再用 Python 裁剪（会使 total/页数泄漏且错位）。
         ``exclude_showcases`` 只用于真实赛事发现列表；演示快照仍保留在库中，
         并可通过已知详情链接读取其只读生命周期图。
+        ``archived`` 控制归档可见性：``exclude``（默认）排除已归档、
+        ``only`` 只看已归档、``include`` 全部；与角色过滤正交，归档
+        对 admin/组织者同样默认隐藏——想看必须显式筛选。
         """
+        if archived not in ("exclude", "only", "include"):
+            raise ValueError("归档筛选参数无效")
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
             params: list[Any] = []
@@ -16005,6 +16018,10 @@ class Store:
                 params.append(game_id)
             if exclude_showcases:
                 sql += " AND showcase_key IS NULL"
+            if archived == "only":
+                sql += " AND archived_at IS NOT NULL"
+            elif archived == "exclude":
+                sql += " AND archived_at IS NULL"
             # 隐藏状态过滤与显式 status 可同时存在：例如访客显式查
             # draft 仍必须得到空集；组织者则只能看自己的 draft。
             if exclude_statuses:
@@ -16044,6 +16061,30 @@ class Store:
                 for raw in c.execute(sql, params)
                 if (row := _contest_row(raw)) is not None
             ]
+
+    def set_contest_archived(self, contest_id: int, *, archived: bool) -> dict | None:
+        """幂等设置/清除归档标记；不改生命周期状态，详情与历史数据保持可达。
+
+        返回更新后的 contest 行；赛事不存在返回 None。归档的时机守卫
+        （仅 finished 可归档、showcase 只读）由 ContestManager 在调用前复核；
+        本方法只在同一 ``BEGIN IMMEDIATE`` 事务里做读取-幂等-写入。
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = _contest_row(
+                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
+            )
+            if row is None:
+                return None
+            if archived == bool(row.get("archived_at")):
+                return row
+            c.execute(
+                "UPDATE contests SET archived_at=? WHERE id=?",
+                (_now() if archived else None, contest_id),
+            )
+            return _contest_row(
+                c.execute("SELECT * FROM contests WHERE id=?", (contest_id,)).fetchone()
+            )
 
     def list_contest_source_candidates(
         self,
@@ -16097,7 +16138,8 @@ class Store:
         search_hint: str
         if source_kind == "protected_seed":
             eligibility = (
-                "showcase_key IS NULL AND status='finished' "
+                "showcase_key IS NULL AND archived_at IS NULL "
+                "AND status='finished' "
                 "AND typeof(official_results_ready)='integer' "
                 "AND official_results_ready=1"
             )
@@ -16105,7 +16147,7 @@ class Store:
             search_index = "idx_contests_source_protected"
             search_hint = "grams.is_protected=1"
         elif include_all_hidden:
-            eligibility = "showcase_key IS NULL"
+            eligibility = "showcase_key IS NULL AND archived_at IS NULL"
             default_index = "idx_contests_source_default_navigation_all"
             search_index = "idx_contests_source_navigation_all"
             search_hint = "grams.is_nonshowcase=1"
@@ -16172,7 +16214,7 @@ class Store:
                         "official_results_ready", "c.official_results_ready"
                     ).replace("organizer_id", "c.organizer_id").replace(
                         "game_id", "c.game_id"
-                    )
+                    ).replace("archived_at", "c.archived_at")
                     + " AND c.title LIKE ? ESCAPE '\\'"
                 )
                 params = [
@@ -16204,6 +16246,7 @@ class Store:
             public_sql, public_params = branch_sql(
                 branch_eligibility=(
                     "game_id=? AND showcase_key IS NULL "
+                    "AND archived_at IS NULL "
                     "AND status NOT IN ('draft','cancelled')"
                 ),
                 branch_default_index=(
@@ -16218,6 +16261,7 @@ class Store:
             owner_sql, owner_params = branch_sql(
                 branch_eligibility=(
                     "organizer_id=? AND game_id=? AND showcase_key IS NULL "
+                    "AND archived_at IS NULL "
                     "AND status IN ('draft','cancelled')"
                 ),
                 branch_default_index=(

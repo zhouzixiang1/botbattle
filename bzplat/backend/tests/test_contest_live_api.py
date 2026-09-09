@@ -344,6 +344,7 @@ def test_live_projection_is_four_select_snapshot_without_n_plus_one(
         "official_results_ready",
         "require_real_name",
         "showcase_key",
+        "archived_at",
         "format_snapshot",
         "games_per_pair",
         "stage_series_settings",

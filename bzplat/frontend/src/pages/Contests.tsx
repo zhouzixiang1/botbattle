@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
+import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { apiFetch, apiJson, errMsg } from '@/api'
@@ -54,6 +55,7 @@ interface Contest {
   registration_closes_at?: string | null
   starts_at?: string | null
   official_results_ready?: boolean | number
+  archived_at?: string | null
 }
 
 /** 状态相关的时间提示文案 + 倒计时目标 */
@@ -103,6 +105,7 @@ type StageFormatSettings = Record<string, { group_count: number }>
 
 interface ContestListQuery {
   gameId: string
+  archivedOnly: boolean
   page: number
 }
 
@@ -177,6 +180,7 @@ export default function Contests() {
   const [templatesLoading, setTemplatesLoading] = useState(true)
   const [templateError, setTemplateError] = useState('')
   const [filterGame, setFilterGame] = useState('')
+  const [filterArchived, setFilterArchived] = useState(false)
   const [formGameId, setFormGameId] = useState('holdem')
   const [requireRealName, setRequireRealName] = useState(false)
   const [gamesPerPair, setGamesPerPair] = useState(1)
@@ -199,7 +203,7 @@ export default function Contests() {
   const [creating, setCreating] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const creatingRef = useRef(false)
-  const currentListQueryRef = useRef<ContestListQuery>({ gameId: '', page: 1 })
+  const currentListQueryRef = useRef<ContestListQuery>({ gameId: '', archivedOnly: false, page: 1 })
   const listRequestSeqRef = useRef(0)
   const listAbortRef = useRef<AbortController | null>(null)
   const templateRequestSeqRef = useRef(0)
@@ -213,7 +217,7 @@ export default function Contests() {
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
   // 建赛表单：游戏由用户选（不再从模板反推）；规则参数已钉死，无需动态配置 UI。
 
-  const load = ({ gameId, page: requestedPage }: ContestListQuery) => {
+  const load = ({ gameId, archivedOnly, page: requestedPage }: ContestListQuery) => {
     const requestSeq = ++listRequestSeqRef.current
     const controller = new AbortController()
     listAbortRef.current?.abort()
@@ -222,6 +226,7 @@ export default function Contests() {
     setListError('')
     const params = new URLSearchParams()
     if (gameId) params.set('game_id', gameId)
+    if (archivedOnly) params.set('archived', 'only')
     params.set('page', String(requestedPage))
     params.set('per_page', String(perPage))
     return apiFetch<{ contests: Contest[]; total?: number; page?: number }>(
@@ -249,7 +254,7 @@ export default function Contests() {
     // 首轮只清 timer，不制造一条没有业务意义的 ERR_ABORTED；真实筛选/
     // 翻页仍由 load() 内的 generation + AbortController 取消上一代请求。
     const startTimer = window.setTimeout(() => {
-      void load({ gameId: filterGame, page })
+      void load({ gameId: filterGame, archivedOnly: filterArchived, page })
     }, 0)
     return () => {
       window.clearTimeout(startTimer)
@@ -258,7 +263,7 @@ export default function Contests() {
       listAbortRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterGame, page])
+  }, [filterGame, filterArchived, page])
 
   useEffect(() => {
     // 模板按建赛表单选中的游戏过滤（后端 ?game= 已支持）。请求代次 + Abort
@@ -569,7 +574,7 @@ export default function Contests() {
           value={filterGame || 'all'}
           onValueChange={(value) => {
             const gameId = value === 'all' ? '' : value
-            currentListQueryRef.current = { gameId, page: 1 }
+            currentListQueryRef.current = { gameId, archivedOnly: filterArchived, page: 1 }
             setFilterGame(gameId)
             setPage(1)
           }}
@@ -578,6 +583,22 @@ export default function Contests() {
           <SelectContent>
             <SelectItem value="all">全部游戏</SelectItem>
             {GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <span className="shrink-0 text-xs font-medium text-muted-foreground">归档</span>
+        <Select
+          value={filterArchived ? 'archived' : 'active'}
+          onValueChange={(value) => {
+            const archivedOnly = value === 'archived'
+            currentListQueryRef.current = { gameId: filterGame, archivedOnly, page: 1 }
+            setFilterArchived(archivedOnly)
+            setPage(1)
+          }}
+        >
+          <SelectTrigger className="min-h-11 w-[7.5rem] max-w-full sm:min-h-[var(--control-height)]" aria-label="归档筛选"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="active">未归档</SelectItem>
+            <SelectItem value="archived">已归档</SelectItem>
           </SelectContent>
         </Select>
         <span className="text-xs tabular-nums text-muted-foreground sm:ml-auto">
@@ -910,6 +931,7 @@ export default function Contests() {
                             <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{contest.title}</EntityName>
                           </Link>
                           <StatusBadge status={contest.status} />
+                          {contest.archived_at && <Badge variant="secondary">已归档</Badge>}
                         </div>
                         {contest.description && <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{contest.description}</OverflowText>}
                         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -936,7 +958,7 @@ export default function Contests() {
         perPage={perPage}
         total={total}
         onPageChange={(nextPage) => {
-          currentListQueryRef.current = { gameId: filterGame, page: nextPage }
+          currentListQueryRef.current = { gameId: filterGame, archivedOnly: filterArchived, page: nextPage }
           setPage(nextPage)
         }}
       />
