@@ -459,7 +459,8 @@ test('contest list keeps the newest game filter when an older request resolves l
   })
   await page.goto('/#/contests')
   await expect(page.getByText('当前条件下暂无赛事')).toBeVisible()
-  const filter = page.getByRole('region', { name: '赛事筛选与创建' }).getByRole('combobox')
+  // #194 在同一筛选区新增了「归档筛选」下拉框；游戏筛选以 aria-label=游戏筛选 语义定位。
+  const filter = page.getByRole('region', { name: '赛事筛选与创建' }).getByRole('combobox', { name: '游戏筛选' })
 
   await filter.click()
   await page.getByRole('option', { name: '点格棋', exact: true }).click()
@@ -519,7 +520,8 @@ test('contest creation refreshes the current filter and page after a delayed POS
   await form.getByRole('button', { name: '创建赛事', exact: true }).click()
   await expect.poll(() => createStarted).toBe(true)
 
-  const filter = page.getByRole('region', { name: '赛事筛选与创建' }).getByRole('combobox')
+  // #194 在同一筛选区新增了「归档筛选」下拉框；游戏筛选以 aria-label=游戏筛选 语义定位。
+  const filter = page.getByRole('region', { name: '赛事筛选与创建' }).getByRole('combobox', { name: '游戏筛选' })
   await filter.click()
   await page.getByRole('option', { name: '点格棋', exact: true }).click()
   await expect(page.getByText('pencil-page-1', { exact: true })).toBeVisible()
