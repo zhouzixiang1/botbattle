@@ -147,7 +147,7 @@ export default function LogsTab() {
 
   if (loading && !data) return <Loading />
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <div className="inline-flex rounded-lg border border-border p-0.5">
           {FILES.map((item) => (
@@ -174,7 +174,7 @@ export default function LogsTab() {
         </div>
       </div>
 
-      <div className="grid gap-2 rounded-xl border border-border bg-card p-3 sm:grid-cols-[9rem_minmax(14rem,1fr)_8rem]">
+      <div className="grid gap-2 rounded-xl border border-border bg-card p-2 sm:grid-cols-[9rem_minmax(14rem,1fr)_8rem]">
         <Select value={level || 'all'} onValueChange={(value) => setLevel(value === 'all' ? '' : value as LogLevel)}>
           <SelectTrigger size="sm" className="h-9 w-full text-xs">
             <SelectValue />
@@ -213,13 +213,13 @@ export default function LogsTab() {
         {loading && <span>刷新中…</span>}
       </div>
 
-      <div role="log" aria-live="polite" className="max-h-[70vh] overflow-auto rounded-xl border border-border bg-card">
+      <div role="log" aria-live="polite" className="max-h-[calc(100dvh-24rem)] overflow-auto rounded-xl border border-border bg-card">
         {lines.length === 0 ? (
           <div className="py-10 text-center text-sm text-muted-foreground">没有符合条件的日志</div>
         ) : (
           <div className="divide-y divide-border">
             {lines.map((line, index) => (
-              <div key={`${index}-${line.raw.slice(0, 24)}`} className="grid gap-1 px-3 py-2 font-mono text-xs hover:bg-accent/50 lg:grid-cols-[9.5rem_5rem_16rem_minmax(0,1fr)] lg:items-start">
+              <div key={`${index}-${line.raw.slice(0, 24)}`} className="grid gap-1 px-3 py-1.5 font-mono text-xs hover:bg-accent/50 lg:grid-cols-[9.5rem_5rem_16rem_minmax(0,1fr)] lg:items-start">
                 <span className="text-muted-foreground">{line.timestamp || '—'}</span>
                 <span><Badge variant={levelVariant(line.level)} className="text-[10px]">{levelLabel(line.level)}</Badge></span>
                 <span className="break-all text-muted-foreground">{line.module || '未结构化'}</span>

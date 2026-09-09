@@ -97,6 +97,7 @@ export default function Admin() {
         eyebrow="平台运维"
         title="管理控制台"
         description={`${active.label}：${active.description}`}
+        className="[&_h1]:sm:text-[1.375rem] [&_[data-slot=page-header-actions]>[data-slot=button]]:max-lg:min-h-11"
         actions={<Button asChild variant="outline" size="sm" className="max-lg:min-h-11"><Link to="/feedback">查看用户视角</Link></Button>}
       />
 

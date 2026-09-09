@@ -2052,14 +2052,14 @@ test('Holdem production replay uses empty space for a responsive current-positio
     expect(hudBox).not.toBeNull()
     expect(canvasBox).not.toBeNull()
     expect(timelineBox).not.toBeNull()
-    expect(hudBox?.x ?? 9999).toBeLessThan(canvasBox?.x ?? 0)
+    // xl+ 仪表盘契约：棋盘主列在左，HUD 与动作上下文同列排在右侧信息栏。
+    expect(hudBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
     expect(canvasBox?.x ?? 9999).toBeLessThan(timelineBox?.x ?? 0)
-    // 两侧信息按内容自然收口；动作区只保留有限上下文，不创建第二个纵向滚动 owner。
-    expect(timelineBox?.height ?? 9999).toBeLessThanOrEqual((canvasBox?.height ?? 0) + 1)
+    expect(Math.abs((timelineBox?.x ?? 0) - (hudBox?.x ?? 0))).toBeLessThanOrEqual(40)
+    // 动作区只保留有限上下文，不创建第二个纵向滚动 owner。
     await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
     await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
     expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
-    expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   }
 
@@ -2075,9 +2075,10 @@ test('Holdem production replay uses empty space for a responsive current-positio
     const hudBox = await overview.boundingBox()
     const canvasBox = await canvas.boundingBox()
     const timelineBox = await timeline.boundingBox()
-    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    // xl(1280) 起即切换为「棋盘主列 + 20rem 右信息栏」，不再使用 HUD 横排在上。
+    expect(hudBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
     expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
-    expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    expect(Math.abs((timelineBox?.x ?? 0) - (hudBox?.x ?? 0))).toBeLessThanOrEqual(40)
     await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
     await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
@@ -2101,19 +2102,23 @@ test('Holdem production replay uses empty space for a responsive current-positio
     await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
+  // xl+ 契约：动作上下文固定在右栏内 sticky。栏高由 70 手 HUD 主导时滚动行程
+  // 有限，不再必然出现“吸附到顶”的几何状态，因此断言 sticky 定位本身。
   await page.setViewportSize({ width: 1366, height: 768 })
   await page.evaluate(() => window.scrollTo(0, 360))
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
-  await expect.poll(async () => (await timeline.boundingBox())?.y ?? 999).toBeLessThanOrEqual(30)
+  expect(await timeline.evaluate((element) => getComputedStyle(element).position)).toBe('sticky')
   await page.evaluate(() => window.scrollTo(0, 0))
 
   await page.setViewportSize({ width: 1600, height: 900 })
   await timeline.getByRole('button', { name: '收起动作', exact: true }).click()
+  await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(0)
   const collapsedHud = await overview.boundingBox()
   const collapsedCanvas = await canvas.boundingBox()
   const collapsedTimeline = await timeline.boundingBox()
-  expect(collapsedHud?.x ?? 9999).toBeLessThan(collapsedCanvas?.x ?? 0)
-  expect(collapsedTimeline?.y ?? 0).toBeGreaterThan((collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0))
+  // 折叠动作上下文只清空时间线行数；HUD 与时间线仍同列在棋盘右侧信息栏中。
+  expect(collapsedHud?.x ?? 0).toBeGreaterThan((collapsedCanvas?.x ?? 0) + (collapsedCanvas?.width ?? 0) - 1)
+  expect(collapsedTimeline?.x ?? 0).toBeGreaterThan((collapsedCanvas?.x ?? 0) + (collapsedCanvas?.width ?? 0))
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean(expectedDetailCancellations())
 })
@@ -2418,7 +2423,8 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
   let hudBox = await overview.boundingBox()
   let canvasBox = await canvas.boundingBox()
   let logBox = await eventLog.boundingBox()
-  expect(hudBox?.x ?? 9999).toBeLessThan(canvasBox?.x ?? 0)
+  // xl+ 仪表盘契约：棋盘主列在左，HUD 与动作日志同列排在右侧信息栏。
+  expect(hudBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
   expect(canvasBox?.x ?? 9999).toBeLessThan(logBox?.x ?? 0)
 
   for (const viewport of [
@@ -2432,8 +2438,9 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
     hudBox = await overview.boundingBox()
     canvasBox = await canvas.boundingBox()
     logBox = await eventLog.boundingBox()
-    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    expect(hudBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
     expect(logBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
+    expect(Math.abs((logBox?.x ?? 0) - (hudBox?.x ?? 0))).toBeLessThanOrEqual(40)
     await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
@@ -2782,20 +2789,27 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   const canvas = page.getByRole('img', { name: '德州扑克对局画面' })
   const canvasBox = await canvas.boundingBox()
   const timelineBox = await page.getByTestId('match-timeline').boundingBox()
+  const overviewBox = await page.getByTestId('holdem-position-overview').boundingBox()
   const resultCardBox = await page.getByTestId('match-result-card').boundingBox()
-  const commentsCardBox = await page.getByTestId('comments-card').boundingBox()
-  expect(canvasBox?.width ?? 0).toBeGreaterThanOrEqual(780)
+  // xl+ 右信息栏：画布主列受 dvh 钳制，HUD 与动作上下文同列在其右侧。
+  expect(canvasBox?.width ?? 0).toBeGreaterThanOrEqual(460)
   expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
+  expect(overviewBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
+  expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
+  expect(Math.abs((timelineBox?.x ?? 0) - (overviewBox?.x ?? 0))).toBeLessThanOrEqual(40)
   expect(timelineBox?.width ?? 0).toBeGreaterThanOrEqual(270)
-  expect(timelineBox?.width ?? 0).toBeLessThanOrEqual(310)
+  expect(timelineBox?.width ?? 0).toBeLessThanOrEqual(345)
   expect(resultCardBox?.height ?? 999).toBeLessThanOrEqual(110)
-  expect(commentsCardBox?.height ?? 999).toBeLessThanOrEqual(140)
 
-  await page.evaluate(() => window.scrollTo(0, 360))
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
-  await expect.poll(async () => (await page.getByTestId('match-timeline').boundingBox())?.y ?? -1)
-    .toBeGreaterThanOrEqual(20)
-  expect((await page.getByTestId('match-timeline').boundingBox())?.y ?? 999).toBeLessThanOrEqual(30)
+  // 评论区默认折叠为一行条；展开后才挂载完整评论区并请求评论数据。
+  const commentsToggle = page.getByRole('button', { name: '评论', exact: true })
+  await expect(commentsToggle).toBeVisible()
+  await expect(commentsToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByTestId('comments-card')).toHaveCount(0)
+  await commentsToggle.click()
+  await expect(page.getByTestId('comments-card')).toBeVisible()
+  const commentsCardBox = await page.getByTestId('comments-card').boundingBox()
+  expect(commentsCardBox?.height ?? 999).toBeLessThanOrEqual(140)
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.evaluate(() => window.scrollTo(0, 0))
@@ -3738,49 +3752,36 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     const bounds = await canvas.boundingBox()
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
-    if (viewport.width >= 1536) {
+    if (viewport.width >= 1280) {
       const logBounds = await eventLog.boundingBox()
       const overviewBounds = await overview.boundingBox()
       expect(logBounds).not.toBeNull()
       expect(overviewBounds).not.toBeNull()
-      const boardTrackWidth = await page.getByTestId('human-canvas-layout').evaluate((element) => {
+      // xl+ 统一「棋盘主列 + 20rem 右信息栏（HUD 上 / 动作日志下）」契约。
+      expect((overviewBounds?.x ?? 0)).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0) - 1)
+      expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0) - 1)
+      expect(Math.abs((logBounds?.x ?? 0) - (overviewBounds?.x ?? 0))).toBeLessThanOrEqual(40)
+      const canvasTrackWidth = await page.getByTestId('human-canvas-layout').evaluate((element) => {
         const columns = getComputedStyle(element).gridTemplateColumns
           .split(/\s+/)
           .map((value) => Number.parseFloat(value))
-        return columns[1] ?? 0
+        return columns[0] ?? 0
       })
-      // 三栏的实际中轨已经扣除 shell、gutter、HUD、日志栏及系统 gap；棋盘应优先
-      // 用满该语义轨道，同时仍受 52rem 和首屏可用高度上限约束。
-      const expectedMax = Math.min(832, viewport.height - 256, boardTrackWidth)
+      // 棋盘受 52rem 与首屏可用高度（100dvh-26rem）钳制，并优先用满主列轨道。
+      const expectedMax = Math.min(832, viewport.height - 416, canvasTrackWidth)
       expect(bounds?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
       expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
       expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
-      expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(bounds?.x ?? 0)
-      expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((bounds?.height ?? 0) + 1)
       const containment = await overview.evaluate((element) => ({
         clientHeight: element.clientHeight,
         scrollHeight: element.scrollHeight,
       }))
       expect(containment.scrollHeight).toBeLessThanOrEqual(containment.clientHeight + 1)
-      expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0))
-      expect((logBounds?.y ?? 0) + (logBounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
-    } else if (viewport.width >= 1280) {
-      const logBounds = await eventLog.boundingBox()
-      const overviewBounds = await overview.boundingBox()
-      expect(logBounds).not.toBeNull()
-      expect(overviewBounds).not.toBeNull()
-      expect(Math.abs((overviewBounds?.x ?? 0) - (bounds?.x ?? 0))).toBeLessThanOrEqual(1)
-      expect((overviewBounds?.y ?? 0) + (overviewBounds?.height ?? 0)).toBeLessThanOrEqual(bounds?.y ?? 0)
-      expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0))
     }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow, `${viewport.width}px human view overflow`).toBeLessThanOrEqual(1)
     await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
-
-  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
-  await page.evaluate(() => window.scrollTo(0, 0))
 
   // 线上事故的旧输出是格心 (5,5)。格心、点、已占边、棋盘外四类误点
   // 现在都只提示，不产生任何 WebSocket 帧。
@@ -4107,15 +4108,14 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopTimeline).not.toBeNull()
     expect(overviewBounds).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    // 棋盘的硬上界来自 52rem 与视口高度；主区横向余量会随侧栏密度变化，
-    // 因而旧的固定减去 888px 只能作为保守下界，不能再误当作精确上界。
-    const heightCap = Math.min(832, viewport.height - 256)
-    const conservativeFloor = Math.min(heightCap, viewport.width - 888)
+    // xl+ 右信息栏契约：棋盘主列受 52rem 与 100dvh-32rem 钳制；概览与动作上下文
+    // 同列排在棋盘右侧，不再使用“概览在左、动作栏在右”的三列布局。
+    const heightCap = Math.min(832, viewport.height - 512)
     expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(heightCap + 1)
-    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(conservativeFloor - 2)
     expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
-    expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(desktopCanvas?.x ?? 0)
-    expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((desktopCanvas?.height ?? 0) + 1)
+    expect(overviewBounds?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
+    expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
+    expect(Math.abs((desktopTimeline?.x ?? 0) - (overviewBounds?.x ?? 0))).toBeLessThanOrEqual(40)
     const overviewContainment = await overview.evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
@@ -4123,29 +4123,25 @@ test('Pencil replay gives the square board priority while the timeline remains u
     }))
     expect(overviewContainment.scrollHeight).toBeLessThanOrEqual(overviewContainment.clientHeight + 1)
     expect(overviewContainment.overflowY).not.toBe('visible')
-    expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
-    expect((desktopTimeline?.y ?? 0) + (desktopTimeline?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
     await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
-  // 用户主动折叠宽屏动作上下文后不得继续保留一条空右轨；概览与棋盘应并排占用主区，
-  // 折叠标题移到下一行，展开后恢复三栏。
+  // 折叠动作上下文只清空时间线行数；右栏仍由局面概览承载，不产生空右轨或三栏切换。
   await page.setViewportSize({ width: 1600, height: 900 })
   await timeline.getByRole('button', { name: '收起动作', exact: true }).click()
+  await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(0)
   const collapsedCanvas = await canvas.boundingBox()
   const collapsedOverview = await overview.boundingBox()
   const collapsedTimeline = await timeline.boundingBox()
   expect(collapsedCanvas).not.toBeNull()
   expect(collapsedOverview).not.toBeNull()
   expect(collapsedTimeline).not.toBeNull()
-  expect((collapsedOverview?.x ?? 9999) + (collapsedOverview?.width ?? 0)).toBeLessThan(collapsedCanvas?.x ?? 0)
-  expect(collapsedTimeline?.y ?? 0).toBeGreaterThan(Math.max(
-    (collapsedOverview?.y ?? 0) + (collapsedOverview?.height ?? 0),
-    (collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0),
-  ))
+  expect(collapsedOverview?.x ?? 0).toBeGreaterThan((collapsedCanvas?.x ?? 0) + (collapsedCanvas?.width ?? 0) - 1)
+  expect(collapsedTimeline?.x ?? 0).toBeGreaterThan((collapsedCanvas?.x ?? 0) + (collapsedCanvas?.width ?? 0))
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await timeline.getByRole('button', { name: '展开动作', exact: true }).click()
+  await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
 
   for (const viewport of [
     { width: 1366, height: 768 },
@@ -4159,18 +4155,16 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopTimeline).not.toBeNull()
     expect(desktopOverview).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(400)
-    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(520)
-    expect(Math.abs((desktopOverview?.x ?? 0) - (desktopCanvas?.x ?? 0))).toBeLessThanOrEqual(1)
-    expect((desktopOverview?.y ?? 0) + (desktopOverview?.height ?? 0)).toBeLessThanOrEqual(desktopCanvas?.y ?? 0)
+    // xl(1280) 起即右信息栏契约；方形棋盘受 100dvh-32rem 钳制。
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(Math.min(832, viewport.height - 512) + 1)
+    expect(desktopOverview?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
     expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
   }
 
   await page.setViewportSize({ width: 1312, height: 700 })
   await page.evaluate(() => window.scrollTo(0, 360))
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
-  const stickyTimeline = await timeline.boundingBox()
-  expect(stickyTimeline?.y ?? 999).toBeLessThanOrEqual(40)
+  expect(await timeline.evaluate((element) => getComputedStyle(element).position)).toBe('sticky')
   await page.evaluate(() => window.scrollTo(0, 0))
 
   for (const viewport of [

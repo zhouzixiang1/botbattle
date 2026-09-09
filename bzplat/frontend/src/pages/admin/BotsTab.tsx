@@ -125,7 +125,7 @@ export default function BotsTab() {
   if (loading && !bots.length) return <Loading />
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <Input
           value={q}
           onChange={(e) => {
@@ -146,39 +146,39 @@ export default function BotsTab() {
         <Table className="min-w-[42rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">序号</TableHead>
-              <TableHead className="px-3 py-2.5">名称</TableHead>
-              <TableHead className="px-3 py-2.5">所有者</TableHead>
-              <TableHead className="px-3 py-2.5">版本</TableHead>
-              <TableHead className="px-3 py-2.5">状态</TableHead>
-              <TableHead className="px-3 py-2.5">操作</TableHead>
+              <TableHead className="px-2.5 py-2">序号</TableHead>
+              <TableHead className="px-2.5 py-2">名称</TableHead>
+              <TableHead className="px-2.5 py-2">所有者</TableHead>
+              <TableHead className="px-2.5 py-2">版本</TableHead>
+              <TableHead className="px-2.5 py-2">状态</TableHead>
+              <TableHead className="px-2.5 py-2">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.map((b, index) => (
               <Fragment key={b.id}>
                 <TableRow className="hover:bg-accent">
-                  <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
-                  <TableCell className="max-w-[16rem] px-3 py-2 font-medium text-foreground">
+                  <TableCell className="px-2.5 py-1.5 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
+                  <TableCell className="max-w-[13rem] px-2.5 py-1.5 font-medium text-foreground">
                     <OverflowText>
                       {b.display_name || b.name}
+                      {b.is_builtin ? <span className="ml-1 text-[10px] font-normal text-primary">内置</span> : null}
                     </OverflowText>
-                    {b.is_builtin ? <span className="ml-1 text-[10px] text-primary">内置</span> : null}
                     {b.runnable === false && (
                       <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
                         诊断：{b.format}/{b.os}-{b.arch}
                       </span>
                     )}
                   </TableCell>
-                  <TableCell className="px-3 py-2">
+                  <TableCell className="px-2.5 py-1.5">
                     {b.owner_name ? (
                       <Link to={`/user/${encodeURIComponent(b.owner_name)}`} className="text-primary hover:underline">
                         {b.owner_display || b.owner_name}
                       </Link>
                     ) : <span className="text-muted-foreground">内部用户 ID {b.owner_id}</span>}
                   </TableCell>
-                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
-                  <TableCell className="px-3 py-2">
+                  <TableCell className="px-2.5 py-1.5 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
+                  <TableCell className="px-2.5 py-1.5">
                     <div className="flex gap-1">
                       {b.is_deleted
                         ? <Badge variant="destructive" className="text-[10px]">所有者已删除</Badge>
@@ -188,12 +188,13 @@ export default function BotsTab() {
                       {b.runnable === false && <Badge variant="destructive" className="text-[10px]">不可运行</Badge>}
                     </div>
                   </TableCell>
-                  <TableCell className="px-3 py-2">
+                  <TableCell className="px-2.5 py-1.5">
                     <div className="flex flex-wrap gap-1">
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
+                        className="max-lg:min-h-11 px-2"
                         disabled={busyId === b.id || b.is_deleted || (!b.is_active && b.runnable === false)}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
                       >
@@ -203,6 +204,7 @@ export default function BotsTab() {
                         type="button"
                         variant="outline"
                         size="sm"
+                        className="max-lg:min-h-11 px-2"
                         onClick={() => void showVersions(b)}
                       >
                         版本
@@ -211,6 +213,7 @@ export default function BotsTab() {
                         type="button"
                         variant="destructive"
                         size="sm"
+                        className="max-lg:min-h-11 px-2"
                         disabled={busyId === b.id}
                         onClick={() => void del(b.id)}
                       >
@@ -221,7 +224,7 @@ export default function BotsTab() {
                 </TableRow>
                 {expand === b.id && (
                   <TableRow key={`${b.id}-v`} className="bg-muted/60">
-                    <TableCell colSpan={6} className="px-6 py-3">
+                    <TableCell colSpan={6} className="px-3 py-2">
                       {versions.length === 0 ? (
                         <EmptyState text="无版本" />
                       ) : (

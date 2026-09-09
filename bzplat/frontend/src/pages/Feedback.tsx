@@ -512,13 +512,13 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
       />
       {error && <ErrorMsg msg={error} />}
       <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(20rem,30rem)_minmax(0,1fr)]">
-        <DataRegion title="提交新问题" description="请不要填写密码、验证码、访问令牌或实名信息" contentClassName="space-y-3 p-4">
-          <div className="grid gap-3 sm:grid-cols-2">
+        <DataRegion title="提交新问题" description="请不要填写密码、验证码、访问令牌或实名信息" contentClassName="space-y-2.5 px-3 py-3">
+          <div className="grid gap-2.5 sm:grid-cols-2">
             <div className="space-y-1.5"><Label>哪里有问题</Label><Select value={category} onValueChange={setCategory}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(BUG_CATEGORY_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div>
             <div className="space-y-1.5"><Label>影响程度</Label><Select value={impact} onValueChange={setImpact}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(BUG_IMPACT_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div>
           </div>
           <div className="space-y-1.5"><Label htmlFor="feedback-title">一句话说明</Label><Input id="feedback-title" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：对局回放点下一步没有变化" /></div>
-          <div className="space-y-1.5"><Label htmlFor="feedback-body">补充说明（可选）</Label><Textarea id="feedback-body" value={body} onChange={(event) => setBody(event.target.value)} maxLength={20_000} rows={4} placeholder="如果方便，补充点了什么、期望看到什么；不需要写技术原因" /></div>
+          <div className="space-y-1.5"><Label htmlFor="feedback-body">补充说明（可选）</Label><Textarea id="feedback-body" value={body} onChange={(event) => setBody(event.target.value)} maxLength={20_000} rows={3} placeholder="如果方便，补充点了什么、期望看到什么；不需要写技术原因" /></div>
           <div className="space-y-1.5">
             <Label htmlFor="feedback-files">截图（可选）</Label>
             <input id="feedback-files" className="peer sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => setFiles(Array.from(event.target.files || []).slice(0, 5))} />
@@ -545,22 +545,22 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
           <Button className="w-full" disabled={submitting || !title.trim()} aria-busy={submitting} onClick={() => void submit()}><Send className="size-4" />{submitting ? '正在提交…' : '提交并开始追踪'}</Button>
         </DataRegion>
 
-        <section className="grid min-h-[32rem] min-w-0 overflow-hidden rounded-xl border bg-card lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]">
+        <section className="grid min-h-[24rem] min-w-0 overflow-hidden rounded-xl border bg-card lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]">
           <div className="min-w-0 border-b lg:border-r lg:border-b-0">
-            <header className="border-b px-3 py-2.5"><h2 className="text-sm font-semibold">{user ? '我的反馈' : '本机访客反馈'}</h2><p className="mt-0.5 text-xs text-muted-foreground">{user ? '登录账号下的提交记录' : '追踪凭据仅保存在这台设备'}</p></header>
-            {loading ? <Loading /> : visibleReports.length === 0 ? <EmptyState text="暂无反馈记录" icon={<Bug className="size-5 opacity-50" />} className="py-10" /> : <ul className="divide-y">{visibleReports.map((item) => <li key={item.public_id}><button type="button" onClick={() => void selectReport(item.public_id)} className="w-full min-w-0 cursor-pointer px-3 py-2.5 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"><span className="flex items-center gap-2"><span className="truncate text-sm font-medium">{item.title}</span>{item.status && <Badge variant="secondary" className="ml-auto shrink-0">{BUG_STATUS_LABELS[item.status] || item.status}</Badge>}</span><span className="mt-1 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.updated_at)}</span></button></li>)}</ul>}
+            <header className="border-b px-3 py-2"><h2 className="text-sm font-semibold">{user ? '我的反馈' : '本机访客反馈'}</h2><p className="mt-0.5 text-xs text-muted-foreground">{user ? '登录账号下的提交记录' : '追踪凭据仅保存在这台设备'}</p></header>
+            {loading ? <Loading /> : visibleReports.length === 0 ? <EmptyState text="暂无反馈记录" icon={<Bug className="size-5 opacity-50" />} className="py-8" /> : <ul className="divide-y">{visibleReports.map((item) => <li key={item.public_id}><button type="button" onClick={() => void selectReport(item.public_id)} className="w-full min-w-0 cursor-pointer px-3 py-1.5 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"><span className="flex items-center gap-2"><span className="truncate text-sm font-medium">{item.title}</span>{item.status && <Badge variant="secondary" className="ml-auto shrink-0">{BUG_STATUS_LABELS[item.status] || item.status}</Badge>}</span><span className="mt-0.5 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.updated_at)}</span></button></li>)}</ul>}
           </div>
           <div className="min-h-0 min-w-0">
-            {!loaded ? <EmptyState text="选择一条反馈查看处理进度" className="py-16" /> : <div className="flex min-h-0 flex-col">
-              <div className="border-b px-4 py-3">
+            {!loaded ? <EmptyState text="选择一条反馈查看处理进度" className="justify-start py-10" /> : <div className="flex min-h-0 flex-col">
+              <div className="border-b px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-words text-sm font-semibold">{loaded.bug_report.title}</h3><Badge>{BUG_STATUS_LABELS[loaded.bug_report.status] || loaded.bug_report.status}</Badge></div>
-                <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{BUG_CATEGORY_LABELS[loaded.bug_report.category]}</span><span>{BUG_IMPACT_LABELS[loaded.bug_report.impact]}</span><span className="font-mono">{loaded.bug_report.public_id}</span></div>
-                <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+                <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{BUG_CATEGORY_LABELS[loaded.bug_report.category]}</span><span>{BUG_IMPACT_LABELS[loaded.bug_report.impact]}</span><span className="font-mono">{loaded.bug_report.public_id}</span></div>
+                <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
                   {loaded.bug_report.attachments.map((attachment) => <Button key={attachment.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(attachment.public_id, attachment.original_name)}><Paperclip className="size-3.5" /><span className="max-w-44 truncate">{attachment.original_name}</span></Button>)}
                   {loaded.bug_report.attachments.length < 5 && <div className="min-w-48 flex-1"><input id="feedback-more-files" className="peer sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={uploading} aria-label="补充截图" onChange={(event) => { const selectedFiles = Array.from(event.target.files || []); event.target.value = ''; void addAttachments(selectedFiles) }} /><Label htmlFor="feedback-more-files" aria-disabled={uploading} className={buttonVariants({ variant: 'outline', size: 'sm', className: 'min-h-11 w-full cursor-pointer peer-disabled:pointer-events-none peer-disabled:opacity-50 peer-focus-visible:ring-[3px] peer-focus-visible:ring-ring/50' })}><Paperclip className="size-4" />{uploading ? '正在上传…' : '选择补充截图'}</Label></div>}
                   {uploading && <span className="text-xs text-muted-foreground">正在上传…</span>}
                 </div>
-                <div className="mt-2 flex flex-wrap gap-2">{loaded.bug_report.events.filter((event) => event.event_type === 'status_changed').map((event) => <span key={event.public_id} className="inline-flex items-center gap-1 text-xs text-muted-foreground"><CheckCircle2 className="size-3.5" />{BUG_STATUS_LABELS[event.to_status] || event.to_status}{event.note ? `：${event.note}` : ''}</span>)}</div>
+                <div className="mt-1.5 flex flex-wrap gap-2">{loaded.bug_report.events.filter((event) => event.event_type === 'status_changed').map((event) => <span key={event.public_id} className="inline-flex items-center gap-1 text-xs text-muted-foreground"><CheckCircle2 className="size-3.5" />{BUG_STATUS_LABELS[event.to_status] || event.to_status}{event.note ? `：${event.note}` : ''}</span>)}</div>
               </div>
               <ThreadView thread={loaded.thread} reply={reply} onReplyChange={setReply} onSend={() => void sendReply()} sending={sending} />
             </div>}

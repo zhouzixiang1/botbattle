@@ -397,6 +397,17 @@ export default function Leaderboard() {
         onRetry={refreshQueue}
         maxQueued={4}
         compactOnMobile
+        compactCapacity
+        className={cn(
+          // 桌面端（md+）页面级密度压缩：只收紧面板容器与内部留白，
+          // 不改动共享组件的结构、文案与语义；<md 保持组件默认密度。
+          'md:[&>div]:px-3 md:[&>div]:py-2',
+          'md:[&_dl]:gap-1.5 md:[&_dl>div]:px-2 md:[&_dl>div]:py-1',
+          'md:[&_section]:p-2',
+          'md:[&_section>div:first-child]:mb-1',
+          'md:[&_li]:px-2.5 md:[&_li]:py-1',
+          'md:[&_li>div:nth-child(2)]:mt-0.5',
+        )}
       />
 
       <DataRegion

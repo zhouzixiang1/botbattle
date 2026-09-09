@@ -906,84 +906,87 @@ export default function Challenge() {
       ) : (
       <form
         onSubmit={(e) => void onSubmit(e)}
-        className="mx-auto w-full max-w-5xl max-sm:[&_[data-slot=button]]:min-h-11 max-sm:[&_[data-slot=button]]:min-w-11 max-sm:[&_[data-slot=select-trigger]]:min-h-11"
+        className="w-full max-sm:[&_[data-slot=button]]:min-h-11 max-sm:[&_[data-slot=button]]:min-w-11 max-sm:[&_[data-slot=select-trigger]]:min-h-11"
         data-testid="challenge-form"
       >
-        <Card>
-          <CardContent className="space-y-4">
-            {/* 游戏筛选：切换时重置两座位（不同游戏的 bot 不互通） */}
-            <div className="space-y-1.5">
-              <Label>游戏</Label>
-              <Select
-                value={gameId}
-                onValueChange={(v) => {
-                  setGameId(v as GameId)
-                  resetSeatsOnGameChange()
-                }}
-              >
-                <SelectTrigger className="mt-1.5 w-full" aria-label="游戏">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {GAMES.map((g) => (
-                    <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+        <Card density="compact">
+          <CardContent className="grid gap-3 xl:grid-cols-[minmax(15rem,18rem)_minmax(0,1fr)]">
+            {/* 左列：对局配置（游戏 / 时限）。切换游戏会重置两座位（不同游戏的 bot 不互通） */}
+            <div className="min-w-0 space-y-3 xl:border-r xl:border-border xl:pr-4">
+              <div className="space-y-1.5">
+                <Label>游戏</Label>
+                <Select
+                  value={gameId}
+                  onValueChange={(v) => {
+                    setGameId(v as GameId)
+                    resetSeatsOnGameChange()
+                  }}
+                >
+                  <SelectTrigger className="mt-1.5 w-full" aria-label="游戏">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GAMES.map((g) => (
+                      <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-2.5">
+                <Label>对局时限</Label>
+                <Select
+                  value={timeControlId || 'time-control-pending'}
+                  onValueChange={(value) => { if (value !== 'time-control-pending') setTimeControlId(value) }}
+                  disabled={timeControlsLoading || !timeControlRegistry || timeControlRegistry.time_controls.length <= 1}
+                >
+                  <SelectTrigger className="w-full" aria-label="对局时限" aria-describedby="challenge-time-control-help">
+                    <SelectValue>
+                      {selectedTimeControl
+                        ? timeControlLabel(selectedTimeControl)
+                        : timeControlsLoading
+                          ? '正在读取时限…'
+                          : '时限不可用'}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {timeControlRegistry?.time_controls.map((control) => (
+                      <SelectItem key={control.id} value={control.id}>
+                        {timeControlLabel(control)}{control.is_default ? ' · 默认' : ' · 练习'}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p id="challenge-time-control-help" className="text-xs leading-relaxed text-muted-foreground">
+                  {selectedTimeControl
+                    ? timeControlDescription(selectedTimeControl, seat2Kind === 'human')
+                    : '只接受平台公开的固定时限，加载失败时不会提交对局。'}
+                </p>
+                {seat2Kind === 'human' && selectedTimeControl && (
+                  <p className="text-xs font-medium text-primary">
+                    非对称练习：所选时限只约束 Bot；你仍使用页面的防挂机时限。
+                  </p>
+                )}
+                {seat2Kind === 'bot' && alternateTimeControl && (
+                  <p className="text-xs font-medium text-primary">
+                    替代时限属于练习模式，本局不计平台排行榜。
+                  </p>
+                )}
+                {timeControlsError && <ErrorMsg msg={timeControlsError} className="text-xs" />}
+              </div>
             </div>
 
-            <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-3">
-              <Label>对局时限</Label>
-              <Select
-                value={timeControlId || 'time-control-pending'}
-                onValueChange={(value) => { if (value !== 'time-control-pending') setTimeControlId(value) }}
-                disabled={timeControlsLoading || !timeControlRegistry || timeControlRegistry.time_controls.length <= 1}
-              >
-                <SelectTrigger className="w-full" aria-label="对局时限" aria-describedby="challenge-time-control-help">
-                  <SelectValue>
-                    {selectedTimeControl
-                      ? timeControlLabel(selectedTimeControl)
-                      : timeControlsLoading
-                        ? '正在读取时限…'
-                        : '时限不可用'}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {timeControlRegistry?.time_controls.map((control) => (
-                    <SelectItem key={control.id} value={control.id}>
-                      {timeControlLabel(control)}{control.is_default ? ' · 默认' : ' · 练习'}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p id="challenge-time-control-help" className="text-xs leading-relaxed text-muted-foreground">
-                {selectedTimeControl
-                  ? timeControlDescription(selectedTimeControl, seat2Kind === 'human')
-                  : '只接受平台公开的固定时限，加载失败时不会提交对局。'}
-              </p>
-              {seat2Kind === 'human' && selectedTimeControl && (
-                <p className="text-xs font-medium text-primary">
-                  非对称练习：所选时限只约束 Bot；你仍使用页面的防挂机时限。
-                </p>
-              )}
-              {seat2Kind === 'bot' && alternateTimeControl && (
-                <p className="text-xs font-medium text-primary">
-                  替代时限属于练习模式，本局不计平台排行榜。
-                </p>
-              )}
-              {timeControlsError && <ErrorMsg msg={timeControlsError} className="text-xs" />}
-            </div>
-
-            <div className="rounded-lg border border-border p-3">
+            {/* 右列：双方座位选择（自博弈徽标 + 我的位置切换 + 双列座位） */}
+            <div className="min-w-0 space-y-3">
               {selfPlay && (
-                <Badge variant="secondary" className="mb-3 gap-1">
+                <Badge variant="secondary" className="gap-1">
                   <BotIcon className="size-3" />
                   自博弈
                 </Badge>
               )}
               {seat2Kind === 'bot' && (
                 <div
-                  className="mb-3 flex flex-col gap-2 rounded-lg bg-muted/50 p-2.5 sm:flex-row sm:items-center sm:justify-between"
+                  className="flex flex-col gap-2 rounded-lg bg-muted/50 p-2 sm:flex-row sm:items-center sm:justify-between"
                   data-testid="challenge-my-seat"
                 >
                   <div className="min-w-0">
@@ -1078,49 +1081,52 @@ export default function Challenge() {
                 </div>
               </div>
 
-              <p className="mt-3 text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 {seat2Kind === 'human'
                   ? `${playerLabels[0]}使用节能沙箱，${playerLabels[1]}由你亲自上场；本局不计平台排行榜。`
                   : '节能沙箱由平台运行；本地 Bot 由你的电脑回答裁判请求，可两边都选本地连接。'}
               </p>
             </div>
 
-            {usesLocalBot && (
-              <div className="flex min-w-0 items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs" role="status">
-                <Laptop className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
-                <span className="min-w-0 break-words">
-                  <strong className="text-foreground">本地 Bot 练习局，不计平台排行榜。</strong>
-                  {' '}开始前请保持所选连接在线；平台只负责裁判，不会连接你的电脑端口。
-                </span>
-              </div>
-            )}
+            {/* 底部通栏：运行提示 / 错误 / 开始按钮（跨左右两列） */}
+            <div className="min-w-0 space-y-2 xl:col-span-2 xl:border-t xl:border-border xl:pt-3">
+              {usesLocalBot && (
+                <div className="flex min-w-0 items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs" role="status">
+                  <Laptop className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
+                  <span className="min-w-0 break-words">
+                    <strong className="text-foreground">本地 Bot 练习局，不计平台排行榜。</strong>
+                    {' '}开始前请保持所选连接在线；平台只负责裁判，不会连接你的电脑端口。
+                  </span>
+                </div>
+              )}
 
-            {agentError && <ErrorMsg msg={agentError} />}
+              {agentError && <ErrorMsg msg={agentError} />}
 
-            {error && (
-              <div ref={errorAlertRef} role="alert" tabIndex={-1}>
-                <ErrorMsg msg={error} />
-              </div>
-            )}
-            <Button
-              type="submit"
-              disabled={busy || !submissionReady}
-              className="w-full gap-1.5"
-            >
-              <Play className="size-4" />
-              {busy ? '发起中…' : seat2Kind === 'human' ? '开始人类对战' : '开始对局'}
-            </Button>
-            {!busy && !submissionReady && (
-              <p className="text-center text-xs text-muted-foreground">
-                {!timeControlReady
-                  ? '对局时限尚未就绪，请稍后重试'
-                  : seat2Kind === 'human'
-                  ? `请选择${playerLabels[0]}的 Bot`
-                  : usesLocalBot
-                    ? '请为双方选择可用连接；离线或正在对局的本地 Bot 不能开始'
-                    : '请为双方选择 Bot'}
-              </p>
-            )}
+              {error && (
+                <div ref={errorAlertRef} role="alert" tabIndex={-1}>
+                  <ErrorMsg msg={error} />
+                </div>
+              )}
+              <Button
+                type="submit"
+                disabled={busy || !submissionReady}
+                className="w-full gap-1.5"
+              >
+                <Play className="size-4" />
+                {busy ? '发起中…' : seat2Kind === 'human' ? '开始人类对战' : '开始对局'}
+              </Button>
+              {!busy && !submissionReady && (
+                <p className="text-center text-xs text-muted-foreground">
+                  {!timeControlReady
+                    ? '对局时限尚未就绪，请稍后重试'
+                    : seat2Kind === 'human'
+                    ? `请选择${playerLabels[0]}的 Bot`
+                    : usesLocalBot
+                      ? '请为双方选择可用连接；离线或正在对局的本地 Bot 不能开始'
+                      : '请为双方选择 Bot'}
+                </p>
+              )}
+            </div>
           </CardContent>
         </Card>
       </form>

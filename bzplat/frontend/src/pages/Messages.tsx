@@ -205,7 +205,7 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
         </nav>
 
         <div className={cn('min-w-0 border-b lg:border-r lg:border-b-0', selected && 'hidden lg:block')}>
-          <div className="flex h-12 items-center gap-2 border-b px-3">
+          <div className="flex h-10 items-center gap-2 border-b px-2.5">
             <h2 className="text-sm font-semibold">{box === 'inbox' ? '收件箱' : '已发送'}</h2>
             <Badge variant="secondary" className="tabular-nums">{threads.length}</Badge>
             <Button variant="ghost" size="icon" className="ml-auto" aria-label="刷新消息" onClick={() => void loadThreads()} disabled={loading}>
@@ -213,7 +213,7 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
             </Button>
           </div>
           {loading ? <Loading text="正在加载消息…" /> : threads.length === 0 ? (
-            <EmptyState text={box === 'inbox' ? '暂无来信' : '暂无已发送回复'} className="py-14" />
+            <EmptyState text={box === 'inbox' ? '暂无来信' : '暂无已发送回复'} className="py-10" />
           ) : (
             <ul className="divide-y">
               {threads.map((item) => (
@@ -221,14 +221,14 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
                   <button
                     type="button"
                     onClick={() => navigate(`/messages/${encodeURIComponent(item.public_id)}`)}
-                    className="min-h-20 w-full min-w-0 cursor-pointer px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    className="min-h-16 w-full min-w-0 cursor-pointer px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   >
                     <span className="flex min-w-0 items-center gap-2">
                       <span className={cn('truncate text-sm', item.unread_count > 0 && 'font-semibold')}>{item.subject || '无主题消息'}</span>
                       {item.unread_count > 0 && <Badge className="ml-auto shrink-0 tabular-nums">{item.unread_count}</Badge>}
                     </span>
-                    <span className="mt-1 line-clamp-2 break-words text-xs leading-relaxed text-muted-foreground">{item.latest_body}</span>
-                    <span className="mt-1 flex items-center gap-2 text-[0.6875rem] text-muted-foreground">
+                    <span className="mt-0.5 line-clamp-2 break-words text-xs leading-snug text-muted-foreground">{item.latest_body}</span>
+                    <span className="mt-0.5 flex items-center gap-2 text-[0.6875rem] text-muted-foreground">
                       <span>{THREAD_KIND_LABELS[item.kind] || '消息'}</span>
                       <time className="ml-auto font-mono tabular-nums">{fmtTime(item.latest_at)}</time>
                     </span>

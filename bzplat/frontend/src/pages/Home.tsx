@@ -156,8 +156,8 @@ export default function Home() {
                           <TableCell className="whitespace-normal">
                             <MatchParticipants source={match} />
                           </TableCell>
-                          <TableCell>
-                            <div className="space-y-1">
+                          <TableCell className="max-w-[16rem] whitespace-normal">
+                            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                               <StatusBadge status={match.status} />
                               <MatchOutcome
                                 source={match}
@@ -240,22 +240,23 @@ function LikedTopMatches() {
       ) : (
         <ul className="divide-y divide-border">
           {matches.map((match, index) => (
-            <li key={match.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
+            <li key={match.id} className="grid min-w-0 gap-2 px-3 py-1.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
               <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
               <div className="min-w-0">
                 <MatchParticipants source={match} />
-                {(match.outcome || match.status) && (
-                  <MatchOutcome
-                    source={match}
-                    seatLabels={outcomeSeatLabels(match)}
-                    primaryOnly
-                    className="mt-1"
-                  />
-                )}
-                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                  <span>{gameLabel(match.game_id)}</span>
-                  <MatchNatureBadge matchType={match.match_type} source={match} />
-                  <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  {(match.outcome || match.status) && (
+                    <MatchOutcome
+                      source={match}
+                      seatLabels={outcomeSeatLabels(match)}
+                      primaryOnly
+                    />
+                  )}
+                  <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>{gameLabel(match.game_id)}</span>
+                    <MatchNatureBadge matchType={match.match_type} source={match} />
+                    <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                  </span>
                 </div>
               </div>
               <div className="flex min-w-0 shrink-0 items-center gap-2">
