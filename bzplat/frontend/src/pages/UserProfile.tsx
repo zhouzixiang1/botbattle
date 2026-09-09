@@ -166,7 +166,7 @@ export default function UserProfile() {
   const xpProgress = Math.min(100, ((profile.xp ?? 0) % 100) || ((profile.xp ?? 0) > 0 ? 100 : 0))
 
   return (
-    <PageFrame width="default" layout="public-user-profile">
+    <PageFrame width="full" layout="public-user-profile">
       <PageHeader
         eyebrow={`@${profile.username}`}
         title={<EntityName lines={2} tooltip={displayName} className="text-2xl font-bold sm:text-[1.75rem]">{displayName}</EntityName>}
@@ -223,7 +223,7 @@ export default function UserProfile() {
         ) : bots.length === 0 ? (
           <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
         ) : (
-          <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
             {bots.map((bot) => {
               const GameIcon = gameIcon(bot.game_id)
               return (

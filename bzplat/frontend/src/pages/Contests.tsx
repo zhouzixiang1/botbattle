@@ -561,7 +561,7 @@ export default function Contests() {
   }
 
   return (
-    <PageFrame layout="public-contests" className="gap-3">
+    <PageFrame width="full" layout="public-contests" className="gap-3">
       <PageHeader
         title="锦标赛"
         description="浏览报名、排期、对阵与正式结果。"

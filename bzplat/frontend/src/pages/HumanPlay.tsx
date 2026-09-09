@@ -425,6 +425,37 @@ export default function HumanPlay() {
     ? `真人 · 座位 ${humanSeat + 1}${seatDetail(humanSeat) ? ` · ${seatDetail(humanSeat)}` : ''}`
     : '正在确认你的位置'
 
+  // 对阵卡：xl+ 并入棋盘主列（与棋盘列同宽），xl 以下保持整行堆叠。
+  const matchupNode = match ? (
+    <Card data-testid="human-matchup" className="gap-0 py-0">
+      <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
+        <MatchParticipantIdentity
+          source={match}
+          side={0}
+          state={winnerSeat === 0 ? 'winner' : winnerSeat === 1 ? 'loser' : 'neutral'}
+          seatDetail={seatDetail(0)}
+          className="order-1 py-0.5"
+        />
+        <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
+          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+            {match ? gameLabel(gameId) : '连接中'}
+          </div>
+          <div className="mt-0.5 text-sm font-semibold text-foreground">{myPosition}</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {over ? '对局已结束' : reconnecting ? '正在恢复连接' : '实时同步'} · {events.length} 条事件
+          </div>
+        </div>
+        <MatchParticipantIdentity
+          source={match}
+          side={1}
+          state={winnerSeat === 1 ? 'winner' : winnerSeat === 0 ? 'loser' : 'neutral'}
+          seatDetail={seatDetail(1)}
+          className="order-2 py-0.5 sm:order-3"
+        />
+      </CardContent>
+    </Card>
+  ) : null
+
   // 两种 humanPlay 布局的棋盘/动作面板内容；withBoardPicks 区分是否启用画布直接落子。
   const renderSurface = (withBoardPicks: boolean) => {
     if (!gameSpec) return null
@@ -511,7 +542,7 @@ export default function HumanPlay() {
 
   return (
     <PageFrame
-      width="wide"
+      width="full"
       layout="game-human-play"
       // 棋盘是人机页的主任务；沿用页面 sticky 间距 token 压缩首屏区块节奏，
       // 不通过缩小方形棋盘来换取视口适配。
@@ -532,35 +563,7 @@ export default function HumanPlay() {
         }
       />
 
-      {match && (
-        <Card data-testid="human-matchup" className="gap-0 py-0">
-          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
-            <MatchParticipantIdentity
-              source={match}
-              side={0}
-              state={winnerSeat === 0 ? 'winner' : winnerSeat === 1 ? 'loser' : 'neutral'}
-              seatDetail={seatDetail(0)}
-              className="order-1 py-0.5"
-            />
-            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
-              <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                {match ? gameLabel(gameId) : '连接中'}
-              </div>
-              <div className="mt-0.5 text-sm font-semibold text-foreground">{myPosition}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                {over ? '对局已结束' : reconnecting ? '正在恢复连接' : '实时同步'} · {events.length} 条事件
-              </div>
-            </div>
-            <MatchParticipantIdentity
-              source={match}
-              side={1}
-              state={winnerSeat === 1 ? 'winner' : winnerSeat === 0 ? 'loser' : 'neutral'}
-              seatDetail={seatDetail(1)}
-              className="order-2 py-0.5 sm:order-3"
-            />
-          </CardContent>
-        </Card>
-      )}
+      {match && !desktopRail && matchupNode}
 
       <StickyToolbar label="人类对战状态" className="justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -632,7 +635,7 @@ export default function HumanPlay() {
         <div
           data-testid="human-canvas-layout"
           className={desktopRail
-            ? 'grid min-w-0 justify-center gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
+            ? 'grid min-w-0 justify-center gap-4 grid-cols-[minmax(0,1fr)_22rem]'
             : viewportDashboard
               ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
               : viewportFitCanvas
@@ -642,6 +645,7 @@ export default function HumanPlay() {
           {desktopRail ? (
             <>
               <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(52rem,calc(100dvh-26rem))]">
+                {matchupNode}
                 {renderSurface(true)}
               </div>
               <div className="flex min-w-0 flex-col gap-3">
@@ -673,11 +677,12 @@ export default function HumanPlay() {
 
       {gameSpec?.humanPlay.layout === 'canvas-controls-log' && (
         <div className={desktopRail
-          ? 'grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'
+          ? 'grid min-w-0 gap-3 grid-cols-[minmax(0,1fr)_22rem]'
           : 'grid min-w-0 items-start gap-3'}>
           {desktopRail ? (
             <>
-              <div className="min-w-0 space-y-3 xl:max-w-[min(100%,calc((100dvh-24rem)*1.7))]">
+              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[min(100%,calc((100dvh-24rem)*1.7))]">
+                {matchupNode}
                 {renderSurface(false)}
               </div>
               <div className="flex min-w-0 flex-col gap-3">

@@ -241,7 +241,7 @@ export default function ContestLive() {
 
   if (!live) {
     return (
-      <PageFrame width="wide" layout="contest-live">
+      <PageFrame width="full" layout="contest-live">
         <PageHeader
           eyebrow={<span className="inline-flex items-center gap-1.5"><Radio aria-hidden="true" className="size-3.5 text-primary" />赛事直播</span>}
           title="正在进入直播间"
@@ -297,7 +297,7 @@ export default function ContestLive() {
   )
 
   return (
-    <PageFrame width="wide" layout="contest-live">
+    <PageFrame width="full" layout="contest-live">
       <PageHeader
         eyebrow={(
           <span className="inline-flex items-center gap-2">

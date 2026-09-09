@@ -310,27 +310,29 @@ export default function BotVersionManager({
 
         <DataRegion title="上传新版本" description="通过预检后发布，并自动切换为当前版本。">
         <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
-          <div className="space-y-1.5">
-            <Label>Botzone 运行模式</Label>
-            <Select value={mode} onValueChange={setMode}>
-              <SelectTrigger className="h-9 w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RUNTIME_MODES.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    {m.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {RUNTIME_MODES.find((m) => m.value === mode)?.desc}
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ver-note">版本备注（可选）</Label>
-            <Input id="ver-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} />
+          <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>Botzone 运行模式</Label>
+              <Select value={mode} onValueChange={setMode}>
+                <SelectTrigger className="h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RUNTIME_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {RUNTIME_MODES.find((m) => m.value === mode)?.desc}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ver-note">版本备注（可选）</Label>
+              <Input id="ver-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} />
+            </div>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="ver-file">程序文件（Linux x86_64 ELF）</Label>

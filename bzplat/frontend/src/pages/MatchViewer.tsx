@@ -11,13 +11,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, ChevronDown, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download, MessageSquare } from 'lucide-react'
-import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
 import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
+import { PageFrame, PageHeader } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -720,16 +720,29 @@ export default function MatchViewer() {
 
   // 主画布列：回放摘要 + canvas + 回放控制。视口高度约束只压 canvas 宽度，
   // 摘要与控制条仍占满整列，让 1440×900 尽量在单视口内容纳核心内容。
-  const squareCanvasClamp = 'mx-auto w-full xl:max-w-[min(52rem,calc(100dvh-32rem))]'
-  const mainColumnClasses = desktopRail
-    ? viewportFitCanvas
-      ? 'min-w-0 space-y-2.5 w-full justify-self-center'
-      : ReplayHud
-        ? 'min-w-0 space-y-2.5 xl:max-w-[min(100%,calc((100dvh-26rem)*1.7))]'
-        : 'min-w-0 space-y-2.5'
-    : viewportFitCanvas
-      ? 'min-w-0 space-y-2.5 w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))]'
-      : 'min-w-0 space-y-2.5'
+  const mainColumnClasses = viewportFitCanvas
+    ? 'min-w-0 space-y-2.5 w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))]'
+    : 'min-w-0 space-y-2.5'
+  // xl+ 仪表盘：主列拆成「信息带区 + 棋盘区」两段，均水平居中——
+  // 信息带不再横铺整行，棋盘区按游戏视口约束吃满主列：
+  // - 方形棋盘（gomoku/pencil）：受 dvh 钳制，信息带独立收口到 42rem，
+  //   避免随 dvh 钳制收得过窄导致结果卡过度折行；
+  // - holdem：信息带与 16:9 牌桌列同宽，完全紧贴。
+  const introZoneClasses = viewportFitCanvas
+    ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,42rem)]'
+    : ReplayHud
+      ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,calc((100dvh-26rem)*1.7))]'
+      : 'min-w-0 w-full space-y-3'
+  const boardZoneClasses = viewportFitCanvas
+    ? 'min-w-0 w-full space-y-3 xl:max-w-[min(52rem,calc(100dvh-26rem))]'
+    : ReplayHud
+      ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,calc((100dvh-26rem)*1.7))]'
+      : 'min-w-0 w-full space-y-3'
+  // 控制条单行化：宽主列（holdem）xl 起一行；方形棋盘列受 dvh 钳制较窄，
+  // 2xl 起才收成一行，xl–2xl 保持换行但仍然贴棋盘列宽。
+  const controlsRowClasses = viewportFitCanvas
+    ? 'flex flex-wrap items-center justify-center gap-1.5 2xl:flex-nowrap 2xl:justify-start'
+    : 'flex flex-wrap items-center justify-center gap-1.5 xl:flex-nowrap xl:justify-start'
 
   const mainColumn = (
     <>
@@ -738,25 +751,51 @@ export default function MatchViewer() {
           <ReplaySummary vm={visibleVm} seats={seats} />
         </div>
       )}
-      <div className={viewportFitCanvas && desktopRail ? squareCanvasClamp : undefined}>
-        <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
-      </div>
+      <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
       {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
       {!zeroProgressTechnicalMatch && (
         <Card className="gap-0 py-0">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex flex-wrap items-center justify-center gap-1.5">
+          <CardContent className="px-3 py-2">
+            <div className={controlsRowClasses}>
               {navigation && (
-                <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" className="px-2" aria-label={`上一${navigation.unitLabel}`} onClick={() => jumpSegment(-1)}>
+                      <SkipBack className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{`上一${navigation.unitLabel}`}</TooltipContent>
+                </Tooltip>
               )}
-              <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一个事件</Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" className="px-2" aria-label="上一个事件" onClick={() => step(-1)}>
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>上一个事件</TooltipContent>
+              </Tooltip>
               <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
                 {playing ? <Pause className="size-4" /> : <Play className="size-4" />}{playbackLabel}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一个事件<ChevronRight className="size-4" /></Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" className="px-2" aria-label="下一个事件" onClick={() => step(1)}>
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>下一个事件</TooltipContent>
+              </Tooltip>
               {navigation && (
-                <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" className="px-2" aria-label={`下一${navigation.unitLabel}`} onClick={() => jumpSegment(1)}>
+                      <SkipForward className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{`下一${navigation.unitLabel}`}</TooltipContent>
+                </Tooltip>
               )}
               {navigation && bounds.length >= 2 && (
                 <Select
@@ -767,7 +806,7 @@ export default function MatchViewer() {
                       : bounds[Number(value)] ?? 0,
                   )}
                 >
-                  <SelectTrigger size="sm" className="h-8 w-[6.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
+                  <SelectTrigger size="sm" className="h-8 w-[5.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -783,17 +822,17 @@ export default function MatchViewer() {
                 </Select>
               )}
               <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
-                <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs" aria-label="回放速度">
+                <SelectTrigger size="sm" className="h-8 w-[4.5rem] text-xs" aria-label="回放速度">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="mt-2.5 flex items-center gap-3">
-              <span data-testid="playback-position" className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
-              <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
+              <div className="flex basis-full items-center gap-3 xl:basis-auto xl:min-w-0 xl:flex-1">
+                <span data-testid="playback-position" className="shrink-0 whitespace-nowrap font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
+                <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="min-w-8 flex-1" />
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -836,23 +875,13 @@ export default function MatchViewer() {
     </Card>
   )
 
-  // xl+：主画布列 + 右信息栏（局面概览、动作上下文自上而下）；右栏随行高拉伸，
-  // 动作上下文在其中吸顶。xl 以下维持既有断点契约：概览先于棋盘、动作栏在后。
+  // xl+ 仪表盘（见 return）：主画布列 + 22rem 右信息栏，顶部信息带并入主列。
+  // xl 以下维持既有断点契约：概览先于棋盘、动作栏在后。
   const replayGrid = gameSpec?.replay.layout === 'wide' ? (
     <div className="space-y-3">
       {hudNode && <div className="min-w-0">{hudNode}</div>}
       <div className={mainColumnClasses}>{mainColumn}</div>
       <div className="min-w-0">{timelineCard}</div>
-    </div>
-  ) : desktopRail ? (
-    <div className={viewportDashboard || viewportFitCanvas
-      ? 'grid justify-center gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'
-      : 'grid gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'}>
-      <div className={mainColumnClasses}>{mainColumn}</div>
-      <div className="flex min-w-0 flex-col gap-3">
-        {hudNode}
-        {timelineCard}
-      </div>
     </div>
   ) : (
     <div className={viewportDashboard
@@ -874,31 +903,10 @@ export default function MatchViewer() {
     </div>
   )
 
-  return (
-    <PageStub
-      title={isLive ? '实时观赛' : '对局详情'}
-      actions={matchLogDownload || (recordDownload && id) ? (
-        <>
-          {matchLogDownload && (
-            <Button asChild variant="outline" size="sm" className="min-h-11">
-              <a href={matchLogDownload.href} download>
-                <Download aria-hidden="true" className="size-4" />
-                {matchLogDownload.label}
-              </a>
-            </Button>
-          )}
-          {recordDownload && id && (
-            <Button asChild variant="outline" size="sm" className="min-h-11">
-              <a href={`/api/matches/${encodeURIComponent(id)}/record`} download>
-                <Download aria-hidden="true" className="size-4" />
-                {recordDownload.label}
-              </a>
-            </Button>
-          )}
-        </>
-      ) : undefined}
-    >
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+  // 顶部信息带（对局元数据徽标）与结果卡/技术故障卡/debug/错误提示：xl+ 全部并入
+  // 棋盘主列、紧贴棋盘列宽，不再横铺整行；xl 以下保持原有整行堆叠顺序。
+  const metaRow = (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
         <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{id}</span>
         {match && (
           <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
@@ -970,12 +978,16 @@ export default function MatchViewer() {
             直接查看最终结果
           </Button>
         )}
-      </div>
+    </div>
+  )
 
+  const introBlocks = (
+    <>
+      {metaRow}
       {/* 对阵与结果形成一个稳定层级；身份不再同时散落于标题、摘要和详情链接。 */}
       {match && (
-        <Card data-testid="match-result-card" className="mb-3 gap-0 py-0">
-          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,auto)_minmax(0,1fr)] sm:items-center">
+        <Card data-testid="match-result-card" className="gap-0 py-0">
+          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.7fr)_minmax(0,1fr)] sm:items-center">
             {renderSeat(0)}
             <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
               <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
@@ -1009,9 +1021,8 @@ export default function MatchViewer() {
           </CardContent>
         </Card>
       )}
-
       {match && technicalTerminal && (
-        <Card role="alert" className="mb-3 gap-0 border-destructive/35 bg-destructive/5 py-0">
+        <Card role="alert" className="gap-0 border-destructive/35 bg-destructive/5 py-0">
           <CardContent className="px-3 py-2">
             <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1 text-xs leading-relaxed">
               <TriangleAlert aria-hidden="true" className="size-4 shrink-0 text-destructive" />
@@ -1045,7 +1056,6 @@ export default function MatchViewer() {
           </CardContent>
         </Card>
       )}
-
       {user
         && match
         && match.id === id
@@ -1059,30 +1069,74 @@ export default function MatchViewer() {
           seatNames={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
         />
       )}
-
-      {error && <ErrorMsg msg={error} className="mb-4" />}
+      {error && <ErrorMsg msg={error} />}
       {match && !gameSpec && (
-        <ErrorMsg msg={`无法显示该对局：${unsupportedGameLabel(match.game_id)}`} className="mb-4" />
+        <ErrorMsg msg={`无法显示该对局：${unsupportedGameLabel(match.game_id)}`} />
       )}
+    </>
+  )
 
-      {loading ? (
-        <Loading text="加载中…" />
-      ) : match && !gameSpec ? (
-        <Card><EmptyState
-          text={`回放不可用：${unsupportedGameLabel(match.game_id)}`}
-          icon={<TriangleAlert className="size-7 opacity-40" />}
-        /></Card>
-      ) : visible.length === 0 ? (
-        <Card><EmptyState
-          text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
-          icon={<History className="size-7 opacity-40" />}
-        /></Card>
+  const bodyFallback = loading ? (
+    <Loading text="加载中…" />
+  ) : match && !gameSpec ? (
+    <Card><EmptyState
+      text={`回放不可用：${unsupportedGameLabel(match.game_id)}`}
+      icon={<TriangleAlert className="size-7 opacity-40" />}
+    /></Card>
+  ) : visible.length === 0 ? (
+    <Card><EmptyState
+      text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
+      icon={<History className="size-7 opacity-40" />}
+    /></Card>
+  ) : null
+  const replayReady = !loading && Boolean(match && gameSpec) && visible.length > 0
+
+  return (
+    <PageFrame width="full" layout="match-viewer" className="gap-3">
+      <PageHeader
+        title={isLive ? '实时观赛' : '对局详情'}
+        actions={matchLogDownload || (recordDownload && id) ? (
+          <>
+            {matchLogDownload && (
+              <Button asChild variant="outline" size="sm" className="min-h-11">
+                <a href={matchLogDownload.href} download>
+                  <Download aria-hidden="true" className="size-4" />
+                  {matchLogDownload.label}
+                </a>
+              </Button>
+            )}
+            {recordDownload && id && (
+              <Button asChild variant="outline" size="sm" className="min-h-11">
+                <a href={`/api/matches/${encodeURIComponent(id)}/record`} download>
+                  <Download aria-hidden="true" className="size-4" />
+                  {recordDownload.label}
+                </a>
+              </Button>
+            )}
+          </>
+        ) : undefined}
+      />
+
+      {replayReady && desktopRail ? (
+        <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-3">
+          <div className="flex min-w-0 flex-col items-center gap-3">
+            <div className={introZoneClasses}>{introBlocks}</div>
+            <div className={boardZoneClasses}>{mainColumn}</div>
+          </div>
+          <div className="flex min-w-0 flex-col gap-3">
+            {hudNode}
+            {timelineCard}
+          </div>
+        </div>
       ) : (
-        replayGrid
+        <>
+          {introBlocks}
+          {replayReady ? replayGrid : bodyFallback}
+        </>
       )}
 
       {/* 返回与评论区折叠条共用一行，避免终局页底部出现两段独立大块。 */}
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         {match?.contest_id != null ? (
           <Button asChild variant="ghost" size="sm" className="min-h-11 gap-1.5">
             <Link to={`/contests/${match.contest_id}/live`}>
@@ -1096,6 +1150,6 @@ export default function MatchViewer() {
         )}
         {id && <CommentsBar targetId={id} className="w-full min-w-[12rem] sm:w-auto sm:max-w-sm sm:flex-1" />}
       </div>
-    </PageStub>
+    </PageFrame>
   )
 }

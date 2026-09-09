@@ -82,7 +82,7 @@ export default function Home() {
   }, [gameId])
 
   return (
-    <PageFrame layout="public-home">
+    <PageFrame layout="public-home" width="full">
       <PageHeader
         title="Bot 对战"
         description="上传 Bot，选择游戏和对手，开一场。"
@@ -147,17 +147,17 @@ export default function Home() {
                         <TableRow key={match.id}>
                           <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
                           <TableCell>
-                            <span className="flex min-w-0 items-center gap-1.5">
+                            <span className="flex min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap">
                               <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
                               <span>{gameLabel(match.game_id)}</span>
                               <MatchNatureBadge matchType={match.match_type} source={match} />
                             </span>
                           </TableCell>
                           <TableCell className="whitespace-normal">
-                            <MatchParticipants source={match} />
+                            <MatchParticipants source={match} variant="inline" />
                           </TableCell>
-                          <TableCell className="max-w-[16rem] whitespace-normal">
-                            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                          <TableCell className="whitespace-normal">
+                            <div className="flex min-w-0 flex-nowrap items-center gap-x-2 whitespace-nowrap">
                               <StatusBadge status={match.status} />
                               <MatchOutcome
                                 source={match}
@@ -184,7 +184,7 @@ export default function Home() {
               {matches.map((match) => {
                 const GameIcon = gameIcon(match.game_id)
                 return (
-                  <li key={match.id} className="min-w-0 px-3 py-2.5">
+                  <li key={match.id} className="min-w-0 px-3 py-2">
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
                       <span className="text-xs font-medium">{gameLabel(match.game_id)}</span>
@@ -238,9 +238,9 @@ function LikedTopMatches() {
       ) : matches.length === 0 ? (
         <EmptyState text="暂无热门对局" icon={<Heart className="size-5 opacity-50" />} className="py-7" />
       ) : (
-        <ul className="divide-y divide-border">
+        <ul className="grid min-w-0 gap-px bg-border xl:grid-cols-2">
           {matches.map((match, index) => (
-            <li key={match.id} className="grid min-w-0 gap-2 px-3 py-1.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
+            <li key={match.id} className="grid min-w-0 gap-2 bg-card px-3 py-1.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
               <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
               <div className="min-w-0">
                 <MatchParticipants source={match} />

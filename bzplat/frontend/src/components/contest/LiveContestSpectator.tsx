@@ -6,6 +6,7 @@ import {
   EliminationTiebreakStatus,
   type EliminationTiebreakProjection,
 } from '@/components/contest/elimination-tiebreak-status'
+import { InlineParticipantIdentity } from '@/components/MatchParticipants'
 import { PairingResult } from '@/components/contest/pairing-result'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -233,7 +234,7 @@ function PairingIdentityLine({
   if (!pairing) return null
   const seriesUnit = duplicate ? '组' : '场'
   return (
-    <li className="min-w-0 py-2 first:pt-0 last:pb-0">
+    <li className="min-w-0 py-1.5 first:pt-0 last:pb-0">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span className="shrink-0 font-mono font-medium tabular-nums text-foreground">
           {pairing.group_id ? `${pairing.group_id} · ` : ''}R{pairing.round_num ?? 1}
@@ -272,13 +273,12 @@ function PairingIdentityLine({
           </Link>
         )}
       </div>
-      <div className="mt-1 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-2">
-        <MatchParticipantIdentity source={pairing} side={0} textLines={2} />
-        <span aria-hidden="true" className="pt-3 text-xs font-semibold text-muted-foreground">VS</span>
-        <MatchParticipantIdentity
+      <div className="mt-1 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+        <InlineParticipantIdentity source={pairing} side={0} showEnvironment />
+        <span aria-hidden="true" className="text-xs font-semibold text-muted-foreground">VS</span>
+        <InlineParticipantIdentity
           source={pairing}
           side={1}
-          textLines={2}
           emptyLabel={pairing.is_bye ? '轮空 (bye)' : undefined}
         />
       </div>
@@ -356,7 +356,7 @@ function ActiveTable({
         <MatchParticipantIdentity source={pairing} side={1} variant="panel" textLines={2} />
       </div>
       {pairing.match_id ? (
-        <Button asChild size="sm" className="mt-2 h-11 w-full sm:w-auto">
+        <Button asChild size="sm" className="mt-1.5 h-11 w-full sm:w-auto">
           <Link to={`/match/${pairing.match_id}`} aria-label={`${snapshot ? '查看演示' : '进入'}第 ${tableNumber} 桌观赛`}>
             <Eye aria-hidden="true" className="size-4" />{snapshot ? '查看演示对局' : '进入实时观赛'}
           </Link>
@@ -544,7 +544,7 @@ export function LiveContestSpectator({
       <EliminationTiebreakStatus value={eliminationTiebreak} className="border-b" />
 
       <div className="grid min-w-0 xl:grid-cols-[minmax(0,1.55fr)_minmax(17rem,0.75fr)]">
-        <section aria-labelledby="active-tables-title" className="min-w-0 px-3 py-3 xl:border-r">
+        <section aria-labelledby="active-tables-title" className="min-w-0 px-3 py-2.5 xl:border-r">
           <div className="mb-2 flex items-center justify-between gap-3">
             <h3 id="active-tables-title" className="text-sm font-semibold text-foreground">{snapshot ? '演示桌台' : '正在进行'}</h3>
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{active.length} 桌</span>
@@ -589,7 +589,7 @@ export function LiveContestSpectator({
           )}
         </section>
 
-        <section aria-labelledby="live-standings-title" className="min-w-0 border-t px-3 py-3 xl:border-t-0">
+        <section aria-labelledby="live-standings-title" className="min-w-0 border-t px-3 py-2.5 xl:border-t-0">
           <div className="mb-2 flex items-center justify-between gap-3">
             <h3 id="live-standings-title" className="text-sm font-semibold text-foreground">
               {hasGroupedStandings ? (rankingMode === 'cross_group' ? '总榜与各组前列' : '各组前列') : '阶段前列'}
@@ -607,7 +607,7 @@ export function LiveContestSpectator({
                 const coordinates = parseRankingCoordinates(row, rankingMode)
                 const crossGroup = rankingMode === 'cross_group' ? parseCrossGroupTiebreak(row.tiebreaks) : null
                 return (
-                  <li key={`${row.bot_id ?? row.bot_name ?? 'standing'}-${rowIndex}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-1.5 first:pt-0 last:pb-0">
+                  <li key={`${row.bot_id ?? row.bot_name ?? 'standing'}-${rowIndex}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-1 first:pt-0 last:pb-0">
                     <span className="font-mono text-sm font-semibold tabular-nums text-primary">
                       {coordinates?.overall_rank != null
                         ? `总${coordinates.overall_rank}`
@@ -616,20 +616,22 @@ export function LiveContestSpectator({
                           : '—'}
                     </span>
                     <div className="min-w-0">
-                      {row.bot_id != null ? (
-                        <Link to={`/bot/${row.bot_id}`} className="hover:text-primary">
-                          <EntityName tooltip={row.bot_name || 'Bot 名称不可用'} tooltipFocusable={false} className="text-sm font-medium hover:text-primary">
-                            {row.bot_name || 'Bot 名称不可用'}
+                      <div className="flex min-w-0 items-baseline gap-x-1.5">
+                        {row.bot_id != null ? (
+                          <Link to={`/bot/${row.bot_id}`} className="min-w-0 shrink hover:text-primary">
+                            <EntityName tooltip={row.bot_name || 'Bot 名称不可用'} tooltipFocusable={false} className="text-sm font-medium hover:text-primary">
+                              {row.bot_name || 'Bot 名称不可用'}
+                            </EntityName>
+                          </Link>
+                        ) : (
+                          <EntityName tooltip={row.bot_name || 'Bot 已删除'} tooltipFocusable={false} className="min-w-0 shrink text-sm font-medium">
+                            {row.bot_name || 'Bot 已删除'}
                           </EntityName>
-                        </Link>
-                      ) : (
-                        <EntityName tooltip={row.bot_name || 'Bot 已删除'} tooltipFocusable={false} className="text-sm font-medium">
-                          {row.bot_name || 'Bot 已删除'}
-                        </EntityName>
-                      )}
-                      {(row.owner_display || row.owner_name) && (
-                        <p className="truncate text-xs text-muted-foreground">@{row.owner_display || row.owner_name}</p>
-                      )}
+                        )}
+                        {(row.owner_display || row.owner_name) && (
+                          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">@{row.owner_display || row.owner_name}</span>
+                        )}
+                      </div>
                       {coordinates?.group_id && coordinates.rank_in_group && (
                         <p className="text-xs font-medium text-foreground">
                           {coordinates.group_id.endsWith('组') ? coordinates.group_id : `${coordinates.group_id}组`} · 第 {coordinates.rank_in_group} 名
@@ -661,7 +663,7 @@ export function LiveContestSpectator({
       </div>
 
       <div className="grid min-w-0 border-t md:grid-cols-2">
-        <section aria-labelledby="upcoming-matches-title" className="min-w-0 px-3 py-3 md:border-r">
+        <section aria-labelledby="upcoming-matches-title" className="min-w-0 px-3 py-2.5 md:border-r">
           <h3 id="upcoming-matches-title" className="text-sm font-semibold text-foreground">接下来</h3>
           {upcoming.length > 0 ? (
             <ul className="mt-2 divide-y divide-border">{upcomingGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>
@@ -671,7 +673,7 @@ export function LiveContestSpectator({
             </p>
           )}
         </section>
-        <section aria-labelledby="recent-results-title" className="min-w-0 border-t px-3 py-3 md:border-t-0">
+        <section aria-labelledby="recent-results-title" className="min-w-0 border-t px-3 py-2.5 md:border-t-0">
           <h3 id="recent-results-title" className="text-sm font-semibold text-foreground">最近赛果</h3>
           {recent.length > 0 ? (
             <ul className="mt-2 divide-y divide-border">{recentGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} showResult duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>

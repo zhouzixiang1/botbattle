@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { effectivePairingStatus, PairingResult } from '@/components/contest/pairing-result'
+import { InlineParticipantIdentity } from '@/components/MatchParticipants'
 import {
   DataTable,
   Table,
@@ -194,7 +195,7 @@ export default function ScheduleTable({
             <TableHead className="min-w-[8rem]">座位 1</TableHead>
             <TableHead className="min-w-[8rem]">座位 2</TableHead>
             <TableHead className="w-36">排期时间</TableHead>
-            <TableHead className="w-32">状态 / 赛果</TableHead>
+            <TableHead className="min-w-[15rem]">状态 / 赛果</TableHead>
             <TableHead className="w-16 text-right">查看</TableHead>
           </TableRow>
         </TableHeader>
@@ -210,7 +211,7 @@ export default function ScheduleTable({
             return (
               <TableRow key={p.id} data-series-start={isSeriesStart || undefined} className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'border-t-2 border-primary/20' : undefined}>
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
-                <TableCell className="font-mono text-xs text-muted-foreground">
+                <TableCell className="py-1 font-mono text-xs text-muted-foreground">
                   {isRoundStart ? `R${round}` : ''}
                   {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
                     <span className="block whitespace-nowrap text-xs font-medium text-foreground">
@@ -230,31 +231,33 @@ export default function ScheduleTable({
                     </span>
                   )}
                 </TableCell>
-                <TableCell className="max-w-[12rem]">
-                  <MatchParticipantIdentity
+                <TableCell className="max-w-[12rem] py-1">
+                  <InlineParticipantIdentity
                     source={p}
                     side={0}
                     state={states[0]}
+                    showEnvironment
                   />
                 </TableCell>
-                <TableCell className="max-w-[12rem]">
-                  <MatchParticipantIdentity
+                <TableCell className="max-w-[12rem] py-1">
+                  <InlineParticipantIdentity
                     source={p}
                     side={1}
                     state={states[1]}
                     emptyLabel={isBye ? '轮空 (bye)' : undefined}
+                    showEnvironment
                   />
                 </TableCell>
-                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                <TableCell className="whitespace-nowrap py-1 text-xs text-muted-foreground">
                   {p.scheduled_at ? fmtTime(p.scheduled_at) : '—'}
                 </TableCell>
-                <TableCell>
-                  <div className="flex flex-col items-start gap-1">
+                <TableCell className="py-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <StatusBadge status={status || 'pending'} />
-                    <PairingResult pairing={p} primaryOnly={legacyAggregate} />
+                    <PairingResult pairing={p} primaryOnly={legacyAggregate} className="leading-snug" />
                   </div>
                 </TableCell>
-                <TableCell className="text-right">
+                <TableCell className="py-1 text-right">
                   {p.match_id ? (
                     <Button asChild variant="ghost" size="xs" className="min-h-8 text-primary">
                       <Link to={`/match/${p.match_id}`} aria-label={duplicate ? '查看复式回放' : legacyAggregate ? '查看历史对局' : '查看计分场'}>查看</Link>

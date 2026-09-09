@@ -287,7 +287,7 @@ export default function Settings() {
   const roleLabel = user.role === 'admin' ? '管理员' : user.role === 'organizer' ? '组织者' : '玩家'
 
   return (
-    <PageFrame width="default" layout="account-settings">
+    <PageFrame width="full" layout="account-settings">
       <PageHeader
         eyebrow={`@${user.username}`}
         title="个人设置"
@@ -359,8 +359,8 @@ export default function Settings() {
                 </dl>
               </div>
               <div className="min-w-0 space-y-3">
-                <div className="grid min-w-0 items-start gap-3 xl:grid-cols-2">
-                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                <div className="grid min-w-0 items-start gap-3 xl:grid-cols-2 2xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                     <div className="min-w-0 space-y-1.5">
                       <Label htmlFor="settings-display">显示名</Label>
                       <Input
@@ -384,7 +384,7 @@ export default function Settings() {
                   <fieldset className="min-w-0 space-y-3 rounded-lg border p-3">
                     <legend className="px-1 text-sm font-medium text-foreground">实名信息（选填）</legend>
                     <p className="text-xs text-muted-foreground">报名要求实名的赛事时需要填写完整。</p>
-                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                       <div className="space-y-1.5">
                         <Label htmlFor="settings-realname">姓名</Label>
                         <Input id="settings-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />

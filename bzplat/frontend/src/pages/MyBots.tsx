@@ -409,6 +409,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
 
   return (
     <PageFrame
+      width="full"
       layout="account-my-bots"
       className="max-sm:[&_[data-slot=button]]:min-h-[44px] max-sm:[&_[data-slot=button]]:min-w-[44px] max-sm:[&_[data-slot=input]]:min-h-[44px] max-sm:[&_[data-slot=select-trigger]]:min-h-[44px]"
     >

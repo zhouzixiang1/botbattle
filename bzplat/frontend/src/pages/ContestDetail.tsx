@@ -663,7 +663,7 @@ function OfficialTiebreakDetail({
       return <span className="text-xs text-warning">跨组破同分明细缺失</span>
     }
     return (
-      <span className="block min-w-0 whitespace-normal text-xs leading-relaxed text-muted-foreground">
+      <span className="block min-w-0 whitespace-normal text-xs leading-snug text-muted-foreground">
         {[
           `组内第 ${crossGroup.group_rank} 名`,
           `每局积分率 ${TIEBREAK_NUMBER.format(crossGroup.points_rate * 100)}%`,
@@ -695,7 +695,7 @@ function OfficialTiebreakDetail({
   if (typeof tiebreaks.technical_losses === 'number') values.push(`技术负 ${tiebreaks.technical_losses}`)
   if (typeof tiebreaks.seed === 'number') values.push(`报名序 ${tiebreaks.seed}`)
   return (
-    <span className="block min-w-0 whitespace-normal text-xs leading-relaxed text-muted-foreground">
+    <span className="block min-w-0 whitespace-normal text-xs leading-snug text-muted-foreground">
       {values.length > 0 ? values.join(' · ') : '破同分明细缺失'}
     </span>
   )
@@ -1574,7 +1574,7 @@ export default function ContestDetail() {
 
   if (!contest) {
     return (
-      <PageFrame width="wide" layout="public-contest-detail-loading">
+      <PageFrame width="full" layout="public-contest-detail-loading">
         <PageHeader
           title="锦标赛详情"
           description="查看赛事安排、参赛选手、对阵进度与正式名次。"
@@ -1649,7 +1649,7 @@ export default function ContestDetail() {
   ].filter(Boolean).join(' ')
 
   return (
-    <PageFrame width="wide" layout="public-contest-detail">
+    <PageFrame width="full" layout="public-contest-detail">
       <PageHeader
         title="锦标赛详情"
         description="查看赛程、选手和比赛结果。"
@@ -1861,7 +1861,7 @@ export default function ContestDetail() {
             estimate={projectedEstimate}
             unboundedTiebreak={hasUnboundedTiebreak}
             frozen={!['draft', 'open'].includes(contest.status)}
-            className="p-3"
+            className="px-3 py-2"
           />
           {displayStageSeriesConfigs.length > 0 && (
             <div className="border-t">
@@ -2187,8 +2187,8 @@ export default function ContestDetail() {
             className="rounded-xl border"
           />
 
-          {/* 宽屏把对阵与阶段榜并排，窄屏自然上下排列。 */}
-          <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          {/* 宽屏把对阵与阶段榜并排并按比例加宽，窄屏自然上下排列。 */}
+          <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_22rem] 2xl:grid-cols-[minmax(0,1.75fr)_minmax(20rem,1fr)]">
           <DataRegion
             title={`对阵${stages.length ? ` · ${STAGE_TYPE_LABEL[stages[stageTab]?.type || ''] || `阶段${stageTab + 1}`}` : ''}`}
             description={!currentStageContractAvailable
@@ -2393,8 +2393,8 @@ export default function ContestDetail() {
                             : (standingsPointTieCounts.get(tieKey) ?? 0) > 1
                         return (
                         <TableRow key={s.entry_id}>
-                          <TableCell className="font-mono text-xs text-muted-foreground">{displayedRank ?? '—'}</TableCell>
-                          <TableCell className="max-w-[10rem]">
+                          <TableCell className="py-1 font-mono text-xs text-muted-foreground">{displayedRank ?? '—'}</TableCell>
+                          <TableCell className="max-w-[10rem] py-1">
                             {s.bot_id != null ? (
                               <Link to={`/bot/${s.bot_id}`} className="block min-w-0 hover:text-primary">
                                 <EntityName tooltip={s.bot_name || 'Bot 名称不可用'} tooltipFocusable={false}>
@@ -2405,14 +2405,14 @@ export default function ContestDetail() {
                               <span className="text-sm text-muted-foreground">已删除 Bot</span>
                             )}
                           </TableCell>
-                          <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">
-                            <span className="block font-sans font-medium text-foreground">
+                          <TableCell className="py-1 font-mono font-semibold text-primary">{s.points}</TableCell>
+                          <TableCell className="py-1 font-mono text-xs text-muted-foreground">
+                            <span className="font-sans font-medium text-foreground">
                               {formatScoringCountsLine(s, currentStageDuplicate, currentStageLegacyAggregate)}
                             </span>
-                            {scoreBreakdown(s)}
+                            <span className="ml-1.5">· {scoreBreakdown(s)}</span>
                           </TableCell>
-                          <TableCell className="min-w-[22rem] max-w-[30rem]">
+                          <TableCell className="min-w-[22rem] max-w-[30rem] py-1">
                             <OfficialTiebreakDetail
                               result={s}
                               hasPointTie={hasPointTie}
@@ -2516,15 +2516,15 @@ export default function ContestDetail() {
                         : hasLegacyAggregateStage
                       return (
                       <TableRow key={result.entry_id}>
-                        <TableCell className="font-mono text-base font-semibold text-primary">
+                        <TableCell className="py-1 font-mono text-base font-semibold text-primary">
                           {rankingCoordinates?.overall_rank ?? '—'}
                         </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
+                        <TableCell className="py-1 font-mono text-xs text-muted-foreground">
                           {rankingCoordinates?.group_id && rankingCoordinates.rank_in_group
                             ? `${rankingCoordinates.group_id.endsWith('组') ? rankingCoordinates.group_id : `${rankingCoordinates.group_id}组`} · ${rankingCoordinates.rank_in_group}`
                             : '—'}
                         </TableCell>
-                        <TableCell className="max-w-[12rem]">
+                        <TableCell className="max-w-[12rem] py-1">
                           {result.bot_id ? (
                             <Link
                               to={`/bot/${result.bot_id}`}
@@ -2539,7 +2539,7 @@ export default function ContestDetail() {
                             </Link>
                           ) : <span className="text-muted-foreground">已删除 Bot</span>}
                         </TableCell>
-                        <TableCell className="max-w-[12rem]">
+                        <TableCell className="max-w-[12rem] py-1">
                           {result.owner_name ? (
                             <Link
                               to={`/user/${encodeURIComponent(result.owner_name)}`}
@@ -2554,25 +2554,25 @@ export default function ContestDetail() {
                             </Link>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
-                        <TableCell className="font-mono font-semibold">
+                        <TableCell className="py-1 font-mono font-semibold">
                           <span>{result.points ?? 0}</span>
                           {sourceLabel && stages.length > 1 && (
-                            <span className="mt-0.5 block font-sans text-[10px] font-normal text-muted-foreground">
+                            <span className="block font-sans text-[10px] font-normal leading-tight text-muted-foreground">
                               {sourceLabel}
                             </span>
                           )}
                         </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
+                        <TableCell className="py-1 font-mono text-xs text-muted-foreground">
                           {scoreRow && sourceContract !== 'invalid' ? (
                             <>
-                              <span className="block font-sans font-medium text-foreground">
+                              <span className="font-sans font-medium text-foreground">
                                 {formatScoringCountsLine(scoreRow, sourceDuplicate, sourceLegacyAggregate)}
                               </span>
-                              {scoreBreakdown(scoreRow)}
+                              <span className="ml-1.5">· {scoreBreakdown(scoreRow)}</span>
                             </>
                           ) : sourceContract === 'invalid' ? '赛制配置暂不可用' : '历史计分构成不可用'}
                         </TableCell>
-                        <TableCell className="min-w-[22rem] max-w-[30rem]">
+                        <TableCell className="min-w-[22rem] max-w-[30rem] py-1">
                           <OfficialTiebreakDetail
                             result={result}
                             hasPointTie={hasPointTie}
@@ -2580,7 +2580,7 @@ export default function ContestDetail() {
                             rankingMode={sourceRankingMode ?? 'overall'}
                           />
                         </TableCell>
-                        <TableCell className="hidden text-muted-foreground md:table-cell">
+                        <TableCell className="hidden py-1 text-muted-foreground md:table-cell">
                           {result.awarded || '—'}
                         </TableCell>
                       </TableRow>
@@ -2653,7 +2653,7 @@ function StageStandingPanel({
             <TableBody>
               {summary.rows.map((row) => (
                 <TableRow key={row.entry_id}>
-                  <TableCell className="px-2 py-2 font-mono text-xs text-muted-foreground">
+                  <TableCell className="px-2 py-1 font-mono text-xs text-muted-foreground">
                     {(() => {
                       const coordinates = parseRankingCoordinates(row, rankingMode)
                       if (!coordinates) return '名次不可用'
@@ -2665,28 +2665,30 @@ function StageStandingPanel({
                       return coordinates.overall_rank ?? '名次不可用'
                     })()}
                   </TableCell>
-                  <TableCell className="max-w-0 px-2 py-2">
-                    {row.bot_id ? (
-                      <Link to={`/bot/${row.bot_id}`} className="block min-w-0 text-xs hover:text-primary">
-                        <EntityName tooltip={row.bot_name || '未命名 Bot'} tooltipFocusable={false} className="text-xs">
-                          {row.bot_name || '未命名 Bot'}
-                        </EntityName>
-                      </Link>
-                    ) : <span className="text-xs text-muted-foreground">已删除 Bot</span>}
-                    <OverflowText tooltip={false} className="text-[10px] text-muted-foreground">
-                      {row.owner_name ? `@${row.owner_display || row.owner_name}` : '参赛身份不可用'}
-                    </OverflowText>
-                    <span className="block font-mono text-xs leading-relaxed text-muted-foreground">
-                      <span className="block font-sans font-medium text-foreground">
+                  <TableCell className="max-w-0 px-2 py-1">
+                    <div className="flex min-w-0 items-center gap-x-1.5">
+                      {row.bot_id ? (
+                        <Link to={`/bot/${row.bot_id}`} className="block min-w-0 flex-1 text-xs hover:text-primary">
+                          <EntityName tooltip={row.bot_name || '未命名 Bot'} tooltipFocusable={false} className="text-xs">
+                            {row.bot_name || '未命名 Bot'}
+                          </EntityName>
+                        </Link>
+                      ) : <span className="text-xs text-muted-foreground">已删除 Bot</span>}
+                    </div>
+                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[11px] leading-snug text-muted-foreground">
+                      <OverflowText tooltip={false} className="min-w-0 max-w-full shrink-0">
+                        {row.owner_name ? `@${row.owner_display || row.owner_name}` : '参赛身份不可用'}
+                      </OverflowText>
+                      <span className="min-w-0 font-medium text-foreground">
                         {formatScoringCountsLine(row, duplicate, legacyAggregate)}
                       </span>
-                      {scoreBreakdown(row)}
-                    </span>
+                      <span className="min-w-0">· {scoreBreakdown(row)}</span>
+                    </div>
                   </TableCell>
-                  <TableCell className="px-2 py-2 text-right font-mono text-xs font-semibold text-primary">
+                  <TableCell className="px-2 py-1 text-right font-mono text-xs font-semibold text-primary">
                     {row.points}
                   </TableCell>
-                  <TableCell className="px-2 py-2 text-right">
+                  <TableCell className="w-20 px-2 py-1 text-right">
                     {advancementLabel(row.advancement)}
                   </TableCell>
                 </TableRow>
