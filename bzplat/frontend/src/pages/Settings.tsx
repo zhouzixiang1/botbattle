@@ -313,8 +313,8 @@ export default function Settings() {
         {msg && <p role="status" className="flex min-w-0 items-center gap-1.5 text-sm text-success"><CheckCircle2 className="size-4" />{msg}</p>}
 
         <TabsContent value="profile">
-          <DataRegion title="公开资料与实名信息" description="实名字段仅在需要实名报名的赛事中供组织者使用，不会公开展示。" contentClassName="p-4">
-            <form onSubmit={saveProfile} className="grid min-w-0 gap-5 lg:grid-cols-[16rem_minmax(0,1fr)]">
+          <DataRegion title="公开资料与实名信息" description="实名字段仅在需要实名报名的赛事中供组织者使用，不会公开展示。" contentClassName="px-4 py-3">
+            <form onSubmit={saveProfile} className="grid min-w-0 gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
               <div className="min-w-0 space-y-3">
                 <Label>头像</Label>
                 <div className="flex min-w-0 items-center gap-3 lg:flex-col lg:items-start">
@@ -358,50 +358,52 @@ export default function Settings() {
                   </div>
                 </dl>
               </div>
-              <div className="min-w-0 space-y-4">
-                <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                  <div className="min-w-0 space-y-1.5">
-                    <Label htmlFor="settings-display">显示名</Label>
-                    <Input
-                      id="settings-display"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      maxLength={64}
-                    />
+              <div className="min-w-0 space-y-3">
+                <div className="grid min-w-0 items-start gap-3 xl:grid-cols-2">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                    <div className="min-w-0 space-y-1.5">
+                      <Label htmlFor="settings-display">显示名</Label>
+                      <Input
+                        id="settings-display"
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        maxLength={64}
+                      />
+                    </div>
+                    <div className="min-w-0 space-y-1.5">
+                      <Label htmlFor="settings-bio">简介</Label>
+                      <Textarea
+                        id="settings-bio"
+                        value={bio}
+                        onChange={(e) => setBio(e.target.value)}
+                        maxLength={500}
+                        rows={3}
+                      />
+                    </div>
                   </div>
-                  <div className="min-w-0 space-y-1.5 sm:col-span-2">
-                    <Label htmlFor="settings-bio">简介</Label>
-                    <Textarea
-                      id="settings-bio"
-                      value={bio}
-                      onChange={(e) => setBio(e.target.value)}
-                      maxLength={500}
-                      rows={3}
-                    />
-                  </div>
+                  <fieldset className="min-w-0 space-y-3 rounded-lg border p-3">
+                    <legend className="px-1 text-sm font-medium text-foreground">实名信息（选填）</legend>
+                    <p className="text-xs text-muted-foreground">报名要求实名的赛事时需要填写完整。</p>
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="settings-realname">姓名</Label>
+                        <Input id="settings-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="settings-phone">手机号</Label>
+                        <Input id="settings-phone" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={20} placeholder="13800138000" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="settings-school">学校</Label>
+                        <Input id="settings-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="settings-studentid">学号</Label>
+                        <Input id="settings-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
+                      </div>
+                    </div>
+                  </fieldset>
                 </div>
-                <fieldset className="min-w-0 space-y-3 rounded-lg border p-3">
-                  <legend className="px-1 text-sm font-medium text-foreground">实名信息（选填）</legend>
-                  <p className="text-xs text-muted-foreground">报名要求实名的赛事时需要填写完整。</p>
-                  <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="settings-realname">姓名</Label>
-                      <Input id="settings-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="settings-phone">手机号</Label>
-                      <Input id="settings-phone" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={20} placeholder="13800138000" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="settings-school">学校</Label>
-                      <Input id="settings-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="settings-studentid">学号</Label>
-                      <Input id="settings-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
-                    </div>
-                  </div>
-                </fieldset>
                 <Button type="submit">保存资料</Button>
               </div>
             </form>
@@ -409,30 +411,32 @@ export default function Settings() {
         </TabsContent>
 
         <TabsContent value="password">
-          <DataRegion title="修改密码" description="修改后后端会撤销全部会话，并跳转至登录页。" contentClassName="p-4">
-            <form onSubmit={changePassword} className="max-w-xl space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="settings-oldpw">当前密码</Label>
-                <Input
-                  id="settings-oldpw"
-                  type="password"
-                  value={oldPw}
-                  onChange={(e) => setOldPw(e.target.value)}
-                  required
-                  autoComplete="current-password"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="settings-newpw">新密码（≥8 位）</Label>
-                <Input
-                  id="settings-newpw"
-                  type="password"
-                  value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)}
-                  required
-                  minLength={8}
-                  autoComplete="new-password"
-                />
+          <DataRegion title="修改密码" description="修改后后端会撤销全部会话，并跳转至登录页。" contentClassName="px-4 py-3">
+            <form onSubmit={changePassword} className="min-w-0 space-y-3">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-oldpw">当前密码</Label>
+                  <Input
+                    id="settings-oldpw"
+                    type="password"
+                    value={oldPw}
+                    onChange={(e) => setOldPw(e.target.value)}
+                    required
+                    autoComplete="current-password"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-newpw">新密码（≥8 位）</Label>
+                  <Input
+                    id="settings-newpw"
+                    type="password"
+                    value={newPw}
+                    onChange={(e) => setNewPw(e.target.value)}
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                  />
+                </div>
               </div>
               <Button type="submit">修改密码并退出</Button>
             </form>
@@ -453,7 +457,7 @@ export default function Settings() {
                   ['email_contest', '赛事阶段变化'],
                   ['email_comment', '被评论'],
                 ] as const).map(([key, label]) => (
-                  <div key={key} className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 text-sm">
+                  <div key={key} className="flex min-w-0 items-center justify-between gap-3 px-4 py-2.5 text-sm">
                     <span className="min-w-0"><span className="block font-medium text-foreground">{label}</span><span className="block text-xs text-muted-foreground">同步发送邮件提醒</span></span>
                     <Switch
                       aria-label={`${label}邮件提醒`}
@@ -477,7 +481,7 @@ export default function Settings() {
             ) : favs.length === 0 ? (
               <EmptyState text="暂无收藏的 Bot" icon={<Star className="size-5 opacity-50" />} className="py-8" />
             ) : (
-              <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">
+              <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {favs.map((b) => (
                   <li key={b.id} className="min-w-0">
                     <Link to={`/bot/${b.id}`} className="group min-w-0">

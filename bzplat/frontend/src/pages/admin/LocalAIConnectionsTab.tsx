@@ -96,7 +96,7 @@ export default function LocalAIConnectionsTab() {
 
   return (
     <div className="min-w-0 space-y-3">
-      <StickyToolbar label="本地连接工具栏" className="justify-between">
+      <StickyToolbar label="本地连接工具栏" className="justify-between py-1.5">
         <p className="min-w-0 text-xs text-muted-foreground">
           共 {total} 个连接 · 本页在线 {onlineCount} · 可接任务 {availableCount}
         </p>
@@ -130,7 +130,7 @@ export default function LocalAIConnectionsTab() {
               return (
                 <li
                   key={agent.public_id}
-                  className="grid min-w-0 gap-2 px-3 py-2.5 text-sm md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(7rem,.65fr)_auto] md:items-center"
+                  className="grid min-w-0 gap-2 px-3 py-2 text-sm md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(7rem,.65fr)_auto] md:items-center"
                 >
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
@@ -144,7 +144,7 @@ export default function LocalAIConnectionsTab() {
                         {state.label}
                       </Badge>
                     </div>
-                    <p className="mt-0.5 min-w-0 text-xs text-muted-foreground">
+                    <p className="mt-px min-w-0 text-xs text-muted-foreground">
                       <span className="font-medium text-foreground">{agent.label}</span>
                       <span> · {gameLabel(agent.game_id)}</span>
                     </p>

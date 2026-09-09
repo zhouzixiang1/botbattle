@@ -292,7 +292,7 @@ export default function ContestsTab() {
   if (loading && !contests.length) return <Loading />
   return (
     <div>
-      <div className="mb-3 flex items-center justify-between gap-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
           共 {total || contests.length} 个锦标赛；生命周期操作会经过后端状态机校验。
         </span>
@@ -301,16 +301,16 @@ export default function ContestsTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <Table className="min-w-[64rem]">
+        <Table className="min-w-[52rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">序号</TableHead>
-              <TableHead className="px-3 py-2.5">标题</TableHead>
-              <TableHead className="px-3 py-2.5">游戏 / 模板</TableHead>
-              <TableHead className="px-3 py-2.5">状态</TableHead>
-              <TableHead className="px-3 py-2.5">时间编排</TableHead>
-              <TableHead className="px-3 py-2.5">创建时间</TableHead>
-              <TableHead className="px-3 py-2.5">当前阶段操作</TableHead>
+              <TableHead className="px-2 py-2">序号</TableHead>
+              <TableHead className="px-2 py-2">标题</TableHead>
+              <TableHead className="px-2 py-2">游戏 / 模板</TableHead>
+              <TableHead className="px-2 py-2">状态</TableHead>
+              <TableHead className="px-2 py-2">时间编排</TableHead>
+              <TableHead className="px-2 py-2">创建时间</TableHead>
+              <TableHead className="px-2 py-2">当前阶段操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -322,65 +322,65 @@ export default function ContestsTab() {
               return (
                 <Fragment key={contest.id}>
                   <TableRow className={timeIssue ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                    <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
-                    <TableCell className="max-w-64 px-3 py-2 font-medium text-foreground">
+                    <TableCell className="px-2 py-1.5 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
+                    <TableCell className="max-w-52 px-2 py-1.5 font-medium text-foreground">
                       <Link to={`/contests/${contest.id}`} className="block break-words text-primary hover:underline">{contest.title}</Link>
                     </TableCell>
-                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">
+                    <TableCell className="w-24 whitespace-normal px-2 py-1.5 text-xs text-muted-foreground">
                       <div className="text-foreground">{gameLabel(contest.game_id)}</div>
                       <div>{contest.template_name || contest.template_id || '未指定模板'}</div>
                     </TableCell>
-                    <TableCell className="px-3 py-2">
+                    <TableCell className="px-2 py-1.5">
                       <div className="flex flex-wrap gap-1">
                         <StatusBadge status={contest.status} />
                         {isShowcase && <Badge variant="secondary">演示快照</Badge>}
                       </div>
                     </TableCell>
-                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">
+                    <TableCell className="w-44 px-2 py-1.5 text-[11px] leading-4 text-muted-foreground">
                       <div>开放报名：{contest.registration_opens_at ? fmtTime(contest.registration_opens_at) : '手动'}</div>
                       <div>报名截止：{contest.registration_closes_at ? fmtTime(contest.registration_closes_at) : '手动'}</div>
                       <div className="font-medium text-foreground">
                         比赛开始：{contest.starts_at ? fmtTime(contest.starts_at) : '手动'}
                       </div>
                       {timeIssue && (
-                        <div className="mt-1 flex items-center gap-1 text-destructive">
+                        <div className="mt-0.5 flex items-center gap-1 text-destructive">
                           <AlertTriangle className="size-3.5" />{timeIssue}
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(contest.created_at)}</TableCell>
-                    <TableCell className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1.5">
+                    <TableCell className="whitespace-nowrap px-2 py-1.5 text-[11px] text-muted-foreground">{fmtTime(contest.created_at)}</TableCell>
+                    <TableCell className="px-2 py-1.5">
+                      <div className="flex flex-wrap gap-1">
                         {primary && (
-                          <Button type="button" size="sm" disabled={busyId === contest.id} onClick={() => void runPrimary(contest)}>
+                          <Button type="button" size="sm" className="max-lg:min-h-11 px-2.5" disabled={busyId === contest.id} onClick={() => void runPrimary(contest)}>
                             {primary.label}
                           </Button>
                         )}
                         {!isShowcase && contest.status === 'rest' && (
-                          <Button type="button" size="sm" disabled={busyId === contest.id} onClick={() => void resumeContest(contest)}>
+                          <Button type="button" size="sm" className="max-lg:min-h-11 px-2.5" disabled={busyId === contest.id} onClick={() => void resumeContest(contest)}>
                             进入下一阶段
                           </Button>
                         )}
                         {!isShowcase && (contest.status === 'running' || contest.status === 'rest') && (
-                          <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void forceFinish(contest)}>
+                          <Button type="button" variant="destructive" size="sm" className="max-lg:min-h-11 px-2.5" disabled={busyId === contest.id} onClick={() => void forceFinish(contest)}>
                             恢复性结束
                           </Button>
                         )}
                         {!isShowcase && CANCELLABLE.has(contest.status) && (
-                          <Button type="button" variant="outline" size="sm" disabled={busyId === contest.id} onClick={() => void cancelContest(contest)} className="text-destructive">
+                          <Button type="button" variant="outline" size="sm" className="max-lg:min-h-11 px-2.5 text-destructive" disabled={busyId === contest.id} onClick={() => void cancelContest(contest)}>
                             取消赛事
                           </Button>
                         )}
-                        <Button type="button" variant="outline" size="sm" onClick={() => showEntries(contest)}>
+                        <Button type="button" variant="outline" size="sm" className="max-lg:min-h-11 px-2.5" onClick={() => showEntries(contest)}>
                           {mutableRoster ? '管理名册' : '查看名册'}
                         </Button>
                         {!isShowcase && SCHEDULE_EDITABLE[contest.status] && (
-                          <Button type="button" variant="outline" size="sm" onClick={() => setScheduleContest(contest)}>
+                          <Button type="button" variant="outline" size="sm" className="max-lg:min-h-11 px-2.5" onClick={() => setScheduleContest(contest)}>
                             <CalendarClock className="size-3.5" />{timeIssue ? '修正时间' : '编辑时间'}
                           </Button>
                         )}
                         {!isShowcase && DELETABLE.has(contest.status) && (
-                          <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void del(contest)}>
+                          <Button type="button" variant="destructive" size="sm" className="max-lg:min-h-11 px-2.5" disabled={busyId === contest.id} onClick={() => void del(contest)}>
                             {contest.status === 'cancelled' ? '清理已取消赛事' : '删除草稿'}
                           </Button>
                         )}
@@ -398,7 +398,7 @@ export default function ContestsTab() {
                   </TableRow>
                   {expand === contest.id && (
                     <TableRow key={`${contest.id}-entries`} className="bg-muted/60">
-                      <TableCell colSpan={7} className="px-6 py-4">
+                      <TableCell colSpan={7} className="px-3 py-2">
                         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                           <div>
                             <h3 className="text-sm font-medium text-foreground">参赛名册</h3>

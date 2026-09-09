@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { OverflowText } from '@/components/ui/overflow-text'
 import {
   formatDrawAlgorithm,
   parseContestFormatSnapshot,
@@ -48,35 +49,35 @@ export function FormatSnapshotAudit({
   return (
     <section
       aria-label="分组抽签审计"
-      className={cn('min-w-0 rounded-lg border border-primary/20 bg-primary/[0.035] px-3 py-3', className)}
+      className={cn('min-w-0 rounded-lg border border-primary/20 bg-primary/[0.035] px-3 py-2', className)}
     >
-      <div className="flex min-w-0 items-start gap-2">
-        <ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary" />
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold text-foreground">分组抽签审计</h3>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            {formatDrawAlgorithm(snapshot.algorithm)} · 算法 {snapshot.algorithm} · 审计格式 v{snapshot.version}
-          </p>
-        </div>
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+        <h3 className="inline-flex shrink-0 items-center gap-1.5 text-sm font-semibold text-foreground">
+          <ShieldCheck aria-hidden="true" className="size-3.5 shrink-0 text-primary" />
+          分组抽签审计
+        </h3>
+        <p className="min-w-0 text-xs leading-relaxed text-muted-foreground">
+          {formatDrawAlgorithm(snapshot.algorithm)} · 算法 {snapshot.algorithm} · 审计格式 v{snapshot.version}
+        </p>
       </div>
-      <dl className="mt-3 grid min-w-0 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
-        <div className="min-w-0">
-          <dt className="text-muted-foreground">分组规模</dt>
-          <dd className="mt-0.5 break-words font-medium text-foreground">
+      <dl className="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
+        <div className="inline-flex min-w-0 items-baseline gap-1.5">
+          <dt className="shrink-0 text-muted-foreground">分组规模</dt>
+          <dd className="min-w-0 break-words font-medium text-foreground">
             {snapshot.group_count} 组 · {sizeText}
           </dd>
         </div>
         {snapshot.expected_match_count !== undefined && (
-          <div className="min-w-0">
-            <dt className="text-muted-foreground">冻结总场数</dt>
-            <dd className="mt-0.5 font-mono font-medium tabular-nums text-foreground">
+          <div className="inline-flex min-w-0 items-baseline gap-1.5">
+            <dt className="shrink-0 text-muted-foreground">冻结总场数</dt>
+            <dd className="font-mono font-medium tabular-nums text-foreground">
               {snapshot.expected_match_count} 场
             </dd>
           </div>
         )}
-        <div className="min-w-0 sm:col-span-2 lg:col-span-1">
-          <dt className="text-muted-foreground">审计值</dt>
-          <dd className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="inline-flex min-w-0 items-baseline gap-1.5">
+          <dt className="shrink-0 text-muted-foreground">审计值</dt>
+          <dd className="flex min-w-0 flex-wrap items-center gap-1.5">
             <code
               title={snapshot.audit_digest}
               className="max-w-full break-all rounded bg-muted px-1.5 py-1 font-mono text-[11px] text-foreground"
@@ -98,26 +99,31 @@ export function FormatSnapshotAudit({
         </div>
       </dl>
       {snapshot.source && (
-        <div className="mt-3 border-t border-primary/15 pt-3">
+        <div className="mt-1.5 border-t border-primary/15 pt-1.5">
           <p className="text-xs text-muted-foreground">
             保护种子来源：
             <Link className="font-medium text-primary hover:underline" to={`/contests/${snapshot.source.contest_id}`}>
               五子棋模拟赛 #{snapshot.source.contest_id}
             </Link>
           </p>
-          <ol className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2">
+          <ol className="mt-1 grid min-w-0 gap-x-3 gap-y-0.5 sm:grid-cols-2">
             {snapshot.source.protected.map((seed) => (
-              <li key={seed.entry_id} className="min-w-0 rounded-md bg-background/70 px-2.5 py-2 text-xs leading-relaxed">
-                <span className="font-semibold text-foreground">来源第 {seed.source_rank} 名</span>
-                <span className="text-muted-foreground">
-                  {' '}· 当前报名 #{seed.entry_id} · 来源报名 #{seed.source_entry_id} · 用户 #{seed.user_id}
-                </span>
+              <li key={seed.entry_id} className="min-w-0 rounded-md bg-background/70 px-2 py-1 text-xs leading-relaxed">
+                <OverflowText
+                  tooltip={`来源第 ${seed.source_rank} 名 · 当前报名 #${seed.entry_id} · 来源报名 #${seed.source_entry_id} · 用户 #${seed.user_id}`}
+                  className="[overflow-wrap:anywhere]"
+                >
+                  <span className="font-semibold text-foreground">来源第 {seed.source_rank} 名</span>
+                  <span className="text-muted-foreground">
+                    {' '}· 当前报名 #{seed.entry_id} · 来源报名 #{seed.source_entry_id} · 用户 #{seed.user_id}
+                  </span>
+                </OverflowText>
               </li>
             ))}
           </ol>
         </div>
       )}
-      <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
         审计投影不包含私有随机种子、完整抽签顺序或重复的分组成员表。
       </p>
     </section>

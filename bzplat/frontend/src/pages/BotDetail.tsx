@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
-import { MatchNatureBadge, MatchParticipantIdentity, MatchParticipants } from '@/components/MatchParticipants'
+import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -25,8 +25,14 @@ import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
+import { cn } from '@/lib/utils'
 import { gameLabel, gameIcon } from '@/lib/games'
-import { isBotSelfPlay, resolveMatchParticipant, type MatchParticipantSource } from '@/lib/match-participants'
+import {
+  isBotSelfPlay,
+  participantOwnerText,
+  resolveMatchParticipant,
+  type MatchParticipantSource,
+} from '@/lib/match-participants'
 import {
   hasPublicMatchOutcomeField,
   isPublicMatchOutcome,
@@ -155,7 +161,74 @@ function BotPerspectiveOutcome({ match, botId }: { match: MatchRow; botId: numbe
         ? 'destructive'
         : 'outline'
   return (
-    <Badge variant={variant}>{label}</Badge>
+    <Badge variant={variant} className="px-1.5 text-[10px]">{label}</Badge>
+  )
+}
+
+type ParticipantState = 'winner' | 'loser' | 'neutral'
+
+/**
+ * 桌面对局历史表的紧凑对阵格：上行两 Bot 名并排 + vs，下行 @owner×2。
+ * 与共享 MatchParticipants 的身份解析一致（真人座显示实际用户、自博弈不归并为
+ * Bot 自胜），仅省略座位/运行环境元数据行以压缩行高；移动卡片仍用完整面板。
+ */
+function DenseParticipant({ source, side, state }: { source: MatchRow; side: 0 | 1; state: ParticipantState }) {
+  const participant = resolveMatchParticipant(source, side)
+  const subject = participant.isHuman
+    ? participant.ownerName && participant.ownerLabel === participant.ownerName
+      ? `@${participant.ownerName}`
+      : participant.ownerLabel
+    : participant.botLabel
+  const stateClass = state === 'winner'
+    ? 'text-success'
+    : state === 'loser'
+      ? 'text-muted-foreground'
+      : 'text-foreground'
+  const missing = !participant.isHuman && participant.botId == null
+  const nameNode = !participant.isHuman && participant.botId != null ? (
+    <Link to={`/bot/${participant.botId}`} className="block min-w-0 flex-1 hover:text-primary">
+      <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('text-sm font-semibold hover:text-primary', stateClass)}>
+        {subject}
+      </EntityName>
+    </Link>
+  ) : (
+    <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('min-w-0 flex-1 text-sm font-semibold', missing ? 'text-muted-foreground' : stateClass)}>
+      {subject}
+    </EntityName>
+  )
+  const ownerText = participant.isHuman
+    ? (participant.ownerName && participant.ownerLabel !== participant.ownerName ? `@${participant.ownerName}` : '')
+    : participantOwnerText(participant)
+  return (
+    <div
+      data-match-participant="true"
+      data-participant-kind={participant.isHuman ? 'human' : 'bot'}
+      data-participant-state={state}
+      data-seat={side + 1}
+      className="min-w-0"
+    >
+      <div className="flex min-w-0 items-center gap-1.5">
+        {nameNode}
+        {state === 'winner' && <Badge className="h-4 shrink-0 px-1 text-[9px]">胜</Badge>}
+      </div>
+      {ownerText && (
+        <OverflowText lines={1} tooltip={ownerText} tooltipFocusable={false} className="text-xs text-muted-foreground">
+          {participant.ownerName ? (
+            <Link to={`/user/${encodeURIComponent(participant.ownerName)}`} className="hover:text-primary">{ownerText}</Link>
+          ) : ownerText}
+        </OverflowText>
+      )}
+    </div>
+  )
+}
+
+function DenseMatchParticipants({ match, states }: { match: MatchRow; states: readonly [ParticipantState, ParticipantState] }) {
+  return (
+    <div data-match-participants="true" className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-x-2">
+      <DenseParticipant source={match} side={0} state={states[0]} />
+      <span className="pt-0.5 text-[10px] font-medium text-muted-foreground">vs</span>
+      <DenseParticipant source={match} side={1} state={states[1]} />
+    </div>
   )
 }
 
@@ -501,7 +574,7 @@ export default function BotDetail() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="Bot 资料" description="身份、参榜状态、版本与当前评分" contentClassName="p-4">
+      <DataRegion title="Bot 资料" description="身份、参榜状态、版本与当前评分" contentClassName="px-4 py-3">
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
           <div className="min-w-0 space-y-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -531,7 +604,7 @@ export default function BotDetail() {
           </div>
           <CopyIdentifier value={profile.id} />
         </div>
-        <dl className="mt-3 grid min-w-0 grid-cols-2 gap-x-5 gap-y-3 border-t pt-3 text-sm md:grid-cols-4 xl:grid-cols-6">
+        <dl className="mt-2.5 grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 border-t pt-2.5 text-sm md:grid-cols-4 xl:grid-cols-6">
           <div className="min-w-0">
             <dt className="text-xs text-muted-foreground">Rating / 95% 区间</dt>
             <dd className="mt-0.5 font-mono font-semibold tabular-nums">
@@ -622,8 +695,8 @@ export default function BotDetail() {
                         <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                           {fmtTime(m.created_at)}
                         </TableCell>
-                        <TableCell className="max-w-[22rem] whitespace-normal">
-                          <MatchParticipants source={m} states={states} />
+                        <TableCell className="max-w-[24rem] whitespace-normal">
+                          <DenseMatchParticipants match={m} states={states} />
                         </TableCell>
                         <TableCell>
                           <BotPerspectiveOutcome match={m} botId={botId} />

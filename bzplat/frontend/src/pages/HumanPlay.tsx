@@ -101,6 +101,18 @@ export default function HumanPlay() {
   // 重连：网络断开时自动重连（指数退避，≤5 次）。match 结束或组件卸载后停止。
   const overRef = useRef(false)
   const [reconnecting, setReconnecting] = useState(false)
+  // xl+ 桌面仪表盘：主画布列 + 右侧信息栏（局面概览 + 最近动作同栏）。
+  const [desktopRail, setDesktopRail] = useState(
+    () => window.matchMedia('(min-width: 1280px)').matches,
+  )
+
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1280px)')
+    const syncBreakpoint = () => setDesktopRail(media.matches)
+    syncBreakpoint()
+    media.addEventListener('change', syncBreakpoint)
+    return () => media.removeEventListener('change', syncBreakpoint)
+  }, [])
 
   useEffect(() => {
     if (!id) return
@@ -413,6 +425,78 @@ export default function HumanPlay() {
     ? `真人 · 座位 ${humanSeat + 1}${seatDetail(humanSeat) ? ` · ${seatDetail(humanSeat)}` : ''}`
     : '正在确认你的位置'
 
+  // 两种 humanPlay 布局的棋盘/动作面板内容；withBoardPicks 区分是否启用画布直接落子。
+  const renderSurface = (withBoardPicks: boolean) => {
+    if (!gameSpec) return null
+    if (TurnSurface) {
+      return (
+        <TurnSurface
+          gameId={gameSpec.id}
+          events={events as RawEvent[]}
+          seats={seats}
+          revealMode={gameSpec.humanPlay.revealMode}
+          disabled={!canSubmitAction || over}
+          legal={canSubmitAction}
+          request={turnRequest}
+          onSubmit={sendMove}
+          renderBoard={({ events: surfaceEvents, onMove, interactive }) => (
+            <MatchBoard
+              gameId={gameSpec.id}
+              events={(surfaceEvents ?? events) as Ev[]}
+              seats={seats}
+              revealMode={gameSpec.humanPlay.revealMode}
+              onMove={onMove}
+              interactive={interactive}
+            />
+          )}
+        />
+      )
+    }
+    if (withBoardPicks) {
+      return (
+        <>
+          <MatchBoard
+            gameId={gameSpec.id}
+            events={events}
+            seats={seats}
+            revealMode={gameSpec.humanPlay.revealMode}
+            onMove={(x, y) => {
+              const action = gameSpec.humanPlay.serializeBoardPick?.(x, y)
+              if (action) sendMove(action)
+            }}
+            interactive={boardInteractive}
+          />
+          {ActionPanel && (
+            <ActionPanel
+              disabled={!canSubmitAction || over}
+              legal={canSubmitAction}
+              request={turnRequest}
+              onSubmit={sendMove}
+            />
+          )}
+        </>
+      )
+    }
+    return (
+      <>
+        <MatchBoard
+          gameId={gameSpec.id}
+          events={events}
+          seats={seats}
+          revealMode={gameSpec.humanPlay.revealMode}
+        />
+        {ActionPanel && (
+          <ActionPanel
+            disabled={!canSubmitAction || over}
+            legal={canSubmitAction}
+            request={turnRequest}
+            onSubmit={sendMove}
+          />
+        )}
+      </>
+    )
+  }
+
   // useEffect 在提交后清状态；这一同步 guard 还会挡住路由切换后的首个 render。
   if (match?.id && String(match.id) !== id) {
     return (
@@ -450,20 +534,19 @@ export default function HumanPlay() {
 
       {match && (
         <Card data-testid="human-matchup" className="gap-0 py-0">
-          <CardContent className="grid grid-cols-2 gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
+          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
             <MatchParticipantIdentity
               source={match}
               side={0}
-              variant="panel"
               state={winnerSeat === 0 ? 'winner' : winnerSeat === 1 ? 'loser' : 'neutral'}
               seatDetail={seatDetail(0)}
-              className="order-1 border border-border bg-muted/20"
+              className="order-1 py-0.5"
             />
-            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-3 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-4 sm:py-1">
+            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
               <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                 {match ? gameLabel(gameId) : '连接中'}
               </div>
-              <div className="mt-1 text-sm font-semibold text-foreground">{myPosition}</div>
+              <div className="mt-0.5 text-sm font-semibold text-foreground">{myPosition}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 {over ? '对局已结束' : reconnecting ? '正在恢复连接' : '实时同步'} · {events.length} 条事件
               </div>
@@ -471,10 +554,9 @@ export default function HumanPlay() {
             <MatchParticipantIdentity
               source={match}
               side={1}
-              variant="panel"
               state={winnerSeat === 1 ? 'winner' : winnerSeat === 0 ? 'loser' : 'neutral'}
               seatDetail={seatDetail(1)}
-              className="order-2 border border-border bg-muted/20 sm:order-3"
+              className="order-2 py-0.5 sm:order-3"
             />
           </CardContent>
         </Card>
@@ -549,124 +631,79 @@ export default function HumanPlay() {
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
         <div
           data-testid="human-canvas-layout"
-          className={viewportDashboard
-            ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-19rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-19rem)))_minmax(17rem,19rem)]'
-            : viewportFitCanvas
-              ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-19rem)))_22rem]'
-            : 'grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}
+          className={desktopRail
+            ? 'grid min-w-0 justify-center gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
+            : viewportDashboard
+              ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
+              : viewportFitCanvas
+                ? 'grid min-w-0 items-start justify-center gap-4'
+                : 'grid min-w-0 gap-4'}
         >
-          {viewportDashboard && ReplayHud && currentVm !== null && (
-            <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
-              <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
-            </div>
+          {desktopRail ? (
+            <>
+              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(52rem,calc(100dvh-26rem))]">
+                {renderSurface(true)}
+              </div>
+              <div className="flex min-w-0 flex-col gap-3">
+                {ReplayHud && currentVm !== null && (
+                  <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
+                )}
+                <div className="min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)]">
+                  <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {viewportDashboard && ReplayHud && currentVm !== null && (
+                <div className="min-w-0 md:col-start-1 md:row-start-1">
+                  <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
+                </div>
+              )}
+              <div className={`min-w-0 space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1' : ''}`}>
+                {renderSurface(true)}
+              </div>
+              <div className={viewportDashboard ? 'min-w-0 md:col-span-2 md:col-start-1 md:row-start-2' : 'min-w-0'}>
+                <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
+              </div>
+            </>
           )}
-          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-19rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
-            {TurnSurface ? (
-              <TurnSurface
-                gameId={gameSpec.id}
-                events={events as RawEvent[]}
-                seats={seats}
-                revealMode={gameSpec.humanPlay.revealMode}
-                disabled={!canSubmitAction || over}
-                legal={canSubmitAction}
-                request={turnRequest}
-                onSubmit={sendMove}
-                renderBoard={({ events: surfaceEvents, onMove, interactive }) => (
-                  <MatchBoard
-                    gameId={gameSpec.id}
-                    events={(surfaceEvents ?? events) as Ev[]}
-                    seats={seats}
-                    revealMode={gameSpec.humanPlay.revealMode}
-                    onMove={onMove}
-                    interactive={interactive}
-                  />
-                )}
-              />
-            ) : (
-              <>
-                <MatchBoard
-                  gameId={gameSpec.id}
-                  events={events}
-                  seats={seats}
-                  revealMode={gameSpec.humanPlay.revealMode}
-                  onMove={(x, y) => {
-                    const action = gameSpec.humanPlay.serializeBoardPick?.(x, y)
-                    if (action) sendMove(action)
-                  }}
-                  interactive={boardInteractive}
-                />
-                {ActionPanel && (
-                  <ActionPanel
-                    disabled={!canSubmitAction || over}
-                    legal={canSubmitAction}
-                    request={turnRequest}
-                    onSubmit={sendMove}
-                  />
-                )}
-              </>
-            )}
-          </div>
-          <div className={viewportDashboard ? 'min-w-0 md:col-span-2 md:col-start-1 md:row-start-2 xl:sticky xl:top-[var(--sticky-table-offset)] xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1' : 'min-w-0'}>
-            <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
-          </div>
         </div>
       )}
 
       {gameSpec?.humanPlay.layout === 'canvas-controls-log' && (
-        <div className={ReplayHud
-          ? 'grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem] 3xl:grid-cols-[15rem_minmax(0,1fr)_18rem]'
-          : 'grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]'}>
-          {ReplayHud && currentVm !== null && (
-            <div className="min-w-0 xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1">
-              <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
-            </div>
+        <div className={desktopRail
+          ? 'grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'
+          : 'grid min-w-0 items-start gap-3'}>
+          {desktopRail ? (
+            <>
+              <div className="min-w-0 space-y-3 xl:max-w-[min(100%,calc((100dvh-24rem)*1.7))]">
+                {renderSurface(false)}
+              </div>
+              <div className="flex min-w-0 flex-col gap-3">
+                {ReplayHud && currentVm !== null && (
+                  <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
+                )}
+                <div className="min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)]">
+                  <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {ReplayHud && currentVm !== null && (
+                <div className="min-w-0">
+                  <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
+                </div>
+              )}
+              <div className="min-w-0 space-y-3">
+                {renderSurface(false)}
+              </div>
+              <div className="min-w-0">
+                <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
+              </div>
+            </>
           )}
-          <div className={`min-w-0 space-y-3 ${ReplayHud ? 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1' : ''}`}>
-            {TurnSurface ? (
-              <TurnSurface
-                gameId={gameSpec.id}
-                events={events as RawEvent[]}
-                seats={seats}
-                revealMode={gameSpec.humanPlay.revealMode}
-                disabled={!canSubmitAction || over}
-                legal={canSubmitAction}
-                request={turnRequest}
-                onSubmit={sendMove}
-                renderBoard={({ events: surfaceEvents, onMove, interactive }) => (
-                  <MatchBoard
-                    gameId={gameSpec.id}
-                    events={(surfaceEvents ?? events) as Ev[]}
-                    seats={seats}
-                    revealMode={gameSpec.humanPlay.revealMode}
-                    onMove={onMove}
-                    interactive={interactive}
-                  />
-                )}
-              />
-            ) : (
-              <>
-                <MatchBoard
-                  gameId={gameSpec.id}
-                  events={events}
-                  seats={seats}
-                  revealMode={gameSpec.humanPlay.revealMode}
-                />
-                {ActionPanel && (
-                  <ActionPanel
-                    disabled={!canSubmitAction || over}
-                    legal={canSubmitAction}
-                    request={turnRequest}
-                    onSubmit={sendMove}
-                  />
-                )}
-              </>
-            )}
-          </div>
-          <div className={`min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)] ${ReplayHud
-            ? 'xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
-            : 'xl:col-start-2 xl:row-start-1'}`}>
-            <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
-          </div>
         </div>
       )}
     </PageFrame>

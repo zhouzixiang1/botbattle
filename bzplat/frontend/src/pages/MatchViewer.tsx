@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, ChevronDown, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download, MessageSquare } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
@@ -133,6 +133,28 @@ function ratingBadge(match: MatchRow): {
   return { label: '预计计分', variant: 'outline' }
 }
 
+/** 评论区折叠条：默认只占一行，点开后才挂载并加载 Comments。 */
+function CommentsBar({ targetId, className }: { targetId: string; className?: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`min-w-0 ${className ?? ''}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <MessageSquare aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+          评论
+        </span>
+        <ChevronDown aria-hidden="true" className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <Comments targetType="match" targetId={targetId} />}
+    </div>
+  )
+}
+
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -151,6 +173,9 @@ export default function MatchViewer() {
   const [speedIdx, setSpeedIdx] = useState(1)
   // 动作上下文折叠态（窄屏默认折叠，棋盘获全宽）
   const [timelineCollapsed, setTimelineCollapsed] = useState(false)
+  // xl+ 桌面仪表盘：主画布列 + 右侧信息栏（局面概览 + 动作上下文同栏）。
+  // 与折叠断点共用同一个 media query，跨过 1280px 时两侧同步切换。
+  const [desktopRail, setDesktopRail] = useState(false)
   // events 最新长度的 ref——SSE 回调需要在 React 提交前计算批量事件长度；
   // updater 保持纯函数，游标始终由独立的播放状态推进。
   const eventsLenRef = useRef(0)
@@ -425,7 +450,10 @@ export default function MatchViewer() {
   // 同一布局内的手动折叠选择不会被 resize 覆盖。
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1279px)')
-    const syncBreakpoint = () => setTimelineCollapsed(media.matches)
+    const syncBreakpoint = () => {
+      setTimelineCollapsed(media.matches)
+      setDesktopRail(!media.matches)
+    }
     syncBreakpoint()
     media.addEventListener('change', syncBreakpoint)
     return () => media.removeEventListener('change', syncBreakpoint)
@@ -491,7 +519,6 @@ export default function MatchViewer() {
   const navigation = gameSpec?.replay.navigation
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
-  const compactViewportDashboard = viewportDashboard && timelineCollapsed
   const ratingStateBadge = match ? ratingBadge(match) : null
   const matchTimeControl = parseMatchTimeControl(match?.time_control, gameId)
   const terminalReason = gameSpec
@@ -679,13 +706,173 @@ export default function MatchViewer() {
       <MatchParticipantIdentity
         source={match}
         side={seat}
-        variant="panel"
         state={participantStates[seat]}
         seatDetail={visibleSeatDetail(seat)}
-        className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} border ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}
+        className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} py-0.5 ${isWinner ? 'rounded-lg bg-primary/5' : ''}`}
       />
     )
   }
+
+  // 局面概览（HUD）：xl+ 位于右信息栏顶部，xl 以下先于棋盘堆叠。
+  const hudNode = ReplayHud && visibleVm !== null
+    ? <ReplayHud vm={visibleVm} seats={seats} liveEdge={atLive && realtime} />
+    : null
+
+  // 主画布列：回放摘要 + canvas + 回放控制。视口高度约束只压 canvas 宽度，
+  // 摘要与控制条仍占满整列，让 1440×900 尽量在单视口内容纳核心内容。
+  const squareCanvasClamp = 'mx-auto w-full xl:max-w-[min(52rem,calc(100dvh-32rem))]'
+  const mainColumnClasses = desktopRail
+    ? viewportFitCanvas
+      ? 'min-w-0 space-y-2.5 w-full justify-self-center'
+      : ReplayHud
+        ? 'min-w-0 space-y-2.5 xl:max-w-[min(100%,calc((100dvh-26rem)*1.7))]'
+        : 'min-w-0 space-y-2.5'
+    : viewportFitCanvas
+      ? 'min-w-0 space-y-2.5 w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))]'
+      : 'min-w-0 space-y-2.5'
+
+  const mainColumn = (
+    <>
+      {ReplaySummary && visibleVm !== null && (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+          <ReplaySummary vm={visibleVm} seats={seats} />
+        </div>
+      )}
+      <div className={viewportFitCanvas && desktopRail ? squareCanvasClamp : undefined}>
+        <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
+      </div>
+
+      {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
+      {!zeroProgressTechnicalMatch && (
+        <Card className="gap-0 py-0">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
+              {navigation && (
+                <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一个事件</Button>
+              <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
+                {playing ? <Pause className="size-4" /> : <Play className="size-4" />}{playbackLabel}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一个事件<ChevronRight className="size-4" /></Button>
+              {navigation && (
+                <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
+              )}
+              {navigation && bounds.length >= 2 && (
+                <Select
+                  value={currentNavigationValue}
+                  onValueChange={(value) => seek(
+                    value === 'terminal'
+                      ? terminalNavigationIndex ?? Math.max(0, total - 1)
+                      : bounds[Number(value)] ?? 0,
+                  )}
+                >
+                  <SelectTrigger size="sm" className="h-8 w-[6.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Array.from({ length: bounds.length - 1 }, (_, segment) => (
+                      <SelectItem key={segment} value={String(segment)}>
+                        {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
+                      </SelectItem>
+                    ))}
+                    {terminalNavigationIndex !== null && (
+                      <SelectItem value="terminal">终局事件</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              )}
+              <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
+                <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs" aria-label="回放速度">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="mt-2.5 flex items-center gap-3">
+              <span data-testid="playback-position" className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
+              <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </>
+  )
+
+  // 右轨中的有限动作上下文；xl+ 吸顶，滚动回放时保持可见。
+  const timelineCard = (
+    <Card data-testid="match-timeline" className="flex w-full flex-col gap-0 self-start overflow-hidden py-0 xl:sticky xl:top-6">
+      <div className="border-b border-border px-3 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 text-sm font-medium">
+            动作上下文 <span className="text-xs font-normal text-muted-foreground">({actionContextStart + 1}–{cur + 1}/{total})</span>
+          </span>
+          <Button variant="ghost" size="sm" className="h-11 px-2 sm:h-7" onClick={() => setTimelineCollapsed(c => !c)}>
+            {timelineCollapsed ? '展开动作' : '收起动作'}
+          </Button>
+        </div>
+      </div>
+      {!timelineCollapsed && (
+        <div className="p-1.5 text-xs">
+          {actionContext.map((ev, index) => {
+            const eventIndex = actionContextStart + index
+            return (
+              <div
+                key={eventIndex}
+                data-testid="match-action-context-row"
+                className={`flex items-center gap-2 rounded px-2 py-1 ${eventIndex === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}
+              >
+                <span className="w-7 shrink-0 font-mono text-[11px] opacity-60">{eventIndex + 1}</span>
+                <span className="min-w-0 flex-1 break-words leading-snug [overflow-wrap:anywhere]">
+                  {describeTimelineEvent(ev, gameSpec?.describeEvent(ev, seats) ?? String(ev.type || '?'), seats)}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </Card>
+  )
+
+  // xl+：主画布列 + 右信息栏（局面概览、动作上下文自上而下）；右栏随行高拉伸，
+  // 动作上下文在其中吸顶。xl 以下维持既有断点契约：概览先于棋盘、动作栏在后。
+  const replayGrid = gameSpec?.replay.layout === 'wide' ? (
+    <div className="space-y-3">
+      {hudNode && <div className="min-w-0">{hudNode}</div>}
+      <div className={mainColumnClasses}>{mainColumn}</div>
+      <div className="min-w-0">{timelineCard}</div>
+    </div>
+  ) : desktopRail ? (
+    <div className={viewportDashboard || viewportFitCanvas
+      ? 'grid justify-center gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'
+      : 'grid gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]'}>
+      <div className={mainColumnClasses}>{mainColumn}</div>
+      <div className="flex min-w-0 flex-col gap-3">
+        {hudNode}
+        {timelineCard}
+      </div>
+    </div>
+  ) : (
+    <div className={viewportDashboard
+      ? 'grid items-start justify-center gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
+      : viewportFitCanvas
+        ? 'grid items-start justify-center gap-3'
+        : 'grid gap-3'}>
+      {hudNode && (
+        <div className={viewportDashboard ? 'min-w-0 md:col-start-1 md:row-start-1' : 'min-w-0'}>
+          {hudNode}
+        </div>
+      )}
+      <div className={mainColumnClasses + (viewportDashboard ? ' md:col-start-2 md:row-start-1' : '')}>
+        {mainColumn}
+      </div>
+      <div className={viewportDashboard ? 'min-w-0 md:col-span-2 md:col-start-1 md:row-start-2' : 'min-w-0'}>
+        {timelineCard}
+      </div>
+    </div>
+  )
 
   return (
     <PageStub
@@ -788,9 +975,9 @@ export default function MatchViewer() {
       {/* 对阵与结果形成一个稳定层级；身份不再同时散落于标题、摘要和详情链接。 */}
       {match && (
         <Card data-testid="match-result-card" className="mb-3 gap-0 py-0">
-          <CardContent className="grid grid-cols-2 gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,auto)_minmax(0,1fr)] sm:items-center">
+          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,auto)_minmax(0,1fr)] sm:items-center">
             {renderSeat(0)}
-            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-3 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-4 sm:py-1">
+            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
               <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 {finished ? '对局结果' : '当前状态'}
               </div>
@@ -803,16 +990,16 @@ export default function MatchViewer() {
                   seatLabels={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
                   normalizedUnit={gameId === 'holdem' ? 'BB' : undefined}
                   showGames
-                  className="mt-1 text-sm"
+                  className="mt-0.5 text-sm"
                 />
               ) : (
-                <div className="mt-1 break-words text-sm font-semibold text-foreground">对局进行中</div>
+                <div className="mt-0.5 break-words text-sm font-semibold text-foreground">对局进行中</div>
               )}
               {hasPersistedTerminalStatus && match.reason && (
                 <div
                   data-testid="terminal-reason"
                   data-tone={terminalReason.tone}
-                  className={`mt-1 text-xs ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
+                  className={`mt-0.5 text-xs ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
                 >
                   {terminalReason.label}
                 </div>
@@ -825,38 +1012,35 @@ export default function MatchViewer() {
 
       {match && technicalTerminal && (
         <Card role="alert" className="mb-3 gap-0 border-destructive/35 bg-destructive/5 py-0">
-          <CardContent className="px-4 py-3">
-            <div className="flex items-start gap-3">
-              <TriangleAlert className="mt-0.5 size-5 shrink-0 text-destructive" />
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-foreground">Bot 技术判负</div>
-                <p className="mt-1 break-words text-sm text-muted-foreground">
-                  {failedSeat === 0 || failedSeat === 1
-                    ? `${seatHeaderLabel(match, failedSeat)} · 座位 ${failedSeat + 1} 发生技术故障`
-                    : '对局因 Bot 技术故障终止'}
-                  {winnerSeat === 0 || winnerSeat === 1
-                    ? `，${seatHeaderLabel(match, winnerSeat)} · 座位 ${winnerSeat + 1} 获胜。`
-                    : '。'}
-                </p>
-                {technicalIncidents.length > 0 ? (
-                  <div className="mt-3 space-y-2">
-                    {technicalIncidents.slice(0, 3).map((incident, index) => (
-                      <div key={`${incident.seat}-${incident.turn ?? 'x'}-${index}`} className="rounded-md border border-destructive/20 bg-background/70 px-3 py-2 text-xs">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-foreground">
-                            {eventSeatSubject(seats, incident.seat)} · 座位 {Number(incident.seat) + 1}
-                            {incident.turn != null ? ` · 第 ${incident.turn} 次决策` : ''}
-                          </span>
-                          {incident.code && <Badge variant="outline" className="max-w-full break-all font-mono text-[10px]">{incident.code}</Badge>}
-                        </div>
-                        <p className="mt-1 break-words text-muted-foreground">{incident.error}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-xs text-muted-foreground">故障类型：{terminalReason.label}</p>
-                )}
-              </div>
+          <CardContent className="px-3 py-2">
+            <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1 text-xs leading-relaxed">
+              <TriangleAlert aria-hidden="true" className="size-4 shrink-0 text-destructive" />
+              <span className="shrink-0 font-semibold text-foreground">Bot 技术判负</span>
+              <span className="min-w-0 break-words text-muted-foreground">
+                {failedSeat === 0 || failedSeat === 1
+                  ? `${seatHeaderLabel(match, failedSeat)} · 座位 ${failedSeat + 1} 发生技术故障`
+                  : '对局因 Bot 技术故障终止'}
+                {winnerSeat === 0 || winnerSeat === 1
+                  ? `，${seatHeaderLabel(match, winnerSeat)} · 座位 ${winnerSeat + 1} 获胜。`
+                  : '。'}
+              </span>
+              {technicalIncidents.length > 0 ? (
+                technicalIncidents.slice(0, 3).map((incident, index) => (
+                  <span
+                    key={`${incident.seat}-${incident.turn ?? 'x'}-${index}`}
+                    className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 break-words text-muted-foreground"
+                  >
+                    <span className="font-medium text-foreground">
+                      {eventSeatSubject(seats, incident.seat)} · 座位 {Number(incident.seat) + 1}
+                      {incident.turn != null ? ` · 第 ${incident.turn} 次决策` : ''}
+                    </span>
+                    {incident.code && <Badge variant="outline" className="max-w-full break-all font-mono text-[10px]">{incident.code}</Badge>}
+                    <span className="min-w-0 break-words">{incident.error}</span>
+                  </span>
+                ))
+              ) : (
+                <span className="min-w-0 break-words text-muted-foreground">故障类型：{terminalReason.label}</span>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -894,172 +1078,24 @@ export default function MatchViewer() {
           icon={<History className="size-7 opacity-40" />}
         /></Card>
       ) : (
-        <div className={gameSpec?.replay.layout === 'wide'
-          ? 'space-y-3'
-          : viewportDashboard
-            ? compactViewportDashboard
-              ? 'grid items-start justify-center gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
-              : 'grid items-start justify-center gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
-            : timelineCollapsed
-              ? ReplayHud
-                ? 'grid items-start gap-3 xl:grid-cols-[15rem_minmax(0,1fr)]'
-                : 'grid gap-3'
-              : ReplayHud
-                ? 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)] 3xl:grid-cols-[15rem_minmax(0,1fr)_minmax(17rem,19rem)]'
-                : viewportFitCanvas
-                  ? 'grid items-start justify-center gap-3 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
-                  : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)]'}>
-          {viewportDashboard && ReplayHud && visibleVm !== null && (
-            <div className={compactViewportDashboard
-              ? 'min-w-0 md:col-start-1 md:row-start-1'
-              : 'min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1'}>
-              <ReplayHud vm={visibleVm} seats={seats} liveEdge={atLive && realtime} />
-            </div>
-          )}
-          {!viewportDashboard && ReplayHud && visibleVm !== null && (
-            <div className={`min-w-0 ${timelineCollapsed
-              ? 'xl:col-start-1 xl:row-start-1'
-              : 'xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1'}`}>
-              <ReplayHud vm={visibleVm} seats={seats} liveEdge={atLive && realtime} />
-            </div>
-          )}
-
-          {/* 左：canvas 棋盘/牌桌 + 分段导航 + 控制条 */}
-          <div className={`min-w-0 space-y-2.5 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard
-            ? compactViewportDashboard
-              ? 'md:col-start-2 md:row-start-1'
-              : 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1'
-            : ReplayHud
-              ? timelineCollapsed
-              ? 'xl:col-start-2 xl:row-start-1'
-              : 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1'
-            : ''}`}>
-            {ReplaySummary && visibleVm !== null && (
-              <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
-                <ReplaySummary vm={visibleVm} seats={seats} />
-              </div>
-            )}
-            <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
-
-            {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
-            {!zeroProgressTechnicalMatch && (
-              <Card className="gap-0 py-0">
-                <CardContent className="px-3 py-2.5">
-                  <div className="flex flex-wrap items-center justify-center gap-1.5">
-                    {navigation && (
-                      <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
-                    )}
-                    <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一个事件</Button>
-                    <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
-                      {playing ? <Pause className="size-4" /> : <Play className="size-4" />}{playbackLabel}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一个事件<ChevronRight className="size-4" /></Button>
-                    {navigation && (
-                      <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
-                    )}
-                    {navigation && bounds.length >= 2 && (
-                      <Select
-                        value={currentNavigationValue}
-                        onValueChange={(value) => seek(
-                          value === 'terminal'
-                            ? terminalNavigationIndex ?? Math.max(0, total - 1)
-                            : bounds[Number(value)] ?? 0,
-                        )}
-                      >
-                        <SelectTrigger size="sm" className="h-8 w-[6.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Array.from({ length: bounds.length - 1 }, (_, segment) => (
-                            <SelectItem key={segment} value={String(segment)}>
-                              {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
-                            </SelectItem>
-                          ))}
-                          {terminalNavigationIndex !== null && (
-                            <SelectItem value="terminal">终局事件</SelectItem>
-                          )}
-                        </SelectContent>
-                      </Select>
-                    )}
-                    <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
-                      <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs" aria-label="回放速度">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="mt-2.5 flex items-center gap-3">
-                    <span data-testid="playback-position" className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
-                    <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-          </div>
-
-          {/* 右：有限动作上下文 */}
-          <Card
-            data-testid="match-timeline"
-            className={`flex flex-col gap-0 self-start overflow-hidden py-0 ${compactViewportDashboard ? '' : 'xl:sticky xl:top-6'} ${viewportDashboard
-              ? compactViewportDashboard
-                ? 'md:col-span-2 md:col-start-1 md:row-start-2'
-                : 'md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1'
-              : ReplayHud
-                ? timelineCollapsed
-                  ? 'xl:col-span-2 xl:row-start-2'
-                  : 'xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
-                : ''}`}
-          >
-            <div className="border-b border-border px-4 py-2">
-              <div className="flex items-center justify-between">
-                <span className="min-w-0 text-sm font-medium">
-                  动作上下文 <span className="text-xs font-normal text-muted-foreground">({actionContextStart + 1}–{cur + 1}/{total})</span>
-                </span>
-                <Button variant="ghost" size="sm" onClick={() => setTimelineCollapsed(c => !c)}>
-                  {timelineCollapsed ? '展开动作' : '收起动作'}
-                </Button>
-              </div>
-            </div>
-            {!timelineCollapsed && (
-              <div className="p-2 text-xs">
-                <p className="px-2 pb-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                  当前事件及之前最多 {ACTION_CONTEXT_SIZE - 1} 条；完整过程用下方进度条定位。
-                </p>
-                {actionContext.map((ev, index) => {
-                  const eventIndex = actionContextStart + index
-                  return (
-                    <div
-                      key={eventIndex}
-                      data-testid="match-action-context-row"
-                      className={`flex items-center gap-2 rounded px-2 py-1.5 ${eventIndex === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}
-                    >
-                      <span className="w-8 shrink-0 font-mono opacity-60">{eventIndex + 1}</span>
-                      <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">
-                        {describeTimelineEvent(ev, gameSpec?.describeEvent(ev, seats) ?? String(ev.type || '?'), seats)}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </Card>
-        </div>
+        replayGrid
       )}
 
-      {match?.contest_id != null ? (
-        <Button asChild variant="ghost" size="sm" className="mt-6 min-h-11 gap-1.5">
-          <Link to={`/contests/${match.contest_id}/live`}>
-            <ArrowLeft aria-hidden="true" className="size-4" />返回赛事直播
-          </Link>
-        </Button>
-      ) : (
-        <Button variant="ghost" size="sm" className="mt-6 min-h-11 gap-1.5" onClick={() => navigate(-1)}>
-          <ArrowLeft aria-hidden="true" className="size-4" />返回
-        </Button>
-      )}
-      {id && <Comments targetType="match" targetId={id} />}
+      {/* 返回与评论区折叠条共用一行，避免终局页底部出现两段独立大块。 */}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        {match?.contest_id != null ? (
+          <Button asChild variant="ghost" size="sm" className="min-h-11 gap-1.5">
+            <Link to={`/contests/${match.contest_id}/live`}>
+              <ArrowLeft aria-hidden="true" className="size-4" />返回赛事直播
+            </Link>
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" className="min-h-11 gap-1.5" onClick={() => navigate(-1)}>
+            <ArrowLeft aria-hidden="true" className="size-4" />返回
+          </Button>
+        )}
+        {id && <CommentsBar targetId={id} className="w-full min-w-[12rem] sm:w-auto sm:max-w-sm sm:flex-1" />}
+      </div>
     </PageStub>
   )
 }

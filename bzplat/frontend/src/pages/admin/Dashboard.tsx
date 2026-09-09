@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { CircleCheck, Clock3, PauseCircle, PlayCircle, Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 import { apiFetch, apiJson, errMsg } from '@/api'
-import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn, Button } from './ui'
+import { Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn, Button } from './ui'
 import {
   autoSchedulerPresentation,
   ExecutionQueuePanel,
@@ -249,23 +249,15 @@ export default function Dashboard() {
 
   return (
     <div>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-2 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">平台总览统计</p>
-        <RefreshBtn onClick={refreshCurrent} className="min-h-11" />
+        <RefreshBtn onClick={refreshCurrent} className="max-lg:min-h-11" />
       </div>
       {(error || offline) && (
         <div role="alert"><ErrorMsg msg={offline ? '当前离线；以下保留上次成功数据。' : error} /></div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <MetricCard label="用户" value={stats.users} hint={`活跃 ${stats.users_active}`} />
-        <MetricCard label="Bot" value={stats.bots} hint={`活跃 ${stats.bots_active}`} />
-        <MetricCard label="对局" value={stats.matches} hint={`完成 ${stats.matches_completed}`} />
-        <MetricCard label="异常对局" value={abnormal} danger={abnormal > 0}
-          hint={`已中止 ${stats.matches_aborted} · 运行中 ${stats.matches_running}`} />
-        <MetricCard label="比赛" value={stats.contests} hint={`进行中 ${stats.contests_running}`} />
-        <MetricCard label="在线会话" value={stats.active_sessions} />
-      </div>
+      <OverviewMetrics stats={stats} abnormal={abnormal} />
 
       <ExecutionQueuePanel
         snapshot={queue}
@@ -274,9 +266,9 @@ export default function Dashboard() {
         stale={!!queue && (offline || !!error)}
         lastUpdatedAt={lastUpdatedAt}
         onRetry={refreshCurrent}
-        maxQueued={6}
+        maxQueued={4}
         compactOnMobile
-        className="mt-5"
+        className="mt-3 [&_li]:py-1.5"
         action={queue ? (
           <MaintenanceControls
             queue={queue}
@@ -289,15 +281,15 @@ export default function Dashboard() {
         ) : null}
       />
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <Card className="min-w-0 overflow-hidden">
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <Card density="compact" className="min-w-0 overflow-hidden">
           <CardHeader><CardTitle>最近注册用户</CardTitle></CardHeader>
           {stats.recent_users.length === 0 ? (
             <EmptyState text="暂无用户" />
           ) : (
             <ul className="divide-y divide-border">
               {stats.recent_users.map((u) => (
-                <li key={u.id} className="grid min-w-0 gap-1 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
+                <li key={u.id} className="grid min-w-0 gap-1 py-1.5 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
                   <Link
                     to={`/user/${encodeURIComponent(u.username)}`}
                     className="min-w-0 max-w-full truncate font-medium text-primary hover:underline"
@@ -314,9 +306,9 @@ export default function Dashboard() {
           )}
         </Card>
 
-        <Card className="min-w-0 overflow-hidden">
+        <Card density="compact" className="min-w-0 overflow-hidden">
           <CardHeader><CardTitle>对局状态分布</CardTitle></CardHeader>
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success" />
             <DistRow label="运行中" n={stats.matches_running} total={stats.matches} color="bg-primary" />
             <DistRow label="待开始" n={stats.matches_pending} total={stats.matches} color="bg-muted-foreground" />
@@ -326,6 +318,48 @@ export default function Dashboard() {
         </Card>
       </div>
       {confirmDialog}
+    </div>
+  )
+}
+
+/**
+ * 总览指标条：数值与副注同行（页面级紧凑布局，替代 MetricCard 三行堆叠），
+ * 保持与 MetricCard 相同的语义 token 与溢出保护。
+ */
+function OverviewMetrics({ stats, abnormal }: { stats: Stats; abnormal: number }) {
+  const items = [
+    { label: '用户', value: stats.users, hint: `活跃 ${stats.users_active}`, danger: false },
+    { label: 'Bot', value: stats.bots, hint: `活跃 ${stats.bots_active}`, danger: false },
+    { label: '对局', value: stats.matches, hint: `完成 ${stats.matches_completed}`, danger: false },
+    {
+      label: '异常对局',
+      value: abnormal,
+      hint: `已中止 ${stats.matches_aborted} · 运行中 ${stats.matches_running}`,
+      danger: abnormal > 0,
+    },
+    { label: '比赛', value: stats.contests, hint: `进行中 ${stats.contests_running}`, danger: false },
+    { label: '在线会话', value: stats.active_sessions, hint: '', danger: false },
+  ]
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      {items.map((item) => (
+        <div key={item.label} className="min-w-0 rounded-lg border bg-card px-2.5 py-2">
+          <OverflowText className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
+            {item.label}
+          </OverflowText>
+          <div className="mt-0.5 flex min-w-0 items-baseline gap-1.5">
+            <OverflowText
+              className={`shrink-0 font-mono text-base font-bold tabular-nums ${item.danger ? 'text-destructive' : 'text-foreground'}`}
+              tooltip={String(item.value)}
+            >
+              {item.value}
+            </OverflowText>
+            {item.hint && (
+              <OverflowText className="min-w-0 flex-1 text-[0.6875rem] text-muted-foreground">{item.hint}</OverflowText>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -386,7 +420,7 @@ function MaintenanceControls({
       data-testid="deployment-maintenance-control"
     >
       <div
-        className={`flex min-h-11 min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 ${status.tone}`}
+        className={`flex min-h-11 min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1 lg:py-1 ${status.tone}`}
         role="status"
         aria-live="polite"
       >
@@ -399,7 +433,7 @@ function MaintenanceControls({
         </span>
       </div>
 
-      <div className="flex min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 sm:justify-start">
+      <div className="flex max-lg:min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1 sm:justify-start">
         <div className="min-w-0">
           <div className="text-xs font-medium">闲时排位</div>
           <div className="break-words text-[0.6875rem] leading-tight text-muted-foreground [overflow-wrap:anywhere]">
@@ -419,7 +453,7 @@ function MaintenanceControls({
         <Button
           type="button"
           size="sm"
-          className="min-h-11 w-full sm:w-auto"
+          className="max-lg:min-h-11 w-full sm:w-auto"
           variant="outline"
           disabled={busy}
           onClick={onRecover}
@@ -430,7 +464,7 @@ function MaintenanceControls({
         <Button
           type="button"
           size="sm"
-          className="min-h-11 w-full sm:w-auto"
+          className="max-lg:min-h-11 w-full sm:w-auto"
           disabled={busy || !ready}
           onClick={onLeave}
         >
@@ -441,7 +475,7 @@ function MaintenanceControls({
         <Button
           type="button"
           size="sm"
-          className="min-h-11 w-full sm:w-auto"
+          className="max-lg:min-h-11 w-full sm:w-auto"
           variant="outline"
           disabled={busy || !normal}
           onClick={onPrepare}
