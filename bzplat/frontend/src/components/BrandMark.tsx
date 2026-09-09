@@ -24,9 +24,9 @@ export default function BrandMark({
           box,
         )}
       >
-        B
+        b
       </span>
-      {withText && <span className={cn('font-display', text)}>Botbattle</span>}
+      {withText && <span className={cn('font-display', text)}>botarena</span>}
     </span>
   )
 }

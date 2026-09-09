@@ -19,7 +19,7 @@ TPL_WELCOME = "welcome"
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_SENDER_NAME = "Botbattle"
+DEFAULT_SENDER_NAME = "botarena"
 
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")

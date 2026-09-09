@@ -166,7 +166,7 @@ export function AppShell() {
             <div className={cn('flex items-center justify-between', sidebarCollapsed && 'flex-col gap-2')}>
               <Link
                 to="/"
-                aria-label={sidebarCollapsed ? 'Botbattle 首页' : undefined}
+                aria-label={sidebarCollapsed ? 'botarena 首页' : undefined}
                 className="flex min-w-0 max-w-full items-center overflow-hidden"
               >
                 <BrandMark
@@ -474,7 +474,7 @@ export function AppShell() {
         {/* 页脚（跟随主体宽度，不跨侧栏）：平台标题 + 版权行 */}
         <footer className="border-t border-border">
           <div className="flex w-full min-w-0 flex-col gap-0.5 px-[var(--page-gutter)] py-4 text-xs text-muted-foreground">
-            <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
+            <span>botarena · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
             <span>© DAISec Lab · 版权所有</span>
           </div>
         </footer>

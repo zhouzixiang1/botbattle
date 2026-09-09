@@ -78,7 +78,7 @@ async def _drain_shielded(task: asyncio.Task[Any]) -> tuple[Any, bool]:
 
 
 def validate_local_docker_configuration() -> None:
-    """Reject an explicit Botbattle remote socket override.
+    """Reject an explicit botarena remote socket override.
 
     Shell-level Docker context/host variables are deliberately ignored: every
     child command receives a sanitized environment and an explicit ``--host``.
