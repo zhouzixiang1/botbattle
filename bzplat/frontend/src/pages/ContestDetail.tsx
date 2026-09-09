@@ -578,7 +578,7 @@ function ContestScheduleInfo({ c }: { c: Contest }) {
     <div
       role="region"
       aria-label="赛事时间安排"
-      className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 border-t pt-2 text-xs"
+      className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs"
     >
       <CalendarClock aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
       {items.map((it) => {
@@ -1668,7 +1668,7 @@ export default function ContestDetail() {
         }
         description={
           <OverflowText
-            lines={3}
+            lines={2}
             tooltip={contest.description || false}
             className="whitespace-pre-wrap break-words text-sm leading-relaxed [overflow-wrap:anywhere]"
           >
@@ -1684,75 +1684,93 @@ export default function ContestDetail() {
             {hasLegacyAggregateStage && <Badge variant="outline">旧版系列结算</Badge>}
           </>
         }
-        contentClassName="space-y-2 p-3"
+        contentClassName="min-w-0 space-y-1.5 p-3"
       >
-          <dl className="flex min-w-0 flex-wrap gap-x-5 gap-y-1 text-xs">
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">游戏</dt>
-              <dd className="font-medium text-foreground">{gameLabel(contest.game_id)} · {contestGame?.matchFormatLabel || '规则不可用'}</dd>
-            </div>
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">赛制</dt>
-              <dd className="font-medium text-foreground">
-                {hasInvalidStageContract
-                  ? `${templateLabel} · 配置暂不可用`
-                  : `${templateLabel}${isDuplicate ? ' · 同牌换座，两场独立计分' : ''}`}
-              </dd>
-            </div>
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">选手</dt>
-              <dd className="font-mono font-medium tabular-nums text-foreground">{entriesTotal}</dd>
-            </div>
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">时限</dt>
-              <dd className="font-medium text-foreground">
-                {contestTimeControl ? timeControlLabel(contestTimeControl) : '配置暂不可用'}
-              </dd>
-            </div>
-            {contest.source_contest_id != null && (
-              <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">
-                  {contest.template_id === 'gomoku_seeded_group_drr_final' ? '保护种子来源' : '关联赛事'}
-                </dt>
-                <dd>
-                  <Link className="font-medium text-primary hover:underline" to={`/contests/${contest.source_contest_id}`}>
-                    {contest.template_id === 'gomoku_seeded_group_drr_final' ? '模拟赛' : '赛事'} #{contest.source_contest_id}
-                  </Link>
-                </dd>
+          {(() => {
+            const hasScheduleTimes = Boolean(
+              contest.registration_opens_at
+              || contest.registration_closes_at
+              || contest.starts_at
+              || contest.ends_at,
+            )
+            const showTimeColumn = Boolean(contestTimeControl) || hasScheduleTimes
+            return (
+              <div className="grid min-w-0 gap-x-5 gap-y-1.5 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+                <dl className="flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs">
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">游戏</dt>
+                    <dd className="font-medium text-foreground">{gameLabel(contest.game_id)} · {contestGame?.matchFormatLabel || '规则不可用'}</dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">赛制</dt>
+                    <dd className="font-medium text-foreground">
+                      {hasInvalidStageContract
+                        ? `${templateLabel} · 配置暂不可用`
+                        : `${templateLabel}${isDuplicate ? ' · 同牌换座，两场独立计分' : ''}`}
+                    </dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">选手</dt>
+                    <dd className="font-mono font-medium tabular-nums text-foreground">{entriesTotal}</dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">时限</dt>
+                    <dd className="font-medium text-foreground">
+                      {contestTimeControl ? timeControlLabel(contestTimeControl) : '配置暂不可用'}
+                    </dd>
+                  </div>
+                  {contest.source_contest_id != null && (
+                    <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                      <dt className="text-muted-foreground">
+                        {contest.template_id === 'gomoku_seeded_group_drr_final' ? '保护种子来源' : '关联赛事'}
+                      </dt>
+                      <dd>
+                        <Link className="font-medium text-primary hover:underline" to={`/contests/${contest.source_contest_id}`}>
+                          {contest.template_id === 'gomoku_seeded_group_drr_final' ? '模拟赛' : '赛事'} #{contest.source_contest_id}
+                        </Link>
+                      </dd>
+                    </div>
+                  )}
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">阶段</dt>
+                    <dd className="font-mono font-medium tabular-nums text-foreground">{stageLabel}</dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">{overviewScheduleLabel}</dt>
+                    <dd className="font-mono font-medium tabular-nums text-foreground">
+                      {hasInvalidStageContract
+                        ? '暂不可用'
+                        : <>{projectedEstimatedMatches != null ? `预计 ${projectedEstimatedMatches}` : pairings.length}{' '}{overviewScheduleSuffix}</>}
+                    </dd>
+                  </div>
+                  {!hasInvalidStageContract && contest.games_per_pair != null && displayStageSeriesConfigs.length === 0 && (
+                    <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                      <dt className="text-muted-foreground">
+                        {hasLegacyAggregateStage ? '每对历史系列' : isDuplicate ? '每对复式交锋' : '每对计分场'}
+                      </dt>
+                      <dd className="font-mono font-medium tabular-nums text-foreground">
+                        {hasLegacyAggregateStage
+                          ? `${contest.games_per_pair} 场 · 完整系列 1 次结算`
+                          : isDuplicate
+                          ? `${contest.games_per_pair} 组 · ${contest.games_per_pair * 2} 场计分`
+                          : `${contest.games_per_pair} 场计分`}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+                {showTimeColumn && (
+                  <div className="flex min-w-0 flex-col justify-center gap-1 lg:border-l lg:border-border lg:pl-4">
+                    {contestTimeControl && (
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {timeControlDescription(contestTimeControl)}
+                      </p>
+                    )}
+                    <ContestScheduleInfo c={contest} />
+                  </div>
+                )}
               </div>
-            )}
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">阶段</dt>
-              <dd className="font-mono font-medium tabular-nums text-foreground">{stageLabel}</dd>
-            </div>
-            <div className="inline-flex min-w-0 items-baseline gap-1.5">
-              <dt className="text-muted-foreground">{overviewScheduleLabel}</dt>
-              <dd className="font-mono font-medium tabular-nums text-foreground">
-                {hasInvalidStageContract
-                  ? '暂不可用'
-                  : <>{projectedEstimatedMatches != null ? `预计 ${projectedEstimatedMatches}` : pairings.length}{' '}{overviewScheduleSuffix}</>}
-              </dd>
-            </div>
-            {!hasInvalidStageContract && contest.games_per_pair != null && displayStageSeriesConfigs.length === 0 && (
-              <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">
-                  {hasLegacyAggregateStage ? '每对历史系列' : isDuplicate ? '每对复式交锋' : '每对计分场'}
-                </dt>
-                <dd className="font-mono font-medium tabular-nums text-foreground">
-                  {hasLegacyAggregateStage
-                    ? `${contest.games_per_pair} 场 · 完整系列 1 次结算`
-                    : isDuplicate
-                    ? `${contest.games_per_pair} 组 · ${contest.games_per_pair * 2} 场计分`
-                    : `${contest.games_per_pair} 场计分`}
-                </dd>
-              </div>
-            )}
-          </dl>
-          {contestTimeControl && (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {timeControlDescription(contestTimeControl)}
-            </p>
-          )}
+            )
+          })()}
           <FormatSnapshotAudit value={contest.format_snapshot} />
           {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="flex min-w-0 items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
@@ -1766,7 +1784,6 @@ export default function ContestDetail() {
               )}
             </div>
           )}
-          <ContestScheduleInfo c={contest} />
           {contestScheduleIssue && (
             <div role="alert" className="flex min-w-0 items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
@@ -1943,7 +1960,7 @@ export default function ContestDetail() {
         {canRegister && (
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             {needsRealName && (
-              <span className="w-full min-w-0 break-words text-sm text-warning">
+              <span className="min-w-0 basis-full break-words text-sm text-warning sm:basis-auto">
                 本赛事要求实名报名，请先{' '}
                 <Link to="/settings" className="font-medium underline">填写实名信息</Link>
               </span>
@@ -2018,59 +2035,85 @@ export default function ContestDetail() {
         {/* Tab「对阵」：阶段切换(S4) + 阶段配置 + 对阵视图(S6a) + 正式名次(finished) */}
         <TabsContent value="matchups" className="mt-2 space-y-3">
           {stages.length > 0 && (
-            <div className="min-w-0 space-y-2 rounded-xl border bg-card p-2">
-              <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))}>
-                <TabsList variant="line" className="w-full justify-start overflow-y-hidden pb-1">
-                  {stages.map((s, i) => {
-                    const stageContract = stageContracts[i] ?? 'invalid'
-                    const prog = stageProgress.get(i)
-                    const summary = stageStandings.find((item) => item.stage_idx === i)
-                    const matchJobs = summary?.counts?.match_jobs
-                    const scoringGames = summary?.counts?.scoring_games
-                    const completed = matchJobs?.completed ?? prog?.completed ?? 0
-                    const total = matchJobs?.total ?? prog?.total ?? 0
-                    const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || `阶段${i + 1}`
-                    const roundTag = prog && prog.maxRound > 0 && completed < total
-                      ? `第${prog.maxRound}轮`
-                      : null
-                    const progressLabel = stageContract === 'invalid'
-                      ? '赛制配置暂不可用'
-                      : summary && (summary.counts?.match_jobs || total > 0)
-                      ? stageStandingProgressLabel(
-                          summary,
-                          s.duplicate === true,
-                          s.series_scoring === 'aggregate_match_points_v1',
-                        )
-                      : total > 0
-                        ? s.series_scoring === 'aggregate_match_points_v1'
-                          ? `${completed}/${total} 场历史系列对局`
-                          : s.duplicate
-                            ? `${completed}/${total} 组复式交锋${scoringGames ? ` · ${scoringGames.completed}/${scoringGames.planned} 场计分` : ''}`
-                            : `${scoringGames?.completed ?? completed}/${scoringGames?.planned ?? total} 场计分`
+            <div className="min-w-0 space-y-1.5 rounded-xl border bg-card p-2">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))} className="min-w-0 flex-1">
+                  <TabsList variant="line" className="w-full justify-start overflow-y-hidden pb-1">
+                    {stages.map((s, i) => {
+                      const stageContract = stageContracts[i] ?? 'invalid'
+                      const prog = stageProgress.get(i)
+                      const summary = stageStandings.find((item) => item.stage_idx === i)
+                      const matchJobs = summary?.counts?.match_jobs
+                      const scoringGames = summary?.counts?.scoring_games
+                      const completed = matchJobs?.completed ?? prog?.completed ?? 0
+                      const total = matchJobs?.total ?? prog?.total ?? 0
+                      const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || `阶段${i + 1}`
+                      const roundTag = prog && prog.maxRound > 0 && completed < total
+                        ? `第${prog.maxRound}轮`
                         : null
-                    return (
-                      <TabsTrigger key={s.key || i} value={String(i)} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
-                        <span>{typeLabel}</span>
-                        {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
-                        {contest.current_stage_idx === i && contest.status !== 'finished' && (
-                          <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
-                        )}
-                        {progressLabel && (
-                          <span className="text-[10px] text-muted-foreground">
-                            {progressLabel}
-                          </span>
-                        )}
-                      </TabsTrigger>
-                    )
-                  })}
-                </TabsList>
-              </Tabs>
+                      const progressLabel = stageContract === 'invalid'
+                        ? '赛制配置暂不可用'
+                        : summary && (summary.counts?.match_jobs || total > 0)
+                        ? stageStandingProgressLabel(
+                            summary,
+                            s.duplicate === true,
+                            s.series_scoring === 'aggregate_match_points_v1',
+                          )
+                        : total > 0
+                          ? s.series_scoring === 'aggregate_match_points_v1'
+                            ? `${completed}/${total} 场历史系列对局`
+                            : s.duplicate
+                              ? `${completed}/${total} 组复式交锋${scoringGames ? ` · ${scoringGames.completed}/${scoringGames.planned} 场计分` : ''}`
+                              : `${scoringGames?.completed ?? completed}/${scoringGames?.planned ?? total} 场计分`
+                          : null
+                      return (
+                        <TabsTrigger key={s.key || i} value={String(i)} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
+                          <span>{typeLabel}</span>
+                          {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
+                          {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                            <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
+                          )}
+                          {progressLabel && (
+                            <span className="text-[10px] text-muted-foreground">
+                              {progressLabel}
+                            </span>
+                          )}
+                        </TabsTrigger>
+                      )
+                    })}
+                  </TabsList>
+                </Tabs>
+                {currentStageContractAvailable && stagePairings.length > 0 && (
+                  <div role="group" aria-label="对阵视图" className="flex shrink-0 items-center gap-1 rounded-lg bg-muted p-0.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="min-h-11 sm:min-h-8"
+                      variant={pairingView === 'tree' ? 'secondary' : 'ghost'}
+                      aria-pressed={pairingView === 'tree'}
+                      onClick={() => setPairingView('tree')}
+                    >
+                      {isElimStage ? '对阵树' : '分组视图'}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="min-h-11 sm:min-h-8"
+                      variant={pairingView === 'table' ? 'secondary' : 'ghost'}
+                      aria-pressed={pairingView === 'table'}
+                      onClick={() => setPairingView('table')}
+                    >
+                      一览表
+                    </Button>
+                  </div>
+                )}
+              </div>
 
               {stages[stageTab] && (
                 <OverflowText
                   lines={3}
                   tooltip={false}
-                  className="border-t px-2 pt-2 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
+                  className="border-t px-2 pt-1.5 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
                 >
                   <span className="font-medium text-foreground">本阶段配置：</span>
                   {currentStageContractAvailable ? [
@@ -2110,30 +2153,6 @@ export default function ContestDetail() {
                 ? `当前阶段 ${stageEncounterCompleted == null ? stageEncounterTotal : `${stageEncounterCompleted}/${stageEncounterTotal}`} 个对手系列 · ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 组复式交锋${stageScoringGamePlanned == null ? '' : ` · ${stageScoringGameCompleted == null ? `计划 ${stageScoringGamePlanned}` : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 场计分`}。`
                 : `当前阶段 ${stageEncounterCompleted == null ? stageEncounterTotal : `${stageEncounterCompleted}/${stageEncounterTotal}`} 个对手系列 · ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 条对局记录${stageScoringGamePlanned == null ? ` · ${stageMatchJobTotal} 场计分` : ` · ${stageScoringGameCompleted == null ? stageScoringGamePlanned : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 场计分`}。`
               : '排期生成后将在这里显示。'}
-            actions={currentStageContractAvailable && stagePairings.length > 0 ? (
-              <div role="group" aria-label="对阵视图" className="flex items-center gap-1 rounded-lg bg-muted p-0.5">
-                <Button
-                  type="button"
-                  size="sm"
-                  className="min-h-11 sm:min-h-8"
-                  variant={pairingView === 'tree' ? 'secondary' : 'ghost'}
-                  aria-pressed={pairingView === 'tree'}
-                  onClick={() => setPairingView('tree')}
-                >
-                  {isElimStage ? '对阵树' : '分组视图'}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="min-h-11 sm:min-h-8"
-                  variant={pairingView === 'table' ? 'secondary' : 'ghost'}
-                  aria-pressed={pairingView === 'table'}
-                  onClick={() => setPairingView('table')}
-                >
-                  一览表
-                </Button>
-              </div>
-            ) : undefined}
             className="h-full"
             contentClassName="min-w-0 p-3"
           >

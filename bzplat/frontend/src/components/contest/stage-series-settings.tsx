@@ -18,24 +18,24 @@ function StageMetrics({ estimate }: { estimate?: StageSeriesEstimate }) {
     return <p className="text-xs leading-relaxed text-muted-foreground">报名人数确定后，详情页会实时估算计分场数与耗时。</p>
   }
   return (
-    <dl className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 text-xs sm:grid-cols-4">
-      <div className="min-w-0">
+    <dl className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs">
+      <div className="inline-flex min-w-0 items-baseline gap-1">
         <dt className="text-muted-foreground">对手交锋</dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums text-foreground">{estimate.conceptual_pairings} 组</dd>
+        <dd className="font-mono font-semibold tabular-nums text-foreground">{estimate.conceptual_pairings} 组</dd>
       </div>
-      <div className="min-w-0">
+      <div className="inline-flex min-w-0 items-baseline gap-1">
         <dt className="text-muted-foreground">计分场</dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums text-foreground">{estimate.estimated_matches} 场</dd>
+        <dd className="font-mono font-semibold tabular-nums text-foreground">{estimate.estimated_matches} 场</dd>
       </div>
-      <div className="min-w-0">
+      <div className="inline-flex min-w-0 items-baseline gap-1">
         <dt className="text-muted-foreground">{estimate.effective_rounds != null ? '有效瑞士轮' : '执行计分场'}</dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums text-foreground">
+        <dd className="font-mono font-semibold tabular-nums text-foreground">
           {estimate.effective_rounds != null ? `${estimate.effective_rounds} 轮` : `${estimate.estimated_execution_legs} 场`}
         </dd>
       </div>
-      <div className="min-w-0">
+      <div className="inline-flex min-w-0 items-baseline gap-1">
         <dt className="text-muted-foreground">预计耗时</dt>
-        <dd className="mt-0.5 font-mono font-semibold tabular-nums text-foreground">{formatContestDuration(estimate.eta_seconds)}</dd>
+        <dd className="font-mono font-semibold tabular-nums text-foreground">{formatContestDuration(estimate.eta_seconds)}</dd>
       </div>
     </dl>
   )
@@ -73,19 +73,15 @@ export function StageSeriesSettingsEditor({
 
   return (
     <div className="min-w-0">
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-2 px-3 py-2.5">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Scale aria-hidden="true" className="size-4 shrink-0 text-primary" />
-            <h3 className="text-sm font-semibold text-foreground">逐阶段公平性</h3>
-            {frozen && <Badge variant="outline">已冻结</Badge>}
-          </div>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            同组多场会交替座位；瑞士轮额外轮数增加对手覆盖。发布排期后配置冻结。
-          </p>
-        </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
+        <Scale aria-hidden="true" className="size-3.5 shrink-0 text-primary" />
+        <h3 className="text-sm font-semibold text-foreground">逐阶段公平性</h3>
+        {frozen && <Badge variant="outline" className="text-[10px]">已冻结</Badge>}
+        <p className="min-w-0 basis-64 text-xs leading-snug text-muted-foreground sm:basis-0 sm:flex-1">
+          同组多场会交替座位；瑞士轮额外轮数增加对手覆盖。发布排期后配置冻结。
+        </p>
         {totalSeconds > 0 && (
-          <span className="inline-flex min-h-7 items-center gap-1.5 rounded-md bg-muted px-2 text-xs font-medium text-foreground">
+          <span className="inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-md bg-muted px-2 text-xs font-medium text-foreground">
             <Clock3 aria-hidden="true" className="size-3.5 text-muted-foreground" />总计 {formatContestDuration(totalSeconds)}
           </span>
         )}
@@ -99,12 +95,26 @@ export function StageSeriesSettingsEditor({
           const estimate = projected[index]
           const gamesLabelId = `series-${config.stage_key}-games-label`
           const roundsLabelId = `series-${config.stage_key}-rounds-label`
+          // 冻结后只读：选择器失去交互意义，压成单行文本以提升桌面密度。
+          if (frozen) {
+            return (
+              <div key={config.stage_key} className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5 text-xs">
+                <p className="text-xs font-semibold text-foreground">{config.label}</p>
+                <p className="text-muted-foreground">
+                  {estimate?.participant_count ? `${estimate.participant_count} 名选手` : '参赛人数待定'}
+                  {' '}· 每对选手 {setting.games_per_pair} 场计分
+                  {config.swiss_extra_rounds ? ` · 额外 ${setting.swiss_extra_rounds ?? config.swiss_extra_rounds.default} 轮` : ''}
+                </p>
+                <StageMetrics estimate={estimate} />
+              </div>
+            )
+          }
           return (
-            <fieldset key={config.stage_key} className="grid min-w-0 gap-3 px-3 py-3 lg:grid-cols-[minmax(10rem,0.65fr)_minmax(13rem,0.8fr)_minmax(18rem,1.5fr)] lg:items-center">
+            <fieldset key={config.stage_key} className="grid min-w-0 gap-x-4 gap-y-2 px-3 py-2 lg:grid-cols-[minmax(9rem,0.55fr)_minmax(12rem,0.7fr)_minmax(0,1.5fr)] lg:items-center">
               <legend className="sr-only">{config.label}</legend>
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-foreground">{config.label}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+                <p className="text-sm font-semibold leading-tight text-foreground">{config.label}</p>
+                <p className="mt-0.5 text-xs leading-tight text-muted-foreground">
                   {estimate?.participant_count ? `${estimate.participant_count} 名选手` : '参赛人数待定'}
                 </p>
               </div>
@@ -151,7 +161,7 @@ export function StageSeriesSettingsEditor({
         })}
       </div>
       {!frozen && (
-        <p className="flex items-center gap-1.5 border-t px-3 py-2 text-xs text-muted-foreground">
+        <p className="flex items-center gap-1.5 border-t px-3 py-1.5 text-xs text-muted-foreground">
           <Swords aria-hidden="true" className="size-3.5 shrink-0" />
           “对手交锋”是一对选手相遇一次；每场独立按胜 3 / 平 1 / 负 0 计入积分榜，K 场全部终结后再推进。
         </p>

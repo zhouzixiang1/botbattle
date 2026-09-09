@@ -421,58 +421,62 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       <div className="grid min-w-0 gap-[var(--page-section-gap)] xl:grid-cols-[22rem_minmax(0,1fr)]">
       <DataRegion title="上传新 Bot" description="上传成功且通过预检后才会发布并激活。" className="self-start">
           <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
-            <div className="space-y-1.5">
-              <Label>游戏类型</Label>
-              <Select value={gameId} onValueChange={setGameId}>
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {GAMES.map((g) => (
-                    <SelectItem key={g.id} value={g.id}>
-                      {g.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>游戏类型</Label>
+                <Select value={gameId} onValueChange={setGameId}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GAMES.map((g) => (
+                      <SelectItem key={g.id} value={g.id}>
+                        {g.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Botzone 运行模式</Label>
+                <Select value={runtimeMode} onValueChange={setRuntimeMode}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="traditional">Traditional（默认）</SelectItem>
+                    <SelectItem value="longrunning">LongRunning（严格长驻）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {runtimeMode === 'longrunning'
+                    ? '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。'
+                    : '平台默认模式；每个决策点重启进程并发送完整历史信封，Bot 须自行重放。'}
+                </p>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Botzone 运行模式</Label>
-              <Select value={runtimeMode} onValueChange={setRuntimeMode}>
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="traditional">Traditional（默认）</SelectItem>
-                  <SelectItem value="longrunning">LongRunning（严格长驻）</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {runtimeMode === 'longrunning'
-                  ? '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。'
-                  : '平台默认模式；每个决策点重启进程并发送完整历史信封，Bot 须自行重放。'}
-              </p>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="upload-name">名称（唯一标识）</Label>
-              <Input
-                id="upload-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                minLength={2}
-                maxLength={32}
-                pattern="[A-Za-z][A-Za-z0-9_]{1,31}"
-              />
-              <p className="text-xs text-muted-foreground">2–32 位，字母开头，仅可含字母、数字和下划线</p>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="upload-display">显示名</Label>
-              <Input
-                id="upload-display"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="upload-name">名称（唯一标识）</Label>
+                <Input
+                  id="upload-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                  minLength={2}
+                  maxLength={32}
+                  pattern="[A-Za-z][A-Za-z0-9_]{1,31}"
+                />
+                <p className="text-xs text-muted-foreground">2–32 位，字母开头，仅可含字母、数字和下划线</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="upload-display">显示名</Label>
+                <Input
+                  id="upload-display"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                />
+              </div>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="upload-desc">简介</Label>
@@ -549,13 +553,13 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
         ) : (
           <ul className="divide-y divide-border">
             {bots.map((b, index) => (
-              <li key={b.id} className="min-w-0 px-3 py-2.5">
+              <li key={b.id} className="min-w-0 px-3 py-2">
                 <div className="grid min-w-0 gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-start">
-                  <span className="hidden pt-1 font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
+                  <span className="hidden pt-0.5 font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <Link to={`/bot/${b.id}`} className="inline-flex min-h-[var(--control-height)] min-w-0 flex-1 items-center hover:text-primary max-sm:min-h-11">
-                        <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{b.display_name || b.name}</EntityName>
+                      <Link to={`/bot/${b.id}`} className="inline-flex min-w-0 flex-1 items-center hover:text-primary max-sm:min-h-11">
+                        <EntityName lines={1} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{b.display_name || b.name}</EntityName>
                       </Link>
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
                       {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
@@ -566,9 +570,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                       </Badge>
                     </div>
                     {b.description && (
-                      <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{b.description}</OverflowText>
+                      <OverflowText lines={2} tooltip={false} className="mt-0.5 text-xs text-muted-foreground">{b.description}</OverflowText>
                     )}
-                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                       <CopyIdentifier value={b.id} />
                       {b.runnable === false && (
                         <span className="max-w-full break-all rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">

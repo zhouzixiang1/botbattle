@@ -34,11 +34,11 @@ export function ThreadView({
   emptyText = '从中间列表选择一封消息',
   viewerKind = 'user',
 }: Props) {
-  if (!thread) return <EmptyState text={emptyText} className="py-16" />
+  if (!thread) return <EmptyState text={emptyText} className="justify-start py-10" />
   const isOpen = thread.conversation.status === 'open'
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="border-b px-4 py-3">
+      <header className="border-b px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h3 className="min-w-0 flex-1 break-words text-sm font-semibold">
             {thread.conversation.subject || '无主题消息'}
@@ -58,7 +58,7 @@ export function ThreadView({
         </div>
       </header>
 
-      <div className="min-h-[18rem] flex-1 space-y-3 overflow-y-auto overscroll-contain p-3" data-scroll-region="message-thread" data-overflow-allowed="y">
+      <div className="min-h-[18rem] flex-1 space-y-2 overflow-y-auto overscroll-contain p-2.5" data-scroll-region="message-thread" data-overflow-allowed="y">
         {thread.messages.map((message) => {
           const mine = viewerKind === 'admin'
             ? message.author.kind === 'admin' || message.author.kind === 'platform'
@@ -68,11 +68,11 @@ export function ThreadView({
             <article
               key={message.public_id}
               className={cn(
-                'max-w-[min(46rem,92%)] rounded-lg border px-3 py-2 text-sm shadow-xs',
+                'max-w-[min(46rem,92%)] rounded-lg border px-2.5 py-1.5 text-sm shadow-xs',
                 mine ? 'ml-auto border-primary/20 bg-primary/5' : 'bg-muted/35',
               )}
             >
-              <div className="mb-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+              <div className="mb-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
                 <span className="truncate font-medium text-foreground">{author}</span>
                 <time className="ml-auto shrink-0 font-mono tabular-nums">{fmtTime(message.created_at)}</time>
               </div>
@@ -83,7 +83,7 @@ export function ThreadView({
       </div>
 
       {allowReply && (
-        <footer className="border-t p-3">
+        <footer className="border-t px-3 py-2">
           <label className="sr-only" htmlFor="communication-reply">回复内容</label>
           <Textarea
             id="communication-reply"

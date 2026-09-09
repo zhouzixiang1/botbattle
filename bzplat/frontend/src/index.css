@@ -279,21 +279,26 @@
 
 @media (pointer: coarse) {
   :root {
-    --control-height: 2.5rem;
-    --control-height-compact: 2.5rem;
-    --control-height-lg: 2.75rem;
+    /* 触屏最小命中 44px（AGENTS 前端规范硬约束）；compact 档同步抬高。 */
+    --control-height: 2.75rem;
+    --control-height-compact: 2.75rem;
+    --control-height-lg: 3rem;
     --table-header-height: 2.5rem;
     --table-row-height: 2.75rem;
   }
 
-  :where(
-    [data-slot="button"],
-    [data-slot="input"],
-    [data-slot="select-trigger"],
-    [data-slot="tabs-trigger"]
-  ) {
-    min-width: var(--control-height);
-    min-height: var(--control-height);
+  /* 必须落在 @layer base：脱离 layer 的声明会压过 utilities 里显式的
+     min-h 覆盖（如 max-sm:min-h-11），导致页面级 44px 约定失效。 */
+  @layer base {
+    :where(
+      [data-slot="button"],
+      [data-slot="input"],
+      [data-slot="select-trigger"],
+      [data-slot="tabs-trigger"]
+    ) {
+      min-width: var(--control-height);
+      min-height: var(--control-height);
+    }
   }
 }
 

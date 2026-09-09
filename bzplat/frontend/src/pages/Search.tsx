@@ -213,9 +213,9 @@ function UserResults({ users }: { users: UserRow[] }) {
     <ul className="divide-y divide-border">
       {users.map((user, index) => (
         <li key={user.id}>
-          <Link to={`/user/${encodeURIComponent(user.username)}`} className="grid min-w-0 gap-2 px-3 py-2.5 hover:bg-muted/40 sm:grid-cols-[2rem_2.25rem_minmax(0,1fr)_auto] sm:items-center">
+          <Link to={`/user/${encodeURIComponent(user.username)}`} className="grid min-w-0 gap-2 px-3 py-1.5 hover:bg-muted/40 sm:grid-cols-[2rem_2.25rem_minmax(0,1fr)_auto] sm:items-center">
             <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
-            <span aria-hidden="true" className="flex min-w-0 size-9 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-bold text-muted-foreground">
+            <span aria-hidden="true" className="flex min-w-0 size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-bold text-muted-foreground">
               {(user.display_name || user.username).charAt(0).toUpperCase()}
             </span>
             <span className="min-w-0">
@@ -240,7 +240,7 @@ function BotResults({ bots }: { bots: BotRow[] }) {
         const GameIcon = gameIcon(bot.game_id)
         return (
           <li key={bot.id} className="min-w-0 bg-card">
-            <Link to={`/bot/${bot.id}`} className="flex min-w-0 gap-3 px-3 py-3 hover:bg-muted/40">
+            <Link to={`/bot/${bot.id}`} className="flex min-w-0 gap-2.5 px-3 py-2 hover:bg-muted/40">
               <span className="font-mono text-xs tabular-nums text-muted-foreground">{index + 1}</span>
               <span className="min-w-0 flex-1">
                 <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="hover:text-primary">{bot.display_name || bot.name}</EntityName>
@@ -293,10 +293,10 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
                     />
                   </TableCell>
                   <TableCell>
-                    <div className="flex min-w-0 flex-col items-start gap-1">
-                      <span>{gameLabel(match.game_id)}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
                       <MatchNatureBadge matchType={match.match_type} source={match} />
-                    </div>
+                    </span>
                   </TableCell>
                   <TableCell className="text-right"><Button asChild variant="ghost" size="xs"><Link to={`/match/${encodeURIComponent(match.id)}`}>回放</Link></Button></TableCell>
                 </TableRow>

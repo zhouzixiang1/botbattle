@@ -310,7 +310,7 @@ function dispatcherLabel(state: string, accepting: boolean, maintenance = false)
   return accepting ? '接收任务' : '暂不接收'
 }
 
-function CapacityMeter({ capacity }: { capacity: ExecutionCapacity }) {
+function CapacityMeter({ capacity, compact = false }: { capacity: ExecutionCapacity; compact?: boolean }) {
   const matchSlots = capacity.match_slots || { used: 0, capacity: 0 }
   const sandboxUnits = capacity.sandbox_units || { used: 0, capacity: 0 }
   const hostCpu = capacity.host_cpu_millis
@@ -320,6 +320,49 @@ function CapacityMeter({ capacity }: { capacity: ExecutionCapacity }) {
   const memoryLabel = (value: number) => (
     value >= 1024 && value % 1024 === 0 ? `${value / 1024} GiB` : `${value} MiB`
   )
+  if (compact) {
+    // 公开页（排行榜）的单行紧凑条：同一语义字段，去掉四张卡片的外壳。
+    return (
+      <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" aria-label="执行容量">
+        <div className="inline-flex items-center gap-1 text-muted-foreground">
+          <dt className="inline-flex items-center gap-1">
+            <Activity className="size-3.5" /> 同时运行
+          </dt>
+          <dd className="ml-1 font-mono font-semibold tabular-nums text-foreground">
+            {matchSlots.used} / {matchSlots.capacity} 场
+          </dd>
+        </div>
+        <div className="inline-flex items-center gap-1 text-muted-foreground">
+          <dt className="inline-flex items-center gap-1">
+            <Cpu className="size-3.5" /> 平台 Bot 运行位
+          </dt>
+          <dd className="ml-1 font-mono font-semibold tabular-nums text-foreground">
+            {sandboxUnits.used} / {sandboxUnits.capacity}
+          </dd>
+        </div>
+        {hostCpu && (
+          <div className="inline-flex items-center gap-1 text-muted-foreground">
+            <dt className="inline-flex items-center gap-1">
+              <Cpu className="size-3.5" /> 主机 CPU
+            </dt>
+            <dd className="ml-1 font-mono font-semibold tabular-nums text-foreground">
+              {cpuLabel(hostCpu.used)} / {cpuLabel(hostCpu.capacity)}
+            </dd>
+          </div>
+        )}
+        {hostMemory && (
+          <div className="inline-flex items-center gap-1 text-muted-foreground">
+            <dt className="inline-flex items-center gap-1">
+              <MemoryStick className="size-3.5" /> 主机内存
+            </dt>
+            <dd className="ml-1 font-mono font-semibold tabular-nums text-foreground">
+              {memoryLabel(hostMemory.used)} / {memoryLabel(hostMemory.capacity)}
+            </dd>
+          </div>
+        )}
+      </dl>
+    )
+  }
   return (
     <dl
       className={cn('grid grid-cols-2 gap-2 text-xs', showHostResources && 'lg:grid-cols-4')}
@@ -383,40 +426,43 @@ function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }
   const blockedReason = capacityBlockedReason(job)
   const executionReason = EXECUTION_REASON_LABEL[job.reason]
   return (
-    <li className="min-w-0 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {position != null && (
-            <span className="inline-flex items-center gap-1 font-mono font-semibold">
-              <ListOrdered className="size-3" /> #{position}
-            </span>
-          )}
-          <Badge variant={active ? 'default' : 'secondary'}>{SOURCE_LABEL[job.source] || job.source}</Badge>
-          <span className="text-muted-foreground">{GAME_LABEL[job.game_id] || job.game_id}</span>
-          <span className="text-muted-foreground">{STATUS_LABEL[job.status] || job.status}</span>
-          <RuntimeEnvironmentBadge environment={job.bot_a_environment} />
-          {job.bot_b_environment !== job.bot_a_environment && (
-            <RuntimeEnvironmentBadge environment={job.bot_b_environment} />
-          )}
-        </div>
+    <li className="min-w-0 rounded-lg border border-border bg-muted/20 px-2.5 py-1.5">
+      {/* 桌面单行密度：身份徽章 + 类型/状态 + 容量/计分说明同行排布；窄屏经 flex-wrap 自然折行。 */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+        {position != null && (
+          <span className="inline-flex items-center gap-1 font-mono font-semibold">
+            <ListOrdered className="size-3" /> #{position}
+          </span>
+        )}
+        <Badge variant={active ? 'default' : 'secondary'}>{SOURCE_LABEL[job.source] || job.source}</Badge>
+        <span className="text-muted-foreground">{GAME_LABEL[job.game_id] || job.game_id}</span>
+        <span className="text-muted-foreground">{STATUS_LABEL[job.status] || job.status}</span>
+        <RuntimeEnvironmentBadge environment={job.bot_a_environment} />
+        {job.bot_b_environment !== job.bot_a_environment && (
+          <RuntimeEnvironmentBadge environment={job.bot_b_environment} />
+        )}
+        <span className="text-muted-foreground">
+          {job.sandbox_units === 0 ? '不占用平台运行位' : `占用 ${job.sandbox_units} 个平台 Bot 运行位`}
+        </span>
+        <span className="text-muted-foreground">
+          {job.rated ? '计入平台排行榜' : RATING_REASON_LABEL[job.rating_reason] || '不计平台排行榜'}
+        </span>
+        {job.source === 'auto' && job.status === 'queued' && (
+          <span className="text-muted-foreground">等待平台闲时，不占前台顺位</span>
+        )}
+        {job.cancel_requested && <span className="text-muted-foreground">正在安全取消</span>}
+        {executionReason && <span className="text-muted-foreground">{executionReason}</span>}
         {job.match_id && (
           <Link
             to={`/match/${encodeURIComponent(job.match_id)}`}
-            className="inline-flex min-h-11 items-center font-medium text-primary hover:underline"
+            className="ml-auto inline-flex min-h-11 items-center font-medium text-primary hover:underline sm:min-h-0"
           >
             进入观赛
           </Link>
         )}
       </div>
-      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>{job.sandbox_units === 0 ? '不占用平台运行位' : `占用 ${job.sandbox_units} 个平台 Bot 运行位`}</span>
-        <span>{job.rated ? '计入平台排行榜' : RATING_REASON_LABEL[job.rating_reason] || '不计平台排行榜'}</span>
-        {job.source === 'auto' && job.status === 'queued' && <span>等待平台闲时，不占前台顺位</span>}
-        {job.cancel_requested && <span>正在安全取消</span>}
-        {executionReason && <span>{executionReason}</span>}
-      </div>
       {blockedReason && (
-        <p className="mt-1.5 flex min-w-0 items-start gap-1.5 text-xs text-warning-foreground" role="status">
+        <p className="mt-1 flex min-w-0 items-start gap-1.5 text-xs text-warning-foreground" role="status">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
           <span className="min-w-0 break-words [overflow-wrap:anywhere]">{blockedReason}</span>
         </p>
@@ -436,6 +482,7 @@ export function ExecutionQueuePanel({
   stale = false,
   lastUpdatedAt,
   compactOnMobile = false,
+  compactCapacity = false,
 }: {
   snapshot: ExecutionQueueSnapshot | null
   loading?: boolean
@@ -447,6 +494,8 @@ export function ExecutionQueuePanel({
   stale?: boolean
   lastUpdatedAt?: number | null
   compactOnMobile?: boolean
+  /** 公开页单行容量条；管理端保留四卡容量网格（e2e 断言依赖）。 */
+  compactCapacity?: boolean
 }) {
   const queued = maxQueued == null
     ? snapshot?.queued || []
@@ -463,7 +512,7 @@ export function ExecutionQueuePanel({
 
   const renderSnapshot = () => snapshot ? (
     <div className="space-y-3 px-3 py-3 sm:px-4">
-      <CapacityMeter capacity={snapshot.capacity} />
+      <CapacityMeter capacity={snapshot.capacity} compact={compactCapacity} />
 
       {/* 管理端（action 控制簇存在时）的队列头部已展示“队列异常暂停 + 原因”，
           这里不再重复渲染同一条红色暂停横幅，避免同一屏双份告警。 */}
