@@ -3700,6 +3700,7 @@ _CONTEST_PUBLIC_FIELDS = (
     "official_results_ready",
     "require_real_name",
     "showcase_key",
+    "archived_at",
 )
 
 
@@ -4113,6 +4114,7 @@ def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
 @router.get("/api/contests")
 def list_contests(request: Request, response: Response,
                   status: str | None = None, game_id: str | None = None,
+                  archived: Literal["exclude", "only", "include"] = "exclude",
                   page: int = Query(
                       default=1, ge=1, le=_CONTEST_LIST_MAX_PAGE
                   ),
@@ -4123,6 +4125,7 @@ def list_contests(request: Request, response: Response,
     _vary_by_auth(response)
     # admin 全见；组织者额外看到自己的隐藏赛事；其他调用方始终排除隐藏状态。
     # 过滤在 Store 的分页 SQL 内完成，避免 total/页数泄漏或页内裁剪错位。
+    # 归档与角色正交：默认 exclude，admin/组织者也需显式 archived=only 才看到。
     is_admin = user is not None and user.get("role") == ROLE_ADMIN
     exclude = None if is_admin else list(_CONTEST_HIDDEN_STATUSES)
     hidden_owner_id = (
@@ -4134,7 +4137,8 @@ def list_contests(request: Request, response: Response,
                                            page=page, per_page=per_page,
                                            exclude_statuses=exclude,
                                            hidden_owner_id=hidden_owner_id,
-                                           exclude_showcases=True)
+                                           exclude_showcases=True,
+                                           archived=archived)
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
@@ -6056,6 +6060,46 @@ async def finish_contest(
         contest = await _contests(request).finish(contest_id)
     except ValueError as e:
         raise _contest_write_http_error(e) from e
+    return {"contest": _contest_for_api(contest)}
+
+
+@router.post("/api/contests/{contest_id}/archive")
+async def archive_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    """归档已结束赛事：默认列表隐藏，显式筛选可见，详情/回放保持可达。"""
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    try:
+        contest = await _contests(request).archive(contest_id)
+    except ValueError as e:
+        audit_log(request, "contest_archive", result="fail",
+                  user=user["username"], target=str(contest_id))
+        raise _contest_write_http_error(e) from e
+    audit_log(request, "contest_archive", result="ok",
+              user=user["username"], target=str(contest_id))
+    return {"contest": _contest_for_api(contest)}
+
+
+@router.post("/api/contests/{contest_id}/unarchive")
+async def unarchive_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    """取消归档：赛事回到默认列表；幂等。"""
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    try:
+        contest = await _contests(request).unarchive(contest_id)
+    except ValueError as e:
+        audit_log(request, "contest_unarchive", result="fail",
+                  user=user["username"], target=str(contest_id))
+        raise _contest_write_http_error(e) from e
+    audit_log(request, "contest_unarchive", result="ok",
+              user=user["username"], target=str(contest_id))
     return {"contest": _contest_for_api(contest)}
 
 

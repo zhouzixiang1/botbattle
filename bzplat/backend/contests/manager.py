@@ -3979,6 +3979,30 @@ class ContestManager:
                 )
             return self.store.update_contest(contest_id, status=CONTEST_CANCELLED)
 
+    async def archive(self, contest_id: int) -> dict:
+        """归档已结束赛事：软隐藏出默认列表，详情/回放/正式榜保持可达。"""
+        async with self._lock(contest_id):
+            c = self.store.get_contest(contest_id)
+            if not c:
+                raise ValueError("比赛不存在")
+            require_mutable(c)
+            if c["status"] != CONTEST_FINISHED:
+                raise ValueError(
+                    f"赛事处于 {c['status']} 态，不能归档（仅已结束赛事可归档）"
+                )
+            return self.store.set_contest_archived(contest_id, archived=True)
+
+    async def unarchive(self, contest_id: int) -> dict:
+        """取消归档：赛事回到默认列表；未归档时幂等返回现状。"""
+        async with self._lock(contest_id):
+            c = self.store.get_contest(contest_id)
+            if not c:
+                raise ValueError("比赛不存在")
+            require_mutable(c)
+            if not c.get("archived_at"):
+                return c
+            return self.store.set_contest_archived(contest_id, archived=False)
+
     async def delete(self, contest_id: int) -> bool:
         """安全删除赛事：与 start/dispatch 共锁，拒绝运行态或任何 active match。
 

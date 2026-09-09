@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock, Radio } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock, Radio, Archive } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchParticipants } from '@/components/MatchParticipants'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
@@ -114,6 +114,7 @@ interface Contest {
   time_control?: unknown
   source_contest_id?: number | null
   format_snapshot?: unknown
+  archived_at?: string | null
 }
 interface Stage {
   /** Internal read-model sentinel for malformed historical stage JSON. */
@@ -1477,6 +1478,27 @@ export default function ContestDetail() {
     await act(`/api/contests/${targetId}/finish`, undefined, '赛事已结束')
   }
 
+  const toggleArchive = async () => {
+    const targetId = id
+    if (!targetId || !contest) return
+    const archiving = !contest.archived_at
+    if (!await confirm(archiving ? {
+      title: '归档这场赛事？',
+      desc: '归档后赛事默认不再出现在列表中（可在列表筛选「已归档」查看）；详情、回放与正式名次保持可达。可随时取消归档。',
+      confirmText: '确认归档',
+    } : {
+      title: '取消归档？',
+      desc: '赛事将重新出现在默认赛事列表中。',
+      confirmText: '取消归档',
+    })) return
+    if (activeContestIdRef.current !== targetId) return
+    await act(
+      `/api/contests/${targetId}/${archiving ? 'archive' : 'unarchive'}`,
+      undefined,
+      archiving ? '赛事已归档' : '已取消归档',
+    )
+  }
+
   const removeEntry = async (entry: Entry) => {
     const targetId = id
     if (!targetId || activeContestIdRef.current !== targetId) return
@@ -1622,7 +1644,9 @@ export default function ContestDetail() {
   const canRegister = isLoggedIn && !myEntry && contest.status === 'open'
   const canSwapBot = isLoggedIn && Boolean(myEntry) && ['rest', 'draft', 'open', 'published'].includes(contest.status)
   const canManageLifecycle = isOrg && ['draft', 'open', 'published', 'running', 'rest'].includes(contest.status)
-  const showActionRegion = isShowcase || canRegister || canSwapBot || canManageLifecycle
+  // 已结束赛事的操作区只承载归档/取消归档（真实赛事）
+  const canArchive = isOrg && contest.status === 'finished' && !isShowcase
+  const showActionRegion = isShowcase || canRegister || canSwapBot || canManageLifecycle || canArchive
   const rosterDescription = contest.require_real_name
     ? serverIsOrganizer
       ? `每页 ${entriesPerPage} 人；导出按报名 ID、用户 ID 与 Bot ID 稳定关联账号和显示名。新报名使用报名时资料快照；历史报名若无快照会明确标注当前资料回退。${user?.role === 'admin' ? '管理员代报名会写入审计。' : '实名赛事仅允许选手本人报名，组织者不能代报名或批量指派。'}`
@@ -1706,6 +1730,7 @@ export default function ContestDetail() {
         actions={
           <>
             <StatusBadge status={contest.status} />
+            {contest.archived_at && <Badge variant="secondary">已归档</Badge>}
             {isShowcase && <Badge variant="secondary">演示快照</Badge>}
             {hasInvalidStageContract && <Badge variant="destructive">赛制配置暂不可用</Badge>}
             {isDuplicate && <Badge variant="secondary">复式交锋 · 每组 2 场计分</Badge>}
@@ -1965,6 +1990,28 @@ export default function ContestDetail() {
             </TooltipTrigger>
             <TooltipContent>
               由后端核验关联对局终态并执行恢复性收尾
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {isOrg && contest.status === 'finished' && !isShowcase && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Button
+                  variant={contest.archived_at ? 'outline' : 'secondary'}
+                  disabled={busyAction}
+                  onClick={() => void toggleArchive()}
+                  className="gap-1.5"
+                >
+                  <Archive className="size-4" aria-hidden="true" />
+                  {contest.archived_at ? '取消归档' : '归档赛事'}
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {contest.archived_at
+                ? '让赛事重新出现在默认列表'
+                : '从默认列表软隐藏；详情与回放保持可达'}
             </TooltipContent>
           </Tooltip>
         )}

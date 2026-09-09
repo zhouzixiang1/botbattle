@@ -49,6 +49,7 @@ interface Contest {
   template_name?: string
   game_id?: string
   showcase_key?: string | null
+  archived_at?: string | null
 }
 
 interface Entry {
@@ -333,6 +334,7 @@ export default function ContestsTab() {
                     <TableCell className="px-3 py-2">
                       <div className="flex flex-wrap gap-1">
                         <StatusBadge status={contest.status} />
+                        {contest.archived_at && <Badge variant="secondary">已归档</Badge>}
                         {isShowcase && <Badge variant="secondary">演示快照</Badge>}
                       </div>
                     </TableCell>
