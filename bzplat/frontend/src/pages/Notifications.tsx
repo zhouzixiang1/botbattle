@@ -133,7 +133,7 @@ export default function Notifications() {
         ) : loading ? (
           <Loading text="正在加载通知…" />
         ) : items.length === 0 ? (
-          <EmptyState text={filter === 'unread' ? '没有未读通知' : '暂无通知'} icon={<Bell className="size-5 opacity-50" />} className="py-8" />
+          <EmptyState text={filter === 'unread' ? '没有未读通知' : '暂无通知'} icon={<Bell className="size-5 opacity-50" />} className="py-6" />
         ) : (
           <ul className="divide-y divide-border">
             {items.map((item) => {
@@ -148,13 +148,13 @@ export default function Notifications() {
                     <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="min-w-0 text-sm">{item.title}</EntityName>
                     <Badge variant="secondary">{NOTIFICATION_LABELS[item.type] || '系统'}</Badge>
                   </span>
-                  {item.body && <OverflowText lines={2} tooltip={false} className="mt-1 text-sm text-muted-foreground">{item.body}</OverflowText>}
-                  <time className="mt-1 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.created_at)}</time>
+                  {item.body && <OverflowText lines={2} tooltip={false} className="mt-0.5 text-sm text-muted-foreground">{item.body}</OverflowText>}
+                  <time className="mt-0.5 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.created_at)}</time>
                 </span>
               )
 
               return (
-                <li key={item.id} className={`flex min-w-0 items-start gap-3 px-3 py-2.5 ${item.is_read ? '' : 'bg-primary/5'}`}>
+                <li key={item.id} className={`flex min-w-0 items-start gap-2 px-3 py-1.5 ${item.is_read ? '' : 'bg-primary/5'}`}>
                   {item.link ? (
                     <Link to={item.link} className="flex min-w-0 flex-1 hover:text-primary">{content}</Link>
                   ) : content}

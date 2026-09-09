@@ -561,7 +561,7 @@ export default function Contests() {
   }
 
   return (
-    <PageFrame layout="public-contests">
+    <PageFrame layout="public-contests" className="gap-3">
       <PageHeader
         title="锦标赛"
         description="浏览报名、排期、对阵与正式结果。"
@@ -579,7 +579,7 @@ export default function Contests() {
             setPage(1)
           }}
         >
-          <SelectTrigger className="min-h-11 w-[8.5rem] max-w-full sm:min-h-[var(--control-height)]"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="min-h-11 w-[8.5rem] max-w-full sm:min-h-[var(--control-height)]" aria-label="游戏筛选"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部游戏</SelectItem>
             {GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}
@@ -923,23 +923,29 @@ export default function Contests() {
                   const templateName = contest.template_name || templates.find((template) => template.id === contest.template_id)?.name
                   const liveAvailable = ['published', 'running', 'rest'].includes(contest.status)
                   return (
-                    <li key={contest.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
+                    <li key={contest.id} className="grid min-w-0 gap-x-3 gap-y-0.5 px-3 py-2 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
                       <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
                       <div className="min-w-0">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <Link to={`/contests/${contest.id}`} className="min-w-0 flex-1 hover:text-primary">
-                            <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{contest.title}</EntityName>
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <Link to={`/contests/${contest.id}`} className="flex min-h-11 min-w-0 max-w-full flex-1 items-center hover:text-primary sm:min-h-0 sm:max-w-sm">
+                            <EntityName lines={1} tooltip={contest.title} tooltipFocusable={false} className="text-sm hover:text-primary">{contest.title}</EntityName>
                           </Link>
                           <StatusBadge status={contest.status} />
                           {contest.archived_at && <Badge variant="secondary">已归档</Badge>}
+                          <span className="flex min-w-0 items-center gap-x-2 text-xs text-muted-foreground">
+                            {templateName ? <OverflowText className="max-w-40" tooltip={templateName} tooltipFocusable={false}>{templateName}</OverflowText> : <Identifier>{contest.template_id || '—'}</Identifier>}
+                            <span className="shrink-0">{gameLabel(contest.game_id)}</span>
+                            <span className="min-w-0">{matchConfigSummary(contest)}</span>
+                          </span>
                         </div>
-                        {contest.description && <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{contest.description}</OverflowText>}
-                        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                          {templateName ? <OverflowText className="max-w-48" tooltip={templateName}>{templateName}</OverflowText> : <Identifier>{contest.template_id || '—'}</Identifier>}
-                          <span>{gameLabel(contest.game_id)}</span>
-                          <span>{matchConfigSummary(contest)}</span>
-                          <time className="font-mono tabular-nums">{fmtTime(contest.created_at)}</time>
-                          {hint && <span className="inline-flex min-w-0 items-center gap-1 font-medium text-primary">{hint.label}{hint.time && <Countdown endsAt={hint.time} />}</span>}
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                          {contest.description && (
+                            <OverflowText lines={1} tooltip={contest.description} tooltipFocusable={false} className="max-w-full min-w-0 basis-48 shrink sm:basis-96 sm:grow">
+                              {contest.description}
+                            </OverflowText>
+                          )}
+                          <time className="shrink-0 font-mono tabular-nums">{fmtTime(contest.created_at)}</time>
+                          {hint && <span className="inline-flex min-w-0 shrink-0 items-center gap-1 font-medium text-primary">{hint.label}{hint.time && <Countdown endsAt={hint.time} />}</span>}
                         </div>
                       </div>
                       <Button asChild variant={liveAvailable ? 'outline' : 'ghost'} size="sm" className="min-h-11 sm:min-h-[var(--control-height)]">

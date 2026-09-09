@@ -7,8 +7,18 @@ import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/l
 import { MatchOutcome } from '@/components/MatchOutcome'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import Pagination from '@/components/Pagination'
+import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  DataTable,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import { fmtTime } from '@/lib/format'
 import { GAMES, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
@@ -115,45 +125,104 @@ export default function History() {
         ) : matches.length === 0 ? (
           <EmptyState text="当前条件下暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
         ) : (
-          <ul className="divide-y divide-border">
-            {matches.map((match, index) => (
-              <li
-                key={match.id}
-                data-testid="history-match-row"
-                data-match-type={match.match_type || 'unknown'}
-                className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center"
-              >
-                <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">
-                  {(page - 1) * PAGE_SIZE + index + 1}
-                </span>
-                <div className="min-w-0">
-                  <MatchParticipants source={match} variant="panel" className="items-stretch gap-1.5 sm:gap-2" />
-                  <MatchOutcome
-                    source={match}
-                    seatLabels={outcomeSeatLabels(match)}
-                    normalizedUnit={match.game_id === 'holdem' ? 'BB' : undefined}
-                    className="mt-1.5"
-                  />
-                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                    <span className="font-mono tabular-nums sm:hidden">序号 {(page - 1) * PAGE_SIZE + index + 1}</span>
-                    <MatchNatureBadge matchType={match.match_type} source={match} />
-                    <span>{gameLabel(match.game_id)}</span>
-                    <StatusBadge status={match.status} />
-                    {match.match_type === 'contest' && match.contest_id != null && (
-                      <Link to={`/contests/${match.contest_id}`} className="font-medium text-primary hover:underline">查看锦标赛</Link>
-                    )}
-                    <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
-                  </div>
-                </div>
-                <Link
-                  className="inline-flex min-w-0 shrink-0 items-center justify-center whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium text-primary hover:bg-accent"
-                  to={`/match/${encodeURIComponent(match.id)}`}
+          <>
+            <div className="hidden md:block">
+              <DataTable className="rounded-none border-0" scrollLabel="对局历史记录">
+                <Table aria-label="对局历史记录" className="min-w-[58rem]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-36">时间</TableHead>
+                      <TableHead className="w-full min-w-[20rem]">对阵</TableHead>
+                      <TableHead>结果</TableHead>
+                      <TableHead>性质</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {matches.map((match) => (
+                      <TableRow
+                        key={match.id}
+                        data-testid="history-match-row"
+                        data-match-type={match.match_type || 'unknown'}
+                        className="[&>td]:py-1"
+                      >
+                        <TableCell className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">
+                          {fmtTime(match.created_at)}
+                        </TableCell>
+                        <TableCell className="max-w-[30rem] whitespace-normal">
+                          <MatchParticipants source={match} />
+                        </TableCell>
+                        <TableCell className="max-w-[18rem] whitespace-normal">
+                          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                            <StatusBadge status={match.status} />
+                            <MatchOutcome
+                              source={match}
+                              seatLabels={outcomeSeatLabels(match)}
+                              normalizedUnit={match.game_id === 'holdem' ? 'BB' : undefined}
+                              primaryOnly
+                            />
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex min-w-0 flex-col items-start gap-1">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
+                              <MatchNatureBadge matchType={match.match_type} source={match} />
+                            </span>
+                            {match.match_type === 'contest' && match.contest_id != null && (
+                              <Link to={`/contests/${match.contest_id}`} className="text-[11px] font-medium text-primary hover:underline">查看锦标赛</Link>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button asChild variant="ghost" size="xs">
+                            <Link to={`/match/${encodeURIComponent(match.id)}`}>
+                              {match.status === 'running' || match.status === 'pending' ? '观赛' : '打开回放'}
+                            </Link>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </DataTable>
+            </div>
+            <ul className="divide-y divide-border md:hidden">
+              {matches.map((match, index) => (
+                <li
+                  key={match.id}
+                  data-match-type={match.match_type || 'unknown'}
+                  className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                 >
-                  {match.status === 'running' || match.status === 'pending' ? '观赛' : '打开回放'}
-                </Link>
-              </li>
-            ))}
-          </ul>
+                  <div className="min-w-0">
+                    <MatchParticipants source={match} variant="panel" className="items-stretch gap-1.5" />
+                    <MatchOutcome
+                      source={match}
+                      seatLabels={outcomeSeatLabels(match)}
+                      normalizedUnit={match.game_id === 'holdem' ? 'BB' : undefined}
+                      className="mt-1.5"
+                    />
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                      <span className="font-mono tabular-nums">序号 {(page - 1) * PAGE_SIZE + index + 1}</span>
+                      <MatchNatureBadge matchType={match.match_type} source={match} />
+                      <span>{gameLabel(match.game_id)}</span>
+                      <StatusBadge status={match.status} />
+                      {match.match_type === 'contest' && match.contest_id != null && (
+                        <Link to={`/contests/${match.contest_id}`} className="font-medium text-primary hover:underline">查看锦标赛</Link>
+                      )}
+                      <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                    </div>
+                  </div>
+                  <Link
+                    className="inline-flex min-w-0 shrink-0 items-center justify-center whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium text-primary hover:bg-accent"
+                    to={`/match/${encodeURIComponent(match.id)}`}
+                  >
+                    {match.status === 'running' || match.status === 'pending' ? '观赛' : '打开回放'}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </DataRegion>
 

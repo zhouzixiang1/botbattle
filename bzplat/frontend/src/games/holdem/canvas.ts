@@ -328,7 +328,7 @@ function drawSeat(
   const ax = x - 25 * s, ay = y - 45 * s + 25 * s
   const initial = (name[0] || '?').toUpperCase()
   ctx.beginPath(); ctx.arc(ax, ay, 18 * s, 0, Math.PI * 2)
-  ctx.fillStyle = idx === 0 ? '#ef4444' : '#3b82f6'; ctx.fill()
+  ctx.fillStyle = idx === 0 ? '#ef4444' : '#2563eb'; ctx.fill()
   if (isMatchWinner) {
     ctx.strokeStyle = 'rgba(255,238,88,0.95)'
     ctx.lineWidth = 3 * s

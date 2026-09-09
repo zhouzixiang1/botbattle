@@ -185,13 +185,13 @@ export default function UserProfile() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="用户资料" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="p-4">
-        <div className="grid min-w-0 gap-4 sm:grid-cols-[4rem_minmax(0,1fr)] sm:items-start">
+      <DataRegion title="用户资料" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="px-4 py-3">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-[4rem_minmax(0,1fr)] sm:items-start">
           <Avatar className="size-16 border">
             {avatarUrl && <AvatarImage src={avatarUrl} alt={`${displayName} 的头像`} />}
             <AvatarFallback className="bg-muted text-xl font-bold text-muted-foreground">{displayName.charAt(0).toUpperCase()}</AvatarFallback>
           </Avatar>
-          <div className="min-w-0 space-y-2">
+          <div className="min-w-0 space-y-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               {profile.role !== 'user' && <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>{profile.role === 'admin' ? '管理员' : '组织者'}</Badge>}
               {(profile.level ?? 0) > 0 && <Badge variant="outline">Lv.{profile.level}</Badge>}
@@ -205,7 +205,7 @@ export default function UserProfile() {
                 </div>
               </div>
             )}
-            <dl className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-2 border-t pt-3 text-sm sm:grid-cols-4">
+            <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1.5 border-t pt-2.5 text-sm sm:grid-cols-4">
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">计分对局</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{totalGames}</dd></div>
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">胜率</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{winRate.toFixed(1)}%</dd></div>
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">战绩</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{wins} 胜 · {profile.stats.draws || 0} 平 · {profile.stats.losses || 0} 负</dd></div>
@@ -223,7 +223,7 @@ export default function UserProfile() {
         ) : bots.length === 0 ? (
           <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
         ) : (
-          <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">
+          <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {bots.map((bot) => {
               const GameIcon = gameIcon(bot.game_id)
               return (

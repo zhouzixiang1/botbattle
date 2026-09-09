@@ -7,6 +7,7 @@ import { Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, 
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
+import { OverflowText } from '@/components/ui/overflow-text'
 import { findGame, gameLabel, resolveTerminalReason } from '@/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
 import { isPublicMatchOutcome, type MatchOutcomeSource } from '@/lib/match-outcome'
@@ -130,7 +131,7 @@ export default function MatchesTab() {
   if (loading && !matches.length) return <Loading />
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <Select value={status || 'all'} onValueChange={onStatusChange}>
           <SelectTrigger size="sm" className="h-9 w-[8.5rem]">
             <SelectValue />
@@ -163,17 +164,17 @@ export default function MatchesTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <Table className="min-w-[56rem]">
+        <Table className="min-w-[48rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">对局 ID</TableHead>
-              <TableHead className="px-3 py-2.5">对阵</TableHead>
-              <TableHead className="px-3 py-2.5">游戏 / 类型</TableHead>
-              <TableHead className="px-3 py-2.5">状态</TableHead>
-              <TableHead className="px-3 py-2.5">进度</TableHead>
-              <TableHead className="px-3 py-2.5">结果 / 异常</TableHead>
-              <TableHead className="px-3 py-2.5">时间</TableHead>
-              <TableHead className="px-3 py-2.5">操作</TableHead>
+              <TableHead className="px-2 py-2">对局 ID</TableHead>
+              <TableHead className="px-2 py-2">对阵</TableHead>
+              <TableHead className="px-2 py-2">游戏 / 类型</TableHead>
+              <TableHead className="px-2 py-2">状态</TableHead>
+              <TableHead className="px-2 py-2">进度</TableHead>
+              <TableHead className="px-2 py-2">结果 / 异常</TableHead>
+              <TableHead className="px-2 py-2">时间</TableHead>
+              <TableHead className="px-2 py-2">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -187,23 +188,25 @@ export default function MatchesTab() {
               const hasTerminalStatus = m.status === 'completed' || m.status === 'aborted'
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
-                <TableCell className="max-w-[22rem] px-3 py-2 text-foreground">
+                <TableCell className="w-[5.5rem] px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
+                  <OverflowText tooltip={m.id} tooltipFocusable={false}>{`${m.id.slice(0, 12)}…`}</OverflowText>
+                </TableCell>
+                <TableCell className="w-52 whitespace-normal px-2 py-1.5 text-foreground">
                   <MatchParticipants source={m} />
                 </TableCell>
-                <TableCell className="px-3 py-2 text-xs text-muted-foreground">
+                <TableCell className="w-24 whitespace-normal px-2 py-1.5 text-xs text-muted-foreground">
                   <div>{gameLabel(m.game_id)}</div>
                   <MatchNatureBadge matchType={m.match_type} source={m} className="mt-1" />
                 </TableCell>
-                <TableCell className="px-3 py-2">
+                <TableCell className="px-2 py-1.5">
                   <StatusBadge status={m.status} />
                 </TableCell>
-                <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                <TableCell className="w-24 whitespace-normal px-2 py-1.5 font-mono text-xs text-muted-foreground">
                   {gameSpec
                     ? progressLabel(m, gameSpec.progressUnit === 'move' ? '步' : '手')
                     : '规则不可用'}
                 </TableCell>
-                <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">
+                <TableCell className="w-52 whitespace-normal px-2 py-1.5 font-mono text-xs text-muted-foreground">
                   <MatchOutcome
                     source={m}
                     seatLabels={outcomeSeatLabels(m)}
@@ -228,15 +231,16 @@ export default function MatchesTab() {
                     </div>
                   )}
                 </TableCell>
-                <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
-                <TableCell className="px-3 py-2">
-                  <div className="flex gap-1">
-                    <Button asChild variant="outline" size="sm"><Link to={`/match/${m.id}`}>查看</Link></Button>
+                <TableCell className="whitespace-nowrap px-2 py-1.5 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
+                <TableCell className="w-16 px-2 py-1.5">
+                  <div className="flex flex-wrap gap-1">
+                    <Button asChild variant="outline" size="sm" className="max-lg:min-h-11 px-2.5"><Link to={`/match/${m.id}`}>查看</Link></Button>
                     {(m.status === 'running' || m.status === 'pending') && (
                       <Button
                         type="button"
                         variant="destructive"
                         size="sm"
+                        className="max-lg:min-h-11 px-2.5"
                         disabled={busyId === m.id}
                         onClick={() => void abort(m.id)}
                       >

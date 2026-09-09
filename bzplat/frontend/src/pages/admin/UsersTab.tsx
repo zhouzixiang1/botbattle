@@ -143,7 +143,7 @@ export default function UsersTab() {
   if (loading && !users.length) return <Loading />
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <Input
           value={q}
           onChange={(e) => {
@@ -180,29 +180,29 @@ export default function UsersTab() {
         <Table className="min-w-[48rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">序号</TableHead>
-              <TableHead className="px-3 py-2.5">用户名</TableHead>
-              <TableHead className="px-3 py-2.5">邮箱</TableHead>
-              <TableHead className="px-3 py-2.5">实名</TableHead>
-              <TableHead className="px-3 py-2.5">角色</TableHead>
-              <TableHead className="px-3 py-2.5">状态</TableHead>
-              <TableHead className="px-3 py-2.5">注册时间</TableHead>
-              <TableHead className="px-3 py-2.5">操作</TableHead>
+              <TableHead className="px-2.5 py-2">序号</TableHead>
+              <TableHead className="px-2.5 py-2">用户名</TableHead>
+              <TableHead className="px-2.5 py-2">邮箱</TableHead>
+              <TableHead className="px-2.5 py-2">实名</TableHead>
+              <TableHead className="px-2.5 py-2">角色</TableHead>
+              <TableHead className="px-2.5 py-2">状态</TableHead>
+              <TableHead className="px-2.5 py-2">注册时间</TableHead>
+              <TableHead className="px-2.5 py-2">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.map((u, index) => (
               <TableRow key={u.id} className="hover:bg-accent">
-                <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
-                <TableCell className="px-3 py-2">
+                <TableCell className="px-2.5 py-1.5 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
+                <TableCell className="px-2.5 py-1.5">
                   <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-primary hover:underline">
                     {u.username}
                   </Link>
                 </TableCell>
-                <TableCell className="max-w-[16rem] px-3 py-2 text-muted-foreground">
+                <TableCell className="max-w-[11rem] px-2.5 py-1.5 text-muted-foreground">
                   <OverflowText>{u.email}</OverflowText>
                 </TableCell>
-                <TableCell className="px-3 py-2 text-sm">
+                <TableCell className="px-2.5 py-1.5 text-sm">
                   {hasRealName(u) ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -218,7 +218,7 @@ export default function UsersTab() {
                     <span className="text-muted-foreground">—</span>
                   )}
                 </TableCell>
-                <TableCell className="px-3 py-2">
+                <TableCell className="px-2.5 py-1.5">
                   <Select
                     value={u.role}
                     disabled={busyId === u.id}
@@ -234,7 +234,7 @@ export default function UsersTab() {
                     </SelectContent>
                   </Select>
                 </TableCell>
-                <TableCell className="px-3 py-2 text-xs">
+                <TableCell className="px-2.5 py-1.5 text-xs">
                   {u.email_verified ? (
                     <span className="text-success">已验证</span>
                   ) : (
@@ -246,13 +246,14 @@ export default function UsersTab() {
                     <span className="ml-1 text-destructive">· 停用</span>
                   )}
                 </TableCell>
-                <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</TableCell>
-                <TableCell className="px-3 py-2">
+                <TableCell className="px-2.5 py-1.5 text-xs text-muted-foreground">{fmtTime(u.created_at)}</TableCell>
+                <TableCell className="px-2.5 py-1.5">
                   <div className="flex flex-nowrap items-center justify-end gap-1">
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
+                      className="max-lg:min-h-11 px-2"
                       disabled={busyId === u.id}
                       onClick={() => void toggleActive(u)}
                     >
@@ -262,12 +263,13 @@ export default function UsersTab() {
                       type="button"
                       variant="outline"
                       size="sm"
+                      className="max-lg:min-h-11 px-2"
                       disabled={busyId === u.id}
                       onClick={() => void revokeSessions(u.id)}
                     >
                       下线
                     </Button>
-                    <Button type="button" variant="destructive" size="sm" disabled={busyId === u.id} onClick={() => void delUser(u.id)}>删除</Button>
+                    <Button type="button" variant="destructive" size="sm" className="max-lg:min-h-11 px-2" disabled={busyId === u.id} onClick={() => void delUser(u.id)}>删除</Button>
                   </div>
                 </TableCell>
               </TableRow>

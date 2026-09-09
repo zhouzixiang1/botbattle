@@ -140,7 +140,7 @@ function ListButton({ selected, onClick, children }: { selected: boolean; onClic
       aria-current={selected ? 'true' : undefined}
       onClick={onClick}
       className={cn(
-        'w-full min-w-0 cursor-pointer border-b px-3 py-2.5 text-left transition-colors last:border-b-0 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+        'w-full min-w-0 cursor-pointer border-b px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
         selected && 'bg-primary/5',
       )}
     >
@@ -681,7 +681,7 @@ export default function CommunicationsTab() {
   }
 
   return (
-    <section className="grid min-h-[36rem] min-w-0 overflow-hidden rounded-xl border bg-card lg:grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)] xl:h-[calc(100dvh-11rem)] xl:grid-cols-[10.5rem_minmax(16rem,21rem)_minmax(0,1fr)]">
+    <section className="grid min-h-[36rem] min-w-0 overflow-hidden rounded-xl border bg-card lg:grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)] xl:h-[calc(100dvh-11.5rem)] xl:min-h-[24rem] xl:grid-cols-[10.5rem_minmax(16rem,21rem)_minmax(0,1fr)]">
       <nav aria-label="通信文件夹" className="border-b p-2 lg:col-span-2 xl:col-span-1 xl:border-r xl:border-b-0">
         <Button type="button" size="sm" className="mb-2 w-full justify-start" onClick={() => { setComposing(true); resetDetail() }}><MailPlus className="size-4" />新建群发</Button>
         <div className="grid grid-cols-2 gap-1 sm:grid-cols-5 xl:grid-cols-1">
@@ -702,7 +702,7 @@ export default function CommunicationsTab() {
       ) : (
         <>
           <div className={cn('min-w-0 border-b lg:border-r lg:border-b-0', selection && 'hidden lg:block')}>
-            <header className="flex min-h-12 min-w-0 items-center gap-2 border-b px-3 py-2">
+            <header className="flex h-11 min-w-0 items-center gap-2 border-b px-3 py-1.5">
               <activeFolder.icon className="size-4 shrink-0 text-muted-foreground" />
               <h2 className="truncate text-sm font-semibold">{activeFolder.label}</h2>
               <Badge variant="secondary" className="tabular-nums">{total}</Badge>

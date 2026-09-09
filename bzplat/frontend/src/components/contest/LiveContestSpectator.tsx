@@ -195,16 +195,16 @@ function LegacySeriesScoreline({ pairing }: { pairing: LiveContestPairing }) {
   if (pairing.is_bye || pairing.bye) {
     const points = summary?.standings_points_a
     return (
-      <div className="mt-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
-        <p className="text-lg font-semibold tabular-nums text-primary">轮空{points != null ? ` · +${points} 赛事积分` : ''}</p>
+      <div className="mt-1.5 rounded-md border border-primary/20 bg-primary/5 px-2.5 py-1.5">
+        <p className="text-base font-semibold tabular-nums text-primary">轮空{points != null ? ` · +${points} 赛事积分` : ''}</p>
         <p className="text-xs text-muted-foreground">本轮轮空，没有生成计分场。</p>
       </div>
     )
   }
   if (!summary) return null
   return (
-    <div className="mt-2 rounded-md border bg-muted/25 px-3 py-2">
-      <p className="text-lg font-semibold tabular-nums text-foreground">
+    <div className="mt-1.5 rounded-md border bg-muted/25 px-2.5 py-1.5">
+      <p className="text-base font-semibold tabular-nums text-foreground">
         {summary.settled && summary.standings_points_a != null && summary.standings_points_b != null
           ? `${summary.standings_points_a}–${summary.standings_points_b} 赛事积分`
           : '本轮积分待结算'}
@@ -233,7 +233,7 @@ function PairingIdentityLine({
   if (!pairing) return null
   const seriesUnit = duplicate ? '组' : '场'
   return (
-    <li className="min-w-0 py-2.5 first:pt-0 last:pb-0">
+    <li className="min-w-0 py-2 first:pt-0 last:pb-0">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span className="shrink-0 font-mono font-medium tabular-nums text-foreground">
           {pairing.group_id ? `${pairing.group_id} · ` : ''}R{pairing.round_num ?? 1}
@@ -329,7 +329,7 @@ function ActiveTable({
     <article
       data-testid="contest-live-table"
       aria-label={`${snapshot ? '演示' : '正在进行的'}第 ${tableNumber} 桌`}
-      className="min-w-0 border-t border-primary/15 py-3 first:border-t-0 first:pt-0 last:pb-0"
+      className="min-w-0 border-t border-primary/15 py-2 first:border-t-0 first:pt-0 last:pb-0"
     >
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Badge variant="outline" className="border-primary/25 bg-primary/5 text-primary">
@@ -350,19 +350,19 @@ function ActiveTable({
             : ''}
         </span>
       </div>
-      <div className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-stretch gap-2">
+      <div className="mt-1.5 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-stretch gap-2">
         <MatchParticipantIdentity source={pairing} side={0} variant="panel" textLines={2} />
         <span aria-hidden="true" className="self-center text-xs font-semibold tracking-wide text-muted-foreground">VS</span>
         <MatchParticipantIdentity source={pairing} side={1} variant="panel" textLines={2} />
       </div>
       {pairing.match_id ? (
-        <Button asChild size="sm" className="mt-3 h-11 w-full sm:w-auto">
+        <Button asChild size="sm" className="mt-2 h-11 w-full sm:w-auto">
           <Link to={`/match/${pairing.match_id}`} aria-label={`${snapshot ? '查看演示' : '进入'}第 ${tableNumber} 桌观赛`}>
             <Eye aria-hidden="true" className="size-4" />{snapshot ? '查看演示对局' : '进入实时观赛'}
           </Link>
         </Button>
       ) : (
-        <p className="mt-2 text-xs text-muted-foreground">桌台正在建立，观赛入口生成后会自动出现。</p>
+        <p className="mt-1.5 text-xs text-muted-foreground">桌台正在建立，观赛入口生成后会自动出现。</p>
       )}
     </article>
   )
@@ -460,7 +460,7 @@ export function LiveContestSpectator({
       aria-labelledby="contest-live-title"
       className="min-w-0 overflow-hidden rounded-xl border border-primary/25 bg-card shadow-xs"
     >
-      <header className="flex min-w-0 flex-col gap-3 border-b border-primary/15 bg-primary/[0.035] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <header className="flex min-w-0 flex-col gap-2 border-b border-primary/15 bg-primary/[0.035] px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <Radio aria-hidden="true" className="size-4 shrink-0 text-primary" />
@@ -475,7 +475,7 @@ export function LiveContestSpectator({
             </h2>
             {stageLabel && <span className="text-xs font-medium text-primary">{stageLabel}</span>}
           </div>
-          <p data-testid="contest-live-sync-status" className="mt-1 text-xs text-muted-foreground">
+          <p data-testid="contest-live-sync-status" className="mt-0.5 text-xs text-muted-foreground">
             {offline
               ? '当前离线，保留最后一次赛况。'
               : snapshot && lastUpdatedAt
@@ -512,14 +512,14 @@ export function LiveContestSpectator({
         </Button>
       </header>
 
-      <div className="border-b px-4 py-3">
+      <div className="border-b px-3 py-2">
         <div className="flex flex-wrap items-end justify-between gap-3 text-xs">
           <span className="font-medium text-foreground">本阶段进度</span>
           <span className="min-w-0 text-right font-mono tabular-nums text-muted-foreground [overflow-wrap:anywhere]">
             {progressLabel} · {progress}%
           </span>
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="mt-0.5 text-xs text-muted-foreground">
           {progressValue.running} 桌进行中 · {progressValue.pending} {legacyAggregate ? '场历史系列对局待赛' : duplicate ? '组待赛' : '场待赛'}
           {(scoringGameCounts?.terminal_unplayed ?? 0) > 0 && (
             <> · {scoringGameCounts!.terminal_unplayed} 场因技术终局未进行</>
@@ -532,7 +532,7 @@ export function LiveContestSpectator({
           aria-valuemax={Math.max(progressTotal, 1)}
           aria-valuenow={Math.min(progressCompleted, Math.max(progressTotal, 1))}
           aria-valuetext={`${progressCompleted} / ${progressTotal} ${legacyAggregate ? '场历史系列对局' : duplicate ? '组复式交锋' : '场计分'}已完成`}
-          className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"
+          className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"
         >
           <div
             className="h-full rounded-full bg-primary transition-[width] duration-300 motion-reduce:transition-none"
@@ -544,17 +544,17 @@ export function LiveContestSpectator({
       <EliminationTiebreakStatus value={eliminationTiebreak} className="border-b" />
 
       <div className="grid min-w-0 xl:grid-cols-[minmax(0,1.55fr)_minmax(17rem,0.75fr)]">
-        <section aria-labelledby="active-tables-title" className="min-w-0 px-4 py-4 xl:border-r">
-          <div className="mb-3 flex items-center justify-between gap-3">
+        <section aria-labelledby="active-tables-title" className="min-w-0 px-3 py-3 xl:border-r">
+          <div className="mb-2 flex items-center justify-between gap-3">
             <h3 id="active-tables-title" className="text-sm font-semibold text-foreground">{snapshot ? '演示桌台' : '正在进行'}</h3>
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{active.length} 桌</span>
           </div>
           {active.length > 0 ? (
             <div className="divide-y divide-primary/15">
               {activeGroups.map((group) => (
-                <div key={seriesGroupKey(group[0]!, stageType)} className="py-3 first:pt-0 last:pb-0">
+                <div key={seriesGroupKey(group[0]!, stageType)} className="py-2 first:pt-0 last:pb-0">
                   {legacyAggregate && <LegacySeriesScoreline pairing={group[0]!} />}
-                  <div className="mt-3">
+                  <div className="mt-2">
                     {group.map((pairing) => (
                       <ActiveTable
                         key={pairing.id}
@@ -589,15 +589,15 @@ export function LiveContestSpectator({
           )}
         </section>
 
-        <section aria-labelledby="live-standings-title" className="min-w-0 border-t px-4 py-4 xl:border-t-0">
-          <div className="mb-3 flex items-center justify-between gap-3">
+        <section aria-labelledby="live-standings-title" className="min-w-0 border-t px-3 py-3 xl:border-t-0">
+          <div className="mb-2 flex items-center justify-between gap-3">
             <h3 id="live-standings-title" className="text-sm font-semibold text-foreground">
               {hasGroupedStandings ? (rankingMode === 'cross_group' ? '总榜与各组前列' : '各组前列') : '阶段前列'}
             </h3>
             <span className="text-xs text-muted-foreground">{snapshot ? '快照积分' : '实时积分'}</span>
           </div>
           {hasGroupedStandings && rankingMode === 'cross_group' && (
-            <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+            <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
               同时显示总榜与组内名次。跨组依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和冻结抽签序；不跨组使用直接交手。
             </p>
           )}
@@ -607,7 +607,7 @@ export function LiveContestSpectator({
                 const coordinates = parseRankingCoordinates(row, rankingMode)
                 const crossGroup = rankingMode === 'cross_group' ? parseCrossGroupTiebreak(row.tiebreaks) : null
                 return (
-                  <li key={`${row.bot_id ?? row.bot_name ?? 'standing'}-${rowIndex}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-2 first:pt-0 last:pb-0">
+                  <li key={`${row.bot_id ?? row.bot_name ?? 'standing'}-${rowIndex}`} className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)_auto] items-center gap-2 py-1.5 first:pt-0 last:pb-0">
                     <span className="font-mono text-sm font-semibold tabular-nums text-primary">
                       {coordinates?.overall_rank != null
                         ? `总${coordinates.overall_rank}`
@@ -661,20 +661,20 @@ export function LiveContestSpectator({
       </div>
 
       <div className="grid min-w-0 border-t md:grid-cols-2">
-        <section aria-labelledby="upcoming-matches-title" className="min-w-0 px-4 py-4 md:border-r">
+        <section aria-labelledby="upcoming-matches-title" className="min-w-0 px-3 py-3 md:border-r">
           <h3 id="upcoming-matches-title" className="text-sm font-semibold text-foreground">接下来</h3>
           {upcoming.length > 0 ? (
-            <ul className="mt-3 divide-y divide-border">{upcomingGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>
+            <ul className="mt-2 divide-y divide-border">{upcomingGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">
               当前阶段暂无待进行的{legacyAggregate ? '历史系列对局' : duplicate ? '复式交锋' : '计分场'}。
             </p>
           )}
         </section>
-        <section aria-labelledby="recent-results-title" className="min-w-0 border-t px-4 py-4 md:border-t-0">
+        <section aria-labelledby="recent-results-title" className="min-w-0 border-t px-3 py-3 md:border-t-0">
           <h3 id="recent-results-title" className="text-sm font-semibold text-foreground">最近赛果</h3>
           {recent.length > 0 ? (
-            <ul className="mt-3 divide-y divide-border">{recentGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} showResult duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>
+            <ul className="mt-2 divide-y divide-border">{recentGroups.map((group) => <PairingIdentityLine key={seriesGroupKey(group[0]!, stageType)} pairings={group} showResult duplicate={duplicate} legacyAggregate={legacyAggregate} />)}</ul>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">
               本阶段尚无已完成的{legacyAggregate ? '历史系列对局' : duplicate ? '复式交锋' : '计分场'}。
