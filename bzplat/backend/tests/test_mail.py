@@ -26,8 +26,8 @@ def test_mail_config_uses_official_sender_name_by_default(monkeypatch):
     monkeypatch.delenv("SMTP_FROM_NAME", raising=False)
     monkeypatch.delenv("SMTP_PORT", raising=False)
     monkeypatch.delenv("EMAIL_CODE_TTL_MINUTES", raising=False)
-    assert DEFAULT_SENDER_NAME == "Botbattle"
-    assert MailConfig().from_name == "Botbattle"
+    assert DEFAULT_SENDER_NAME == "botarena"
+    assert MailConfig().from_name == "botarena"
 
     monkeypatch.setenv("SMTP_FROM_NAME", "赛事组委会")
     assert MailConfig().from_name == "赛事组委会"
@@ -37,10 +37,10 @@ def test_env_example_uses_the_same_official_sender_name():
     env_example = (Path(__file__).parents[3] / ".env.example").read_text(
         encoding="utf-8"
     )
-    assert "SMTP_FROM_NAME=Botbattle" in env_example.splitlines()
+    assert "SMTP_FROM_NAME=botarena" in env_example.splitlines()
 
 
-def test_default_templates_use_one_multigame_botbattle_identity():
+def test_default_templates_use_one_multigame_botarena_identity():
     templates = _templates_by_key()
     assert set(templates) == {
         TPL_VERIFY_EMAIL,
@@ -53,9 +53,9 @@ def test_default_templates_use_one_multigame_botbattle_identity():
         assert obsolete.casefold() not in corpus.casefold()
 
     for subject, body_html, body_text in templates.values():
-        assert subject.startswith("【Botbattle】")
-        assert "Botbattle" in body_html
-        assert "Botbattle" in body_text
+        assert subject.startswith("【botarena】")
+        assert "botarena" in body_html
+        assert "botarena" in body_text
         assert "{{username}}" in body_html
         assert "{{username}}" in body_text
 
@@ -71,7 +71,7 @@ def test_seeded_templates_render_formal_user_facing_copy():
     templates = _templates_by_key()
 
     verify_subject, verify_html, verify_text = templates[TPL_VERIFY_EMAIL]
-    assert verify_subject == "【Botbattle】邮箱验证码"
+    assert verify_subject == "【botarena】邮箱验证码"
     for rendered in (
         render_template(verify_html, ctx),
         render_template(verify_text, ctx),
@@ -82,7 +82,7 @@ def test_seeded_templates_render_formal_user_facing_copy():
         assert "{{" not in rendered
 
     welcome_subject, welcome_html, welcome_text = templates[TPL_WELCOME]
-    assert welcome_subject == "【Botbattle】欢迎加入多游戏 Bot 竞赛平台"
+    assert welcome_subject == "【botarena】欢迎加入多游戏 Bot 竞赛平台"
     assert "参赛者" in render_template(welcome_html, ctx)
     assert "参赛者" in render_template(welcome_text, ctx)
 

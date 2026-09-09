@@ -184,7 +184,7 @@ def test_email_codes_and_templates(tmp_path):
 
     tpl = s.get_template(TPL_VERIFY_EMAIL)
     assert tpl is not None
-    assert tpl["subject"] == "【Botbattle】邮箱验证码"
+    assert tpl["subject"] == "【botarena】邮箱验证码"
     assert "{{code}}" in tpl["body_text"]
     assert "多游戏 Bot 竞赛平台" in tpl["body_text"]
     keys = {t["key"] for t in s.list_templates()}

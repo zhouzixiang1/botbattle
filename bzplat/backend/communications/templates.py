@@ -46,57 +46,57 @@ _TEMPLATES = {
     TPL_VERIFY_EMAIL: TemplateSpec(
         key=TPL_VERIFY_EMAIL,
         version=1,
-        subject="【Botbattle】邮箱验证码",
+        subject="【botarena】邮箱验证码",
         body_html=(
             "<p>{{username}}，你好：</p>"
-            "<p>你正在验证 Botbattle 账号邮箱，验证码为 "
+            "<p>你正在验证 botarena 账号邮箱，验证码为 "
             "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
             "<p>如非本人操作，请忽略本邮件，且不要向任何人透露验证码。</p>"
-            "<p>Botbattle 多游戏 Bot 竞赛平台</p>"
+            "<p>botarena 多游戏 Bot 竞赛平台</p>"
         ),
         body_text=(
             "{{username}}，你好：\n"
-            "你正在验证 Botbattle 账号邮箱，验证码为 {{code}}。"
+            "你正在验证 botarena 账号邮箱，验证码为 {{code}}。"
             "验证码在 {{expires_minutes}} 分钟内有效。\n"
             "如非本人操作，请忽略本邮件，且不要向任何人透露验证码。\n"
-            "Botbattle 多游戏 Bot 竞赛平台"
+            "botarena 多游戏 Bot 竞赛平台"
         ),
         secret=True,
     ),
     TPL_RESET_PASSWORD: TemplateSpec(
         key=TPL_RESET_PASSWORD,
         version=1,
-        subject="【Botbattle】密码重置验证码",
+        subject="【botarena】密码重置验证码",
         body_html=(
             "<p>{{username}}，你好：</p>"
-            "<p>你正在申请重置 Botbattle 账号密码，验证码为 "
+            "<p>你正在申请重置 botarena 账号密码，验证码为 "
             "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
             "<p>如非本人操作，请忽略本邮件并及时检查账号安全。</p>"
-            "<p>Botbattle 多游戏 Bot 竞赛平台</p>"
+            "<p>botarena 多游戏 Bot 竞赛平台</p>"
         ),
         body_text=(
             "{{username}}，你好：\n"
-            "你正在申请重置 Botbattle 账号密码，验证码为 {{code}}。"
+            "你正在申请重置 botarena 账号密码，验证码为 {{code}}。"
             "验证码在 {{expires_minutes}} 分钟内有效。\n"
             "如非本人操作，请忽略本邮件并及时检查账号安全。\n"
-            "Botbattle 多游戏 Bot 竞赛平台"
+            "botarena 多游戏 Bot 竞赛平台"
         ),
         secret=True,
     ),
     TPL_WELCOME: TemplateSpec(
         key=TPL_WELCOME,
         version=1,
-        subject="【Botbattle】欢迎加入多游戏 Bot 竞赛平台",
+        subject="【botarena】欢迎加入多游戏 Bot 竞赛平台",
         body_html=(
             "<p>{{username}}，你好：</p>"
-            "<p>欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。</p>"
+            "<p>欢迎加入 botarena 多游戏 Bot 竞赛平台。你的邮箱已验证完成。</p>"
             "<p>平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
             "参加锦标赛并查看对局回放。</p>"
             "<p>开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。</p>"
         ),
         body_text=(
             "{{username}}，你好：\n"
-            "欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。\n"
+            "欢迎加入 botarena 多游戏 Bot 竞赛平台。你的邮箱已验证完成。\n"
             "平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
             "参加锦标赛并查看对局回放。\n"
             "开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。"

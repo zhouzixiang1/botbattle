@@ -3137,7 +3137,7 @@ def site_info(request: Request):
         SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     ])
     return {
-        "name": s.get(SETTING_SITE_NAME) or "Botbattle",
+        "name": s.get(SETTING_SITE_NAME) or "botarena",
         "logo": s.get(SETTING_SITE_LOGO) or "",
         "announcement": s.get(SETTING_SITE_ANNOUNCEMENT) or "",
         "about": s.get(SETTING_SITE_ABOUT) or "",
@@ -7392,7 +7392,7 @@ def admin_patch_site(
         SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     ])
     return {"site": {
-        "name": s.get(SETTING_SITE_NAME) or "Botbattle",
+        "name": s.get(SETTING_SITE_NAME) or "botarena",
         "logo": s.get(SETTING_SITE_LOGO) or "",
         "announcement": s.get(SETTING_SITE_ANNOUNCEMENT) or "",
         "about": s.get(SETTING_SITE_ABOUT) or "",

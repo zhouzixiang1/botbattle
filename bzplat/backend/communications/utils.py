@@ -70,4 +70,4 @@ def safe_route(value: str) -> str:
 
 def deterministic_message_id(idempotency_key: str) -> str:
     digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
-    return f"<{digest}@mail.botbattle.local>"
+    return f"<{digest}@mail.botarena.cn>"

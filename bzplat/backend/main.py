@@ -92,7 +92,7 @@ def _seed_site_settings(store: Store) -> None:
     from bzplat.backend.store.schema import (
         SETTING_SITE_NAME, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     )
-    store.seed_setting_if_absent(SETTING_SITE_NAME, "Botbattle")
+    store.seed_setting_if_absent(SETTING_SITE_NAME, "botarena")
     store.seed_setting_if_absent(SETTING_SITE_ANNOUNCEMENT, "")
     store.seed_setting_if_absent(SETTING_SITE_ABOUT, "多游戏 Bot 线上对战平台")
 

@@ -72,8 +72,8 @@ async function expectUnifiedAuthLayout(
 
   // The brand belongs to the shell alone. Keeping it out of main prevents the
   // doubled logo/title treatment that made the auth pages visually noisy.
-  await expect(page.getByText('Botbattle', { exact: true })).toHaveCount(1)
-  await expect(main.getByText('Botbattle', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('botarena', { exact: true })).toHaveCount(1)
+  await expect(main.getByText('botarena', { exact: true })).toHaveCount(0)
   await expect(main.locator('h1')).toHaveCount(1)
 
   const headingBox = await visibleBox(heading, `${item.path} h1`)

@@ -91,7 +91,7 @@ def test_auth_code_is_queued_without_message_body_and_rendered_only_in_worker(tm
     assert len(mailer.sent) == 1
     assert code in mailer.sent[0]["body_text"]
     assert mailer.sent[0]["message_id"].startswith("<")
-    assert mailer.sent[0]["message_id"].endswith("@mail.botbattle.local>")
+    assert mailer.sent[0]["message_id"].endswith("@mail.botarena.cn>")
     assert store._conn.execute(
         "SELECT status FROM deliveries WHERE public_id=?", (delivery["public_id"],)
     ).fetchone()[0] == "sent"
