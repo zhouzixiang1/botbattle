@@ -287,7 +287,7 @@ export default function Dashboard() {
           {stats.recent_users.length === 0 ? (
             <EmptyState text="暂无用户" />
           ) : (
-            <ul className="divide-y divide-border">
+            <ul className="divide-y divide-border px-3">
               {stats.recent_users.map((u) => (
                 <li key={u.id} className="grid min-w-0 gap-1 py-1.5 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
                   <Link
@@ -308,7 +308,7 @@ export default function Dashboard() {
 
         <Card density="compact" className="min-w-0 overflow-hidden">
           <CardHeader><CardTitle>对局状态分布</CardTitle></CardHeader>
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 px-3">
             <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success" />
             <DistRow label="运行中" n={stats.matches_running} total={stats.matches} color="bg-primary" />
             <DistRow label="待开始" n={stats.matches_pending} total={stats.matches} color="bg-muted-foreground" />
@@ -416,7 +416,7 @@ function MaintenanceControls({
 
   return (
     <div
-      className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[minmax(10rem,auto)_minmax(13rem,20rem)_auto] sm:items-stretch"
+      className="grid w-full min-w-0 gap-2 sm:grid-cols-[minmax(10rem,1fr)_minmax(13rem,1.5fr)_auto] sm:items-stretch"
       data-testid="deployment-maintenance-control"
     >
       <div
@@ -433,7 +433,7 @@ function MaintenanceControls({
         </span>
       </div>
 
-      <div className="flex max-lg:min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1 sm:justify-start">
+      <div className="flex max-lg:min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1">
         <div className="min-w-0">
           <div className="text-xs font-medium">闲时排位</div>
           <div className="break-words text-[0.6875rem] leading-tight text-muted-foreground [overflow-wrap:anywhere]">
