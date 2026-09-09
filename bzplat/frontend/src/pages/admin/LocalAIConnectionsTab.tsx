@@ -130,7 +130,7 @@ export default function LocalAIConnectionsTab() {
               return (
                 <li
                   key={agent.public_id}
-                  className="grid min-w-0 gap-2 px-3 py-2 text-sm md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(7rem,.65fr)_auto] md:items-center"
+                  className="grid min-w-0 gap-2 px-3 py-1.5 text-sm md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(7rem,.65fr)_auto] md:items-center"
                 >
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">

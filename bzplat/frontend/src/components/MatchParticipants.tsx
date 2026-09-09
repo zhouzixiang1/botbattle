@@ -196,11 +196,119 @@ export function MatchParticipantIdentity({
 
 interface MatchParticipantsProps {
   source: MatchParticipantSource
-  variant?: 'compact' | 'panel'
+  variant?: 'compact' | 'panel' | 'inline'
   className?: string
   states?: readonly [ParticipantState, ParticipantState]
   secondEmptyLabel?: string
   links?: boolean
+}
+
+/**
+ * 桌面数据表与赛程行的对阵格单行投影：`Bot 名 @owner vs Bot 名 @owner` 同一行。
+ * 与共享身份解析/状态语义一致（真人座显示实际用户、自博弈不归并、空座省略
+ * data-participant-state），仅省略内嵌面板外壳；运行环境徽标经 showEnvironment
+ * 按需显示（赛事赛程/直播显示，公开数据表省略），以把表格行高压到单行。
+ */
+export function InlineParticipantIdentity({
+  source,
+  side,
+  state = 'neutral',
+  emptyLabel,
+  links = true,
+  showEnvironment = false,
+  className,
+}: {
+  source: MatchParticipantSource
+  side: 0 | 1
+  state?: ParticipantState
+  emptyLabel?: string
+  links?: boolean
+  showEnvironment?: boolean
+  className?: string
+}) {
+  const participant = resolveMatchParticipant(source, side)
+  const explicitEmpty = Boolean(emptyLabel && !participant.isHuman && participant.botId == null)
+  const stateClass = state === 'winner'
+    ? 'text-success'
+    : state === 'loser'
+      ? 'text-muted-foreground'
+      : 'text-foreground'
+  const subject = participant.isHuman
+    ? participant.ownerName && participant.ownerLabel === participant.ownerName
+      ? `@${participant.ownerName}`
+      : participant.ownerLabel
+    : participant.botLabel
+
+  if (explicitEmpty) {
+    return (
+      <span
+        data-match-participant="true"
+        data-participant-kind="empty"
+        data-seat={side + 1}
+        className={cn('inline-flex min-w-0 max-w-full items-center gap-1 text-sm italic text-muted-foreground', className)}
+      >
+        <span className="text-[10px] font-medium not-italic text-muted-foreground">{participant.seatLabel}</span>
+        <span className="min-w-0 truncate">{emptyLabel}</span>
+      </span>
+    )
+  }
+
+  const nameNode = participant.isHuman ? (
+    participant.ownerName && links ? (
+      <Link to={`/user/${encodeURIComponent(participant.ownerName)}`} className="block min-w-0 shrink-[2] basis-24 hover:text-primary">
+        <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('text-sm font-semibold hover:text-primary', stateClass)}>
+          {subject}
+        </EntityName>
+      </Link>
+    ) : (
+      <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('min-w-0 shrink-[2] basis-24 text-sm font-semibold', stateClass)}>
+        {subject}
+      </EntityName>
+    )
+  ) : participant.botId != null && links ? (
+    <Link to={`/bot/${participant.botId}`} className="block min-w-0 shrink-[2] basis-24 hover:text-primary">
+      <EntityName lines={1} tooltip={participant.botLabel} tooltipFocusable={false} className={cn('text-sm font-semibold hover:text-primary', stateClass)}>
+        {participant.botLabel}
+      </EntityName>
+    </Link>
+  ) : (
+    <EntityName
+      lines={1}
+      tooltip={participant.botLabel}
+      tooltipFocusable={false}
+      className={cn('min-w-0 shrink-[2] basis-24 text-sm font-semibold', participant.botId == null ? 'text-muted-foreground' : stateClass)}
+    >
+      {participant.botLabel}
+    </EntityName>
+  )
+  const ownerText = participant.isHuman
+    ? (participant.ownerName && participant.ownerLabel !== participant.ownerName ? `@${participant.ownerName}` : '')
+    : participantOwnerText(participant)
+  return (
+    <span
+      data-match-participant="true"
+      data-participant-kind={participant.isHuman ? 'human' : 'bot'}
+      data-participant-state={state}
+      data-seat={side + 1}
+      className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5 text-sm', className)}
+    >
+      {nameNode}
+      {ownerText && (
+        <OverflowText lines={1} tooltip={ownerText} tooltipFocusable={false} className="min-w-0 shrink-[3] basis-24 text-xs text-muted-foreground">
+          {participant.ownerName && links ? (
+            <Link to={`/user/${encodeURIComponent(participant.ownerName)}`} className="hover:text-primary hover:underline">{ownerText}</Link>
+          ) : ownerText}
+        </OverflowText>
+      )}
+      {state === 'winner' && <Badge className="h-4 shrink-0 self-center px-1 text-[9px]">胜</Badge>}
+      {showEnvironment && (
+        <RuntimeEnvironmentBadge
+          environment={matchParticipantEnvironment(source, side)}
+          className="h-4 shrink-0 px-1 text-[9px]"
+        />
+      )}
+    </span>
+  )
 }
 
 export function MatchParticipants({
@@ -211,6 +319,24 @@ export function MatchParticipants({
   secondEmptyLabel,
   links = true,
 }: MatchParticipantsProps) {
+  if (variant === 'inline') {
+    return (
+      <div
+        data-match-participants="true"
+        className={cn('flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1', className)}
+      >
+        <InlineParticipantIdentity source={source} side={0} state={states[0]} links={links} />
+        <span aria-hidden="true" className="text-[10px] font-medium text-muted-foreground">vs</span>
+        <InlineParticipantIdentity
+          source={source}
+          side={1}
+          state={states[1]}
+          emptyLabel={secondEmptyLabel}
+          links={links}
+        />
+      </div>
+    )
+  }
   return (
     <div
       data-match-participants="true"

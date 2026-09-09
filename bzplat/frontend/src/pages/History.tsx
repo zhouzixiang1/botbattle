@@ -74,7 +74,7 @@ export default function History() {
   }
 
   return (
-    <PageFrame layout="public-history">
+    <PageFrame layout="public-history" width="full">
       <PageHeader
         title="对局历史"
         description="查看双方用户、Bot 或真人身份以及对局性质，并按状态与游戏定位回放。"
@@ -131,10 +131,9 @@ export default function History() {
                 <Table aria-label="对局历史记录" className="min-w-[58rem]">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-36">时间</TableHead>
+                      <TableHead>时间 / 性质</TableHead>
                       <TableHead className="w-full min-w-[20rem]">对阵</TableHead>
                       <TableHead>结果</TableHead>
-                      <TableHead>性质</TableHead>
                       <TableHead className="text-right">操作</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -146,14 +145,21 @@ export default function History() {
                         data-match-type={match.match_type || 'unknown'}
                         className="[&>td]:py-1"
                       >
-                        <TableCell className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">
-                          {fmtTime(match.created_at)}
+                        <TableCell className="whitespace-nowrap">
+                          <div className="flex min-w-0 flex-nowrap items-center gap-x-2 whitespace-nowrap">
+                            <time className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</time>
+                            <span className="whitespace-nowrap text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
+                            <MatchNatureBadge matchType={match.match_type} source={match} />
+                            {match.match_type === 'contest' && match.contest_id != null && (
+                              <Link to={`/contests/${match.contest_id}`} className="whitespace-nowrap text-[11px] font-medium text-primary hover:underline">查看锦标赛</Link>
+                            )}
+                          </div>
                         </TableCell>
-                        <TableCell className="max-w-[30rem] whitespace-normal">
-                          <MatchParticipants source={match} />
+                        <TableCell className="w-full min-w-[20rem] whitespace-normal">
+                          <MatchParticipants source={match} variant="inline" />
                         </TableCell>
-                        <TableCell className="max-w-[18rem] whitespace-normal">
-                          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <TableCell className="whitespace-normal">
+                          <div className="flex min-w-0 flex-nowrap items-center gap-x-2 whitespace-nowrap">
                             <StatusBadge status={match.status} />
                             <MatchOutcome
                               source={match}
@@ -161,17 +167,6 @@ export default function History() {
                               normalizedUnit={match.game_id === 'holdem' ? 'BB' : undefined}
                               primaryOnly
                             />
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex min-w-0 flex-col items-start gap-1">
-                            <span className="flex min-w-0 items-center gap-1.5">
-                              <span className="text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
-                              <MatchNatureBadge matchType={match.match_type} source={match} />
-                            </span>
-                            {match.match_type === 'contest' && match.contest_id != null && (
-                              <Link to={`/contests/${match.contest_id}`} className="text-[11px] font-medium text-primary hover:underline">查看锦标赛</Link>
-                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right">

@@ -168,9 +168,10 @@ function BotPerspectiveOutcome({ match, botId }: { match: MatchRow; botId: numbe
 type ParticipantState = 'winner' | 'loser' | 'neutral'
 
 /**
- * 桌面对局历史表的紧凑对阵格：上行两 Bot 名并排 + vs，下行 @owner×2。
- * 与共享 MatchParticipants 的身份解析一致（真人座显示实际用户、自博弈不归并为
- * Bot 自胜），仅省略座位/运行环境元数据行以压缩行高；移动卡片仍用完整面板。
+ * 桌面对局历史表的紧凑对阵格：Bot 名与 @owner 同格，md 两行、lg+ 同行随宽度
+ * 自然展开（放不下时仍自动折行）。与共享 MatchParticipants 的身份解析一致
+ * （真人座显示实际用户、自博弈不归并为 Bot 自胜），仅省略座位/运行环境元数据
+ * 行以压缩行高；移动卡片仍用完整面板。
  */
 function DenseParticipant({ source, side, state }: { source: MatchRow; side: 0 | 1; state: ParticipantState }) {
   const participant = resolveMatchParticipant(source, side)
@@ -186,13 +187,13 @@ function DenseParticipant({ source, side, state }: { source: MatchRow; side: 0 |
       : 'text-foreground'
   const missing = !participant.isHuman && participant.botId == null
   const nameNode = !participant.isHuman && participant.botId != null ? (
-    <Link to={`/bot/${participant.botId}`} className="block min-w-0 flex-1 hover:text-primary">
+    <Link to={`/bot/${participant.botId}`} className="block min-w-0 flex-1 hover:text-primary lg:flex-initial">
       <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('text-sm font-semibold hover:text-primary', stateClass)}>
         {subject}
       </EntityName>
     </Link>
   ) : (
-    <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('min-w-0 flex-1 text-sm font-semibold', missing ? 'text-muted-foreground' : stateClass)}>
+    <EntityName lines={1} tooltip={subject} tooltipFocusable={false} className={cn('min-w-0 flex-1 text-sm font-semibold lg:flex-initial', missing ? 'text-muted-foreground' : stateClass)}>
       {subject}
     </EntityName>
   )
@@ -207,17 +208,17 @@ function DenseParticipant({ source, side, state }: { source: MatchRow; side: 0 |
       data-seat={side + 1}
       className="min-w-0"
     >
-      <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
         {nameNode}
         {state === 'winner' && <Badge className="h-4 shrink-0 px-1 text-[9px]">胜</Badge>}
+        {ownerText && (
+          <OverflowText lines={1} tooltip={ownerText} tooltipFocusable={false} className="w-full min-w-0 flex-none text-xs text-muted-foreground lg:w-auto lg:max-w-[14rem]">
+            {participant.ownerName ? (
+              <Link to={`/user/${encodeURIComponent(participant.ownerName)}`} className="hover:text-primary">{ownerText}</Link>
+            ) : ownerText}
+          </OverflowText>
+        )}
       </div>
-      {ownerText && (
-        <OverflowText lines={1} tooltip={ownerText} tooltipFocusable={false} className="text-xs text-muted-foreground">
-          {participant.ownerName ? (
-            <Link to={`/user/${encodeURIComponent(participant.ownerName)}`} className="hover:text-primary">{ownerText}</Link>
-          ) : ownerText}
-        </OverflowText>
-      )}
     </div>
   )
 }
@@ -560,7 +561,7 @@ export default function BotDetail() {
   const GameIcon = gameIcon(profile.game_id)
 
   return (
-    <PageFrame layout="public-bot-detail">
+    <PageFrame width="full" layout="public-bot-detail">
       <PageHeader
         eyebrow={`@${profile.name}`}
         title={<EntityName lines={2} tooltip={profile.display_name || profile.name} className="text-2xl font-bold sm:text-[1.75rem]">{profile.display_name || profile.name}</EntityName>}
@@ -574,246 +575,256 @@ export default function BotDetail() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="Bot 资料" description="身份、参榜状态、版本与当前评分" contentClassName="px-4 py-3">
-        <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-          <div className="min-w-0 space-y-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <Badge variant="outline"><GameIcon className="size-3.5" />{gameLabel(profile.game_id)}</Badge>
-              {!isRanked ? (
-                <Badge variant="outline"><Trophy className="size-3" aria-hidden="true" />未参加排行榜</Badge>
-              ) : profile.ranking_eligible && profile.rank != null ? (
-                <Badge variant="outline" className="font-mono"><Trophy className="size-3" aria-hidden="true" />公开排名 #{profile.rank} / {profile.rank_total}</Badge>
-              ) : (
-                <Badge variant="secondary" className="font-mono"><Trophy className="size-3" aria-hidden="true" />参榜中 · 资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
-              )}
-              {profile.is_deleted
-                ? <Badge variant="destructive">已删除</Badge>
-                : !profile.is_active && <Badge variant="secondary">已停用</Badge>}
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span className="inline-flex min-w-0 items-center gap-1">所有者
-                {profile.owner_name ? (
-                  <Link to={`/user/${encodeURIComponent(profile.owner_name)}`} className="min-w-0 font-medium text-primary">
-                    <OverflowText lines={2} tooltip={false} tooltipFocusable={false}>{profile.owner_display || profile.owner_name}</OverflowText>
-                  </Link>
-                ) : '—'}
-              </span>
-              <span>当前版本 v{profile.current_version ?? 1}</span>
-              <span>创建于 {fmtDate(profile.created_at)}</span>
-            </div>
-          </div>
-          <CopyIdentifier value={profile.id} />
-        </div>
-        <dl className="mt-2.5 grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 border-t pt-2.5 text-sm md:grid-cols-4 xl:grid-cols-6">
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">Rating / 95% 区间</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-              {fmtRating(profile.rating)}
-              <span className="ml-1.5 font-normal text-muted-foreground">
-                {profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
-                  ? `RD ${Number(profile.rd).toFixed(0)} · ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
-                  : '暂无区间'}
-              </span>
-            </dd>
-          </div>
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">公开名次</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-              {!isRanked
-                ? '未参加排行榜'
-                : profile.rank == null ? '暂未获得公开名次' : `第 ${profile.rank} / ${profile.rank_total} 名`}
-              <span className="ml-1.5 font-normal text-muted-foreground">
-                {!isRanked
-                  ? '历史评分保留'
-                  : profile.rank == null
-                    ? `${ratedMatches}/${profile.ranking_min_matches} 场`
-                  : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}%`}
-              </span>
-            </dd>
-          </div>
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">计分样本</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{ratedMatches} 场 <span className="font-normal text-muted-foreground">· {profile.unique_opponents ?? 0} 个对手</span></dd>
-          </div>
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">战绩</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.wins ?? 0} 胜 · {profile.draws ?? 0} 平 · {profile.losses ?? 0} 负</dd>
-          </div>
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">评分变化</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">上次 {fmtSigned(profile.rating_delta)} <span className="font-normal text-muted-foreground">· 30 日 {fmtSigned(profile.recent_delta_30d)}</span></dd>
-          </div>
-          <div className="min-w-0">
-            <dt className="text-xs text-muted-foreground">正常完成率</dt>
-            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)} <span className="font-normal text-muted-foreground">· 技术负 {profile.technical_failures ?? 0}</span></dd>
-          </div>
-        </dl>
-      </DataRegion>
-
-      <Tabs defaultValue="history" className="w-full">
-        <StickyToolbar label="Bot 详情分区">
-          <TabsList className="w-full sm:w-auto">
-            <TabsTrigger value="history"><HistoryIcon className="size-3.5" />对局历史 <span className="text-xs text-muted-foreground">{matchesTotal || matches.length}</span></TabsTrigger>
-            <TabsTrigger value="opponents"><Swords className="size-3.5" />对手战绩 <span className="text-xs text-muted-foreground">{opponentsTotal}</span></TabsTrigger>
-            <TabsTrigger value="rating"><Target className="size-3.5" />评分曲线</TabsTrigger>
-          </TabsList>
-        </StickyToolbar>
-
-        <TabsContent value="history">
-          <DataRegion title="对局历史" description={`第 ${matchesPage} 页 · 每页 ${matchesPerPage} 条记录`}>
-            {matchesError ? (
-              <ErrorMsg msg={matchesError} className="px-4 py-6" />
-            ) : matchesLoading ? (
-              <Loading text="正在加载对局…" />
-            ) : (
-              <>
-                <div className="divide-y md:hidden" aria-label="Bot 对局历史移动视图">
-                  {matches.length === 0 ? (
-                    <EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
-                  ) : matches.map((match) => <MobileMatchCard key={match.id} match={match} botId={botId} />)}
-                </div>
-                <div className="hidden md:block">
-                  <DataTable className="rounded-none border-0" scrollLabel="Bot 对局历史">
-                    <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead className="min-w-[18rem]">对阵与所属用户</TableHead>
-                  <TableHead>结果</TableHead>
-                  <TableHead>性质</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {matches.length === 0 ? (
-                  <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
+      <div className="grid min-w-0 gap-[var(--page-section-gap)] xl:grid-cols-[22rem_minmax(0,1fr)] xl:items-start">
+        <DataRegion title="Bot 资料" description="身份、参榜状态、版本与当前评分" contentClassName="px-4 py-3">
+          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+            <div className="min-w-0 space-y-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <Badge variant="outline"><GameIcon className="size-3.5" />{gameLabel(profile.game_id)}</Badge>
+                {!isRanked ? (
+                  <Badge variant="outline"><Trophy className="size-3" aria-hidden="true" />未参加排行榜</Badge>
+                ) : profile.ranking_eligible && profile.rank != null ? (
+                  <Badge variant="outline" className="font-mono"><Trophy className="size-3" aria-hidden="true" />公开排名 #{profile.rank} / {profile.rank_total}</Badge>
                 ) : (
-                  matches.map((m) => {
-                    const states = participantStates(m)
-                    return (
-                      <TableRow key={m.id}>
-                        <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                          {fmtTime(m.created_at)}
-                        </TableCell>
-                        <TableCell className="max-w-[24rem] whitespace-normal">
+                  <Badge variant="secondary" className="font-mono"><Trophy className="size-3" aria-hidden="true" />参榜中 · 资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
+                )}
+                {profile.is_deleted
+                  ? <Badge variant="destructive">已删除</Badge>
+                  : !profile.is_active && <Badge variant="secondary">已停用</Badge>}
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                <span className="inline-flex min-w-0 items-center gap-1">所有者
+                  {profile.owner_name ? (
+                    <Link to={`/user/${encodeURIComponent(profile.owner_name)}`} className="min-w-0 font-medium text-primary">
+                      <OverflowText lines={2} tooltip={false} tooltipFocusable={false}>{profile.owner_display || profile.owner_name}</OverflowText>
+                    </Link>
+                  ) : '—'}
+                </span>
+                <span>当前版本 v{profile.current_version ?? 1}</span>
+                <span>创建于 {fmtDate(profile.created_at)}</span>
+              </div>
+            </div>
+            <CopyIdentifier value={profile.id} />
+          </div>
+          <dl className="mt-2 grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 border-t pt-2 text-sm md:grid-cols-3 xl:grid-cols-2">
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">Rating / 95% 区间</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+                {fmtRating(profile.rating)}
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
+                    ? `RD ${Number(profile.rd).toFixed(0)} · ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
+                    : '暂无区间'}
+                </span>
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">公开名次</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+                {!isRanked
+                  ? '未参加排行榜'
+                  : profile.rank == null ? '暂未获得公开名次' : `第 ${profile.rank} / ${profile.rank_total} 名`}
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {!isRanked
+                    ? '历史评分保留'
+                    : profile.rank == null
+                      ? `${ratedMatches}/${profile.ranking_min_matches} 场`
+                    : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}%`}
+                </span>
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">计分样本</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">{ratedMatches} 场 <span className="font-normal text-muted-foreground">· {profile.unique_opponents ?? 0} 个对手</span></dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">战绩</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.wins ?? 0} 胜 · {profile.draws ?? 0} 平 · {profile.losses ?? 0} 负</dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">评分变化</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">上次 {fmtSigned(profile.rating_delta)} <span className="font-normal text-muted-foreground">· 30 日 {fmtSigned(profile.recent_delta_30d)}</span></dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">正常完成率</dt>
+              <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)} <span className="font-normal text-muted-foreground">· 技术负 {profile.technical_failures ?? 0}</span></dd>
+            </div>
+          </dl>
+        </DataRegion>
+
+        <Tabs defaultValue="history" className="w-full min-w-0">
+          <StickyToolbar label="Bot 详情分区">
+            <TabsList className="w-full sm:w-auto">
+              <TabsTrigger value="history"><HistoryIcon className="size-3.5" />对局历史 <span className="text-xs text-muted-foreground">{matchesTotal || matches.length}</span></TabsTrigger>
+              <TabsTrigger value="opponents"><Swords className="size-3.5" />对手战绩 <span className="text-xs text-muted-foreground">{opponentsTotal}</span></TabsTrigger>
+              <TabsTrigger value="rating"><Target className="size-3.5" />评分曲线</TabsTrigger>
+            </TabsList>
+          </StickyToolbar>
+
+          <TabsContent value="history">
+            <DataRegion title="对局历史">
+              {matchesError ? (
+                <ErrorMsg msg={matchesError} className="px-4 py-6" />
+              ) : matchesLoading ? (
+                <Loading text="正在加载对局…" />
+              ) : (
+                <>
+                  <div className="divide-y md:hidden" aria-label="Bot 对局历史移动视图">
+                    {matches.length === 0 ? (
+                      <EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+                    ) : matches.map((match) => <MobileMatchCard key={match.id} match={match} botId={botId} />)}
+                  </div>
+                  <div className="hidden md:block">
+                    {/* 桌面密度档：30px 行（触屏保持 44px 全局硬顶） */}
+                    <DataTable
+                      className="rounded-none border-0 [--table-row-height:1.875rem] [&_[data-slot=table-cell]]:py-1 [@media(pointer:coarse)]:[--table-row-height:2.75rem]"
+                      scrollLabel="Bot 对局历史"
+                    >
+                      <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>时间</TableHead>
+                    <TableHead className="min-w-[18rem]">对阵与所属用户</TableHead>
+                    <TableHead>结果</TableHead>
+                    <TableHead>性质</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {matches.length === 0 ? (
+                    <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
+                  ) : (
+                    matches.map((m) => {
+                      const states = participantStates(m)
+                      return (
+                        <TableRow key={m.id}>
+                          <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                            {fmtTime(m.created_at)}
+                          </TableCell>
+                        <TableCell className="whitespace-normal">
                           <DenseMatchParticipants match={m} states={states} />
                         </TableCell>
-                        <TableCell>
-                          <BotPerspectiveOutcome match={m} botId={botId} />
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          <MatchNatureBadge matchType={m.match_type} source={m} />
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-xs font-medium text-primary hover:underline">回放</Link>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })
-                )}
-              </TableBody>
-                    </Table>
-                  </DataTable>
-                </div>
-              </>
-            )}
-            <Pagination
-              page={matchesPage}
-              perPage={matchesPerPage}
-              total={matchesTotal}
-              onPageChange={setMatchesPage}
-              ariaLabel="Bot 对局历史分页"
-              disabled={matchesLoading}
-            />
-          </DataRegion>
-        </TabsContent>
-
-        <TabsContent value="opponents">
-          <DataRegion
-            title="对手战绩"
-            description={`当前评分池计分交手 · 第 ${opponentsPage} 页 · 每页 ${opponentsPerPage} 个 · 共 ${opponentsTotal} 个对手`}
-          >
-            {opponentsError ? (
-              <div className="space-y-3 px-4 py-6">
-                <ErrorMsg msg={opponentsError} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setOpponentsReloadKey((key) => key + 1)}
-                  className="max-sm:min-h-11"
-                >
-                  重试
-                </Button>
-              </div>
-            ) : opponentsLoading ? (
-              <Loading text="正在加载对手战绩…" />
-            ) : opponents.length === 0 ? (
-              <EmptyState text="暂无对手战绩" />
-            ) : (
-              <>
-                <div className="divide-y md:hidden" aria-label="Bot 对手战绩移动视图">
-                  {opponents.map((opponent) => (
-                    <MobileOpponentCard key={opponent.opponent_id} opponent={opponent} />
-                  ))}
-                </div>
-                <div className="hidden md:block">
-                  <DataTable className="rounded-none border-0" scrollLabel="Bot 对手战绩">
-                    <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="min-w-[6rem]">对手</TableHead>
-                          <TableHead>交手</TableHead>
-                          <TableHead>胜</TableHead>
-                          <TableHead>负</TableHead>
-                          <TableHead>平</TableHead>
-                          <TableHead>胜率</TableHead>
+                          <TableCell>
+                            <BotPerspectiveOutcome match={m} botId={botId} />
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            <MatchNatureBadge matchType={m.match_type} source={m} />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-xs font-medium text-primary hover:underline">回放</Link>
+                          </TableCell>
                         </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {opponents.map((opponent) => {
-                          const total = opponent.wins + opponent.losses + opponent.draws
-                          const winRate = total > 0
-                            ? (opponent.wins + opponent.draws * 0.5) / total
-                            : 0
-                          return (
-                            <TableRow key={opponent.opponent_id}>
-                              <TableCell className="max-w-[12rem] whitespace-normal">
+                      )
+                    })
+                  )}
+                </TableBody>
+                      </Table>
+                    </DataTable>
+                  </div>
+                </>
+              )}
+              <Pagination
+                page={matchesPage}
+                perPage={matchesPerPage}
+                total={matchesTotal}
+                onPageChange={setMatchesPage}
+                ariaLabel="Bot 对局历史分页"
+                disabled={matchesLoading}
+              />
+            </DataRegion>
+          </TabsContent>
+
+          <TabsContent value="opponents">
+            <DataRegion
+              title="对手战绩"
+              description={`当前评分池计分交手 · 第 ${opponentsPage} 页 · 每页 ${opponentsPerPage} 个 · 共 ${opponentsTotal} 个对手`}
+            >
+              {opponentsError ? (
+                <div className="space-y-3 px-4 py-6">
+                  <ErrorMsg msg={opponentsError} />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setOpponentsReloadKey((key) => key + 1)}
+                    className="max-sm:min-h-11"
+                  >
+                    重试
+                  </Button>
+                </div>
+              ) : opponentsLoading ? (
+                <Loading text="正在加载对手战绩…" />
+              ) : opponents.length === 0 ? (
+                <EmptyState text="暂无对手战绩" />
+              ) : (
+                <>
+                  <div className="divide-y md:hidden" aria-label="Bot 对手战绩移动视图">
+                    {opponents.map((opponent) => (
+                      <MobileOpponentCard key={opponent.opponent_id} opponent={opponent} />
+                    ))}
+                  </div>
+                <div className="hidden md:block">
+                  {/* 与对局历史表同一桌面密度档（触屏保持 44px） */}
+                  <DataTable
+                    className="rounded-none border-0 [--table-row-height:1.875rem] [&_[data-slot=table-cell]]:py-1 [@media(pointer:coarse)]:[--table-row-height:2.75rem]"
+                    scrollLabel="Bot 对手战绩"
+                  >
+                    <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="min-w-[6rem]">对手</TableHead>
+                            <TableHead>交手</TableHead>
+                            <TableHead>胜</TableHead>
+                            <TableHead>负</TableHead>
+                            <TableHead>平</TableHead>
+                            <TableHead>胜率</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {opponents.map((opponent) => {
+                            const total = opponent.wins + opponent.losses + opponent.draws
+                            const winRate = total > 0
+                              ? (opponent.wins + opponent.draws * 0.5) / total
+                              : 0
+                            return (
+                              <TableRow key={opponent.opponent_id}>
+                              <TableCell className="max-w-[16rem] whitespace-normal">
                                 <Link to={`/bot/${opponent.opponent_id}`} className="block min-w-0 hover:text-primary">
-                                  <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{opponent.opponent_display || opponent.opponent_name || '未命名 Bot'}</EntityName>
+                                  <EntityName lines={1} tooltip={opponent.opponent_display || opponent.opponent_name || '未命名 Bot'} tooltipFocusable={false} className="text-sm hover:text-primary">{opponent.opponent_display || opponent.opponent_name || '未命名 Bot'}</EntityName>
                                 </Link>
                               </TableCell>
-                              <TableCell className="text-muted-foreground">{opponent.samples}</TableCell>
-                              <TableCell className="text-success">{opponent.wins}</TableCell>
-                              <TableCell className="text-destructive">{opponent.losses}</TableCell>
-                              <TableCell className="text-muted-foreground">{opponent.draws}</TableCell>
-                              <TableCell className="font-mono text-sm">{fmtPct(winRate)}</TableCell>
-                            </TableRow>
-                          )
-                        })}
-                      </TableBody>
-                    </Table>
-                  </DataTable>
-                </div>
-              </>
-            )}
-            <Pagination
-              page={opponentsPage}
-              perPage={opponentsPerPage}
-              total={opponentsTotal}
-              onPageChange={setOpponentsPage}
-              ariaLabel="Bot 对手战绩分页"
-              disabled={opponentsLoading}
-            />
-          </DataRegion>
-        </TabsContent>
+                                <TableCell className="text-muted-foreground">{opponent.samples}</TableCell>
+                                <TableCell className="text-success">{opponent.wins}</TableCell>
+                                <TableCell className="text-destructive">{opponent.losses}</TableCell>
+                                <TableCell className="text-muted-foreground">{opponent.draws}</TableCell>
+                                <TableCell className="font-mono text-sm">{fmtPct(winRate)}</TableCell>
+                              </TableRow>
+                            )
+                          })}
+                        </TableBody>
+                      </Table>
+                    </DataTable>
+                  </div>
+                </>
+              )}
+              <Pagination
+                page={opponentsPage}
+                perPage={opponentsPerPage}
+                total={opponentsTotal}
+                onPageChange={setOpponentsPage}
+                ariaLabel="Bot 对手战绩分页"
+                disabled={opponentsLoading}
+              />
+            </DataRegion>
+          </TabsContent>
 
-        <TabsContent value="rating">
-          <DataRegion title="评分变化" description={`Glicko-2 · ${history.length} 个数据点`} actions={<Trophy className="size-4 text-primary" />} contentClassName="p-3">
-            <RatingChart points={history} />
-          </DataRegion>
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="rating">
+            <DataRegion title="评分变化" description={`Glicko-2 · ${history.length} 个数据点`} actions={<Trophy className="size-4 text-primary" />} contentClassName="p-3">
+              <RatingChart points={history} />
+            </DataRegion>
+          </TabsContent>
+        </Tabs>
+      </div>
 
       <Comments targetType="bot" targetId={String(botId)} />
     </PageFrame>

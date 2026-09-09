@@ -134,7 +134,7 @@ export default function Search() {
   const resultCount = type === 'users' ? users.length : type === 'bots' ? bots.length : matches.length
 
   return (
-    <PageFrame layout="public-search">
+    <PageFrame layout="public-search" width="full">
       <PageHeader
         title="全站搜索"
         description="按用户、Bot 或对局分别检索；Bot 与对局结果可进一步限定游戏。"
@@ -235,12 +235,12 @@ function BotResults({ bots }: { bots: BotRow[] }) {
     return <EmptyState text="无匹配 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
   }
   return (
-    <ul className="grid min-w-0 gap-px bg-border sm:grid-cols-2 xl:grid-cols-3">
+    <ul className="grid min-w-0 gap-px bg-border sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
       {bots.map((bot, index) => {
         const GameIcon = gameIcon(bot.game_id)
         return (
           <li key={bot.id} className="min-w-0 bg-card">
-            <Link to={`/bot/${bot.id}`} className="flex min-w-0 gap-2.5 px-3 py-2 hover:bg-muted/40">
+            <Link to={`/bot/${bot.id}`} className="flex min-w-0 gap-2.5 px-3 py-1.5 hover:bg-muted/40">
               <span className="font-mono text-xs tabular-nums text-muted-foreground">{index + 1}</span>
               <span className="min-w-0 flex-1">
                 <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="hover:text-primary">{bot.display_name || bot.name}</EntityName>
@@ -283,17 +283,18 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
                   <TableCell className="whitespace-normal">
-                    <MatchParticipants source={match} />
+                    <MatchParticipants source={match} variant="inline" />
                   </TableCell>
-                  <TableCell className="max-w-[16rem] whitespace-normal">
+                  <TableCell className="whitespace-normal">
                     <MatchOutcome
                       source={match}
                       seatLabels={outcomeSeatLabels(match)}
                       primaryOnly
+                      className="whitespace-nowrap"
                     />
                   </TableCell>
                   <TableCell>
-                    <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="flex min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap">
                       <span className="text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
                       <MatchNatureBadge matchType={match.match_type} source={match} />
                     </span>
@@ -307,7 +308,7 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
       </div>
       <ul className="divide-y divide-border md:hidden">
         {matches.map((match, index) => (
-          <li key={match.id} className="min-w-0 px-3 py-2.5">
+          <li key={match.id} className="min-w-0 px-3 py-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span className="font-mono">{index + 1} · {fmtTime(match.created_at)}</span>
               <Badge variant="secondary" className="ml-auto">{gameLabel(match.game_id)}</Badge>

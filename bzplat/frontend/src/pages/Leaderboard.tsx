@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  Activity,
   Gauge,
   Minus,
   TrendingDown,
@@ -103,85 +102,159 @@ function ChangeValue({ value, label }: { value: number | null; label: string }) 
   )
 }
 
-function BotIdentity({ row }: { row: RankingRow }) {
+function BotIdentity({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
   const name = row.bot_display || row.bot_name || '未命名 Bot'
+  const nameNode = (
+    <Link to={`/bot/${row.bot_id}`} className="block min-w-0 hover:text-primary">
+      <EntityName lines={inline ? 1 : 2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">
+        {name}
+      </EntityName>
+    </Link>
+  )
+  const ownerNode = (
+    <OverflowText
+      tooltip={false}
+      className={cn('min-w-0 text-xs text-muted-foreground', inline ? 'shrink-[3] basis-24' : 'mt-0.5')}
+    >
+      {row.owner_name ? (
+        <Link to={`/user/${encodeURIComponent(row.owner_name)}`} className="hover:text-primary hover:underline">
+          @{row.owner_name}
+        </Link>
+      ) : '所有者未知'}
+    </OverflowText>
+  )
+  if (inline) {
+    return (
+      <div className="flex min-w-0 max-w-full items-baseline gap-1.5">
+        <div className="min-w-0 shrink-[2] basis-28">{nameNode}</div>
+        {ownerNode}
+      </div>
+    )
+  }
   return (
     <div className="min-w-0">
-      <Link to={`/bot/${row.bot_id}`} className="block min-w-0 hover:text-primary">
-        <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">
-          {name}
-        </EntityName>
-      </Link>
-      <OverflowText tooltip={false} className="mt-0.5 text-xs text-muted-foreground">
-        {row.owner_name ? (
-          <Link to={`/user/${encodeURIComponent(row.owner_name)}`} className="hover:text-primary hover:underline">
-            @{row.owner_name}
-          </Link>
-        ) : '所有者未知'}
-      </OverflowText>
+      {nameNode}
+      {ownerNode}
     </div>
   )
 }
 
-function RatingFacts({ row }: { row: RankingRow }) {
+function RatingFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
   const hasConfidence = row.confidence_low != null && row.confidence_high != null
+  const value = (
+    <div className="min-w-0 font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
+  )
+  const detail = (
+    <div className="min-w-0 text-[11px] leading-snug text-muted-foreground">
+      RD {Number(row.rd).toFixed(0)}
+      {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
+    </div>
+  )
+  if (inline) {
+    return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
+  }
   return (
     <div className="min-w-0 tabular-nums">
-      <div className="font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
-      <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-        RD {Number(row.rd).toFixed(0)}
-        {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
-      </div>
+      {value}
+      <div className="mt-0.5">{detail}</div>
     </div>
   )
 }
 
-function RankingFacts({ row }: { row: RankingRow }) {
+function RankingFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
   if (!row.ranking_eligible || row.rank == null) {
+    const value = (
+      <div className="min-w-0 font-mono text-xs font-semibold text-foreground">
+        {row.rated_matches}/{row.ranking_min_matches} 场
+      </div>
+    )
+    const detail = (
+      <div className="min-w-0 text-[11px] text-muted-foreground">
+        资格进度 {(row.ranking_progress * 100).toFixed(0)}%
+      </div>
+    )
+    if (inline) {
+      return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
+    }
     return (
       <div className="tabular-nums">
-        <div className="font-mono text-xs font-semibold text-foreground">
-          {row.rated_matches}/{row.ranking_min_matches} 场
-        </div>
-        <div className="mt-0.5 text-[11px] text-muted-foreground">
-          资格进度 {(row.ranking_progress * 100).toFixed(0)}%
-        </div>
+        {value}
+        <div className="mt-0.5">{detail}</div>
+      </div>
+    )
+  }
+  const value = (
+    <div className="min-w-0 font-mono text-xs font-semibold text-foreground">#{row.rank} / {row.rank_total}</div>
+  )
+  const detail = (
+    <div className="min-w-0 text-[11px] text-muted-foreground">
+      百分位 {row.percentile == null ? '—' : `${row.percentile.toFixed(1)}%`}
+    </div>
+  )
+  if (inline) {
+    return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
+  }
+  return (
+    <div className="tabular-nums">
+      {value}
+      <div className="mt-0.5">{detail}</div>
+    </div>
+  )
+}
+
+function SampleFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
+  const volume = (
+    <div className="min-w-0 font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
+  )
+  const record = (
+    <div className="min-w-0 font-mono text-[11px] text-muted-foreground">
+      {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
+    </div>
+  )
+  if (inline) {
+    return (
+      <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">
+        {volume}
+        <span aria-hidden="true" className="text-[11px] text-muted-foreground">·</span>
+        {record}
       </div>
     )
   }
   return (
     <div className="tabular-nums">
-      <div className="font-mono text-xs font-semibold text-foreground">#{row.rank} / {row.rank_total}</div>
-      <div className="mt-0.5 text-[11px] text-muted-foreground">
-        百分位 {row.percentile == null ? '—' : `${row.percentile.toFixed(1)}%`}
-      </div>
+      {volume}
+      <div className="mt-0.5">{record}</div>
     </div>
   )
 }
 
-function SampleFacts({ row }: { row: RankingRow }) {
-  return (
-    <div className="tabular-nums">
-      <div className="font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
-      <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-        {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
-      </div>
-    </div>
-  )
-}
-
-function ChangeFacts({ row }: { row: RankingRow }) {
-  return (
-    <div className="flex flex-col gap-0.5 text-[11px] tabular-nums">
+function ChangeFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
+  const changes = (
+    <>
       <ChangeValue value={row.rating_delta} label="上次" />
+      <span aria-hidden="true" className="text-muted-foreground">·</span>
       <ChangeValue value={row.recent_delta_30d} label="30 日" />
-    </div>
+    </>
   )
+  if (inline) {
+    return <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums">{changes}</div>
+  }
+  return <div className="flex flex-col gap-0.5 text-[11px] tabular-nums">{changes}</div>
 }
 
-function RecentMatch({ row }: { row: RankingRow }) {
+function RecentMatch({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
   if (!row.last_match_id || !row.last_match_at) {
     return <span className="text-xs text-muted-foreground">暂无已验证对局</span>
+  }
+  if (inline) {
+    return (
+      <div className="flex min-w-0 items-baseline gap-x-1.5">
+        <Link to={`/match/${encodeURIComponent(row.last_match_id)}`} className="shrink-0 text-xs font-medium text-primary hover:underline">
+          查看对局
+        </Link>
+        <span className="min-w-0 text-[11px] text-muted-foreground">{fmtTime(row.last_match_at)}</span>
+      </div>
+    )
   }
   return (
     <div className="min-w-0">
@@ -208,7 +281,7 @@ function DesktopRows({
   return (
     <>
       <TableRow className="bg-muted/30 hover:bg-muted/30" data-testid={testId}>
-        <TableCell colSpan={7} className="h-8 px-3 py-1.5 text-xs font-semibold text-muted-foreground">
+        <TableCell colSpan={7} className="h-7 px-3 py-1 text-xs font-semibold text-muted-foreground">
           {title} · 本页 {rows.length} / 共 {globalCount}
         </TableCell>
       </TableRow>
@@ -217,12 +290,12 @@ function DesktopRows({
           <TableCell className="w-14 font-mono text-xs font-semibold text-muted-foreground">
             {row.rank == null ? '—' : `#${row.rank}`}
           </TableCell>
-          <TableCell className="max-w-64 whitespace-normal"><BotIdentity row={row} /></TableCell>
-          <TableCell><RatingFacts row={row} /></TableCell>
-          <TableCell><RankingFacts row={row} /></TableCell>
-          <TableCell><SampleFacts row={row} /></TableCell>
-          <TableCell><ChangeFacts row={row} /></TableCell>
-          <TableCell className="whitespace-normal"><RecentMatch row={row} /></TableCell>
+          <TableCell className="max-w-xs"><BotIdentity row={row} inline /></TableCell>
+          <TableCell><RatingFacts row={row} inline /></TableCell>
+          <TableCell><RankingFacts row={row} inline /></TableCell>
+          <TableCell><SampleFacts row={row} inline /></TableCell>
+          <TableCell><ChangeFacts row={row} inline /></TableCell>
+          <TableCell><RecentMatch row={row} inline /></TableCell>
         </TableRow>
       ))}
     </>
@@ -284,7 +357,8 @@ export default function Leaderboard() {
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
   const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
-  const perPage = 50
+  // 每页 14 行配合单行行高与固定队列面板，把三游戏首屏总高都压回一屏量级；翻页语义不变。
+  const perPage = 14
 
   useEffect(() => {
     let cancelled = false
@@ -364,7 +438,7 @@ export default function Leaderboard() {
   const sampleRows = rows.filter((row) => !row.ranking_eligible)
 
   return (
-    <PageFrame layout="public-leaderboard">
+    <PageFrame layout="public-leaderboard" width="full">
       <PageHeader
         title="排行榜"
         description="每款游戏独立使用 Glicko-2 数值评分；每个账号每款游戏最多派遣一个 Bot，公开名次与计分样本分区展示。"
@@ -376,7 +450,7 @@ export default function Leaderboard() {
             {GAMES.map((game) => {
               const GameIcon = game.icon
               return (
-                <TabsTrigger key={game.id} value={game.id} className="h-auto min-w-0 px-2 py-2">
+                <TabsTrigger key={game.id} value={game.id} className="h-auto min-w-0 px-2 py-1.5">
                   <GameIcon className="size-3.5 shrink-0" />
                   <span className="truncate">{game.label}</span>
                 </TabsTrigger>
@@ -395,7 +469,9 @@ export default function Leaderboard() {
         stale={!!queue && (queueOffline || !!queueError)}
         lastUpdatedAt={queueLastUpdatedAt}
         onRetry={refreshQueue}
-        maxQueued={4}
+        // 排队展示上限收紧到 2：等待列表只保留前 2 条 + 条数溢出提示，
+        // 正在执行列表不受影响；压掉长队列下首屏的队列高度。
+        maxQueued={2}
         compactOnMobile
         compactCapacity
         className={cn(
@@ -403,17 +479,20 @@ export default function Leaderboard() {
           // 不改动共享组件的结构、文案与语义；<md 保持组件默认密度。
           'md:[&>div]:px-3 md:[&>div]:py-2',
           'md:[&_dl]:gap-1.5 md:[&_dl>div]:px-2 md:[&_dl>div]:py-1',
-          'md:[&_section]:p-2',
+          'md:[&_section]:p-1.5',
           'md:[&_section>div:first-child]:mb-1',
-          'md:[&_li]:px-2.5 md:[&_li]:py-1',
+          'md:[&_li]:px-2 md:[&_li]:py-0.5',
           'md:[&_li>div:nth-child(2)]:mt-0.5',
         )}
       />
 
       <DataRegion
         title="数值评分明细"
-        description={rankingMinMatches ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加；赛事积分不进入平台 Rating。` : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。'}
+        description={rankingMinMatches
+          ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加；赛事积分不进入平台 Rating。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。`
+          : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。'}
         actions={<Gauge className="size-4 text-primary" />}
+        className="[&>header]:py-2"
       >
         {loading ? (
           <Loading text="正在加载排行榜…" />
@@ -452,11 +531,6 @@ export default function Leaderboard() {
           </>
         )}
       </DataRegion>
-
-      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-muted-foreground">
-        <Activity className="mt-0.5 size-3.5 shrink-0" />
-        百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。
-      </p>
     </PageFrame>
   )
 }

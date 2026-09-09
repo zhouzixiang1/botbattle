@@ -131,7 +131,7 @@ export default function MatchesTab() {
   if (loading && !matches.length) return <Loading />
   return (
     <div>
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
         <Select value={status || 'all'} onValueChange={onStatusChange}>
           <SelectTrigger size="sm" className="h-9 w-[8.5rem]">
             <SelectValue />
@@ -167,14 +167,14 @@ export default function MatchesTab() {
         <Table className="min-w-[48rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-2 py-2">对局 ID</TableHead>
-              <TableHead className="px-2 py-2">对阵</TableHead>
-              <TableHead className="px-2 py-2">游戏 / 类型</TableHead>
-              <TableHead className="px-2 py-2">状态</TableHead>
-              <TableHead className="px-2 py-2">进度</TableHead>
-              <TableHead className="px-2 py-2">结果 / 异常</TableHead>
-              <TableHead className="px-2 py-2">时间</TableHead>
-              <TableHead className="px-2 py-2">操作</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">对局 ID</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">对阵</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">游戏 / 类型</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">状态</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">进度</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">结果 / 异常</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">时间</TableHead>
+              <TableHead className="h-9 px-2 py-1.5">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -188,52 +188,57 @@ export default function MatchesTab() {
               const hasTerminalStatus = m.status === 'completed' || m.status === 'aborted'
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                <TableCell className="w-[5.5rem] px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
+                <TableCell className="w-[5.5rem] px-2 py-1 font-mono text-[11px] text-muted-foreground">
                   <OverflowText tooltip={m.id} tooltipFocusable={false}>{`${m.id.slice(0, 12)}…`}</OverflowText>
                 </TableCell>
-                <TableCell className="w-52 whitespace-normal px-2 py-1.5 text-foreground">
-                  <MatchParticipants source={m} />
+                <TableCell className="w-72 whitespace-normal px-2 py-1 text-foreground">
+                  <MatchParticipants
+                    source={m}
+                    className="[&_[data-match-participant]]:py-0 [&_[data-match-participant]>div+div]:mt-0"
+                  />
                 </TableCell>
-                <TableCell className="w-24 whitespace-normal px-2 py-1.5 text-xs text-muted-foreground">
+                <TableCell className="w-24 whitespace-normal px-2 py-1 text-xs text-muted-foreground">
                   <div>{gameLabel(m.game_id)}</div>
                   <MatchNatureBadge matchType={m.match_type} source={m} className="mt-1" />
                 </TableCell>
-                <TableCell className="px-2 py-1.5">
+                <TableCell className="px-2 py-1">
                   <StatusBadge status={m.status} />
                 </TableCell>
-                <TableCell className="w-24 whitespace-normal px-2 py-1.5 font-mono text-xs text-muted-foreground">
+                <TableCell className="w-24 whitespace-normal px-2 py-1 font-mono text-xs text-muted-foreground">
                   {gameSpec
                     ? progressLabel(m, gameSpec.progressUnit === 'move' ? '步' : '手')
                     : '规则不可用'}
                 </TableCell>
-                <TableCell className="w-52 whitespace-normal px-2 py-1.5 font-mono text-xs text-muted-foreground">
+                <TableCell className="w-60 whitespace-normal 2xl:w-[24rem] px-2 py-1 font-mono text-xs text-muted-foreground">
                   <MatchOutcome
                     source={m}
                     seatLabels={outcomeSeatLabels(m)}
                     normalizedUnit={m.game_id === 'holdem' ? 'BB' : undefined}
                     showGames
-                    className="font-sans"
+                    className="font-sans leading-snug"
                   />
-                  <div className="mt-1">原始分差 {m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
-                  {hasTerminalStatus && m.reason && (
-                    <div
-                      data-testid="terminal-reason"
-                      data-tone={terminalReason.tone}
-                      className={`mt-1 text-[10px] ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
-                    >
-                      {terminalReason.label}
-                    </div>
-                  )}
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="whitespace-nowrap">原始分差 {m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</span>
+                    {hasTerminalStatus && m.reason && (
+                      <span
+                        data-testid="terminal-reason"
+                        data-tone={terminalReason.tone}
+                        className={`text-[10px] ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
+                      >
+                        {terminalReason.label}
+                      </span>
+                    )}
+                  </div>
                   {incidentCount > 0 && (
-                    <div className="mt-1 space-y-0.5 text-[10px] text-destructive">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-destructive">
                       <Badge variant="destructive" className="text-[10px]">Bot 技术故障 {incidentCount} 次</Badge>
-                      {sample && <div>座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</div>}
+                      {sample && <span>座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</span>}
                     </div>
                   )}
                 </TableCell>
-                <TableCell className="whitespace-nowrap px-2 py-1.5 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
-                <TableCell className="w-16 px-2 py-1.5">
-                  <div className="flex flex-wrap gap-1">
+                <TableCell className="whitespace-nowrap px-2 py-1 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
+                <TableCell className="w-16 whitespace-nowrap px-2 py-1">
+                  <div className="flex items-center gap-1 whitespace-nowrap">
                     <Button asChild variant="outline" size="sm" className="max-lg:min-h-11 px-2.5"><Link to={`/match/${m.id}`}>查看</Link></Button>
                     {(m.status === 'running' || m.status === 'pending') && (
                       <Button

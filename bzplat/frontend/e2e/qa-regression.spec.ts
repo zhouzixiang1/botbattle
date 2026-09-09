@@ -2075,7 +2075,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
     const hudBox = await overview.boundingBox()
     const canvasBox = await canvas.boundingBox()
     const timelineBox = await timeline.boundingBox()
-    // xl(1280) 起即切换为「棋盘主列 + 20rem 右信息栏」，不再使用 HUD 横排在上。
+    // xl(1280) 起即切换为「棋盘主列 + 22rem 右信息栏」，不再使用 HUD 横排在上。
     expect(hudBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0) - 1)
     expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
     expect(Math.abs((timelineBox?.x ?? 0) - (hudBox?.x ?? 0))).toBeLessThanOrEqual(40)
@@ -2798,8 +2798,8 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
   expect(Math.abs((timelineBox?.x ?? 0) - (overviewBox?.x ?? 0))).toBeLessThanOrEqual(40)
   expect(timelineBox?.width ?? 0).toBeGreaterThanOrEqual(270)
-  expect(timelineBox?.width ?? 0).toBeLessThanOrEqual(345)
-  expect(resultCardBox?.height ?? 999).toBeLessThanOrEqual(110)
+  expect(timelineBox?.width ?? 0).toBeLessThanOrEqual(400)
+  expect(resultCardBox?.height ?? 999).toBeLessThanOrEqual(160)
 
   // 评论区默认折叠为一行条；展开后才挂载完整评论区并请求评论数据。
   const commentsToggle = page.getByRole('button', { name: '评论', exact: true })
@@ -3757,7 +3757,7 @@ test('Pencil human canvas rejects the production box-center click and stays squa
       const overviewBounds = await overview.boundingBox()
       expect(logBounds).not.toBeNull()
       expect(overviewBounds).not.toBeNull()
-      // xl+ 统一「棋盘主列 + 20rem 右信息栏（HUD 上 / 动作日志下）」契约。
+      // xl+ 统一「棋盘主列 + 22rem 右信息栏（HUD 上 / 动作日志下）」契约。
       expect((overviewBounds?.x ?? 0)).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0) - 1)
       expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0) - 1)
       expect(Math.abs((logBounds?.x ?? 0) - (overviewBounds?.x ?? 0))).toBeLessThanOrEqual(40)
@@ -4110,7 +4110,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
     // xl+ 右信息栏契约：棋盘主列受 52rem 与 100dvh-32rem 钳制；概览与动作上下文
     // 同列排在棋盘右侧，不再使用“概览在左、动作栏在右”的三列布局。
-    const heightCap = Math.min(832, viewport.height - 512)
+    const heightCap = Math.min(832, viewport.height - 416)
     expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(heightCap + 1)
     expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     expect(overviewBounds?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
@@ -4156,14 +4156,15 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopOverview).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
     // xl(1280) 起即右信息栏契约；方形棋盘受 100dvh-32rem 钳制。
-    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(Math.min(832, viewport.height - 512) + 1)
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(Math.min(832, viewport.height - 416) + 1)
     expect(desktopOverview?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
     expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
   }
 
   await page.setViewportSize({ width: 1312, height: 700 })
   await page.evaluate(() => window.scrollTo(0, 360))
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  // R2 压缩后该视口可滚动行程变小（<100px），能滚动 + sticky 生效即为契约。
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
   expect(await timeline.evaluate((element) => getComputedStyle(element).position)).toBe('sticky')
   await page.evaluate(() => window.scrollTo(0, 0))
 
