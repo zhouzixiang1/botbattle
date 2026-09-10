@@ -176,6 +176,8 @@ export default function MatchViewer() {
   // xl+ 桌面仪表盘：主画布列 + 右侧信息栏（局面概览 + 动作上下文同栏）。
   // 与折叠断点共用同一个 media query，跨过 1280px 时两侧同步切换。
   const [desktopRail, setDesktopRail] = useState(false)
+  // 2xl 超宽三区（仅方形棋盘页）：信息带移到左栏、棋盘居中、右栏保留动作上下文。
+  const [ultraRail, setUltraRail] = useState(false)
   // events 最新长度的 ref——SSE 回调需要在 React 提交前计算批量事件长度；
   // updater 保持纯函数，游标始终由独立的播放状态推进。
   const eventsLenRef = useRef(0)
@@ -450,13 +452,19 @@ export default function MatchViewer() {
   // 同一布局内的手动折叠选择不会被 resize 覆盖。
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1279px)')
+    const ultra = window.matchMedia('(min-width: 1536px)')
     const syncBreakpoint = () => {
       setTimelineCollapsed(media.matches)
       setDesktopRail(!media.matches)
+      setUltraRail(ultra.matches)
     }
     syncBreakpoint()
     media.addEventListener('change', syncBreakpoint)
-    return () => media.removeEventListener('change', syncBreakpoint)
+    ultra.addEventListener('change', syncBreakpoint)
+    return () => {
+      media.removeEventListener('change', syncBreakpoint)
+      ultra.removeEventListener('change', syncBreakpoint)
+    }
   }, [])
 
   const gameId = normalizeGameId(match?.game_id)
@@ -1118,7 +1126,19 @@ export default function MatchViewer() {
         ) : undefined}
       />
 
-      {replayReady && desktopRail ? (
+      {replayReady && desktopRail && ultraRail && viewportFitCanvas ? (
+        // 2xl 超宽三区：棋盘仍是主内容且尺寸断言不变（min(68rem,100dvh-22rem)），
+        // 信息带（元数据/结果卡/技术告警/debug/错误）填左栏死角，右栏保留
+        // 局面概览 + 动作上下文。中宽 1280–1535 与 <1280 分支不变。
+        <div className="grid grid-cols-[22rem_minmax(0,1fr)_20rem] items-start gap-3">
+          <div className="flex min-w-0 flex-col gap-3">{introBlocks}</div>
+          <div className={`${boardZoneClasses} justify-self-center`}>{mainColumn}</div>
+          <div className="flex min-w-0 flex-col gap-3">
+            {hudNode}
+            {timelineCard}
+          </div>
+        </div>
+      ) : replayReady && desktopRail ? (
         <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-3">
           <div className="flex min-w-0 flex-col items-center gap-3">
             <div className={introZoneClasses}>{introBlocks}</div>

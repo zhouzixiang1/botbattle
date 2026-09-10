@@ -347,7 +347,7 @@ interface Entry {
   identity_captured_at?: string | null
 }
 
-const EXPORT_LINK_CLASS = 'max-sm:h-auto max-sm:min-h-[44px] max-sm:w-full max-sm:whitespace-normal max-sm:py-2 max-sm:text-center max-sm:leading-snug'
+const EXPORT_LINK_CLASS = 'whitespace-normal max-sm:h-auto max-sm:min-h-[44px] max-sm:w-full max-sm:py-2 max-sm:text-center max-sm:leading-snug'
 
 function identitySourceLabel(source: Entry['identity_source']): string {
   if (source === 'registration_profile') return '报名时资料快照'
@@ -2629,7 +2629,7 @@ function StageStandingPanel({
       description={sourceLabel}
       className="h-full min-w-0"
       actions={summary && summary.total_pairings > 0 ? (
-          <Badge variant="outline" className="text-[9px]">
+          <Badge variant="outline" className="max-w-full whitespace-normal text-left leading-snug text-[9px]">
             {stageStandingProgressLabel(summary, duplicate, legacyAggregate)}
           </Badge>
       ) : undefined}

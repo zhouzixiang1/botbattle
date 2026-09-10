@@ -105,13 +105,25 @@ export default function HumanPlay() {
   const [desktopRail, setDesktopRail] = useState(
     () => window.matchMedia('(min-width: 1280px)').matches,
   )
+  // 2xl 超宽三区（仅方形棋盘页）：对阵卡移到左栏、棋盘居中、右栏保留概览+动作。
+  const [ultraRail, setUltraRail] = useState(
+    () => window.matchMedia('(min-width: 1536px)').matches,
+  )
 
   useEffect(() => {
     const media = window.matchMedia('(min-width: 1280px)')
-    const syncBreakpoint = () => setDesktopRail(media.matches)
+    const ultra = window.matchMedia('(min-width: 1536px)')
+    const syncBreakpoint = () => {
+      setDesktopRail(media.matches)
+      setUltraRail(ultra.matches)
+    }
     syncBreakpoint()
     media.addEventListener('change', syncBreakpoint)
-    return () => media.removeEventListener('change', syncBreakpoint)
+    ultra.addEventListener('change', syncBreakpoint)
+    return () => {
+      media.removeEventListener('change', syncBreakpoint)
+      ultra.removeEventListener('change', syncBreakpoint)
+    }
   }, [])
 
   useEffect(() => {
@@ -401,6 +413,8 @@ export default function HumanPlay() {
   const ReplayHud = gameSpec?.replay.Hud
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
+  // 2xl 超宽三区（仅方形视口适配棋盘）：对阵卡 | 棋盘居中 | 概览+动作日志。
+  const ultra3zone = desktopRail && ultraRail && viewportFitCanvas
   const turnLabel = gameSpec?.humanPlay.turnLabelForRequest?.(turnRequest)
     ?? gameSpec?.humanPlay.turnLabel
     ?? '轮到你操作'
@@ -634,15 +648,33 @@ export default function HumanPlay() {
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
         <div
           data-testid="human-canvas-layout"
-          className={desktopRail
-            ? 'grid min-w-0 justify-center gap-4 grid-cols-[minmax(0,1fr)_22rem]'
-            : viewportDashboard
-              ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
-              : viewportFitCanvas
-                ? 'grid min-w-0 items-start justify-center gap-4'
-                : 'grid min-w-0 gap-4'}
+          className={ultra3zone
+            ? 'grid min-w-0 items-start justify-center gap-4 grid-cols-[22rem_minmax(0,1fr)_20rem]'
+            : desktopRail
+              ? 'grid min-w-0 justify-center gap-4 grid-cols-[minmax(0,1fr)_22rem]'
+              : viewportDashboard
+                ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
+                : viewportFitCanvas
+                  ? 'grid min-w-0 items-start justify-center gap-4'
+                  : 'grid min-w-0 gap-4'}
         >
-          {desktopRail ? (
+          {ultra3zone ? (
+            <>
+              {/* 2xl 三区：左栏对阵卡（身份/我的位置），棋盘尺寸断言不变。 */}
+              <div className="flex min-w-0 flex-col gap-3">{matchupNode}</div>
+              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]">
+                {renderSurface(true)}
+              </div>
+              <div className="flex min-w-0 flex-col gap-3">
+                {ReplayHud && currentVm !== null && (
+                  <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
+                )}
+                <div className="min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)]">
+                  <EventLogCard events={events} seats={seats} describeEvent={gameSpec.describeEvent} />
+                </div>
+              </div>
+            </>
+          ) : desktopRail ? (
             <>
               <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]">
                 {matchupNode}
