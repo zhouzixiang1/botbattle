@@ -213,7 +213,7 @@ export default function LogsTab() {
         {loading && <span>刷新中…</span>}
       </div>
 
-      <div role="log" aria-live="polite" className="max-h-[calc(100dvh-24rem)] overflow-auto rounded-xl border border-border bg-card">
+      <div role="log" aria-live="polite" className="max-h-[max(12rem,calc(100dvh-24rem))] overflow-auto rounded-xl border border-border bg-card">
         {lines.length === 0 ? (
           <div className="py-10 text-center text-sm text-muted-foreground">没有符合条件的日志</div>
         ) : (

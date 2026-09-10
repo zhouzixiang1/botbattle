@@ -428,7 +428,7 @@ export default function HumanPlay() {
   // 对阵卡：xl+ 并入棋盘主列（与棋盘列同宽），xl 以下保持整行堆叠。
   const matchupNode = match ? (
     <Card data-testid="human-matchup" className="gap-0 py-0">
-      <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
+      <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,0.7fr)_minmax(0,1fr)] sm:items-center">
         <MatchParticipantIdentity
           source={match}
           side={0}
