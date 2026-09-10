@@ -645,7 +645,7 @@ export function ExecutionQueuePanel({
             </p>
           )}
         </div>
-        {action && <div className="w-full min-w-0 max-w-full sm:w-auto">{action}</div>}
+        {action && <div className="w-full min-w-0 max-w-full">{action}</div>}
       </div>
 
       {error && (
