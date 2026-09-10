@@ -987,7 +987,7 @@ export default function MatchViewer() {
       {metaRow}
       {/* 对阵与结果形成一个稳定层级；身份不再同时散落于标题、摘要和详情链接。 */}
       {match && (
-        <Card data-testid="match-result-card" className="gap-0 py-0">
+        <Card data-testid="match-result-card" className="mx-auto w-full max-w-4xl gap-0 py-0">
           <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.7fr)_minmax(0,1fr)] sm:items-center">
             {renderSeat(0)}
             <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
