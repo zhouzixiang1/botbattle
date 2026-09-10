@@ -270,6 +270,9 @@ function LikedTopMatches() {
               </div>
             </li>
           ))}
+          {matches.length % 2 === 1 && (
+            <li aria-hidden="true" className="bg-card" />
+          )}
         </ul>
       )}
     </DataRegion>
