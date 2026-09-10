@@ -191,7 +191,9 @@ export default function MatchesTab() {
                 <TableCell className="w-[5.5rem] px-2 py-1 font-mono text-[11px] text-muted-foreground">
                   <OverflowText tooltip={m.id} tooltipFocusable={false}>{`${m.id.slice(0, 12)}…`}</OverflowText>
                 </TableCell>
-                <TableCell className="w-72 whitespace-normal px-2 py-1 text-foreground">
+                {/* min-w-40 防止 auto 表格布局在窄视口把对阵列压缩到只剩省略号；
+                    不足的宽度交给外层 overflow-x-auto 滚动区消化。 */}
+                <TableCell className="w-72 min-w-40 whitespace-normal px-2 py-1 text-foreground">
                   <MatchParticipants
                     source={m}
                     className="[&_[data-match-participant]]:py-0 [&_[data-match-participant]>div+div]:mt-0"

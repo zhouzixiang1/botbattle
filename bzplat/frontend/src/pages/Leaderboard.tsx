@@ -113,7 +113,7 @@ function BotIdentity({ row, inline = false }: { row: RankingRow; inline?: boolea
   )
   const ownerNode = (
     <OverflowText
-      tooltip={false}
+      tooltip={row.owner_name ? `@${row.owner_name}` : '所有者未知'}
       className={cn('min-w-0 text-xs text-muted-foreground', inline ? 'shrink-[3] basis-24' : 'mt-0.5')}
     >
       {row.owner_name ? (
