@@ -3767,8 +3767,8 @@ test('Pencil human canvas rejects the production box-center click and stays squa
           .map((value) => Number.parseFloat(value))
         return columns[0] ?? 0
       })
-      // 棋盘受 52rem 与首屏可用高度（100dvh-26rem）钳制，并优先用满主列轨道。
-      const expectedMax = Math.min(832, viewport.height - 416, canvasTrackWidth)
+      // 棋盘受 68rem 与首屏可用高度（100dvh-22rem）钳制，并优先用满主列轨道。
+      const expectedMax = Math.min(1088, viewport.height - 352, canvasTrackWidth)
       expect(bounds?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
       expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
       expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
@@ -4108,9 +4108,9 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopTimeline).not.toBeNull()
     expect(overviewBounds).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    // xl+ 右信息栏契约：棋盘主列受 52rem 与 100dvh-32rem 钳制；概览与动作上下文
+    // xl+ 右信息栏契约：棋盘主列受 68rem 与 100dvh-22rem 钳制；概览与动作上下文
     // 同列排在棋盘右侧，不再使用“概览在左、动作栏在右”的三列布局。
-    const heightCap = Math.min(832, viewport.height - 416)
+    const heightCap = Math.min(1088, viewport.height - 352)
     expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(heightCap + 1)
     expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     expect(overviewBounds?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
@@ -4155,8 +4155,8 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopTimeline).not.toBeNull()
     expect(desktopOverview).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    // xl(1280) 起即右信息栏契约；方形棋盘受 100dvh-32rem 钳制。
-    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(Math.min(832, viewport.height - 416) + 1)
+    // xl(1280) 起即右信息栏契约；方形棋盘受 68rem 与 100dvh-22rem 钳制。
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(Math.min(1088, viewport.height - 352) + 1)
     expect(desktopOverview?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0) - 1)
     expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
   }

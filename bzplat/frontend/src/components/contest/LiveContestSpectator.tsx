@@ -234,7 +234,7 @@ function PairingIdentityLine({
   if (!pairing) return null
   const seriesUnit = duplicate ? '组' : '场'
   return (
-    <li className="min-w-0 py-1.5 first:pt-0 last:pb-0">
+    <li className="min-w-0 py-1 first:pt-0 last:pb-0">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span className="shrink-0 font-mono font-medium tabular-nums text-foreground">
           {pairing.group_id ? `${pairing.group_id} · ` : ''}R{pairing.round_num ?? 1}
@@ -273,7 +273,7 @@ function PairingIdentityLine({
           </Link>
         )}
       </div>
-      <div className="mt-1 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+      <div className="mt-0.5 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
         <InlineParticipantIdentity source={pairing} side={0} showEnvironment />
         <span aria-hidden="true" className="text-xs font-semibold text-muted-foreground">VS</span>
         <InlineParticipantIdentity
@@ -329,7 +329,7 @@ function ActiveTable({
     <article
       data-testid="contest-live-table"
       aria-label={`${snapshot ? '演示' : '正在进行的'}第 ${tableNumber} 桌`}
-      className="min-w-0 border-t border-primary/15 py-2 first:border-t-0 first:pt-0 last:pb-0"
+      className="min-w-0 border-t border-primary/15 py-1.5 first:border-t-0 first:pt-0 last:pb-0"
     >
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Badge variant="outline" className="border-primary/25 bg-primary/5 text-primary">
@@ -350,13 +350,13 @@ function ActiveTable({
             : ''}
         </span>
       </div>
-      <div className="mt-1.5 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-stretch gap-2">
+      <div className="mt-1 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-stretch gap-2">
         <MatchParticipantIdentity source={pairing} side={0} variant="panel" textLines={2} />
         <span aria-hidden="true" className="self-center text-xs font-semibold tracking-wide text-muted-foreground">VS</span>
         <MatchParticipantIdentity source={pairing} side={1} variant="panel" textLines={2} />
       </div>
       {pairing.match_id ? (
-        <Button asChild size="sm" className="mt-1.5 h-11 w-full sm:w-auto">
+        <Button asChild size="sm" className="mt-1 h-11 w-full sm:h-9 sm:w-auto">
           <Link to={`/match/${pairing.match_id}`} aria-label={`${snapshot ? '查看演示' : '进入'}第 ${tableNumber} 桌观赛`}>
             <Eye aria-hidden="true" className="size-4" />{snapshot ? '查看演示对局' : '进入实时观赛'}
           </Link>
@@ -502,7 +502,7 @@ export function LiveContestSpectator({
           type="button"
           variant="outline"
           size="sm"
-          className="h-11 w-full sm:w-auto"
+          className="h-11 w-full sm:h-9 sm:w-auto"
           onClick={onRefresh}
           disabled={!refreshEnabled || polling || offline}
           aria-busy={polling || undefined}
@@ -550,9 +550,9 @@ export function LiveContestSpectator({
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{active.length} 桌</span>
           </div>
           {active.length > 0 ? (
-            <div className="divide-y divide-primary/15">
+            <div className="grid min-w-0 gap-x-6 gap-y-1 2xl:grid-cols-2">
               {activeGroups.map((group) => (
-                <div key={seriesGroupKey(group[0]!, stageType)} className="py-2 first:pt-0 last:pb-0">
+                <div key={seriesGroupKey(group[0]!, stageType)} className="min-w-0 py-1.5 first:pt-0">
                   {legacyAggregate && <LegacySeriesScoreline pairing={group[0]!} />}
                   <div className="mt-2">
                     {group.map((pairing) => (

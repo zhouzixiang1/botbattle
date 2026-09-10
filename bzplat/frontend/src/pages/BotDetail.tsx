@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
+import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon, MessageSquare, ChevronDown } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
@@ -304,6 +304,28 @@ function MobileOpponentCard({ opponent }: { opponent: OpponentRow }) {
 const chartConfig = {
   rating: { label: 'Rating', color: 'var(--chart-1)' },
 } satisfies ChartConfig
+
+/** 评论区折叠条：默认只占一行，点开后才挂载并加载 Comments（同 MatchViewer 模式）。 */
+function CommentsBar({ targetId }: { targetId: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <MessageSquare aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+          评论
+        </span>
+        <ChevronDown aria-hidden="true" className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <Comments targetType="bot" targetId={targetId} />}
+    </div>
+  )
+}
 
 /* ── 评分曲线（recharts，浅/暗双主题） ────────────────── */
 function RatingChart({ points }: { points: RatingPoint[] }) {
@@ -826,7 +848,7 @@ export default function BotDetail() {
         </Tabs>
       </div>
 
-      <Comments targetType="bot" targetId={String(botId)} />
+      <CommentsBar targetId={String(botId)} />
     </PageFrame>
   )
 }
