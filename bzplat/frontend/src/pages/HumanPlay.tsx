@@ -644,7 +644,7 @@ export default function HumanPlay() {
         >
           {desktopRail ? (
             <>
-              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(52rem,calc(100dvh-26rem))]">
+              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]">
                 {matchupNode}
                 {renderSurface(true)}
               </div>
@@ -681,7 +681,7 @@ export default function HumanPlay() {
           : 'grid min-w-0 items-start gap-3'}>
           {desktopRail ? (
             <>
-              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[min(100%,calc((100dvh-24rem)*1.7))]">
+              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[min(100%,calc((100dvh-16rem)*1.7))]">
                 {matchupNode}
                 {renderSurface(false)}
               </div>

@@ -308,8 +308,10 @@ export default function ContestLive() {
           </span>
         )}
         title={live.contest.title}
-        description={(
-          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        // 长赛况元信息经 children 承载（共享 PageHeader 的 description 有 max-w-3xl 上限，
+        // 宽屏会折成多行）；文案与 DOM 契约保持不变，仅取消宽度上限。
+        children={(
+          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm leading-relaxed text-muted-foreground">
             <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
             <span>
               {timeControl

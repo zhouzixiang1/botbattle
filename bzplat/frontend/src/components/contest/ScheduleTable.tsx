@@ -4,7 +4,8 @@
  * 列：轮次 · 座位1 Bot · 座位2 Bot · 排期时间 · 状态 · 查看。
  * 行按 round_num 分组排序（同轮内按 bracket_slot/id）。淘汰赛/瑞士/循环通用。
  * 与 BracketTree 共享 Pairing 形状（bye 支持：bot_b_id 可为 null）。
- * 客户端分页（per_page=30）：大规模对阵（如瑞士轮 60+ 场）避免一次性渲染过长表格。
+ * 客户端分页（per_page=20）：数据行受 40px 密度契约下限约束，30 行一页会让
+ * 大规模对阵（如瑞士轮 60+ 场 / 复式系列）成为页面高度主项；20 条与报名名册一致。
  */
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -64,7 +65,7 @@ interface Props {
   legacyAggregate?: boolean
 }
 
-const PER_PAGE = 30
+const PER_PAGE = 20
 
 export default function ScheduleTable({
   pairings,
@@ -133,7 +134,7 @@ export default function ScheduleTable({
   }
 
   return (
-    <div className="min-w-0 space-y-2">
+    <div className="@container min-w-0 space-y-2">
       <div className="divide-y overflow-hidden rounded-lg border md:hidden" aria-label="赛事对阵一览表移动视图">
         {pageRows.map(({ pairing: p, round, isSeriesStart }) => {
           const status = effectivePairingStatus(p)
@@ -194,7 +195,7 @@ export default function ScheduleTable({
             <TableHead className="w-16">轮次</TableHead>
             <TableHead className="min-w-[8rem]">座位 1</TableHead>
             <TableHead className="min-w-[8rem]">座位 2</TableHead>
-            <TableHead className="w-36">排期时间</TableHead>
+            <TableHead className="w-32">排期时间</TableHead>
             <TableHead className="min-w-[15rem]">状态 / 赛果</TableHead>
             <TableHead className="w-16 text-right">查看</TableHead>
           </TableRow>
@@ -210,26 +211,28 @@ export default function ScheduleTable({
               : outcomeStates
             return (
               <TableRow key={p.id} data-series-start={isSeriesStart || undefined} className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'border-t-2 border-primary/20' : undefined}>
-                {/* 仅每轮首行显示轮次徽章，避免重复噪音 */}
+                {/* 仅每轮首行显示轮次徽章，避免重复噪音；列宽充裕时单行，紧张时折行 */}
                 <TableCell className="py-1 font-mono text-xs text-muted-foreground">
-                  {isRoundStart ? `R${round}` : ''}
-                  {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
-                    <span className="block whitespace-nowrap text-xs font-medium text-foreground">
-                      决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
-                    </span>
-                  )}
-                  {p.series_size && p.series_size > 1 && (
-                    <span className="block whitespace-nowrap text-xs">
-                      {isSeriesStart
-                        ? duplicate
-                          ? `本对 ${p.series_size} 组复式 · `
-                          : legacyAggregate
-                            ? `本对 ${p.series_size} 场历史系列对局 · `
-                            : `本对 ${p.series_size} 场计分 · `
-                        : ''}
-                      {legacyAggregate && !duplicate ? '旧版系列' : '第'} {legacyAggregate && !duplicate ? `第 ${p.series_index ?? 1}/${p.series_size} 场` : `${p.series_index ?? 1}/${p.series_size}${duplicate ? ' 组' : ' 场'}`}
-                    </span>
-                  )}
+                  <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                    {isRoundStart && <span className="shrink-0">R{round}</span>}
+                    {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
+                      <span className="whitespace-nowrap font-medium text-foreground">
+                        决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
+                      </span>
+                    )}
+                    {p.series_size && p.series_size > 1 && (
+                      <span className="whitespace-nowrap">
+                        {isSeriesStart
+                          ? duplicate
+                            ? `本对 ${p.series_size} 组复式 · `
+                            : legacyAggregate
+                              ? `本对 ${p.series_size} 场历史系列对局 · `
+                              : `本对 ${p.series_size} 场计分 · `
+                          : ''}
+                        {legacyAggregate && !duplicate ? '旧版系列' : '第'} {legacyAggregate && !duplicate ? `第 ${p.series_index ?? 1}/${p.series_size} 场` : `${p.series_index ?? 1}/${p.series_size}${duplicate ? ' 组' : ' 场'}`}
+                      </span>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell className="max-w-[12rem] py-1">
                   <InlineParticipantIdentity
@@ -252,9 +255,15 @@ export default function ScheduleTable({
                   {p.scheduled_at ? fmtTime(p.scheduled_at) : '—'}
                 </TableCell>
                 <TableCell className="py-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
                     <StatusBadge status={status || 'pending'} />
-                    <PairingResult pairing={p} primaryOnly={legacyAggregate} className="leading-snug" />
+                    {/* 表格容器 ≥64rem 时把主/次赛果折成一行流式文本；以下保持徽章旁两行堆叠，
+                        依赖内容自身 min-width 换取足够列宽，避免把查看列挤出横向滚动区 */}
+                    <PairingResult
+                      pairing={p}
+                      primaryOnly={legacyAggregate}
+                      className="grow leading-snug @5xl:min-w-0 @5xl:[&>div]:inline @5xl:[&>div+div]:before:mx-1.5 @5xl:[&>div+div]:before:content-['·']"
+                    />
                   </div>
                 </TableCell>
                 <TableCell className="py-1 text-right">

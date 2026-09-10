@@ -201,7 +201,7 @@ export default function MatchesTab() {
                   <div>{gameLabel(m.game_id)}</div>
                   <MatchNatureBadge matchType={m.match_type} source={m} className="mt-1" />
                 </TableCell>
-                <TableCell className="px-2 py-1">
+                <TableCell className="2xl:w-20 px-2 py-1">
                   <StatusBadge status={m.status} />
                 </TableCell>
                 <TableCell className="w-24 whitespace-normal px-2 py-1 font-mono text-xs text-muted-foreground">
@@ -209,13 +209,15 @@ export default function MatchesTab() {
                     ? progressLabel(m, gameSpec.progressUnit === 'move' ? '步' : '手')
                     : '规则不可用'}
                 </TableCell>
-                <TableCell className="w-60 whitespace-normal 2xl:w-[24rem] px-2 py-1 font-mono text-xs text-muted-foreground">
+                {/* 宽屏去掉结果列固定宽度：让内容最长的赛果/异常列吸收余量，避免折行推高行高 */}
+                <TableCell className="w-60 whitespace-normal 2xl:w-auto px-2 py-1 font-mono text-xs text-muted-foreground">
+                  {/* 宽屏结果列很宽：primary/secondary/逐场计分横向排布，压平 4 行结构 */}
                   <MatchOutcome
                     source={m}
                     seatLabels={outcomeSeatLabels(m)}
                     normalizedUnit={m.game_id === 'holdem' ? 'BB' : undefined}
                     showGames
-                    className="font-sans leading-snug"
+                    className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 font-sans leading-tight"
                   />
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span className="whitespace-nowrap">原始分差 {m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</span>
@@ -236,7 +238,7 @@ export default function MatchesTab() {
                     </div>
                   )}
                 </TableCell>
-                <TableCell className="whitespace-nowrap px-2 py-1 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
+                <TableCell className="2xl:w-32 whitespace-nowrap px-2 py-1 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
                 <TableCell className="w-16 whitespace-nowrap px-2 py-1">
                   <div className="flex items-center gap-1 whitespace-nowrap">
                     <Button asChild variant="outline" size="sm" className="max-lg:min-h-11 px-2.5"><Link to={`/match/${m.id}`}>查看</Link></Button>
