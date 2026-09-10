@@ -125,7 +125,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
     <section
       data-testid="holdem-position-overview"
       aria-label="德州扑克局面概览"
-      className="@container/holdem min-w-0 rounded-xl border border-border bg-card p-3 shadow-sm 3xl:sticky 3xl:top-6"
+      className="@container/holdem min-w-0 rounded-xl border border-border bg-card p-2.5 shadow-sm 3xl:sticky 3xl:top-6"
     >
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
         <div className="min-w-0">
@@ -150,8 +150,8 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
         </div>
       </div>
 
-      <div className="mt-2.5 grid grid-cols-2 gap-2 @max-3xs/holdem:grid-cols-1 @xl/holdem:grid-cols-[1.05fr_1fr_1fr]">
-        <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs @max-3xs/holdem:col-span-1 @xl/holdem:col-span-1">
+      <div className="mt-2 grid grid-cols-2 gap-1.5 @max-3xs/holdem:grid-cols-1 @xl/holdem:grid-cols-[1.05fr_1fr_1fr]">
+        <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-0.5 rounded-lg border border-border/70 bg-muted/25 px-2.5 py-1.5 text-xs @max-3xs/holdem:col-span-1 @xl/holdem:col-span-1">
           <div>
             <div className="text-muted-foreground">阶段</div>
             <div className="mt-0.5 font-medium text-foreground">{phase}</div>
@@ -190,7 +190,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
             <div
               key={seat}
               data-testid={`holdem-seat-state-${seat + 1}`}
-              className={`min-w-0 rounded-lg border px-3 py-2 ${hasStarted && state.toAct === seat && !state.matchOver ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' : 'border-border/70 bg-muted/20'}`}
+              className={`min-w-0 rounded-lg border px-2.5 py-1.5 ${hasStarted && state.toAct === seat && !state.matchOver ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' : 'border-border/70 bg-muted/20'}`}
             >
               <div className="flex min-w-0 items-center justify-between gap-2">
                 <span className="min-w-0 truncate text-xs font-semibold text-foreground">{identity.subject}</span>
@@ -199,12 +199,12 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
               <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
                 {identity.owner ? `${identity.owner} · ` : ''}{identity.seat} · {hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}
               </div>
-              <div className="mt-1.5 grid grid-cols-3 gap-1.5 text-[11px]">
+              <div className="mt-1 grid grid-cols-3 gap-1 text-[11px]">
                 <div><span className="block text-muted-foreground">剩余</span><span className="font-mono font-medium text-foreground">{formatChips(player.chips)}</span></div>
                 <div><span className="block text-muted-foreground">本街</span><span className="font-mono font-medium text-foreground">{formatChips(player.bet)}</span></div>
                 <div><span className="block text-muted-foreground">本场净胜</span><span className={`font-mono font-semibold ${player.net > 0 ? 'text-success' : player.net < 0 ? 'text-destructive' : 'text-foreground'}`}>{formatNet(player.net)}</span></div>
               </div>
-              <div className={`mt-1.5 border-t border-border/60 pt-1 text-[11px] ${hasStarted && state.toAct === seat && !state.matchOver ? 'font-medium text-primary' : 'text-muted-foreground'}`}>
+              <div className={`mt-1 border-t border-border/60 pt-0.5 text-[11px] ${hasStarted && state.toAct === seat && !state.matchOver ? 'font-medium text-primary' : 'text-muted-foreground'}`}>
                 {status}
               </div>
             </div>
@@ -212,15 +212,15 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
         })}
       </div>
 
-      <div className="mt-2 grid grid-cols-[0.9fr_1.1fr] gap-2 @max-3xs/holdem:grid-cols-1">
-        <div className="min-w-0 rounded-lg border border-border/70 px-3 py-2">
+      <div className="mt-1.5 grid grid-cols-[0.9fr_1.1fr] gap-1.5 @max-3xs/holdem:grid-cols-1">
+        <div className="min-w-0 rounded-lg border border-border/70 px-2.5 py-1.5">
           <div className="text-[11px] text-muted-foreground">最近动作</div>
           <div className="mt-0.5 truncate text-xs font-medium text-foreground">{actionText(lastAction, seats)}</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">
+          <div className="mt-0.5 text-[11px] text-muted-foreground">
             胜手 {subjects[0]} {wins[0]} · {subjects[1]} {wins[1]}{draws > 0 ? ` · 平分 ${draws}` : ''}
           </div>
         </div>
-        <div className="min-w-0 rounded-lg border border-border/70 px-3 py-2">
+        <div className="min-w-0 rounded-lg border border-border/70 px-2.5 py-1.5">
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
             <span>最近 {recentSettles.length || 0} 手 · {subjects[0]} 净变化</span>
             <span className="shrink-0">单位：筹码</span>
@@ -258,7 +258,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
       {state.isDuplicate && (
         <div
           data-testid="holdem-duplicate-combined-summary"
-          className="mt-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground"
+          className="mt-1.5 rounded-lg border border-border/70 bg-muted/20 px-2.5 py-1.5 text-[11px] text-muted-foreground"
         >
           <div className="font-medium text-foreground">复式交锋组合计 · 辅助信息</div>
           <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-0.5">
