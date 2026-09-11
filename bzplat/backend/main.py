@@ -8,6 +8,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -234,12 +235,19 @@ def create_app(
     # a copied production DB may say enabled, but an isolated QA process must never
     # write background ladder matches.
     host_budget = effective_host_resource_budget()
+    # QA 隔离实例不执行进程启动前已入队的赛事任务（复制库的 running 赛事
+    # 无法经状态机提前收束，只能在 claim 处按入队时间切断；与 auto producer
+    # 的 capability guard 同一先例）。生产实例恒为 None。
+    qa_inherited_contest_cutoff = (
+        datetime.now().isoformat(timespec="seconds") if qa_instance else None
+    )
     execution_dispatcher = ExecutionDispatcher(
         orch,
         store,
         max_match_slots=effective_conc,
         max_sandbox_units=effective_conc * 2,
         auto_capability_enabled=not qa_instance,
+        qa_inherited_contest_cutoff=qa_inherited_contest_cutoff,
         contest_reconciler=contest_manager.reconcile_running_contests,
         singleton_acquired=store.reset_local_ai_runtime_state,
         uploads_in_flight=lambda: int(bot_upload_activity["active"]),

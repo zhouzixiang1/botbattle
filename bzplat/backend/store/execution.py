@@ -2390,6 +2390,7 @@ class ExecutionRepository:
         source: str,
         due: str,
         contest_id: int | None = None,
+        created_after: str | None = None,
     ) -> Iterator[dict]:
         """Yield one source/contest stream in indexed, bounded pages.
 
@@ -2420,6 +2421,9 @@ class ExecutionRepository:
             if contest_id is not None:
                 clauses.append("contest_id=?")
                 params.append(contest_id)
+            if created_after is not None:
+                clauses.append("created_at>?")
+                params.append(created_after)
             if cursor is not None:
                 clauses.append("(created_at>? OR (created_at=? AND id>?))")
                 params.extend((cursor[0], cursor[0], cursor[1]))
@@ -2531,6 +2535,7 @@ class ExecutionRepository:
         aging_seconds: int,
         include_held_auto: bool = False,
         allowed_sources: frozenset[str] | None = None,
+        inherited_contest_cutoff: str | None = None,
     ) -> Iterator[dict]:
         """Lazily merge the exact priority, barrier and contest-fair order."""
         control = conn.execute(
@@ -2554,6 +2559,10 @@ class ExecutionRepository:
                         source=EXECUTION_SOURCE_CONTEST,
                         due=due,
                         contest_id=contest_id,
+                        # QA 隔离实例不执行进程启动前已入队的赛事任务：
+                        # running 赛事无法经状态机提前收束，逐个取消又会被
+                        # +30s pairing 回退无限重排，只有按入队时间切断。
+                        created_after=inherited_contest_cutoff,
                     )
                 )
         else:
@@ -3234,7 +3243,15 @@ class ExecutionRepository:
         claim_class: str = "foreground",
         max_host_cpu_millis: int | None = None,
         max_host_memory_mb: int | None = None,
+        inherited_contest_cutoff: str | None = None,
     ) -> dict | None:
+        if inherited_contest_cutoff is not None and (
+            not isinstance(inherited_contest_cutoff, str)
+            or not inherited_contest_cutoff.strip()
+        ):
+            raise ExecutionInvariantError(
+                "inherited_contest_cutoff must be a non-empty ISO timestamp"
+            )
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             control = conn.execute(
@@ -3294,6 +3311,7 @@ class ExecutionRepository:
                     conn,
                     aging_seconds=aging_seconds,
                     allowed_sources=sources,
+                    inherited_contest_cutoff=inherited_contest_cutoff,
                 )
 
             non_contest_waiting = bool(

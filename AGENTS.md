@@ -194,6 +194,7 @@ pip install -e '.[dev]'          # 装 bzplat 包 + pytest/httpx
 - **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`），务必从本任务 worktree 根运行。
 - **本地无 Docker 跑 ELF**：`export BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1`（`BinaryRunner` 退回本机 subprocess，仅隔离 QA 使用）。CLI `serve` 发现 `BZ_BOT_LOCAL`、`BZ_SKIP_CAPTCHA` 或 `BZ_TEST_CAPTCHA` 任一为真而 `BZ_QA_INSTANCE` 未启用时，必须在日志、数据库和运行时目录创建前拒绝启动；生产 `scripts/platform-ctl.sh` 无论是否误设 QA marker 都直接拒绝这三项测试开关。
 - **测试/开发验证码开关**：隔离 QA 可在 `BZ_QA_INSTANCE=1` 下设置 `BZ_SKIP_CAPTCHA=1`（登录/注册跳过验证码）或 `BZ_TEST_CAPTCHA=1`（仍验证、但 `/api/auth/captcha` 额外返回 `answer`）。生产二者必须未设或为假。
+- **QA 继承队列隔离**：QA 隔离实例（`BZ_QA_INSTANCE=1`）的 dispatcher 不认领进程启动时刻之前已入队的 `source=contest` 任务（running 赛事无法经状态机提前收束，复制库的赛事队列只能在 claim 处按入队时间切断；与强制禁用 auto producer 的 capability guard 同一先例，生产实例恒不启用）。配套 `scripts/seed_test_accounts.py --drain-inherited-queue` 在副本上经 `request_cancel` 正式取消继承的 manual/human/auto 任务；赛事任务不逐个取消（pairing +30s 回退会重排），只依赖上述 claim 门。
 - **端到端冒烟**：只从本任务 worktree 根运行 `bash scripts/e2e_smoke.sh`。
 - **测试种子账号**：只在 worktree 根执行 `python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts`（建隔离角色与三游戏样例 Bot；幂等，便于对战/人类对战测试）。
 - **运行时代码发布**：前端产物由后端 StaticFiles 托管、后端代码由运行进程加载，因此运行时代码要通过 `bash scripts/rebuild.sh` 才能生效；但生产必须先完成 §1.8 的 maintenance 排空，禁止在开发 worktree 或未排空的 main 直接运行该脚本。纯文档/规则改动无需 restart。

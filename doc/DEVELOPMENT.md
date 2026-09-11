@@ -234,7 +234,9 @@ cd .worktrees/<分支名>
 # 若复制的生产快照带着部署窗内的 dispatcher 暂停态（隔离 QA 的队列/沙箱
 # 接口会 503），加 --reset-execution-control 经正式 Store resume() 事务复位；
 # 只允许对隔离副本使用，同库 QA 调度器正在启动容器时会短暂重试后仍 fail-closed。
-python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts --reset-execution-control
+# --drain-inherited-queue 进一步取消继承的 manual/human/auto 任务；继承的
+# 赛事任务由 QA 实例的 claim 门自动隔离（不执行、也不可逐个取消）。
+python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts --reset-execution-control --drain-inherited-queue
 cd bzplat/frontend
 BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 

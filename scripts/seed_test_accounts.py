@@ -151,6 +151,16 @@ def main() -> int:
             "事务（Docker launch journal 未收敛时会拒绝）。"
         ),
     )
+    ap.add_argument(
+        "--drain-inherited-queue",
+        action="store_true",
+        help=(
+            "取消副本里继承的全部非终态非赛事任务（manual/human/auto 经 "
+            "request_cancel 正式取消语义，配对任务回退重排）。赛事任务无法逐个"
+            "取消（会被 +30s 回退重排），由 QA 实例的继承赛事 claim 门隔离。"
+            "仅允许对隔离 QA 副本使用。"
+        ),
+    )
     args = ap.parse_args()
 
     db_path, upload_root = resolve_seed_paths(ROOT, args.db, args.upload_root)
@@ -164,6 +174,42 @@ def main() -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = Store(str(db_path))
     try:
+        if args.drain_inherited_queue:
+            from bzplat.backend.store.execution import ExecutionRepository
+
+            repo = ExecutionRepository(store)
+            with store._tx() as conn:
+                rows = conn.execute(
+                    "SELECT public_id, source, status FROM execution_jobs "
+                    "WHERE status IN "
+                    "('queued','claimed','starting','running','settling') "
+                    "ORDER BY id"
+                ).fetchall()
+            cancelled = running_cancels = settling = contest_left = 0
+            for row in rows:
+                if row["source"] == "contest":
+                    # 赛事任务逐个取消会被 pairing +30s 回退重新入队，只能
+                    # 交给 QA 实例的继承赛事 claim 门隔离，这里只计数。
+                    contest_left += 1
+                    continue
+                try:
+                    outcome = repo.request_cancel(
+                        str(row["public_id"]), owner_user_id=None
+                    )
+                except ValueError:
+                    settling += 1
+                    continue
+                if outcome["status"] == "cancelled":
+                    cancelled += 1
+                else:
+                    running_cancels += 1
+            print(
+                f"继承队列已排干：取消 {cancelled} 个排队任务，"
+                f"对 {running_cancels} 个在途任务置 cancel_requested，"
+                f"跳过收尾中 {settling} 个；赛事任务保留 {contest_left} 个"
+                "（由 QA 实例 claim 门隔离）。"
+            )
+
         if args.reset_execution_control:
             # 复制的生产快照可能带着部署窗内的 dispatcher 暂停态，导致隔离 QA
             # 的执行队列/沙箱接口 503。经正式 Store 事务复位，不绕过任何门禁；

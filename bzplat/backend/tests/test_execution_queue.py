@@ -12251,3 +12251,78 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
     assert str(control_after_reopen["pause_reason"]).startswith("manual:")
     assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     reopened.close()
+
+
+def test_qa_inherited_contest_cutoff_skips_pre_boot_contest_jobs(queue_store):
+    """QA 隔离实例不执行进程启动前已入队的赛事任务（继承队列隔离门）。
+
+    running 赛事无法经状态机提前收束，复制库的赛事队列只能按入队时间在
+    claim 处切断；cutoff 之前的非 contest 任务不受影响。
+    """
+    store = queue_store
+    bots = [_bot(store, f"qa-cutoff-{index}") for index in range(4)]
+    # 继承批：整批入队后把 created_at 统一回拨到 cutoff 之前。
+    old_contest, _old_bots, _old_pairings, old_jobs = _sealed_contest_batch(
+        store, "qa-old"
+    )
+    cutoff = (datetime.now() - timedelta(seconds=30)).isoformat(timespec="seconds")
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET created_at=? WHERE contest_id=?",
+            ((datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds"), int(old_contest["id"])),
+        )
+    # 新批：cutoff 之后正常入队。
+    new_contest, _new_bots, _new_pairings, new_jobs = _sealed_contest_batch(
+        store, "qa-new"
+    )
+    new_job = new_jobs[0]
+
+    def _claim(*, cutoff: str | None) -> dict | None:
+        return store.executions.claim_next(
+            max_match_slots=2,
+            max_sandbox_units=4,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+            inherited_contest_cutoff=cutoff,
+        )
+
+    claimed = _claim(cutoff=cutoff)
+    assert claimed is not None
+    assert claimed["public_id"] == new_job["public_id"]
+    assert store.executions.rollback_unstarted_claim(
+        str(new_job["public_id"]), reason="test:cutoff-probe"
+    )
+    # 同一库不设 cutoff 时，继承任务按既有的 created_at 优先序正常被认领，
+    # 证明排除完全来自 cutoff 而非数据或排序差异。
+    baseline = _claim(cutoff=None)
+    assert baseline is not None
+    assert baseline["public_id"] == old_jobs[0]["public_id"]
+    # 仅回滚被认领的那一条；其余继承任务保持 queued（manual 优先级在其前，
+    # 不影响第三段断言）。
+    assert store.executions.rollback_unstarted_claim(
+        str(old_jobs[0]["public_id"]), reason="test:cutoff-probe"
+    )
+    # 非 contest 任务不受 cutoff 影响：cutoff 之前的 manual 任务仍可认领。
+    manual = _enqueue_pair(store, (bots[0], bots[1]))
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET created_at=? WHERE public_id=?",
+            ((datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds"), manual["public_id"]),
+        )
+    manual_claimed = _claim(cutoff=cutoff)
+    assert manual_claimed is not None
+    assert manual_claimed["public_id"] == manual["public_id"]
+
+
+def test_claim_rejects_blank_inherited_contest_cutoff(queue_store):
+    store = queue_store
+    with pytest.raises(ExecutionInvariantError):
+        store.executions.claim_next(
+            max_match_slots=2,
+            max_sandbox_units=4,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+            inherited_contest_cutoff="   ",
+        )

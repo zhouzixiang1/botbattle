@@ -65,6 +65,7 @@ class ExecutionDispatcher:
         max_match_slots: int,
         max_sandbox_units: int | None = None,
         auto_capability_enabled: bool = True,
+        qa_inherited_contest_cutoff: str | None = None,
         contest_reconciler: Callable[..., Awaitable[int]] | None = None,
         singleton_acquired: Callable[[], None] | None = None,
         uploads_in_flight: Callable[[], int] | None = None,
@@ -90,6 +91,13 @@ class ExecutionDispatcher:
             ),
         )
         self.auto_capability_enabled = bool(auto_capability_enabled)
+        # QA 隔离实例的继承赛事任务切断时间（进程启动时刻）；None 表示不启用。
+        # 运行中赛事无法经状态机提前收束，复制库的赛事队列只能在 claim 处隔离。
+        self.qa_inherited_contest_cutoff = (
+            str(qa_inherited_contest_cutoff)
+            if qa_inherited_contest_cutoff
+            else None
+        )
         self.contest_reconciler = contest_reconciler
         self.singleton_acquired = singleton_acquired
         self.uploads_in_flight = uploads_in_flight
@@ -595,6 +603,7 @@ class ExecutionDispatcher:
                 claim_class="foreground",
                 max_host_cpu_millis=self.max_host_cpu_millis,
                 max_host_memory_mb=self.max_host_memory_mb,
+                inherited_contest_cutoff=self.qa_inherited_contest_cutoff,
             )
             if job is None:
                 break
