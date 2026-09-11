@@ -177,3 +177,48 @@ def test_reset_execution_control_resumes_paused_isolated_copy(tmp_path):
     assert resumed["accepting"] == 1
     assert resumed["pause_reason"] == ""
     store.close()
+
+
+def test_drain_inherited_queue_cancels_non_contest_jobs(tmp_path):
+    """--drain-inherited-queue 经 request_cancel 正式取消继承的非赛事任务。"""
+    import sys
+
+    db_path = tmp_path / "qa-copy.db"
+    store = Store(str(db_path))
+    store.executions.resume()
+    # execution_jobs 的 bot id 是不可变审计快照而非 ownership 外键，
+    # 这里只关心取消生命周期，直接插入最小合法行。
+    with store._tx() as conn:
+        conn.execute(
+            "INSERT INTO execution_jobs("
+            "public_id,source,status,priority,owner_user_id,game_id,match_type,"
+            "bot_a_id,bot_b_id,rated,rating_reason,sandbox_units,"
+            "host_cpu_millis,host_memory_mb,created_at) VALUES "
+            "('req_drain_manual_test','manual','queued',50,999,'holdem',"
+            "'challenge',1,2,1,'ranked_bot_not_selected',2,2000,1024,datetime('now'))"
+        )
+    store.close()
+
+    argv_backup = sys.argv
+    try:
+        sys.argv = [
+            "seed_test_accounts.py",
+            "--db",
+            str(db_path),
+            "--drain-inherited-queue",
+        ]
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+    except SystemExit as exc:
+        assert exc.code in (0, None), exc.code
+    finally:
+        sys.argv = argv_backup
+
+    store = Store(str(db_path))
+    rows = store._conn.execute(
+        "SELECT public_id, status, terminal_reason FROM execution_jobs "
+        "ORDER BY public_id"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("req_drain_manual_test", "cancelled", "user_cancelled"),
+    ]
+    store.close()
