@@ -36,7 +36,7 @@ export function ThemeToggle({ className }: { className?: string }) {
           aria-label={`当前：${LABELS[current]}（点击切换到${LABELS[next]}）`}
           onClick={() => setTheme(next)}
           className={cn(
-            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-11',
             className
           )}
         >

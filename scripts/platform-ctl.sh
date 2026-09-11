@@ -469,6 +469,11 @@ status_pid() {
   fi
   if port_state; then
     echo "unmanaged listener on $HOST:$PORT (no verified live PID record)"
+    # 常见误报来源：systemd user 单元仍在运行，但当前 shell 缺 XDG_RUNTIME_DIR
+    # 导致无法读取单元状态而落到 PID 兜底。给出可执行的排查指引，不改变退出码。
+    if command -v systemctl >/dev/null 2>&1; then
+      echo "hint: check 'systemctl --user status $SYSTEMD_UNIT' from an environment with XDG_RUNTIME_DIR set (e.g. via the service user's login session)"
+    fi
     return 1
   else
     rc=$?

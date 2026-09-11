@@ -113,8 +113,9 @@ export default function Comments({
             disabled={!user}
             className="gap-1.5"
           >
-            <Heart className={cn('size-3.5', liked && 'fill-current')} />
-            {likeCount}
+            <Heart className={cn('size-3.5', liked && 'fill-current')} aria-hidden="true" />
+            <span aria-hidden="true">{likeCount}</span>
+            <span className="sr-only">点赞（{likeCount}）</span>
           </Button>
         </div>
       </CardHeader>
@@ -153,13 +154,17 @@ export default function Comments({
                     {fmtTime(c.created_at)}
                   </span>
                   {user && (user.id === c.user_id || user.role === 'admin') && (
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="xs"
+                      aria-label={`删除 ${c.user_display || c.username || '评论'}`}
                       onClick={() => del(c.id)}
-                      className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                      className="ml-auto gap-1 text-muted-foreground hover:text-destructive"
                     >
-                      <Trash2 className="size-3" />删除
-                    </button>
+                      <Trash2 className="size-3" />
+                      删除
+                    </Button>
                   )}
                 </div>
                 <p className="mt-1 whitespace-pre-wrap break-all text-foreground/80">{c.body}</p>

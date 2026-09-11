@@ -87,7 +87,7 @@ export default function ResetPassword() {
                 {busy ? '发送中…' : '发送重置验证码'}
               </Button>
               <p className="text-center text-sm text-muted-foreground">
-                <Link to="/login" className="font-medium text-primary hover:underline">
+                <Link to="/login" className="inline-flex min-h-11 items-center font-medium text-primary hover:underline">
                   返回登录
                 </Link>
               </p>

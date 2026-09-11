@@ -155,7 +155,7 @@ export default function LogsTab() {
               key={item.key}
               type="button"
               onClick={() => setFile(item.key)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors [@media(pointer:coarse)]:min-h-11 ${
                 file === item.key
                   ? 'bg-primary text-primary-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
@@ -190,7 +190,7 @@ export default function LogsTab() {
           onChange={(event) => setQ(event.target.value)}
           placeholder="对局 ID / Bot ID / 模块 / IP / 操作"
           aria-label="日志关键字"
-          className={`${inp} mt-0 h-9 px-3 py-1 text-xs`}
+          className={`${inp} mt-0 h-9 px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11`}
         />
         <input
           type="number"
@@ -199,7 +199,7 @@ export default function LogsTab() {
           value={limit}
           aria-label="日志行数"
           onChange={(event) => setLimit(Math.min(2000, Math.max(50, Number(event.target.value) || 300)))}
-          className={`${inp} mt-0 h-9 px-3 py-1 text-xs`}
+          className={`${inp} mt-0 h-9 px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11`}
         />
       </div>
 

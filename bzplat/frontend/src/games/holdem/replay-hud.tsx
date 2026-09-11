@@ -1,4 +1,5 @@
 import { Badge } from '@/components/ui/badge'
+import { OverflowText } from '@/components/ui/overflow-text'
 import type { GameAuxiliaryProps, RawEvent } from '@/games/base'
 import type { SeatInfo } from '@/games/canvas-types'
 import {
@@ -127,45 +128,38 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
       aria-label="德州扑克局面概览"
       className="@container/holdem min-w-0 rounded-xl border border-border bg-card p-2.5 shadow-sm 3xl:sticky 3xl:top-6"
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-        <div className="min-w-0">
-          <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">局面概览</div>
-          <div className="mt-0.5 text-sm font-semibold text-foreground">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="flex min-w-0 items-baseline gap-x-2">
+          <span className="shrink-0 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">局面概览</span>
+          <span className="min-w-0 truncate text-sm font-semibold text-foreground">
             {currentHand > 0
               ? `${legPrefix}当前手 ${currentHand} / ${state.totalHands}`
               : noCompletedTerminal
                 ? `${legPrefix}未完成任何一手 · 本场共 ${currentGameHands} 手`
                 : `${legPrefix}等待发牌 · 本场共 ${currentGameHands} 手`}
-          </div>
+          </span>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">{potLabel} {formatChips(potValue)}</span>
         </div>
         <Badge variant={state.matchOver ? 'secondary' : 'outline'} className="ml-auto shrink-0">
           {phase}
         </Badge>
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="本场已完成手数" aria-valuemin={0} aria-valuemax={currentGameHands} aria-valuenow={currentCompletedHands}>
-          <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
-        </div>
-        <div className="flex w-full items-center justify-between text-[11px] text-muted-foreground">
-          <span>{state.isDuplicate ? '本场已结算' : '已结算'} {currentCompletedHands} 手</span>
-          <span>本场剩余 {Math.max(0, currentGameHands - currentCompletedHands)} 手</span>
+        {/* 零手终局不渲染进度行：技术判负/开局前中止不得出现 "N/70 手" 式进度声称；
+            DVR 回扫到未开局的中间态（非终局）仍保留进度框。 */}
+        {!noCompletedTerminal && (
+          <div className="flex w-full items-center gap-2">
+            <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="本场已完成手数" aria-valuemin={0} aria-valuemax={currentGameHands} aria-valuenow={currentCompletedHands}>
+              <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
+            </div>
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{currentCompletedHands}/{currentGameHands} 手</span>
+          </div>
+        )}
+        <div className="flex w-full items-center justify-between gap-2 text-[11px] text-muted-foreground">
+          <span className="min-w-0 truncate">{actingText}</span>
+          {hasStarted && <span className="shrink-0">按钮 · 座位 {state.sbSeat + 1}</span>}
         </div>
       </div>
 
-      <div className="mt-2 grid grid-cols-2 gap-1.5 @max-3xs/holdem:grid-cols-1 @xl/holdem:grid-cols-[1.05fr_1fr_1fr]">
-        <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-0.5 rounded-lg border border-border/70 bg-muted/25 px-2.5 py-1.5 text-xs @max-3xs/holdem:col-span-1 @xl/holdem:col-span-1">
-          <div>
-            <div className="text-muted-foreground">阶段</div>
-            <div className="mt-0.5 font-medium text-foreground">{phase}</div>
-          </div>
-          <div>
-            <div className="text-muted-foreground">{potLabel}</div>
-            <div className="mt-0.5 font-mono font-semibold text-foreground">{formatChips(potValue)}</div>
-          </div>
-          <div className="col-span-2 flex items-center justify-between gap-2 border-t border-border/60 pt-1.5 text-muted-foreground">
-            <span>{actingText}</span>
-            {hasStarted && <span className="shrink-0">按钮 · 座位 {state.sbSeat + 1}</span>}
-          </div>
-        </div>
-
+      <div className="mt-2 grid grid-cols-2 gap-2 @max-3xs/holdem:grid-cols-1">
         {([0, 1] as const).map((seat) => {
           const player = state.seats[seat]
           const identity = identities[seat]
@@ -193,12 +187,16 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
               className={`min-w-0 rounded-lg border px-2.5 py-1.5 ${hasStarted && state.toAct === seat && !state.matchOver ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' : 'border-border/70 bg-muted/20'}`}
             >
               <div className="flex min-w-0 items-center justify-between gap-2">
-                <span className="min-w-0 truncate text-xs font-semibold text-foreground">{identity.subject}</span>
+                <OverflowText tooltip={identity.subject} tooltipFocusable={false} className="min-w-0 text-xs font-semibold text-foreground">{identity.subject}</OverflowText>
                 <span className="shrink-0 text-[10px] text-muted-foreground sm:text-[11px]">{identity.kind}</span>
               </div>
-              <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+              <OverflowText
+                lines={1}
+                tooltip={`${identity.owner ? `${identity.owner} · ` : ''}${identity.seat} · ${hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}`}
+                className="mt-0.5 block text-[10px] text-muted-foreground"
+              >
                 {identity.owner ? `${identity.owner} · ` : ''}{identity.seat} · {hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}
-              </div>
+              </OverflowText>
               <div className="mt-1 grid grid-cols-3 gap-1 text-[11px]">
                 <div><span className="block text-muted-foreground">剩余</span><span className="font-mono font-medium text-foreground">{formatChips(player.chips)}</span></div>
                 <div><span className="block text-muted-foreground">本街</span><span className="font-mono font-medium text-foreground">{formatChips(player.bet)}</span></div>
@@ -215,14 +213,16 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
       <div className="mt-1.5 grid grid-cols-[0.9fr_1.1fr] gap-1.5 @max-3xs/holdem:grid-cols-1">
         <div className="min-w-0 rounded-lg border border-border/70 px-2.5 py-1.5">
           <div className="text-[11px] text-muted-foreground">最近动作</div>
-          <div className="mt-0.5 truncate text-xs font-medium text-foreground">{actionText(lastAction, seats)}</div>
+          <OverflowText lines={1} tooltip={actionText(lastAction, seats)} tooltipFocusable={false} className="mt-0.5 block text-xs font-medium text-foreground">
+            {actionText(lastAction, seats)}
+          </OverflowText>
           <div className="mt-0.5 text-[11px] text-muted-foreground">
             胜手 {subjects[0]} {wins[0]} · {subjects[1]} {wins[1]}{draws > 0 ? ` · 平分 ${draws}` : ''}
           </div>
         </div>
         <div className="min-w-0 rounded-lg border border-border/70 px-2.5 py-1.5">
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-            <span>最近 {recentSettles.length || 0} 手 · {subjects[0]} 净变化</span>
+            <span className="min-w-0 truncate">最近 {recentSettles.length || 0} 手 · {subjects[0]} 净变化</span>
             <span className="shrink-0">单位：筹码</span>
           </div>
           {recentSettles.length ? (

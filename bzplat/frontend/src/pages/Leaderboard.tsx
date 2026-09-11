@@ -139,129 +139,72 @@ function BotIdentity({ row, inline = false }: { row: RankingRow; inline?: boolea
   )
 }
 
-function RatingFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
+function RatingFacts({ row }: { row: RankingRow }) {
   const hasConfidence = row.confidence_low != null && row.confidence_high != null
-  const value = (
-    <div className="min-w-0 font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
-  )
-  const detail = (
-    <div className="min-w-0 text-[11px] leading-snug text-muted-foreground">
-      RD {Number(row.rd).toFixed(0)}
-      {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
-    </div>
-  )
-  if (inline) {
-    return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
-  }
   return (
     <div className="min-w-0 tabular-nums">
-      {value}
-      <div className="mt-0.5">{detail}</div>
+      <div className="min-w-0 font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
+      <div className="mt-0.5 min-w-0 text-xs leading-snug text-muted-foreground">
+        RD {Number(row.rd).toFixed(0)}
+        {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
+      </div>
     </div>
   )
 }
 
-function RankingFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
+function RankingFacts({ row }: { row: RankingRow }) {
   if (!row.ranking_eligible || row.rank == null) {
-    const value = (
-      <div className="min-w-0 font-mono text-xs font-semibold text-foreground">
-        {row.rated_matches}/{row.ranking_min_matches} 场
-      </div>
-    )
-    const detail = (
-      <div className="min-w-0 text-[11px] text-muted-foreground">
-        资格进度 {(row.ranking_progress * 100).toFixed(0)}%
-      </div>
-    )
-    if (inline) {
-      return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
-    }
     return (
       <div className="tabular-nums">
-        {value}
-        <div className="mt-0.5">{detail}</div>
-      </div>
-    )
-  }
-  const value = (
-    <div className="min-w-0 font-mono text-xs font-semibold text-foreground">#{row.rank} / {row.rank_total}</div>
-  )
-  const detail = (
-    <div className="min-w-0 text-[11px] text-muted-foreground">
-      百分位 {row.percentile == null ? '—' : `${row.percentile.toFixed(1)}%`}
-    </div>
-  )
-  if (inline) {
-    return <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">{value}{detail}</div>
-  }
-  return (
-    <div className="tabular-nums">
-      {value}
-      <div className="mt-0.5">{detail}</div>
-    </div>
-  )
-}
-
-function SampleFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
-  const volume = (
-    <div className="min-w-0 font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
-  )
-  const record = (
-    <div className="min-w-0 font-mono text-[11px] text-muted-foreground">
-      {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
-    </div>
-  )
-  if (inline) {
-    return (
-      <div className="flex min-w-0 items-baseline gap-x-1.5 tabular-nums">
-        {volume}
-        <span aria-hidden="true" className="text-[11px] text-muted-foreground">·</span>
-        {record}
+        <div className="min-w-0 font-mono text-xs font-semibold text-foreground">
+          {row.rated_matches}/{row.ranking_min_matches} 场
+        </div>
+        <div className="mt-0.5 min-w-0 text-xs text-muted-foreground">
+          资格进度 {(row.ranking_progress * 100).toFixed(0)}%
+        </div>
       </div>
     )
   }
   return (
     <div className="tabular-nums">
-      {volume}
-      <div className="mt-0.5">{record}</div>
+      <div className="min-w-0 font-mono text-xs font-semibold text-foreground">#{row.rank} / {row.rank_total}</div>
+      <div className="mt-0.5 min-w-0 text-xs text-muted-foreground">
+        百分位 {row.percentile == null ? '—' : `${row.percentile.toFixed(1)}%`}
+      </div>
     </div>
   )
 }
 
-function ChangeFacts({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
-  const changes = (
-    <>
+function SampleFacts({ row }: { row: RankingRow }) {
+  return (
+    <div className="tabular-nums">
+      <div className="min-w-0 font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
+      <div className="mt-0.5 min-w-0 font-mono text-xs text-muted-foreground">
+        {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
+      </div>
+    </div>
+  )
+}
+
+function ChangeFacts({ row }: { row: RankingRow }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5 text-xs tabular-nums">
       <ChangeValue value={row.rating_delta} label="上次" />
-      <span aria-hidden="true" className="text-muted-foreground">·</span>
       <ChangeValue value={row.recent_delta_30d} label="30 日" />
-    </>
+    </div>
   )
-  if (inline) {
-    return <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums">{changes}</div>
-  }
-  return <div className="flex flex-col gap-0.5 text-[11px] tabular-nums">{changes}</div>
 }
 
-function RecentMatch({ row, inline = false }: { row: RankingRow; inline?: boolean }) {
+function RecentMatch({ row }: { row: RankingRow }) {
   if (!row.last_match_id || !row.last_match_at) {
     return <span className="text-xs text-muted-foreground">暂无已验证对局</span>
-  }
-  if (inline) {
-    return (
-      <div className="flex min-w-0 items-baseline gap-x-1.5">
-        <Link to={`/match/${encodeURIComponent(row.last_match_id)}`} className="shrink-0 text-xs font-medium text-primary hover:underline">
-          查看对局
-        </Link>
-        <span className="min-w-0 text-[11px] text-muted-foreground">{fmtTime(row.last_match_at)}</span>
-      </div>
-    )
   }
   return (
     <div className="min-w-0">
       <Link to={`/match/${encodeURIComponent(row.last_match_id)}`} className="text-xs font-medium text-primary hover:underline">
         查看对局
       </Link>
-      <div className="mt-0.5 text-[11px] text-muted-foreground">{fmtTime(row.last_match_at)}</div>
+      <div className="mt-0.5 text-xs text-muted-foreground">{fmtTime(row.last_match_at)}</div>
     </div>
   )
 }
@@ -290,12 +233,14 @@ function DesktopRows({
           <TableCell className="w-14 font-mono text-xs font-semibold text-muted-foreground">
             {row.rank == null ? '—' : `#${row.rank}`}
           </TableCell>
+          {/* 堆叠事实（与移动卡一致）：inline 单行版会让表格按 max-content
+              求和撑到 ~1555px（1440 视口必横向滚动），堆叠后各列 ≤ ~150px。 */}
           <TableCell className="max-w-xs"><BotIdentity row={row} inline /></TableCell>
-          <TableCell><RatingFacts row={row} inline /></TableCell>
-          <TableCell><RankingFacts row={row} inline /></TableCell>
-          <TableCell><SampleFacts row={row} inline /></TableCell>
-          <TableCell><ChangeFacts row={row} inline /></TableCell>
-          <TableCell><RecentMatch row={row} inline /></TableCell>
+          <TableCell><RatingFacts row={row} /></TableCell>
+          <TableCell><RankingFacts row={row} /></TableCell>
+          <TableCell><SampleFacts row={row} /></TableCell>
+          <TableCell><ChangeFacts row={row} /></TableCell>
+          <TableCell><RecentMatch row={row} /></TableCell>
         </TableRow>
       ))}
     </>
@@ -357,7 +302,7 @@ export default function Leaderboard() {
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
   const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
-  // 每页 14 行配合单行行高与固定队列面板，把三游戏首屏总高都压回一屏量级；翻页语义不变。
+  // 每页 14 行配合堆叠事实行高与固定队列面板，控制首屏总高；翻页语义不变。
   const perPage = 14
 
   useEffect(() => {
@@ -474,16 +419,7 @@ export default function Leaderboard() {
         maxQueued={2}
         compactOnMobile
         compactCapacity
-        className={cn(
-          // 桌面端（md+）页面级密度压缩：只收紧面板容器与内部留白，
-          // 不改动共享组件的结构、文案与语义；<md 保持组件默认密度。
-          'md:[&>div]:px-3 md:[&>div]:py-2',
-          'md:[&_dl]:gap-1.5 md:[&_dl>div]:px-2 md:[&_dl>div]:py-1',
-          'md:[&_section]:p-1.5',
-          'md:[&_section>div:first-child]:mb-1',
-          'md:[&_li]:px-2 md:[&_li]:py-0.5',
-          'md:[&_li>div:nth-child(2)]:mt-0.5',
-        )}
+        dense
       />
 
       <DataRegion
@@ -492,7 +428,7 @@ export default function Leaderboard() {
           ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加；赛事积分不进入平台 Rating。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。`
           : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。'}
         actions={<Gauge className="size-4 text-primary" />}
-        className="[&>header]:py-2"
+        density="compact"
       >
         {loading ? (
           <Loading text="正在加载排行榜…" />
@@ -502,7 +438,7 @@ export default function Leaderboard() {
           <>
             <div className="hidden md:block" data-testid="leaderboard-desktop">
               <DataTable className="rounded-none border-0" scrollLabel="排行榜数值明细">
-                <Table aria-label="排行榜数值明细" className="min-w-[72rem]">
+                <Table aria-label="排行榜数值明细" className="min-w-[64rem] [--table-row-height:3rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>名次</TableHead>

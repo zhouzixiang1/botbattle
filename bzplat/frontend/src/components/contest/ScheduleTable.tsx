@@ -262,13 +262,14 @@ export default function ScheduleTable({
                     <PairingResult
                       pairing={p}
                       primaryOnly={legacyAggregate}
-                      className="grow leading-snug @5xl:min-w-0 @5xl:[&>div]:inline @5xl:[&>div+div]:before:mx-1.5 @5xl:[&>div+div]:before:content-['·']"
+                      layout="flow-wide"
+                      className="grow leading-snug"
                     />
                   </div>
                 </TableCell>
                 <TableCell className="py-1 text-right">
                   {p.match_id ? (
-                    <Button asChild variant="ghost" size="xs" className="min-h-8 text-primary">
+                    <Button asChild variant="ghost" size="xs" className="[@media(pointer:fine)_and_(min-width:40rem)]:min-h-8 text-primary">
                       <Link to={`/match/${p.match_id}`} aria-label={duplicate ? '查看复式回放' : legacyAggregate ? '查看历史对局' : '查看计分场'}>查看</Link>
                     </Button>
                   ) : (

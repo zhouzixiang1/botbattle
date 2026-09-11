@@ -231,7 +231,10 @@ BZ_DB_PATH="$PWD/botzone.db" BZ_INSTANCE_KEY=qa-refactor-global-queue \
 
 # 3) 终端 B：播种三类角色的隔离账号，然后启前端
 cd .worktrees/<分支名>
-python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts
+# 若复制的生产快照带着部署窗内的 dispatcher 暂停态（隔离 QA 的队列/沙箱
+# 接口会 503），加 --reset-execution-control 经正式 Store resume() 事务复位；
+# 只允许对隔离副本使用，同库 QA 调度器正在启动容器时会短暂重试后仍 fail-closed。
+python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts --reset-execution-control
 cd bzplat/frontend
 BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 

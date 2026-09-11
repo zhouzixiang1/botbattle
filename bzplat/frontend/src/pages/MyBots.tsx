@@ -560,7 +560,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <Link to={`/bot/${b.id}`} className="inline-flex min-w-0 flex-1 items-center hover:text-primary max-sm:min-h-11">
-                        <EntityName lines={1} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{b.display_name || b.name}</EntityName>
+                        <EntityName lines={1} tooltip={b.display_name || b.name} tooltipFocusable={false} className="text-sm hover:text-primary">{b.display_name || b.name}</EntityName>
                       </Link>
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
                       {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
@@ -571,7 +571,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                       </Badge>
                     </div>
                     {b.description && (
-                      <OverflowText lines={2} tooltip={false} className="mt-0.5 text-xs text-muted-foreground">{b.description}</OverflowText>
+                      <OverflowText lines={2} tooltip={b.description} className="mt-0.5 text-xs text-muted-foreground">{b.description}</OverflowText>
                     )}
                     <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                       <CopyIdentifier value={b.id} />

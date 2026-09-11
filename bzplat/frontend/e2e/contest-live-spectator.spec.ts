@@ -488,7 +488,8 @@ test('bounded group-draw audit is readable and copyable on mobile', async ({ pag
   await expect(audit).toContainText('A组 6 人 · B组 6 人 · C组 5 人 · D组 5 人')
   await expect(audit.getByRole('link', { name: '五子棋模拟赛 #77' })).toHaveAttribute('href', '#/contests/77')
   await expect(audit.getByText('来源第 4 名', { exact: true })).toBeVisible()
-  const digest = audit.getByTitle('a'.repeat(64))
+  // 审计值截断提示已从原生 title= 迁移到 OverflowText/Tooltip（触屏可达）。
+  const digest = audit.getByText('aaaaaaaaaaaa…aaaaaaaa', { exact: true })
   await expect(digest).toHaveText('aaaaaaaaaaaa…aaaaaaaa')
   expect((await audit.getByRole('button', { name: '复制完整抽签审计值' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)

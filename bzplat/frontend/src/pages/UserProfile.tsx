@@ -66,6 +66,7 @@ export default function UserProfile() {
   const [following, setFollowing] = useState(false)
   const [followerCount, setFollowerCount] = useState(0)
   const [followingCount, setFollowingCount] = useState(0)
+  const [followLoaded, setFollowLoaded] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
 
@@ -100,6 +101,7 @@ export default function UserProfile() {
               setFollowing(status.following)
               setFollowerCount(status.follower_count)
               setFollowingCount(status.following_count)
+              setFollowLoaded(true)
             })
             .catch(() => {})
         }
@@ -195,7 +197,7 @@ export default function UserProfile() {
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               {profile.role !== 'user' && <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>{profile.role === 'admin' ? '管理员' : '组织者'}</Badge>}
               {(profile.level ?? 0) > 0 && <Badge variant="outline">Lv.{profile.level}</Badge>}
-              {user && !isSelf && <><Badge variant="secondary">关注 {followingCount}</Badge><Badge variant="secondary">粉丝 {followerCount}</Badge></>}
+              {user && !isSelf && followLoaded && <><Badge variant="secondary">关注 {followingCount}</Badge><Badge variant="secondary">粉丝 {followerCount}</Badge></>}
             </div>
             {(profile.xp ?? 0) > 0 && (
               <div className="max-w-sm">
@@ -232,7 +234,7 @@ export default function UserProfile() {
                     <Card density="compact" className="h-full transition-colors hover:border-primary/40 hover:bg-accent/30">
                       <CardContent className="min-w-0 space-y-1">
                         <div className="flex min-w-0 items-start gap-2">
-                          <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="min-w-0 flex-1 text-sm group-hover:text-primary">{bot.display_name || bot.name}</EntityName>
+                          <EntityName lines={2} tooltip={bot.display_name || bot.name} tooltipFocusable={false} className="min-w-0 flex-1 text-sm group-hover:text-primary">{bot.display_name || bot.name}</EntityName>
                           <Badge variant="secondary" className="shrink-0"><GameIcon className="size-3" />{gameLabel(bot.game_id)}</Badge>
                         </div>
                         <OverflowText tooltip={false} className="text-xs text-muted-foreground">@{bot.name}</OverflowText>

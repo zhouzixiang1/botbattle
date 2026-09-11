@@ -6,6 +6,7 @@ import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { Input } from '@/components/ui/input'
+import { fmtTime } from '@/lib/format'
 
 interface Bot {
   id: number
@@ -46,6 +47,7 @@ export default function BotsTab() {
   const [q, setQ] = useState('')
   const [expand, setExpand] = useState<number | null>(null)
   const [versions, setVersions] = useState<Version[]>([])
+  const [versionsLoading, setVersionsLoading] = useState<number | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
   // 分页
   const [page, setPage] = useState(1)
@@ -110,11 +112,14 @@ export default function BotsTab() {
     }
     setExpand(b.id)
     setVersions([])
+    setVersionsLoading(b.id)
     try {
       const d = await apiGet<{ versions: Version[] }>(`/api/admin/bots/${b.id}/versions`)
       setVersions(d.versions || [])
     } catch (e) {
       setError(errMsg(e, '加载版本失败'))
+    } finally {
+      setVersionsLoading(null)
     }
   }
 
@@ -160,13 +165,13 @@ export default function BotsTab() {
                 <TableRow className="hover:bg-accent">
                   <TableCell className="px-2.5 py-1.5 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
                   <TableCell className="max-w-[13rem] px-2.5 py-1.5 font-medium text-foreground">
-                    <OverflowText>
+                    <OverflowText tooltip={b.display_name || b.name}>
                       {b.display_name || b.name}
                       {b.is_builtin ? <span className="ml-1 text-[10px] font-normal text-primary">内置</span> : null}
                     </OverflowText>
                     {b.runnable === false && (
                       <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
-                        诊断：{b.format}/{b.os}-{b.arch}
+                        诊断：{b.unsupported_reason || `${b.format}/${b.os}-${b.arch}`}
                       </span>
                     )}
                   </TableCell>
@@ -225,7 +230,9 @@ export default function BotsTab() {
                 {expand === b.id && (
                   <TableRow key={`${b.id}-v`} className="bg-muted/60">
                     <TableCell colSpan={6} className="px-3 py-2">
-                      {versions.length === 0 ? (
+                      {versionsLoading === b.id ? (
+                        <Loading text="加载版本…" />
+                      ) : versions.length === 0 ? (
                         <EmptyState text="无版本" />
                       ) : (
                         <Table className="min-w-[36rem]">
@@ -252,12 +259,12 @@ export default function BotsTab() {
                                 <TableCell className="px-2 py-1">
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <span className="cursor-help">{v.checksum.slice(0, 12)}…</span>
+                                      <span tabIndex={0} className="cursor-help">{v.checksum.slice(0, 12)}…</span>
                                     </TooltipTrigger>
                                     <TooltipContent className="font-mono">{v.checksum}</TooltipContent>
                                   </Tooltip>
                                 </TableCell>
-                                <TableCell className="px-2 py-1">{v.uploaded_at}</TableCell>
+                                <TableCell className="px-2 py-1 whitespace-nowrap">{fmtTime(v.uploaded_at)}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>

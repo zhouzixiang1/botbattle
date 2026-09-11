@@ -142,6 +142,15 @@ def main() -> int:
         action="store_true",
         help="在隔离 worktree DB 创建 qa_organizer/qa_admin（固定测试密码）",
     )
+    ap.add_argument(
+        "--reset-execution-control",
+        action="store_true",
+        help=(
+            "把执行控制复位为 running+accepting（清除继承自生产快照的调度器"
+            "暂停/重试状态）。仅允许对隔离 QA 副本使用；走 Store 的正式 resume() "
+            "事务（Docker launch journal 未收敛时会拒绝）。"
+        ),
+    )
     args = ap.parse_args()
 
     db_path, upload_root = resolve_seed_paths(ROOT, args.db, args.upload_root)
@@ -155,6 +164,30 @@ def main() -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = Store(str(db_path))
     try:
+        if args.reset_execution_control:
+            # 复制的生产快照可能带着部署窗内的 dispatcher 暂停态，导致隔离 QA
+            # 的执行队列/沙箱接口 503。经正式 Store 事务复位，不绕过任何门禁；
+            # 仅对「同库 QA 调度器正在启动容器」的瞬态 busy-journal 做有界重试。
+            import time
+
+            from bzplat.backend.store.execution import DockerLaunchInvariantError, ExecutionRepository
+
+            control = None
+            for attempt in range(5):
+                try:
+                    control = ExecutionRepository(store).resume()
+                    break
+                except DockerLaunchInvariantError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(2)
+            assert control is not None
+            print(
+                "执行控制已复位："
+                f"state={control.get('dispatcher_state')} "
+                f"accepting={control.get('accepting')} "
+                f"drain={control.get('deployment_drain_requested')}"
+            )
         specs = [test_account_spec(*account) for account in TEST_ACCOUNTS]
         if args.with_role_accounts:
             specs.extend(role_account_spec(*account) for account in ROLE_ACCOUNTS)

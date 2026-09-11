@@ -30,11 +30,11 @@ export default function Pagination({
   const pages: (number | string)[] = []
   const add = (p: number | string) => pages.push(p)
   add(1)
-  if (page - 2 > 2) add('...')
+  if (page - 2 >= 2) add('...')
   for (let p = Math.max(2, page - 1); p <= Math.min(totalPages - 1, page + 1); p++) {
     add(p)
   }
-  if (page + 2 < totalPages - 1) add('...')
+  if (page + 2 <= totalPages - 1) add('...')
   if (totalPages > 1) add(totalPages)
 
   return (
@@ -65,7 +65,7 @@ export default function Pagination({
             aria-current={p === page ? 'page' : undefined}
             disabled={disabled}
             onClick={() => onPageChange(p)}
-            className="h-8 min-w-8 px-2 font-mono max-md:h-11 max-md:min-w-11"
+            className="h-8 min-w-8 px-2 font-mono max-md:h-11 max-md:min-w-11 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
           >
             {p}
           </Button>

@@ -267,7 +267,7 @@ function PairingIdentityLine({
         {pairings.length === 1 && pairing.match_id && (
           <Link
             to={`/match/${pairing.match_id}`}
-            className="ml-auto inline-flex min-h-11 shrink-0 touch-manipulation items-center text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-8"
+            className="ml-auto inline-flex min-h-11 shrink-0 touch-manipulation items-center text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
           >
             {showResult ? '回看' : '详情'}
           </Link>
@@ -295,12 +295,12 @@ function PairingIdentityLine({
                 <Link
                   to={`/match/${item.match_id}`}
                   aria-label={`第 ${item.series_index}/${item.series_size} ${seriesUnit}${showResult ? '回看' : '详情'}`}
-                  className="ml-auto inline-flex min-h-11 shrink-0 touch-manipulation items-center font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-8"
+                  className="ml-auto inline-flex min-h-11 shrink-0 touch-manipulation items-center font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
                 >
                   {showResult ? '回看' : '详情'}
                 </Link>
               ) : (
-                <span className="ml-auto inline-flex min-h-11 shrink-0 items-center text-muted-foreground sm:min-h-8">
+                <span className="ml-auto inline-flex min-h-11 shrink-0 items-center text-muted-foreground [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8">
                   {showResult ? '无回放' : '待调度'}
                 </span>
               )}

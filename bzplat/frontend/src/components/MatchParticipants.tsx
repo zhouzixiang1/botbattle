@@ -28,6 +28,8 @@ interface MatchParticipantIdentityProps {
   seatDetail?: string
   /** 名称与 owner 的最大展示行数；移动数据卡可放宽，表格默认仍保持单行。 */
   textLines?: 1 | 2 | 3
+  /** 表格内高密度档：去掉块级留白与行间距；不改变文本层级与语义。 */
+  dense?: boolean
 }
 
 function OwnerIdentity({
@@ -67,6 +69,7 @@ export function MatchParticipantIdentity({
   links = true,
   seatDetail,
   textLines = 1,
+  dense = false,
 }: MatchParticipantIdentityProps) {
   const participant = resolveMatchParticipant(source, side)
   const explicitEmpty = Boolean(emptyLabel && !participant.isHuman && participant.botId == null)
@@ -108,7 +111,7 @@ export function MatchParticipantIdentity({
       data-participant-state={state}
       data-seat={side + 1}
       className={cn(
-        'min-w-0 py-0.5',
+        dense ? 'min-w-0 py-0' : 'min-w-0 py-0.5',
         variant === 'panel' && 'rounded-lg bg-muted/35 px-2.5 py-2',
         className,
       )}
@@ -161,15 +164,15 @@ export function MatchParticipantIdentity({
             {participant.botLabel}
           </EntityName>
         )}
-        {state === 'winner' && <Badge className="mt-0.5 h-4 shrink-0 px-1 text-[9px]">胜</Badge>}
+        {state === 'winner' && <Badge className="mt-0.5 h-5 shrink-0 px-1 text-[11px]">胜</Badge>}
       </div>
       {!participant.isHuman && (
-        <div className="mt-0.5 min-w-0">
+        <div className={cn('min-w-0', dense ? 'mt-0' : 'mt-0.5')}>
           <OwnerIdentity participant={participant} links={links} lines={textLines} />
         </div>
       )}
       {participant.isHuman && participant.ownerName && participant.ownerLabel !== participant.ownerName && (
-        <div className="mt-0.5 min-w-0">
+        <div className={cn('min-w-0', dense ? 'mt-0' : 'mt-0.5')}>
           <OverflowText
             lines={textLines}
             tooltip={`@${participant.ownerName}`}
@@ -180,7 +183,7 @@ export function MatchParticipantIdentity({
           </OverflowText>
         </div>
       )}
-      <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] font-medium text-muted-foreground">
+      <div className={cn('flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] font-medium text-muted-foreground', dense ? 'mt-0' : 'mt-0.5')}>
         <span>{participant.isHuman ? '真人' : 'Bot'}</span>
         <span aria-hidden="true">·</span>
         <span>{participant.seatLabel}</span>
@@ -201,6 +204,8 @@ interface MatchParticipantsProps {
   states?: readonly [ParticipantState, ParticipantState]
   secondEmptyLabel?: string
   links?: boolean
+  /** compact/panel 档的表格内高密度变体（见 MatchParticipantIdentity.dense）。 */
+  dense?: boolean
 }
 
 /**
@@ -300,11 +305,11 @@ export function InlineParticipantIdentity({
           ) : ownerText}
         </OverflowText>
       )}
-      {state === 'winner' && <Badge className="h-4 shrink-0 self-center px-1 text-[9px]">胜</Badge>}
+      {state === 'winner' && <Badge className="h-5 shrink-0 self-center px-1 text-[11px]">胜</Badge>}
       {showEnvironment && (
         <RuntimeEnvironmentBadge
           environment={matchParticipantEnvironment(source, side)}
-          className="h-4 shrink-0 px-1 text-[9px]"
+          className="h-5 shrink-0 px-1 text-[11px]"
         />
       )}
     </span>
@@ -318,6 +323,7 @@ export function MatchParticipants({
   states = ['neutral', 'neutral'],
   secondEmptyLabel,
   links = true,
+  dense = false,
 }: MatchParticipantsProps) {
   if (variant === 'inline') {
     return (
@@ -345,7 +351,7 @@ export function MatchParticipants({
         className,
       )}
     >
-      <MatchParticipantIdentity source={source} side={0} variant={variant} state={states[0]} links={links} />
+      <MatchParticipantIdentity source={source} side={0} variant={variant} state={states[0]} links={links} dense={dense} />
       <span className="self-center text-[10px] font-medium text-muted-foreground">VS</span>
       <MatchParticipantIdentity
         source={source}
@@ -354,6 +360,7 @@ export function MatchParticipants({
         state={states[1]}
         emptyLabel={secondEmptyLabel}
         links={links}
+        dense={dense}
       />
     </div>
   )

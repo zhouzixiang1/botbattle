@@ -733,19 +733,19 @@ export default function MatchViewer() {
     : 'min-w-0 space-y-2.5'
   // xl+ 仪表盘：主列拆成「信息带区 + 棋盘区」两段，均水平居中——
   // 信息带不再横铺整行，棋盘区按游戏视口约束吃满主列：
-  // - 方形棋盘（gomoku/pencil）：受 dvh 钳制（68rem 顶 + 100dvh-22rem），
+  // - 方形棋盘（gomoku/pencil）：受 dvh 钳制（68rem 顶 + 100dvh-22rem，24rem 下限防矮视口过度缩小），
   //   信息带独立收口到 42rem，避免随棋盘列等宽后结果卡过度折行；
   // - holdem：信息带与 16:9 牌桌列同宽，完全紧贴（宽屏允许少量必要滚动，
   //   次级信息带不把牌桌挤小）。
   const introZoneClasses = viewportFitCanvas
     ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,42rem)]'
     : ReplayHud
-      ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,calc((100dvh-16rem)*1.7))]'
+      ? 'min-w-0 w-full space-y-3 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
       : 'min-w-0 w-full space-y-3'
   const boardZoneClasses = viewportFitCanvas
-    ? 'min-w-0 w-full space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]'
+    ? 'min-w-0 w-full space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]'
     : ReplayHud
-      ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,calc((100dvh-16rem)*1.7))]'
+      ? 'min-w-0 w-full space-y-3 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
       : 'min-w-0 w-full space-y-3'
   // 控制条单行化：宽主列（holdem）xl 起一行；方形棋盘列受 dvh 钳制较窄，
   // 2xl 起才收成一行，xl–2xl 保持换行但仍然贴棋盘列宽。
@@ -1093,10 +1093,15 @@ export default function MatchViewer() {
       icon={<TriangleAlert className="size-7 opacity-40" />}
     /></Card>
   ) : visible.length === 0 ? (
-    <Card><EmptyState
-      text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
-      icon={<History className="size-7 opacity-40" />}
-    /></Card>
+    status === 'connecting' ? (
+      // SSE 传输错误后 EventSource 自动重连期间：不要伪装成「暂无事件」。
+      <Card><Loading text="正在连接事件流…" /></Card>
+    ) : (
+      <Card><EmptyState
+        text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
+        icon={<History className="size-7 opacity-40" />}
+      /></Card>
+    )
   ) : null
   const replayReady = !loading && Boolean(match && gameSpec) && visible.length > 0
 

@@ -6,6 +6,7 @@ import { fmtTime } from '@/lib/format'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import { EmptyState } from '@/components/ui/status'
+import { OverflowText } from '@/components/ui/overflow-text'
 import { cn } from '@/lib/utils'
 
 interface Notification {
@@ -63,7 +64,7 @@ export default function NotificationBell({ className }: { className?: string }) 
         <button
           type="button"
           className={cn(
-            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
+            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground [@media(pointer:coarse)]:size-11',
             className,
           )}
           aria-label="通知"
@@ -76,11 +77,11 @@ export default function NotificationBell({ className }: { className?: string }) 
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 p-0">
+      <PopoverContent align="end" className="w-[min(20rem,calc(100vw-1.5rem))] p-0">
         <div className="flex items-center justify-between border-b border-border px-3 py-2">
           <span className="text-sm font-semibold text-foreground">通知</span>
           {unread > 0 && (
-            <Button type="button" variant="ghost" size="sm" onClick={readAll} className="h-7 gap-1 text-xs text-primary">
+            <Button type="button" variant="ghost" size="sm" onClick={readAll} className="h-8 gap-1 text-xs text-primary">
               <Check className="size-3" />全部已读
             </Button>
           )}
@@ -101,7 +102,7 @@ export default function NotificationBell({ className }: { className?: string }) 
                     {!n.is_read && <span className="size-1.5 shrink-0 rounded-full bg-primary" />}
                     <span className="font-medium text-foreground">{n.title}</span>
                   </div>
-                  {n.body && <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{n.body}</p>}
+                  {n.body && <OverflowText lines={2} tooltip={n.body} className="mt-0.5 block text-xs text-muted-foreground">{n.body}</OverflowText>}
                   <p className="mt-0.5 text-[10px] text-muted-foreground">
                     {fmtTime(n.created_at)}
                   </p>
@@ -118,7 +119,7 @@ export default function NotificationBell({ className }: { className?: string }) 
         <Link
           to="/notifications"
           onClick={() => setOpen(false)}
-          className="block border-t border-border px-3 py-2 text-center text-xs font-medium text-primary transition-colors hover:bg-accent"
+          className="flex min-h-11 items-center justify-center border-t border-border px-3 py-2 text-center text-xs font-medium text-primary transition-colors hover:bg-accent"
         >
           查看全部通知
         </Link>

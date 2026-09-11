@@ -645,7 +645,7 @@ export default function Challenge() {
           请先{' '}
           <Link
             to="/login"
-            className="inline-flex min-h-11 min-w-11 items-center justify-center px-1 font-medium text-primary hover:underline sm:min-h-0 sm:min-w-0 sm:px-0"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center px-1 font-medium text-primary hover:underline [@media(pointer:fine)_and_(min-width:40rem)]:min-h-0 [@media(pointer:fine)_and_(min-width:40rem)]:min-w-0 [@media(pointer:fine)_and_(min-width:40rem)]:px-0"
           >
             登录
           </Link>{' '}
@@ -672,7 +672,7 @@ export default function Challenge() {
             <div className="flex flex-wrap items-center gap-2">
               <Label>{seatLabel}</Label>
               {seat2Kind === 'bot' && idx === mySeat && (
-                <Badge variant="secondary" className="text-[10px]">
+                <Badge variant="secondary" className="text-[11px]">
                   {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
                 </Badge>
               )}
@@ -729,7 +729,7 @@ export default function Challenge() {
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-foreground">
               <BotIcon className="size-4 shrink-0 text-primary" />
               <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seat.bot.display_name || seat.bot.name}</strong>
-              <Badge variant={seat.bot.is_ranked ? 'default' : 'outline'} className="text-[10px]">
+              <Badge variant={seat.bot.is_ranked ? 'default' : 'outline'} className="text-[11px]">
                 <Trophy className="size-3" aria-hidden="true" />
                 {seat.bot.is_ranked ? '排行榜 Bot' : '练习 Bot'}
               </Badge>
@@ -1036,7 +1036,7 @@ export default function Challenge() {
                     <div className="flex flex-wrap items-center gap-2">
                       <Label>{playerLabels[1]}</Label>
                       {seat2Kind === 'bot' && mySeat === 1 && (
-                        <Badge variant="secondary" className="text-[10px]">
+                        <Badge variant="secondary" className="text-[11px]">
                           {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
                         </Badge>
                       )}

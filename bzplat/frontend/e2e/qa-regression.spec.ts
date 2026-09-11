@@ -2026,8 +2026,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   await page.getByRole('button', { name: '下一个事件', exact: true }).click()
   await page.getByRole('button', { name: '下一个事件', exact: true }).click()
   await expect(overview).toContainText('当前手 70 / 70')
-  await expect(overview).toContainText('已结算 70 手')
-  await expect(overview).toContainText('剩余 0 手')
+  await expect(overview).toContainText('70/70 手')
   await expect(overview).toContainText('本手底池')
   await expect(overview).toContainText('1,000')
   await expect(overview).toContainText('最近动作')
@@ -2102,11 +2101,11 @@ test('Holdem production replay uses empty space for a responsive current-positio
     await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
-  // xl+ 契约：动作上下文固定在右栏内 sticky。栏高由 70 手 HUD 主导时滚动行程
-  // 有限，不再必然出现“吸附到顶”的几何状态，因此断言 sticky 定位本身。
+  // xl+ 契约：动作上下文固定在右栏内 sticky。HUD 压缩后 1366×768 的滚动行程
+  // 更短（首屏容纳更多内容正是密度目标），因此只断言文档可滚动且 sticky 定位本身。
   await page.setViewportSize({ width: 1366, height: 768 })
   await page.evaluate(() => window.scrollTo(0, 360))
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
   expect(await timeline.evaluate((element) => getComputedStyle(element).position)).toBe('sticky')
   await page.evaluate(() => window.scrollTo(0, 0))
 
@@ -2191,8 +2190,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(outcome).toContainText('第 2 场：physical_beta（@beta）胜')
   await expect(page.getByText('第 2/2 场 · 第 70/70 手', { exact: true })).toBeVisible()
   await expect(overview).toContainText('第 2/2 场 · 当前手 70 / 70')
-  await expect(overview).toContainText('本场已结算 70 手')
-  await expect(overview).toContainText('本场剩余 0 手')
+  await expect(overview).toContainText('70/70 手')
   await expect(overview).toContainText('physical_alpha（@alpha） · 弃牌 · 座位 1')
   await expect(overview).toContainText('胜手 physical_alpha（@alpha） 0 · physical_beta（@beta） 70')
   await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('本场净胜-7,000')
@@ -2216,8 +2214,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await secondLegFirstHand.click()
   await page.getByRole('button', { name: '上一个事件', exact: true }).click()
   await expect(overview).toContainText('第 2/2 场 · 等待发牌 · 本场共 70 手')
-  await expect(overview).toContainText('本场已结算 0 手')
-  await expect(overview).toContainText('本场剩余 70 手')
+  await expect(overview).toContainText('等待发牌 · 本场共 70 手')
   await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuemax', '70')
   await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuenow', '0')
   await expect(overview).toContainText('胜手 physical_alpha（@alpha） 0 · physical_beta（@beta） 0')

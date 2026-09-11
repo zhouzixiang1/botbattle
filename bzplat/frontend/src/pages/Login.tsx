@@ -75,9 +75,9 @@ export default function Login() {
             </Button>
             <p className="text-center text-sm text-muted-foreground">
               没有账号？{' '}
-              <Link to="/register" className="font-medium text-primary hover:underline">注册</Link>
+              <Link to="/register" className="inline-flex min-h-11 items-center font-medium text-primary hover:underline">注册</Link>
               {' · '}
-              <Link to="/reset-password" className="font-medium text-primary hover:underline">重置密码</Link>
+              <Link to="/reset-password" className="inline-flex min-h-11 items-center font-medium text-primary hover:underline">重置密码</Link>
             </p>
           </form>
         </CardContent>

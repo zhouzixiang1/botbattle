@@ -155,13 +155,13 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
               key={r.round}
               variant={r.round <= expandTo ? 'default' : 'outline'}
               size="xs"
-              className="min-h-11 sm:min-h-8"
+              className="min-h-11 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
               onClick={() => setExpandTo(r.round)}
             >
               R{r.round}
             </Button>
           ))}
-          <Button variant="ghost" size="xs" className="min-h-11 sm:min-h-8" onClick={() => setExpandTo(maxRound)}>
+          <Button variant="ghost" size="xs" className="min-h-11 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8" onClick={() => setExpandTo(maxRound)}>
             全部
           </Button>
         </div>
@@ -201,7 +201,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                   onClick={() => toggleCollapse(r.round)}
                   aria-expanded={!isCollapsed}
                   aria-controls={roundPanelId}
-                  className="mb-2 min-h-11 w-full justify-start text-foreground hover:text-primary sm:min-h-8"
+                  className="mb-2 min-h-11 w-full justify-start text-foreground hover:text-primary [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
                 >
                   {isCollapsed ? <ChevronRight aria-hidden="true" className="size-3.5" /> : <ChevronDown aria-hidden="true" className="size-3.5" />}
                   第 {r.round} 轮
@@ -256,7 +256,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                             <Link
                               to={`/match/${p.match_id}`}
                               aria-label={duplicate ? '查看复式回放' : '查看计分场'}
-                              className="mt-1 flex min-h-11 items-center justify-center text-center text-xs text-primary hover:underline sm:min-h-8"
+                              className="mt-1 flex min-h-11 items-center justify-center text-center text-xs text-primary hover:underline [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
                             >
                               {duplicate ? '复式回放' : '查看'}
                             </Link>

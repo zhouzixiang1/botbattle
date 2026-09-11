@@ -207,8 +207,19 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       drawSeat(ctx, seat1Pos.x, seat1Pos.y, 1, next, prev, t, opts.seats, s)
       drawSeat(ctx, seat0Pos.x, seat0Pos.y, 0, next, prev, t, opts.seats, s)
     } else {
-      drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats, s)
-      drawSeat(ctx, X(-0.75), Y1, 0, next, prev, t, opts.seats, s)
+      // 小画布座位文字块（fitText 宽 min(150s, 82)）整体夹在毡布左缘与
+      // 居中底牌扇形左缘之间：默认锚点 X(-0.75) 的文字右缘会压到底牌
+      // ~15-21px（覆盖 320-810px 全部小画布宽度），此处按牌缘动态内移，
+      // 长文本交给 fitText 提前截断。
+      const seatTextW = s < 0.72 ? 82 : 150 * s
+      const holeCardLeft = W / 2 - 0.7875 * CARD_SIZE
+      const feltLeft = W / 2 - L - 0.84 * R
+      const smallSeatX = Math.max(
+        feltLeft + 10 * s + seatTextW / 2,
+        Math.min(X(-0.75), holeCardLeft - 8 * s - seatTextW / 2),
+      )
+      drawSeat(ctx, smallSeatX, Y0, 1, next, prev, t, opts.seats, s)
+      drawSeat(ctx, smallSeatX, Y1, 0, next, prev, t, opts.seats, s)
     }
 
     // 手牌：showdown 模式隐藏非人类/非摊牌对手牌
@@ -365,7 +376,16 @@ function drawSeat(
   // 名字（两行：BOT名 + @用户名）—— 测量后按座位宽度截断，防止长名越出牌桌
   ctx.fillStyle = isMatchWinner ? 'rgba(255,238,88,0.98)' : '#fff'
   ctx.font = `bold ${Math.round(14 * s)}px "DM Sans"`
-  if (isToAct) ctx.fillText('👉', x - 45 * s, y - 12 * s)
+  // 当前行动标记：头像左侧画实心播放三角（替代跨平台字形不一的 emoji）。
+  if (isToAct) {
+    ctx.fillStyle = 'rgba(255,238,88,0.95)'
+    ctx.beginPath()
+    ctx.moveTo(ax - 32 * s, ay - 9 * s)
+    ctx.lineTo(ax - 32 * s, ay + 9 * s)
+    ctx.lineTo(ax - 21 * s, ay)
+    ctx.closePath()
+    ctx.fill()
+  }
   ctx.textAlign = 'center'
   ctx.fillText(fitText(ctx, name, seatW), x, y + 16 * s)
   ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${Math.round(12 * s)}px "DM Sans"`

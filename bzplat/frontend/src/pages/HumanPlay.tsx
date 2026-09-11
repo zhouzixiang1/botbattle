@@ -583,14 +583,14 @@ export default function HumanPlay() {
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
           {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
           <Badge variant="outline">Bot：{timeControl ? timeControlLabel(timeControl) : '时限不可用'}</Badge>
-          <span
-            className="text-xs text-muted-foreground"
-            title={timeControl
+          <OverflowText
+            className="max-w-full text-xs text-muted-foreground"
+            tooltip={timeControl
               ? timeControlDescription(timeControl, true)
               : 'Bot 时限配置暂不可用；页面不会猜测或代填 Bot 棋钟。'}
           >
             非对称练习：真人仅用防挂机时限
-          </span>
+          </OverflowText>
           {over ? (
             <span className="min-w-0 break-words font-medium text-foreground">
               对局结束 · {winnerLabel}
@@ -662,7 +662,7 @@ export default function HumanPlay() {
             <>
               {/* 2xl 三区：左栏对阵卡（身份/我的位置），棋盘尺寸断言不变。 */}
               <div className="flex min-w-0 flex-col gap-3">{matchupNode}</div>
-              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]">
+              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
                 {renderSurface(true)}
               </div>
               <div className="flex min-w-0 flex-col gap-3">
@@ -676,7 +676,7 @@ export default function HumanPlay() {
             </>
           ) : desktopRail ? (
             <>
-              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[min(68rem,calc(100dvh-22rem))]">
+              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
                 {matchupNode}
                 {renderSurface(true)}
               </div>
@@ -713,7 +713,7 @@ export default function HumanPlay() {
           : 'grid min-w-0 items-start gap-3'}>
           {desktopRail ? (
             <>
-              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[min(100%,calc((100dvh-16rem)*1.7))]">
+              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]">
                 {matchupNode}
                 {renderSurface(false)}
               </div>

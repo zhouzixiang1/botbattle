@@ -40,12 +40,15 @@ function pairingResultLabel(pairing: PairingResultSource): string {
 function PairingResult({
   pairing,
   primaryOnly = false,
+  layout,
   className,
   ...props
 }: Omit<ComponentProps<'div'>, 'children'> & {
   pairing: PairingResultSource
   /** Hide per-match scoring progress where a frozen legacy series settles only once. */
   primaryOnly?: boolean
+  /** 透传 MatchOutcome 的 layout（stacked / flow-wide）。 */
+  layout?: 'stacked' | 'flow-wide'
 }) {
   const status = effectivePairingStatus(pairing)
   const label = pairingResultLabel(pairing)
@@ -67,6 +70,7 @@ function PairingResult({
       source={{ ...pairing, status }}
       seatLabels={seatLabels}
       primaryOnly={primaryOnly}
+      layout={layout}
       data-pairing-result={status === 'completed' ? 'decided' : 'pending'}
       aria-label={`赛果：${label}`}
       className={cn(

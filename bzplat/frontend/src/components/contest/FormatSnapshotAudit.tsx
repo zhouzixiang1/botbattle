@@ -78,11 +78,10 @@ export function FormatSnapshotAudit({
         <div className="inline-flex min-w-0 items-baseline gap-1.5">
           <dt className="shrink-0 text-muted-foreground">审计值</dt>
           <dd className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <code
-              title={snapshot.audit_digest}
-              className="max-w-full break-all rounded bg-muted px-1.5 py-1 font-mono text-[11px] text-foreground"
-            >
-              {shortDigest}
+            <code className="max-w-full rounded bg-muted px-1.5 py-1 font-mono text-[11px] text-foreground">
+              <OverflowText tooltip={snapshot.audit_digest} className="block break-all">
+                {shortDigest}
+              </OverflowText>
             </code>
             <Button
               type="button"
