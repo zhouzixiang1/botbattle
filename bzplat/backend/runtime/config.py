@@ -12,13 +12,17 @@ from typing import Any
 
 CONFIGURATION_SOURCE = "code"
 
-# 对局/赛事通用运行参数。全站所有来源共享最多六个对局槽；
+# 对局/赛事通用运行参数。全站所有来源共享最多八个对局槽；
 # 实际可同时启动的数量还必须通过进程可见 CPU/内存与每个 job 入队时
-# 冻结的资源向量准入。当前主机上六场最重赛事对局合计为
-# 24 vCPU / 24 GiB，保留了 API、SQLite、Docker 与上传预检余量。主机
-# 资源门可继续收紧，管理员与显式参数不能放大六槽硬顶。
+# 冻结的资源向量准入。CPU 准入上界在探测预算上应用有界超卖系数
+# （锦标赛冻结向量按每场 4 核保守记账，实测平均仅用 ~0.8 核）；内存
+# 维度严格不超卖。管理员与显式参数不能放大八槽硬顶或超卖系数。
 ACTION_TIMEOUT_SEC = 60.0
-MAX_CONCURRENT_MATCHES = 6
+MAX_CONCURRENT_MATCHES = 8
+# CPU 准入超卖系数（仅 CPU 维度）：claim 允许的冻结向量之和上限 =
+# 主机 CPU 探测预算 × 该系数。每个 Bot 容器仍有独立 --cpus 硬顶，
+# 最坏情况只是决策按该倍数变慢；内存与 sandbox 单位不乘该系数。
+EXECUTION_CPU_OVERCOMMIT_RATIO = 2.0
 # 全员单/双循环不再按参赛人数拒绝发布。实际并发仍由 match slots 与
 # sandbox capacity 硬顶控制，超大赛程只会进入持久队列，不会放大物理并发。
 # 保留该公开配置键并以 ``None`` 明确表示“不限人数”，避免旧诊断客户端

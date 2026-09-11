@@ -13,6 +13,7 @@ from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
     CONFIGURATION_SOURCE,
+    EXECUTION_CPU_OVERCOMMIT_RATIO,
     MAX_CONCURRENT_MATCHES,
     RANKING_MIN_RATED_MATCHES,
 )
@@ -29,41 +30,41 @@ from bzplat.backend.store.schema import (
 )
 
 
-def test_slot_ceiling_is_six_and_does_not_prejudge_job_resource_profiles():
+def test_slot_ceiling_is_eight_and_does_not_prejudge_job_resource_profiles():
     for logical_cpus in (1, 7, 8, 16, 24, 64):
         with mock.patch(
             "bzplat.backend.runtime.limits.os.cpu_count",
             return_value=logical_cpus,
         ):
-            assert concurrent_ceiling() == 6
-            assert clamp_concurrent(99) == 6
+            assert concurrent_ceiling() == 8
+            assert clamp_concurrent(99) == 8
             assert clamp_concurrent(2) == 2
-            assert default_max_concurrent() == 6
+            assert default_max_concurrent() == 8
 
 
 def test_explicit_startup_override_cannot_bypass_global_match_cap(tmp_path):
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
         client, app = _admin_client(tmp_path, max_concurrent=99)
 
-    assert app.state.runtime_ceiling == 6
-    assert app.state.orch.max_concurrent == 6
-    assert app.state.execution_dispatcher.max_match_slots == 6
-    assert app.state.execution_dispatcher.max_sandbox_units == 12
+    assert app.state.runtime_ceiling == 8
+    assert app.state.orch.max_concurrent == 8
+    assert app.state.execution_dispatcher.max_match_slots == 8
+    assert app.state.execution_dispatcher.max_sandbox_units == 16
 
     response = client.get("/api/admin/settings/runtime")
     assert response.status_code == 200
     capacity = response.json()["queue"]["capacity"]
-    assert capacity["match_slots"]["capacity"] == 6
-    assert capacity["sandbox_units"]["capacity"] == 12
+    assert capacity["match_slots"]["capacity"] == 8
+    assert capacity["sandbox_units"]["capacity"] == 16
 
 
-def test_six_slot_hard_cap_is_stable_on_large_hosts():
+def test_eight_slot_hard_cap_is_stable_on_large_hosts():
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=24):
-        assert concurrent_ceiling() == 6
-        assert clamp_concurrent(99) == 6
-        assert default_max_concurrent() == 6
+        assert concurrent_ceiling() == 8
+        assert clamp_concurrent(99) == 8
+        assert default_max_concurrent() == 8
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=64):
-        assert concurrent_ceiling() == 6
+        assert concurrent_ceiling() == 8
 
 
 def _admin_client(tmp_path, *, max_concurrent: int | None = None):
@@ -195,7 +196,8 @@ def test_code_configuration_is_immutable():
     import bzplat.backend.runtime.config as config
 
     assert AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES == 10
-    assert MAX_CONCURRENT_MATCHES == 6
+    assert MAX_CONCURRENT_MATCHES == 8
+    assert EXECUTION_CPU_OVERCOMMIT_RATIO == 2.0
     assert RANKING_MIN_RATED_MATCHES == 10
     assert not hasattr(config, "AUTO_MATCH_CONFIG")
     assert not hasattr(config, "QA_AUTO_MATCH_CONFIG")

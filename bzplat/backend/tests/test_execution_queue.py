@@ -55,6 +55,7 @@ from bzplat.backend.runtime.config import (
     AUTO_MATCH_SCHEDULER_POLICY_VERSION,
     EXECUTION_AUTO_ACTIVE_LIMIT,
     EXECUTION_AUTO_LOOKAHEAD,
+    EXECUTION_CPU_OVERCOMMIT_RATIO,
 )
 from bzplat.backend.store import Store, rating_projection_digests
 from bzplat.backend.store.execution import (
@@ -4068,7 +4069,7 @@ def test_contest_fairness_history_has_targeted_restart_safe_index(queue_store):
     )
 
 
-def test_all_capacity_entrypoints_defensively_clamp_to_six_slots(queue_store):
+def test_all_capacity_entrypoints_defensively_clamp_to_eight_slots(queue_store):
     store = queue_store
     dispatcher = ExecutionDispatcher(
         SimpleNamespace(),
@@ -4087,15 +4088,15 @@ def test_all_capacity_entrypoints_defensively_clamp_to_six_slots(queue_store):
         aging_seconds=60,
     )["capacity"]
 
-    assert (dispatcher.max_match_slots, dispatcher.max_sandbox_units) == (6, 12)
-    assert orchestrator.max_concurrent == 6
-    assert orchestrator._sem._value == 6
+    assert (dispatcher.max_match_slots, dispatcher.max_sandbox_units) == (8, 16)
+    assert orchestrator.max_concurrent == 8
+    assert orchestrator._sem._value == 8
     orchestrator.rebuild_concurrency(999)
-    assert orchestrator.max_concurrent == 6
-    assert orchestrator._sem._value == 6
+    assert orchestrator.max_concurrent == 8
+    assert orchestrator._sem._value == 8
     assert (capacity["max_match_slots"], capacity["max_sandbox_units"]) == (
-        6,
-        12,
+        8,
+        16,
     )
 
 
@@ -6789,12 +6790,32 @@ def test_public_pause_reason_is_sanitized_but_admin_keeps_diagnostic(queue_store
     assert "host_memory_mb" not in public["capacity"]
     assert admin["capacity"]["host_cpu_millis"] == {
         "used": 0,
-        "capacity": dispatcher.max_host_cpu_millis,
+        "capacity": dispatcher.admission_host_cpu_millis,
     }
     assert admin["capacity"]["host_memory_mb"] == {
         "used": 0,
         "capacity": dispatcher.max_host_memory_mb,
     }
+
+
+def test_cpu_overcommit_ceiling_scales_admission_but_never_memory(queue_store):
+    """CPU 准入上界 = 探测预算 × 有界超卖系数；容量投影按上界报告 CPU，
+    内存预算严格不放大（内存不可压缩，超卖即 OOM 风险）。"""
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(), queue_store, max_match_slots=8, max_sandbox_units=16
+    )
+    assert dispatcher.admission_host_cpu_millis == int(
+        dispatcher.max_host_cpu_millis * EXECUTION_CPU_OVERCOMMIT_RATIO
+    )
+    admin = dispatcher.public_snapshot(include_internal=True)
+    assert (
+        admin["capacity"]["host_cpu_millis"]["capacity"]
+        == dispatcher.admission_host_cpu_millis
+    )
+    assert (
+        admin["capacity"]["host_memory_mb"]["capacity"]
+        == dispatcher.max_host_memory_mb
+    )
 
 
 def test_deployment_drain_finishes_active_work_and_preserves_waiting_jobs(
@@ -9638,9 +9659,9 @@ def test_8vcpu_budget_admits_four_frozen_low_profile_matches(queue_store):
     assert capacity["used_host_memory_mb"] == 4096
 
 
-def test_8vcpu_budget_admits_six_human_jobs_and_direct_claim_clamps(queue_store):
+def test_8vcpu_budget_admits_eight_human_jobs_and_direct_claim_clamps(queue_store):
     store = queue_store
-    jobs = [_enqueue_human(store, f"human-capacity-{index}")[2] for index in range(7)]
+    jobs = [_enqueue_human(store, f"human-capacity-{index}")[2] for index in range(9)]
     claim_kwargs = {
         # Deliberately bypass the runtime/dispatcher entrypoints: the durable
         # repository remains the final defense against a caller asking for 99.
@@ -9653,12 +9674,12 @@ def test_8vcpu_budget_admits_six_human_jobs_and_direct_claim_clamps(queue_store)
         "contest_share_slots": 1,
     }
 
-    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(6)]
+    claimed = [store.executions.claim_next(**claim_kwargs) for _ in range(8)]
     assert [row["public_id"] for row in claimed] == [
-        row["public_id"] for row in jobs[:6]
+        row["public_id"] for row in jobs[:8]
     ]
     assert store.executions.claim_next(**claim_kwargs) is None
-    assert store.executions.get(jobs[6]["public_id"])["status"] == "queued"
+    assert store.executions.get(jobs[8]["public_id"])["status"] == "queued"
     capacity = store.executions.snapshot(
         max_match_slots=999,
         max_sandbox_units=999,
@@ -9667,15 +9688,15 @@ def test_8vcpu_budget_admits_six_human_jobs_and_direct_claim_clamps(queue_store)
         aging_seconds=60,
     )["capacity"]
     assert (capacity["max_match_slots"], capacity["max_sandbox_units"]) == (
-        6,
-        12,
+        8,
+        16,
     )
     assert (capacity["used_match_slots"], capacity["used_sandbox_units"]) == (
-        6,
-        6,
+        8,
+        8,
     )
-    assert capacity["used_host_cpu_millis"] == 6000
-    assert capacity["used_host_memory_mb"] == 3072
+    assert capacity["used_host_cpu_millis"] == 8000
+    assert capacity["used_host_memory_mb"] == 4096
 
 
 def test_8vcpu_budget_admits_six_remote_local_jobs(queue_store):
@@ -9735,12 +9756,14 @@ def test_8vcpu_budget_admits_six_remote_local_jobs(queue_store):
     assert capacity["used_host_memory_mb"] == 3072
 
 
-def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
+def test_8vcpu_16gib_budget_with_overcommit_admits_four_and_holds_fifth(
     queue_store,
     monkeypatch,
 ):
+    """CPU 准入上界 = 预算 ×2：8 vCPU/16 GiB 下四场锦标赛（16000 毫核）可入，
+    第五场被 CPU 上界挡住；内存预算严格不放大（4×4096 恰好用满）。"""
     store = queue_store
-    bots = [_bot(store, f"dual-capacity-{index}") for index in range(6)]
+    bots = [_bot(store, f"dual-capacity-{index}") for index in range(10)]
     contest = store.create_contest(
         "Dual capacity",
         bots[0]["user_id"],
@@ -9756,7 +9779,7 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
             bot_a_version_id=bots[offset]["version_id"],
             bot_b_version_id=bots[offset + 1]["version_id"],
         )
-        for offset in (0, 2, 4)
+        for offset in (0, 2, 4, 6, 8)
     ]
     _seal_current_contest_stage_for_execution(store, int(contest["id"]))
     _verify_projection(store)
@@ -9773,7 +9796,7 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
             contest_id=contest["id"],
             contest_pairing_id=pairings[index]["id"],
         )
-        for index, offset in enumerate((0, 2, 4))
+        for index, offset in enumerate((0, 2, 4, 6, 8))
     ]
 
     monkeypatch.setattr(
@@ -9799,26 +9822,25 @@ def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
         auto_capability_enabled=False,
     )
     result = asyncio.run(dispatcher.run_once())
-    assert result["claimed"] == 2
+    assert result["claimed"] == 4
     assert {job["public_id"] for job in orch.started} == {
-        jobs[0]["public_id"],
-        jobs[1]["public_id"],
+        jobs[index]["public_id"] for index in range(4)
     }
 
     snapshot = store.executions.snapshot(
-        max_match_slots=6,
-        max_sandbox_units=12,
-        max_host_cpu_millis=8000,
+        max_match_slots=8,
+        max_sandbox_units=16,
+        max_host_cpu_millis=16_000,
         max_host_memory_mb=16 * 1024,
         aging_seconds=60,
     )
-    assert snapshot["capacity"]["max_match_slots"] == 6
-    assert snapshot["capacity"]["max_sandbox_units"] == 12
-    assert snapshot["capacity"]["used_match_slots"] == 2
-    assert snapshot["capacity"]["used_sandbox_units"] == 4
-    assert snapshot["capacity"]["used_host_cpu_millis"] == 8000
-    assert snapshot["capacity"]["used_host_memory_mb"] == 8192
-    assert store.executions.get(jobs[2]["public_id"])["status"] == "queued"
+    assert snapshot["capacity"]["max_match_slots"] == 8
+    assert snapshot["capacity"]["max_sandbox_units"] == 16
+    assert snapshot["capacity"]["used_match_slots"] == 4
+    assert snapshot["capacity"]["used_sandbox_units"] == 8
+    assert snapshot["capacity"]["used_host_cpu_millis"] == 16_000
+    assert snapshot["capacity"]["used_host_memory_mb"] == 16 * 1024
+    assert store.executions.get(jobs[4]["public_id"])["status"] == "queued"
 
 
 @pytest.mark.parametrize(
@@ -10032,10 +10054,17 @@ def test_official_profile_waits_on_undersized_host_without_downgrade(
         max_host_memory_mb=host_memory_mb,
     )
     request = dispatcher.public_request(job["public_id"])
-    assert request["request"]["blocked_code"] == "host_resources_insufficient"
-    assert "不会降档" in request["blocked_reason"]
-    queued = dispatcher.public_snapshot()["queued"]
-    assert queued[0]["blocked_reason"] == request["blocked_reason"]
+    if host_memory_mb < 4096:
+        # 内存维度严格不超卖：略小的内存预算仍然阻塞且不降档。
+        assert request["request"]["blocked_code"] == "host_resources_insufficient"
+        assert "不会降档" in request["blocked_reason"]
+        queued = dispatcher.public_snapshot()["queued"]
+        assert queued[0]["blocked_reason"] == request["blocked_reason"]
+    else:
+        # CPU 维度经有界超卖上界（预算×2）：3999 毫核的宿主不再阻塞
+        # 4000 毫核向量，但 Store 直连预算仍严格按 3999 拒绝（上文断言）。
+        assert "blocked_code" not in request["request"]
+        assert not request["request"].get("blocked_reason")
 
     claimed = store.executions.claim_next(
         max_match_slots=1,
