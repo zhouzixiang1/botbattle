@@ -385,8 +385,9 @@ test('mobile opponent cards and pagination stay touch-sized without root overflo
   await expect(pagination.getByRole('button', { name: '第 1 页', exact: true })).toHaveAttribute('aria-current', 'page')
   for (const button of await pagination.getByRole('button').all()) {
     const box = await button.boundingBox()
-    expect(box?.height).toBeGreaterThanOrEqual(44)
-    expect(box?.width).toBeGreaterThanOrEqual(44)
+    // firefox 保留亚像素布局精度（2.75rem = 43.99997px），按 CSS 像素取整比较。
+    expect(Math.round(box?.height ?? 0)).toBeGreaterThanOrEqual(44)
+    expect(Math.round(box?.width ?? 0)).toBeGreaterThanOrEqual(44)
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
 
