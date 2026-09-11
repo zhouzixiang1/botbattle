@@ -6063,6 +6063,26 @@ async def finish_contest(
     return {"contest": _contest_for_api(contest)}
 
 
+@router.post("/api/contests/{contest_id}/converge")
+async def converge_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    """组织者/admin 强制收束：作废未打对阵、中止在途、按已完场固化正式名次。"""
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    try:
+        contest = await _contests(request).converge(contest_id)
+    except ValueError as e:
+        audit_log(request, "contest_converge", result="fail",
+                  user=user["username"], target=str(contest_id))
+        raise _contest_write_http_error(e) from e
+    audit_log(request, "contest_converge", result="ok",
+              user=user["username"], target=str(contest_id))
+    return {"contest": _contest_for_api(contest)}
+
+
 @router.post("/api/contests/{contest_id}/archive")
 async def archive_contest(
     contest_id: int, request: Request, user=Depends(require_organizer)

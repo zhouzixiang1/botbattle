@@ -5188,6 +5188,10 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_contests_showcase_key "
         "ON contests(showcase_key) WHERE showcase_key IS NOT NULL"
     )
+    # 强制收束：组织者/admin 把未开打的对阵标记为“未进行”的合法缺席。
+    # status 保持 pending/running/completed 三值不动，避免触碰所有
+    # ``status<>'completed'`` 形态的门禁；void 行永不派发、不产 Match。
+    _add_col(conn, "contest_pairings", "voided_at", "TEXT")
     # 组织者归档：NULL=未归档；非空=归档时间。软隐藏（默认列表排除、
     # 显式筛选可见），不改生命周期状态，详情与历史数据保持可达。
     _add_col(conn, "contests", "archived_at", "TEXT")
@@ -12764,6 +12768,39 @@ class Store:
                 if row:
                     return True
             return False
+
+    def active_contest_match_ids(self, contest_id: int) -> list[str]:
+        """列出赛事全部 pending/running 对局 ID（强制收束作废在途用）。"""
+        ids: list[str] = []
+        with self._tx() as c:
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                ids.extend(
+                    str(row[0])
+                    for row in c.execute(
+                        f"SELECT id FROM {table} WHERE contest_id=? "
+                        "AND status IN (?,?)",
+                        (contest_id, STATUS_PENDING, STATUS_RUNNING),
+                    )
+                )
+        return ids
+
+    def void_unfinished_contest_pairings(self, contest_id: int) -> int:
+        """把赛事所有未完成对阵标记为“未进行”（强制收束专用，幂等）。
+
+        只覆盖尚未绑定终态 Match 的行：pending 未派发、以及刚被 abort 的
+        在途行（其 status 仍是 running 且无合法计分结果）。已 completed
+        的行绝不动；重复调用对已 void 行无效果。
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            cursor = c.execute(
+                "UPDATE contest_pairings SET voided_at=? "
+                "WHERE contest_id=? AND voided_at IS NULL "
+                "AND status='pending' AND match_id IS NULL",
+                (_now(), int(contest_id)),
+            )
+            return int(cursor.rowcount)
 
     def list_liked_top_matches(self, limit: int = 10) -> list[dict]:
         """对局点赞排行榜（跨三表 UNION ALL，likes_count>0 的已完成对局）。"""
@@ -21061,6 +21098,9 @@ class Store:
                     raise ValueError("阶段决策轮空对阵未权威裁决")
                 continue
             participants.add(entry_b_id)
+            if pairing.get("voided_at") is not None:
+                # converge 的合法缺席：成员计入 cohort 覆盖，但不要求赛果。
+                continue
             if (
                 not isinstance(pairing.get("match_id"), str)
                 or not pairing["match_id"]
@@ -21122,6 +21162,9 @@ class Store:
                 or pairing_stage_idx >= len(stages)
             ):
                 raise ValueError("赛事终态恢复对阵阶段坐标损坏")
+            if pairing.get("voided_at") is not None:
+                # converge 的合法缺席：无赛果要求，也不参与绑定复查。
+                continue
             stage_type = stages[pairing_stage_idx].get("type")
             entry_a_id = exact_nonnegative_int(pairing.get("entry_a_id"))
             raw_entry_b_id = pairing.get("entry_b_id")

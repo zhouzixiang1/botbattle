@@ -618,6 +618,24 @@ class ExecutionRepository:
             ),
         )
 
+    def cancel_queued_jobs_for_contest(self, contest_id: int, *, reason: str) -> int:
+        """公开入口：取消某赛事全部排队中的执行 job（强制收束）。
+
+        与私有 seal 版同一 UPDATE 形态；reason 由调用方显式给出并持久化
+        到 terminal_reason/last_error，供请求方与审计解释。
+        """
+        terminal = _now()
+        with self.store._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            cursor = c.execute(
+                "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                "cancel_requested=0,terminal_reason=?,last_error=?,"
+                "next_attempt_at=NULL,terminal_at=? "
+                "WHERE source='contest' AND contest_id=? AND status='queued'",
+                (reason, reason, terminal, int(contest_id)),
+            )
+            return int(cursor.rowcount)
+
     def _terminalize_residual_terminal_contest_job_tx(
         self,
         conn: sqlite3.Connection,

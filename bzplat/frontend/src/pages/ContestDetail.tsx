@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock, Radio, Archive } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock, Radio, Archive, Flag } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchParticipants } from '@/components/MatchParticipants'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
@@ -1450,6 +1450,19 @@ export default function ContestDetail() {
     await act(`/api/contests/${targetId}/finish`, undefined, '赛事已结束')
   }
 
+  const convergeContest = async () => {
+    const targetId = id
+    if (!targetId) return
+    if (!await confirm({
+      title: '强制收束这场赛事？',
+      desc: '剩余未开打的对阵将标记为“未进行”、不再产生比赛；进行中的对局会被中止；正式名次仅按已完成的比赛计算。此操作不可撤销，且不等同于“强制结束”（后者要求全部对阵都已打完）。',
+      danger: true,
+      confirmText: '确认收束',
+    })) return
+    if (activeContestIdRef.current !== targetId) return
+    await act(`/api/contests/${targetId}/converge`, undefined, '赛事已按已完场成绩收束')
+  }
+
   const toggleArchive = async () => {
     const targetId = id
     if (!targetId || !contest) return
@@ -1979,6 +1992,26 @@ export default function ContestDetail() {
             </TooltipTrigger>
             <TooltipContent>
               由后端核验关联对局终态并执行恢复性收尾
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {isOrg && (contest.status === 'running' || contest.status === 'rest') && !isShowcase && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Button
+                  variant="destructive"
+                  disabled={busyAction}
+                  onClick={() => void convergeContest()}
+                  className="gap-1.5"
+                >
+                  <Flag className="size-4" aria-hidden="true" />
+                  强制收束赛果
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              放弃未打部分：未开打对阵作废、在途中止，按已完场出正式名次
             </TooltipContent>
           </Tooltip>
         )}
