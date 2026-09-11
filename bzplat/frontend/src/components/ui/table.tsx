@@ -18,6 +18,7 @@ function DataTable({
   viewportClassName,
   scrollLabel,
   overflow = "x",
+  density = "default",
   children,
   ...props
 }: React.ComponentProps<"div"> & {
@@ -25,11 +26,19 @@ function DataTable({
   scrollLabel?: string
   /** `both` 适合带 max-height 的局部数据窗；其 sticky 表头应使用 sticky="region"。 */
   overflow?: "x" | "both"
+  /** compact：收紧行高 token（细指针 1.875rem，触屏仍回 2.75rem）并压缩单元格纵向留白。 */
+  density?: "default" | "compact"
 }) {
   return (
     <div
       data-slot="data-table"
-      className={cn("min-w-0 overflow-hidden rounded-xl border bg-card", className)}
+      data-density={density}
+      className={cn(
+        "min-w-0 overflow-hidden rounded-xl border bg-card",
+        density === "compact" &&
+          "[--table-row-height:1.875rem] [@media(pointer:coarse)]:[--table-row-height:2.75rem] [&_[data-slot=table-cell]]:py-1",
+        className,
+      )}
       {...props}
     >
       <div
@@ -139,12 +148,17 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
   )
 }
 
-function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
+function TableRow({ className, density = "default", ...props }: React.ComponentProps<"tr"> & {
+  /** compact：压缩本行单元格纵向留白（DataTable 的表格级 compact 之外的行级用法）。 */
+  density?: "default" | "compact"
+}) {
   return (
     <tr
       data-slot="table-row"
+      data-density={density}
       className={cn(
         "h-[var(--table-row-height)] border-b transition-colors duration-150 hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        density === "compact" && "[&>td]:py-1",
         className
       )}
       {...props}

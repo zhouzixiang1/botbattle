@@ -101,7 +101,7 @@ export default function Register() {
             </Button>
             <p className="text-center text-sm text-muted-foreground sm:col-span-2">
               已有账号？{' '}
-              <Link to="/login" className="font-medium text-primary hover:underline">去登录</Link>
+              <Link to="/login" className="inline-flex min-h-11 items-center font-medium text-primary hover:underline">去登录</Link>
             </p>
           </form>
         </CardContent>

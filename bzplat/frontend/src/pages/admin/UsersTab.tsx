@@ -194,9 +194,9 @@ export default function UsersTab() {
             {filtered.map((u, index) => (
               <TableRow key={u.id} className="hover:bg-accent">
                 <TableCell className="px-2.5 py-1.5 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
-                <TableCell className="px-2.5 py-1.5">
-                  <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-primary hover:underline">
-                    {u.username}
+                <TableCell className="max-w-[11rem] px-2.5 py-1.5">
+                  <Link to={`/user/${encodeURIComponent(u.username)}`} className="block min-w-0 font-medium text-primary hover:underline">
+                    <OverflowText tooltip={u.username} tooltipFocusable={false}>{u.username}</OverflowText>
                   </Link>
                 </TableCell>
                 <TableCell className="max-w-[11rem] px-2.5 py-1.5 text-muted-foreground">
@@ -206,7 +206,7 @@ export default function UsersTab() {
                   {hasRealName(u) ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <span className="cursor-help underline decoration-dotted underline-offset-2">
+                        <span tabIndex={0} className="cursor-help underline decoration-dotted underline-offset-2">
                           {u.real_name}
                         </span>
                       </TooltipTrigger>

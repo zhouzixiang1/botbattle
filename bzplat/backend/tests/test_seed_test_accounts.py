@@ -141,3 +141,39 @@ def test_seed_uploads_default_and_relative_paths_follow_database(tmp_path):
         worktree, str(db_path), "custom-uploads"
     )
     assert relative_uploads == (db_path.parent / "custom-uploads").resolve()
+
+
+def test_reset_execution_control_resumes_paused_isolated_copy(tmp_path):
+    """--reset-execution-control 经正式 resume() 事务复位继承的暂停态。"""
+    from bzplat.backend.store.execution import ExecutionRepository
+
+    db_path = tmp_path / "qa-copy.db"
+    store = Store(str(db_path))
+    repo = ExecutionRepository(store)
+    repo.pause("Docker 容器状态不确定，需要精确清场")
+    paused = repo.control()
+    assert paused["dispatcher_state"] == "paused"
+    store.close()
+
+    import sys
+
+    argv_backup = sys.argv
+    try:
+        sys.argv = [
+            "seed_test_accounts.py",
+            "--db",
+            str(db_path),
+            "--reset-execution-control",
+        ]
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+    except SystemExit as exc:  # 成功路径以 exit 0 结束
+        assert exc.code in (0, None), exc.code
+    finally:
+        sys.argv = argv_backup
+
+    store = Store(str(db_path))
+    resumed = ExecutionRepository(store).control()
+    assert resumed["dispatcher_state"] == "running"
+    assert resumed["accepting"] == 1
+    assert resumed["pause_reason"] == ""
+    store.close()

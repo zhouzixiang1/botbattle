@@ -102,7 +102,7 @@ export default function Notifications() {
     return (
       <PageFrame layout="account-notifications-guest">
         <PageHeader title="通知" description="登录后查看对局结果、赛事与系统消息。" />
-        <DataRegion title="通知中心" className="mx-auto w-full max-w-5xl"><EmptyState text="请先登录" icon={<Bell className="size-5 opacity-50" />} className="py-8" /></DataRegion>
+        <DataRegion title="通知中心" className="mx-auto w-full max-w-5xl" contentClassName="space-y-3 px-4 py-6"><EmptyState text="请先登录" icon={<Bell className="size-5 opacity-50" />} className="py-3" /><div className="flex min-w-0 justify-center"><Button asChild size="sm" className="max-sm:min-h-11"><Link to="/login">前往登录</Link></Button></div></DataRegion>
       </PageFrame>
     )
   }
@@ -145,10 +145,10 @@ export default function Notifications() {
                         <span aria-hidden="true" className="size-2 rounded-full bg-primary" />未读
                       </span>
                     )}
-                    <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="min-w-0 text-sm">{item.title}</EntityName>
+                    <EntityName lines={2} tooltip={item.title} tooltipFocusable={false} className="min-w-0 text-sm">{item.title}</EntityName>
                     <Badge variant="secondary">{NOTIFICATION_LABELS[item.type] || '系统'}</Badge>
                   </span>
-                  {item.body && <OverflowText lines={2} tooltip={false} className="mt-0.5 text-sm text-muted-foreground">{item.body}</OverflowText>}
+                  {item.body && <OverflowText lines={2} tooltip={item.body} className="mt-0.5 text-sm text-muted-foreground">{item.body}</OverflowText>}
                   <time className="mt-0.5 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.created_at)}</time>
                 </span>
               )

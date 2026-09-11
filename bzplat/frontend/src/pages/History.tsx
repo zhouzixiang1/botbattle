@@ -138,15 +138,16 @@ export default function History() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {matches.map((match) => (
+                    {matches.map((match, index) => (
                       <TableRow
                         key={match.id}
                         data-testid="history-match-row"
                         data-match-type={match.match_type || 'unknown'}
-                        className="[&>td]:py-1"
+                        density="compact"
                       >
                         <TableCell className="whitespace-nowrap">
                           <div className="flex min-w-0 flex-nowrap items-center gap-x-2 whitespace-nowrap">
+                            <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">#{(page - 1) * PAGE_SIZE + index + 1}</span>
                             <time className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</time>
                             <span className="whitespace-nowrap text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
                             <MatchNatureBadge matchType={match.match_type} source={match} />
@@ -186,6 +187,7 @@ export default function History() {
               {matches.map((match, index) => (
                 <li
                   key={match.id}
+                  data-testid="history-match-card"
                   data-match-type={match.match_type || 'unknown'}
                   className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                 >
@@ -208,12 +210,11 @@ export default function History() {
                       <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
                     </div>
                   </div>
-                  <Link
-                    className="inline-flex min-w-0 shrink-0 items-center justify-center whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium text-primary hover:bg-accent"
-                    to={`/match/${encodeURIComponent(match.id)}`}
-                  >
-                    {match.status === 'running' || match.status === 'pending' ? '观赛' : '打开回放'}
-                  </Link>
+                  <Button asChild variant="ghost" size="xs" className="shrink-0 whitespace-nowrap text-primary">
+                    <Link to={`/match/${encodeURIComponent(match.id)}`}>
+                      {match.status === 'running' || match.status === 'pending' ? '观赛' : '打开回放'}
+                    </Link>
+                  </Button>
                 </li>
               ))}
             </ul>

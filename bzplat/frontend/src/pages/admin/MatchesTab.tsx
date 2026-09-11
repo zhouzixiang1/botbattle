@@ -194,10 +194,7 @@ export default function MatchesTab() {
                 {/* min-w-40 防止 auto 表格布局在窄视口把对阵列压缩到只剩省略号；
                     不足的宽度交给外层 overflow-x-auto 滚动区消化。 */}
                 <TableCell className="w-72 min-w-40 whitespace-normal px-2 py-1 text-foreground">
-                  <MatchParticipants
-                    source={m}
-                    className="[&_[data-match-participant]]:py-0 [&_[data-match-participant]>div+div]:mt-0"
-                  />
+                  <MatchParticipants source={m} dense />
                 </TableCell>
                 <TableCell className="w-24 whitespace-normal px-2 py-1 text-xs text-muted-foreground">
                   <div>{gameLabel(m.game_id)}</div>
@@ -236,7 +233,7 @@ export default function MatchesTab() {
                   {incidentCount > 0 && (
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-destructive">
                       <Badge variant="destructive" className="text-[10px]">Bot 技术故障 {incidentCount} 次</Badge>
-                      {sample && <span>座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</span>}
+                      {sample && <span className="break-words [overflow-wrap:anywhere]">座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</span>}
                     </div>
                   )}
                 </TableCell>

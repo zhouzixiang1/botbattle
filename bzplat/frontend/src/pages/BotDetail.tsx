@@ -161,7 +161,7 @@ function BotPerspectiveOutcome({ match, botId }: { match: MatchRow; botId: numbe
         ? 'destructive'
         : 'outline'
   return (
-    <Badge variant={variant} className="px-1.5 text-[10px]">{label}</Badge>
+    <Badge variant={variant} className="px-1.5 text-[11px]">{label}</Badge>
   )
 }
 
@@ -210,7 +210,7 @@ function DenseParticipant({ source, side, state }: { source: MatchRow; side: 0 |
     >
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
         {nameNode}
-        {state === 'winner' && <Badge className="h-4 shrink-0 px-1 text-[9px]">胜</Badge>}
+        {state === 'winner' && <Badge className="h-5 shrink-0 px-1 text-[11px]">胜</Badge>}
         {ownerText && (
           <OverflowText lines={1} tooltip={ownerText} tooltipFocusable={false} className="w-full min-w-0 flex-none text-xs text-muted-foreground lg:w-auto lg:max-w-[14rem]">
             {participant.ownerName ? (
@@ -618,7 +618,7 @@ export default function BotDetail() {
                 <span className="inline-flex min-w-0 items-center gap-1">所有者
                   {profile.owner_name ? (
                     <Link to={`/user/${encodeURIComponent(profile.owner_name)}`} className="min-w-0 font-medium text-primary">
-                      <OverflowText lines={2} tooltip={false} tooltipFocusable={false}>{profile.owner_display || profile.owner_name}</OverflowText>
+                      <OverflowText lines={2} tooltip={profile.owner_display || profile.owner_name} tooltipFocusable={false}>{profile.owner_display || profile.owner_name}</OverflowText>
                     </Link>
                   ) : '—'}
                 </span>
@@ -698,10 +698,7 @@ export default function BotDetail() {
                   </div>
                   <div className="hidden md:block">
                     {/* 桌面密度档：30px 行（触屏保持 44px 全局硬顶） */}
-                    <DataTable
-                      className="rounded-none border-0 [--table-row-height:1.875rem] [&_[data-slot=table-cell]]:py-1 [@media(pointer:coarse)]:[--table-row-height:2.75rem]"
-                      scrollLabel="Bot 对局历史"
-                    >
+                    <DataTable density="compact" className="rounded-none border-0" scrollLabel="Bot 对局历史">
                       <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
                 <TableHeader>
                   <TableRow>
@@ -733,7 +730,9 @@ export default function BotDetail() {
                             <MatchNatureBadge matchType={m.match_type} source={m} />
                           </TableCell>
                           <TableCell className="text-right">
-                            <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-xs font-medium text-primary hover:underline">回放</Link>
+                            <Button asChild variant="ghost" size="xs" className="text-primary">
+                              <Link to={`/match/${encodeURIComponent(m.id)}`}>回放</Link>
+                            </Button>
                           </TableCell>
                         </TableRow>
                       )
@@ -787,10 +786,7 @@ export default function BotDetail() {
                   </div>
                 <div className="hidden md:block">
                   {/* 与对局历史表同一桌面密度档（触屏保持 44px） */}
-                  <DataTable
-                    className="rounded-none border-0 [--table-row-height:1.875rem] [&_[data-slot=table-cell]]:py-1 [@media(pointer:coarse)]:[--table-row-height:2.75rem]"
-                    scrollLabel="Bot 对手战绩"
-                  >
+                  <DataTable density="compact" className="rounded-none border-0" scrollLabel="Bot 对手战绩">
                     <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
                         <TableHeader>
                           <TableRow>

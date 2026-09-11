@@ -487,6 +487,7 @@ export function ExecutionQueuePanel({
   lastUpdatedAt,
   compactOnMobile = false,
   compactCapacity = false,
+  dense = false,
 }: {
   snapshot: ExecutionQueueSnapshot | null
   loading?: boolean
@@ -500,6 +501,8 @@ export function ExecutionQueuePanel({
   compactOnMobile?: boolean
   /** 公开页单行容量条；管理端保留四卡容量网格（e2e 断言依赖）。 */
   compactCapacity?: boolean
+  /** 桌面端（md+）高密度档：收紧头表、容量计与任务行留白；<md 保持默认密度。 */
+  dense?: boolean
 }) {
   const queued = maxQueued == null
     ? snapshot?.queued || []
@@ -592,7 +595,20 @@ export function ExecutionQueuePanel({
 
   return (
     <Card
-      className={cn('gap-0 overflow-hidden py-0', className)}
+      className={cn(
+        'gap-0 overflow-hidden py-0',
+        // dense 档只收紧留白，不改结构、文案与语义；选择器收编在本组件内，
+        // 消费方传语义 prop 而不是从父级伸进本组件的 DOM。
+        dense && [
+          'md:[&>div]:px-3 md:[&>div]:py-2',
+          'md:[&_dl]:gap-1.5 md:[&_dl>div]:px-2 md:[&_dl>div]:py-1',
+          'md:[&_section]:p-1.5',
+          'md:[&_section>div:first-child]:mb-1',
+          'md:[&_li]:px-2 md:[&_li]:py-0.5',
+          'md:[&_li>div:nth-child(2)]:mt-0.5',
+        ],
+        className,
+      )}
       data-testid="execution-queue-panel"
       aria-busy={loading}
     >

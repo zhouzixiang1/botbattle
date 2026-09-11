@@ -200,7 +200,7 @@ export default function Home() {
                     />
                     <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
                       <time className="min-w-0 font-mono tabular-nums">{fmtTime(match.created_at)}</time>
-                      <Link className="shrink-0 whitespace-nowrap font-medium text-primary" to={`/match/${encodeURIComponent(match.id)}`}>
+                      <Link className="inline-flex min-h-11 shrink-0 items-center whitespace-nowrap px-1 font-medium text-primary" to={`/match/${encodeURIComponent(match.id)}`}>
                         {match.status === 'pending' || match.status === 'running' ? '观赛' : '详情'}
                       </Link>
                     </div>

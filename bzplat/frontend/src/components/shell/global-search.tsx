@@ -44,6 +44,8 @@ interface SearchMatch extends MatchParticipantSource, MatchOutcomeSource {
  * 文字截断、不带 ⌘K 快捷键徽章（省横向空间，Cmd+K 仍可用）。
  * 默认（顶栏）：图标按钮(<md) + 文字按钮(≥md) 两态。
  */
+const IS_APPLE = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
+
 export function GlobalSearch({
   compact = false,
   hotkey = false,
@@ -60,6 +62,7 @@ export function GlobalSearch({
   const [users, setUsers] = useState<SearchUser[]>([])
   const [bots, setBots] = useState<SearchBot[]>([])
   const [matches, setMatches] = useState<SearchMatch[]>([])
+  const [searchError, setSearchError] = useState(false)
   const nav = useNavigate()
 
   // Cmd/Ctrl + K 唤起
@@ -97,11 +100,13 @@ export function GlobalSearch({
         setUsers(u.users ?? [])
         setBots(b.bots ?? [])
         setMatches(m.matches ?? [])
+        setSearchError(false)
       } catch {
         if (!cancelled) {
           setUsers([])
           setBots([])
           setMatches([])
+          setSearchError(true)
         }
       }
     }, 250)
@@ -166,7 +171,7 @@ export function GlobalSearch({
             <Search aria-hidden="true" className="size-4 shrink-0" />
             <span className="truncate">搜索 Bot、用户、对局…</span>
             <kbd aria-hidden="true" className="ml-2 shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
-              ⌘K
+              {IS_APPLE ? '⌘K' : 'Ctrl K'}
             </kbd>
           </button>
         </>
@@ -174,7 +179,7 @@ export function GlobalSearch({
       <CommandDialog open={open} onOpenChange={setOpen}>
         <CommandInput placeholder="搜索 Bot、用户、对局…" value={q} onValueChange={setQ} />
         <CommandList>
-          <CommandEmpty>{q.trim() ? '无匹配结果' : '输入关键词搜索'}</CommandEmpty>
+          <CommandEmpty>{searchError ? '搜索失败，请重试' : q.trim() ? '无匹配结果' : '输入关键词搜索'}</CommandEmpty>
           {users.length > 0 && (
             <CommandGroup heading="用户">
               {users.slice(0, 6).map((u) => (

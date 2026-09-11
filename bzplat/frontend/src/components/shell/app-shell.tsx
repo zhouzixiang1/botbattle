@@ -268,7 +268,7 @@ export function AppShell() {
                       </TooltipContent>
                     </Tooltip>
                     {user?.role === 'admin' && (
-                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+                      <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-xs font-medium text-destructive">
                         admin
                       </span>
                     )}

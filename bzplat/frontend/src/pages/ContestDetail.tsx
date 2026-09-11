@@ -347,7 +347,7 @@ interface Entry {
   identity_captured_at?: string | null
 }
 
-const EXPORT_LINK_CLASS = 'whitespace-normal max-sm:h-auto max-sm:min-h-[44px] max-sm:w-full max-sm:py-2 max-sm:text-center max-sm:leading-snug'
+const EXPORT_LINK_CLASS = 'whitespace-normal min-h-11 sm:min-h-[var(--control-height)] max-sm:h-auto max-sm:w-full max-sm:py-2 max-sm:text-center max-sm:leading-snug'
 
 function identitySourceLabel(source: Entry['identity_source']): string {
   if (source === 'registration_profile') return '报名时资料快照'
@@ -2215,7 +2215,7 @@ export default function ContestDetail() {
                 legacyAggregate={currentStageLegacyAggregate}
               />
             ) : isElimStage ? (
-              <BracketTree pairings={stagePairings} duplicate={currentStageDuplicate} />
+              <BracketTree key={stageTab} pairings={stagePairings} duplicate={currentStageDuplicate} />
             ) : (
               <PairingFoldedList
                 pairings={stagePairings}
@@ -2332,7 +2332,7 @@ export default function ContestDetail() {
                           <Button
                             size="xs"
                             variant="ghost"
-                            className="text-destructive"
+                            className="min-h-11 text-destructive [@media(pointer:fine)_and_(min-width:40rem)]:min-h-8"
                             disabled={busyAction}
                             onClick={() => void removeEntry(e)}
                           >
@@ -2476,7 +2476,7 @@ export default function ContestDetail() {
                       <TableHead>积分</TableHead>
                       <TableHead className="min-w-[13rem]">{hasInvalidStageContract ? '计分构成' : hasLegacyAggregateStage ? '计分构成（含旧版系列）' : '计分场构成'}</TableHead>
                       <TableHead className="min-w-[22rem]">破同分依据</TableHead>
-                      <TableHead className="hidden md:table-cell">奖项</TableHead>
+                      <TableHead>奖项</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2525,7 +2525,7 @@ export default function ContestDetail() {
                             : '—'}
                         </TableCell>
                         <TableCell className="max-w-[12rem] py-1">
-                          {result.bot_id ? (
+                          {result.bot_id != null ? (
                             <Link
                               to={`/bot/${result.bot_id}`}
                               className="block min-w-0 hover:text-primary"
@@ -2580,7 +2580,7 @@ export default function ContestDetail() {
                             rankingMode={sourceRankingMode ?? 'overall'}
                           />
                         </TableCell>
-                        <TableCell className="hidden py-1 text-muted-foreground md:table-cell">
+                        <TableCell className="py-1 text-muted-foreground">
                           {result.awarded || '—'}
                         </TableCell>
                       </TableRow>
@@ -2667,7 +2667,7 @@ function StageStandingPanel({
                   </TableCell>
                   <TableCell className="max-w-0 px-2 py-1">
                     <div className="flex min-w-0 items-center gap-x-1.5">
-                      {row.bot_id ? (
+                      {row.bot_id != null ? (
                         <Link to={`/bot/${row.bot_id}`} className="block min-w-0 flex-1 text-xs hover:text-primary">
                           <EntityName tooltip={row.bot_name || '未命名 Bot'} tooltipFocusable={false} className="text-xs">
                             {row.bot_name || '未命名 Bot'}

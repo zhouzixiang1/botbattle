@@ -18,7 +18,7 @@ export default function AuthShell({
     <PageFrame
       width="readable"
       layout={layout}
-      className="min-h-[calc(100dvh-var(--shell-header-height)-6rem)] justify-center gap-6 py-2 [&_button]:min-h-10 sm:py-4"
+      className="min-h-[calc(100dvh-var(--shell-header-height)-6rem)] justify-center gap-6 py-2 [&_button]:min-h-[var(--control-height-lg)] sm:py-4"
     >
       <PageHeader
         title={title}

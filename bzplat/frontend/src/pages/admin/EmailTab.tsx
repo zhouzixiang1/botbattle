@@ -48,6 +48,7 @@ import { Identifier } from '@/components/ui/overflow-text'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Switch } from '@/components/ui/switch'
+import { OverflowText } from '@/components/ui/overflow-text'
 import { Textarea } from '@/components/ui/textarea'
 import { useConfirm } from '@/hooks/use-confirm'
 import { fmtTime } from '@/lib/format'
@@ -367,7 +368,7 @@ function BroadcastCompose({ onCreated, onClose }: { onCreated: (publicId: string
           {audienceKind === 'selected_users' && <div className="space-y-1.5"><Label htmlFor="broadcast-users">公开用户名</Label><Textarea id="broadcast-users" value={usernames} onChange={(event) => { setUsernames(event.target.value); invalidate() }} rows={5} placeholder="每行一个，也可用逗号分隔" /></div>}
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="flex min-h-10 items-center gap-2"><Switch checked disabled aria-label="站内信必选" /><span className="text-sm">站内信（必选）</span></div>
-            <div className="mt-1 flex min-h-10 items-center gap-2"><Switch checked={email} onCheckedChange={(value) => { setEmail(value); invalidate() }} /><span className="text-sm">同时发送邮件</span></div>
+            <div className="mt-1 flex min-h-10 items-center gap-2"><Switch checked={email} onCheckedChange={(value) => { setEmail(value); invalidate() }} aria-label="同时发送邮件" className="before:absolute before:-inset-x-3 before:-inset-y-3.5 before:content-['']" /><span className="text-sm">同时发送邮件</span></div>
           </div>
           <div className="space-y-1.5"><Label htmlFor="broadcast-schedule">定时发送（可选）</Label><Input id="broadcast-schedule" type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /></div>
         </div>
@@ -725,7 +726,7 @@ export default function CommunicationsTab() {
                     <div className="flex min-w-0 flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-words text-sm font-semibold">{bug.title}</h3><Badge>{BUG_STATUS_LABELS[bug.status] || bug.status}</Badge></div>
                     <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{bug.reporter_username || bug.username || '访客'}</span><span>{BUG_CATEGORY_LABELS[bug.category] || bug.category}</span><span>{BUG_IMPACT_LABELS[bug.impact] || bug.impact}</span><span className="break-all font-mono">{bug.public_id}</span></div>
                     <div className="mt-3 rounded-lg border bg-muted/20 p-3"><h4 className="mb-2 text-xs font-semibold">安全诊断摘要</h4><DiagnosticSummary bug={bug} /></div>
-                    {bug.attachments.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{bug.attachments.map((item) => <Button key={item.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(item.public_id, item.original_name)}><Paperclip className="size-3.5" /><span className="max-w-48 truncate">{item.original_name}</span></Button>)}</div>}
+                    {bug.attachments.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{bug.attachments.map((item) => <Button key={item.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(item.public_id, item.original_name)}><Paperclip className="size-3.5" /><OverflowText className="max-w-48" tooltip={item.original_name} tooltipFocusable={false}>{item.original_name}</OverflowText></Button>)}</div>}
                     {BUG_TRANSITIONS[bug.status]?.length > 0 && <div className="mt-3 grid min-w-0 gap-2 border-t pt-3 sm:grid-cols-[10rem_minmax(10rem,1fr)_auto]"><Select value={statusDraft} onValueChange={setStatusDraft}><SelectTrigger size="sm"><SelectValue placeholder="下一状态" /></SelectTrigger><SelectContent>{BUG_TRANSITIONS[bug.status].map((value) => <SelectItem key={value} value={value}>{BUG_STATUS_LABELS[value] || value}</SelectItem>)}</SelectContent></Select><Input value={statusNote} maxLength={2000} onChange={(event) => setStatusNote(event.target.value)} placeholder="处理说明（可选）" /><Button type="button" size="sm" disabled={busy || !statusDraft || (statusDraft === 'duplicate' && !duplicateOf.trim())} onClick={() => void updateBugStatus()}>更新状态</Button>{statusDraft === 'duplicate' && <Input className="sm:col-start-2" value={duplicateOf} onChange={(event) => setDuplicateOf(event.target.value)} placeholder="重复反馈的公开编号 bug_…" />}</div>}
                   </header>
                   <ThreadView thread={thread} reply={reply} onReplyChange={setReply} onSend={() => void sendReply()} sending={busy} email={replyEmail} onEmailChange={setReplyEmail} viewerKind="admin" />

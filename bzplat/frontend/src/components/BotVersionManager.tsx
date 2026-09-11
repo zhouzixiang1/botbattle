@@ -338,7 +338,7 @@ export default function BotVersionManager({
             <Label htmlFor="ver-file">程序文件（Linux x86_64 ELF）</Label>
             <label
               htmlFor="ver-file"
-              className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
+              className="flex min-h-[var(--control-height)] min-w-0 max-sm:min-h-11 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
             >
               <span className="shrink-0 font-medium text-foreground">选择文件</span>
               <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>

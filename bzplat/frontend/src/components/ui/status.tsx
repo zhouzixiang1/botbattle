@@ -92,14 +92,14 @@ export function RefreshBtn({ onClick, className }: { onClick: () => void; classN
 /* ── 状态徽章：对局/赛事/邮件等状态的统一着色 ── */
 
 const STATUS_VARIANT: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; label?: string }> = {
-  // 对局
+  // 对局：活跃态用 outline+primary 文字与终态（default 实底）区分，表格扫读可辨。
   completed: { variant: 'default', label: '已完成' },
-  running: { variant: 'default', label: '进行中' },
+  running: { variant: 'outline', label: '进行中' },
   pending: { variant: 'secondary', label: '排队中' },
   aborted: { variant: 'destructive', label: '已中止' },
   // 赛事阶段（running 与对局共用「进行中」，上方已声明）
   finished: { variant: 'default', label: '已结束' },
-  open: { variant: 'default', label: '报名中' },
+  open: { variant: 'outline', label: '报名中' },
   published: { variant: 'secondary', label: '排期已发布' },
   draft: { variant: 'secondary', label: '草稿' },
   cancelled: { variant: 'destructive', label: '已取消' },
@@ -120,7 +120,7 @@ export function StatusBadge({
 }) {
   const conf = STATUS_VARIANT[status] ?? { variant: 'secondary' as const }
   return (
-    <Badge variant={conf.variant} className={cn('text-[10px]', className)}>
+    <Badge variant={conf.variant} className={cn('text-xs', className)}>
       {conf.label ?? status}
     </Badge>
   )

@@ -1,6 +1,7 @@
 import { Clock } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
+import { OverflowText } from '@/components/ui/overflow-text'
 import type { GameAuxiliaryProps } from '@/games/base'
 import { useTickingRemaining } from '@/games/clock-tick'
 import type { PencilViewModel } from '@/games/pencil/reducer'
@@ -84,9 +85,13 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
       <div className="flex min-w-0 items-center gap-2">
         <div className="min-w-0">
           <div className="text-xs font-semibold text-foreground">局面概览</div>
-          <div data-testid="pencil-turn-status" className="truncate text-[11px] leading-tight text-muted-foreground">
+          <OverflowText
+            data-testid="pencil-turn-status"
+            tooltip={`${stateLabel}${state.extraTurn && !state.matchOver && !state.mustPass ? ' · 得分连走' : ''}`}
+            className="block text-[11px] leading-tight text-muted-foreground"
+          >
             {stateLabel}{state.extraTurn && !state.matchOver && !state.mustPass ? ' · 得分连走' : ''}
-          </div>
+          </OverflowText>
         </div>
         <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground">{edgeProgress}%</span>
       </div>
@@ -116,11 +121,11 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
               className={`min-w-0 rounded-lg border px-2.5 py-2 2xl:py-1.5 ${tint} ${isActing ? 'border-primary/50 ring-2 ring-primary/25' : 'border-border'}`}
             >
               <div className="flex min-w-0 items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{identity.subject}</span>
+                <OverflowText tooltip={identity.subject} tooltipFocusable={false} className="min-w-0 flex-1 text-xs font-semibold text-foreground">{identity.subject}</OverflowText>
                 <span className={`ml-auto shrink-0 font-mono text-xl font-bold leading-none ${color}`}>{state.scores[seat]}</span>
               </div>
               <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
-                {identity.owner && <span className="min-w-0 truncate">{identity.owner}</span>}
+                {identity.owner && <OverflowText tooltip={identity.owner} tooltipFocusable={false} className="min-w-0">{identity.owner}</OverflowText>}
                 {identity.owner && <span aria-hidden="true">·</span>}
                 <Badge variant="outline" className={`shrink-0 px-1.5 text-[10px] leading-tight ${color}`}>
                   {seat === 0 ? '先手 · 红' : '后手 · 蓝'} · {identity.seat}

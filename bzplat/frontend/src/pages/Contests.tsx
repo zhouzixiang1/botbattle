@@ -871,7 +871,7 @@ export default function Contests() {
                         : '仅建立两场独立点格棋赛事之间的导航；不要求来源已结束，不复制名单、成绩或晋级关系。'}
                     </p>
                     {sourceContestsHasMore && !sourceContestsLoading && !sourceContestsError && (
-                      <p role="status" className="text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+                      <p role="status" className="text-xs leading-relaxed text-warning-foreground">
                         候选超过 {SOURCE_CANDIDATE_LIMIT} 项，请输入更具体的标题或精确赛事 ID。
                       </p>
                     )}

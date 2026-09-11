@@ -1,6 +1,7 @@
 import { Clock } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
+import { OverflowText } from '@/components/ui/overflow-text'
 import type { GameAuxiliaryProps } from '@/games/base'
 import { useTickingRemaining } from '@/games/clock-tick'
 import { gomokuSeatDetail, type GomokuViewModel } from '@/games/gomoku/reducer'
@@ -38,16 +39,18 @@ export function GomokuReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
             className={`min-w-0 rounded-lg border px-2.5 py-2 ${acting ? 'border-primary/50 bg-primary/5 ring-2 ring-primary/20' : 'border-border bg-muted/25'}`}
           >
             <div className="flex min-w-0 items-center gap-2">
-              <span title={eventSeatSubject(seats, seat)} className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+              <OverflowText tooltip={eventSeatSubject(seats, seat)} tooltipFocusable={false} className="min-w-0 flex-1 text-xs font-semibold text-foreground">
                 {eventSeatSubject(seats, seat)}
-              </span>
+              </OverflowText>
               <span className="inline-flex shrink-0 items-center gap-1 font-mono text-sm font-semibold tabular-nums text-foreground">
                 <Clock aria-hidden="true" className="size-3.5 text-muted-foreground" />
                 {formatClock(timeRemaining[seat])}
               </span>
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-              <span title={gomokuSeatDetail(state, seat)} className="min-w-0 flex-1 truncate">{gomokuSeatDetail(state, seat)}</span>
+              <OverflowText tooltip={gomokuSeatDetail(state, seat)} tooltipFocusable={false} className="min-w-0 flex-1">
+                {gomokuSeatDetail(state, seat)}
+              </OverflowText>
               {acting && !timedOut && <Badge variant="outline">当前行动</Badge>}
               {timedOut && <Badge variant="destructive">棋钟耗尽</Badge>}
             </div>

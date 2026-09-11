@@ -146,7 +146,7 @@ export default function Dashboard() {
       desc: '将删除当前平台实例标签下的所有容器，确认清零后补偿中断任务并恢复派发。',
       confirmText: '清场并恢复',
       danger: true,
-      buttonClassName: 'min-h-12 sm:min-h-9',
+      buttonClassName: 'min-h-12 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-9',
     })) return
     const revision = ++requestRevision.current
     queueMutationInFlight.current = true
@@ -180,7 +180,7 @@ export default function Dashboard() {
       title: '准备部署维护',
       desc: '平台会立即停止接收新任务并关闭自动排位。当前对局继续到自然结束，等待中的任务不会丢失。',
       confirmText: '开始排空',
-      buttonClassName: 'min-h-12 sm:min-h-9',
+      buttonClassName: 'min-h-12 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-9',
     })) return
     if (queueMutationInFlight.current) return
     const revision = ++requestRevision.current
