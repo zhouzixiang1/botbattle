@@ -411,7 +411,7 @@ function CapacityMeter({ capacity, compact = false }: { capacity: ExecutionCapac
       </dl>
       {showHostResources && (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          主机 CPU / 内存按各任务入队时冻结的资源向量记账，并非实时占用；满载时新任务会等待资源释放。
+          主机 CPU / 内存按各任务入队时冻结的资源向量记账，并非实时占用；CPU 准入含 ×2 有界超卖（内存严格不超卖），满载时新任务会等待资源释放。
         </p>
       )}
     </div>

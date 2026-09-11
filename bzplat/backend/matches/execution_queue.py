@@ -20,6 +20,7 @@ from bzplat.backend.runtime.config import (
     EXECUTION_AGING_SECONDS,
     EXECUTION_AUTO_LOOKAHEAD,
     EXECUTION_CONTEST_SHARE_SLOTS,
+    EXECUTION_CPU_OVERCOMMIT_RATIO,
     EXECUTION_POLL_SECONDS,
     EXECUTION_USER_ACTIVE_LIMIT,
     MAX_CONCURRENT_MATCHES,
@@ -107,6 +108,12 @@ class ExecutionDispatcher:
             max(1, int(max_host_memory_mb))
             if max_host_memory_mb is not None
             else detected_budget.memory_mb,
+        )
+        # CPU 准入上界：在（已可能被显式注入收紧的）探测预算上应用有界
+        # 超卖系数，仅作用于 CPU 维度；claim 准入与容量投影共用该上界，
+        # 内存预算严格不乘系数（内存不可压缩，超卖即 OOM 风险）。
+        self.admission_host_cpu_millis = int(
+            self.max_host_cpu_millis * EXECUTION_CPU_OVERCOMMIT_RATIO
         )
         self._wake = asyncio.Event()
         self._lock_fd: int | None = None
@@ -593,7 +600,7 @@ class ExecutionDispatcher:
                 user_active_limit=EXECUTION_USER_ACTIVE_LIMIT,
                 contest_share_slots=EXECUTION_CONTEST_SHARE_SLOTS,
                 claim_class="foreground",
-                max_host_cpu_millis=self.max_host_cpu_millis,
+                max_host_cpu_millis=self.admission_host_cpu_millis,
                 max_host_memory_mb=self.max_host_memory_mb,
             )
             if job is None:
@@ -630,7 +637,7 @@ class ExecutionDispatcher:
                 user_active_limit=EXECUTION_USER_ACTIVE_LIMIT,
                 contest_share_slots=EXECUTION_CONTEST_SHARE_SLOTS,
                 claim_class="auto",
-                max_host_cpu_millis=self.max_host_cpu_millis,
+                max_host_cpu_millis=self.admission_host_cpu_millis,
                 max_host_memory_mb=self.max_host_memory_mb,
             )
             if auto_job is not None:
@@ -668,7 +675,7 @@ class ExecutionDispatcher:
             max_match_slots=self.max_match_slots,
             max_sandbox_units=self.max_sandbox_units,
             aging_seconds=EXECUTION_AGING_SECONDS,
-            max_host_cpu_millis=self.max_host_cpu_millis,
+            max_host_cpu_millis=self.admission_host_cpu_millis,
             max_host_memory_mb=self.max_host_memory_mb,
             public_id=public_id,
         )
