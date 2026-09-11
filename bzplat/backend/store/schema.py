@@ -1344,6 +1344,7 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     scheduled_at    TEXT,      -- 计划开赛时间（NULL=立即可打；逐场排期用，scheduler 到点 dispatch）
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
+    voided_at       TEXT,   -- 非空=组织者/admin 强制收束时作废（未进行的合法缺席；不另设 status 值）
     stage_idx       INTEGER NOT NULL DEFAULT 0,
     stage_key       TEXT    NOT NULL DEFAULT '',
     group_id        TEXT    NOT NULL DEFAULT '',

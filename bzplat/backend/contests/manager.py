@@ -7607,12 +7607,21 @@ class ContestManager:
         current_ranking: list[dict[str, Any]] | None = None,
         decision_revision: int | None = None,
         allow_unreached_empty_stage: bool = False,
+        allow_partial: bool = False,
     ) -> dict | None:
         """Publish one terminal status and official table behind the shared gate.
 
         ``gate_stage_idx`` is normally the persisted current stage.  Stage
         creation passes its intended target so an entirely missing next-stage
         batch cannot be hidden by the previous stage's complete graph.
+
+        ``allow_partial`` is reserved for converge: the organizer explicitly
+        abandons unplayed pairings (voided) and accepts current standings as
+        final, so the protected-final-stage gate, the configured-last-stage
+        gate and the complete-pairing-topology proof are all skipped.  The
+        caller must have already voided unplayed pairings, cancelled queued
+        jobs and aborted in-flight matches, and must re-check that no active
+        match remains.
         """
         contest = self.store.get_contest(contest_id)
         try:
@@ -7635,7 +7644,11 @@ class ContestManager:
                 exc,
             )
             return None
-        if contest and contest.get("template_id") == GOMOKU_PROTECTED_GROUP_TEMPLATE:
+        if (
+            contest
+            and contest.get("template_id") == GOMOKU_PROTECTED_GROUP_TEMPLATE
+            and not allow_partial
+        ):
             persisted_stage_idx = contest_current_stage_index(
                 contest, stage_count=len(stages)
             )
@@ -7675,7 +7688,7 @@ class ContestManager:
                 contest_id,
             )
             return None
-        if persisted_stage_idx != len(stages) - 1:
+        if persisted_stage_idx != len(stages) - 1 and not allow_partial:
             active_entries = active_contest_entries(
                 self.store.list_contest_entries(contest_id)
             )
@@ -7709,7 +7722,19 @@ class ContestManager:
                     len(stages) - 1,
                 )
                 return None
-        if self._has_unfinished_pairings(
+        if allow_partial:
+            # converge 语义：未打对阵已 void、排队 job 已取消，唯一前置是
+            # 没有任何 pending/running 对局残留（在途已被 abort 或自然完成）。
+            if self.store.contest_has_active_matches(contest_id):
+                if raise_on_unfinished:
+                    raise ValueError("赛事仍有进行中的对局未能收束")
+                logger.error(
+                    "skip %s finalization with active matches contest=%s",
+                    context,
+                    contest_id,
+                )
+                return None
+        elif self._has_unfinished_pairings(
             contest_id,
             through_stage_idx=gate_stage_idx,
         ):
@@ -7771,6 +7796,64 @@ class ContestManager:
                 contest_id,
             )
             return None
+
+    async def converge(self, contest_id: int) -> dict:
+        """组织者/admin 强制收束：放弃未打部分，按已完场固化正式名次。
+
+        与 ``finish``（恢复性收尾，要求全部该打的对局都已终态）不同，
+        converge 是裁量性收束：取消该赛事全部排队 job、把未开打对阵标记
+        为“未进行”（voided_at）、中止在途对局，然后以当前已完场成绩安装
+        阶段决策并落正式名次。语义不可撤销，仅真实赛事、仅 running/rest。
+        """
+        async with self._lock(contest_id):
+            c = self.store.get_contest(contest_id)
+            if not c:
+                raise ValueError("比赛不存在")
+            require_mutable(c)
+            if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
+                raise ValueError(
+                    f"赛事处于 {c['status']} 态，仅运行中/休息中的赛事可强制收束"
+                )
+            stages = _parse_stages(c)
+            stage_idx = contest_current_stage_index(c, stage_count=len(stages))
+            if stage_idx is None:
+                raise ValueError("赛事当前阶段游标损坏，拒绝收束")
+            # 顺序即安全：先关排队闸（claim 只取 queued），再中止在途，
+            # 最后把一切非 completed 对阵 void，杜绝收束窗口内重新派发。
+            cancelled = self.store.executions.cancel_queued_jobs_for_contest(
+                contest_id, reason="contest_converged"
+            )
+            for _ in range(3):
+                active_ids = self.store.active_contest_match_ids(contest_id)
+                if not active_ids:
+                    break
+                for match_id in active_ids:
+                    self.store.abort_match_if_active(
+                        match_id, reason="contest_converged"
+                    )
+                    # aborted 局从 pairing 解绑复位（复用既有审计语义），
+                    # 随后由 void 统一标记“未进行”；completed 行绝不受影响。
+                    self.store.reset_aborted_contest_pairing(
+                        contest_id, match_id
+                    )
+            voided = self.store.void_unfinished_contest_pairings(contest_id)
+            if self.store.contest_has_active_matches(contest_id):
+                raise ValueError("赛事仍有进行中的对局未能收束，请稍后重试")
+            result = self._finish_adjudicated_contest_locked(
+                contest_id,
+                stage_idx,
+                context="converge",
+                raise_on_unfinished=True,
+                allow_partial=True,
+            )
+            assert result is not None  # raise_on_unfinished guarantees a result.
+            logger.info(
+                "contest converged id=%s cancelled_jobs=%s voided_pairings=%s",
+                contest_id,
+                cancelled,
+                voided,
+            )
+            return result
 
     def _finish_locked(self, contest_id: int) -> dict:
         """finish 的实际逻辑（调用方已持 per-contest 锁并在此重读状态）。"""
