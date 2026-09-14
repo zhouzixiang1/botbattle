@@ -20045,6 +20045,7 @@ class Store:
                 + identity_columns + ", "
                 "r.rank,COALESCE(r.points,sr.points) AS points,r.awarded,"
                 "COALESCE(r.stage_idx,sr.stage_idx) AS stage_idx,sr.stage_key, "
+                "r.tiebreaks_json AS official_tiebreaks_json, "
                 "sr.wins,sr.draws,sr.losses,sr.delta_total, "
                 "CASE WHEN r.entry_id IS NOT NULL THEN 'official' "
                 "WHEN sr.entry_id IS NOT NULL THEN 'stage' ELSE 'none' END AS result_source "

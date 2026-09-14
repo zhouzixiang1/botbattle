@@ -668,12 +668,186 @@ def test_schema2_export_is_readable_stable_safe_and_audited(tmp_path, monkeypatc
         for private in ("报名姓名", "013800000001", "报名学校", "000123")
     )
     unsupported = TestClient(app).get(
-        f"/api/contests/{contest['id']}/export?format=csv&schema=3",
+        f"/api/contests/{contest['id']}/export?format=csv&schema=4",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert unsupported.status_code == 400
     assert unsupported.headers["cache-control"] == "private, no-store, max-age=0"
     assert "content-disposition" not in unsupported.headers
+    store.close()
+
+
+def test_schema3_export_appends_frozen_official_tiebreak_chain(
+    tmp_path, monkeypatch
+):
+    """v3 = v2 列原样前缀 + 官方冻结破同分链；缺失留空、畸形 409 fail closed。"""
+    import json as _json
+
+    app = _app(tmp_path)
+    store = app.state.store
+    organizer = store.create_user(
+        "orgv3", "orgv3@e.com", hash_password("pw123456"), role="organizer"
+    )
+    store.update_user(organizer["id"], email_verified=1)
+    entrant = store.create_user(
+        "account-v3", "account-v3@e.com", hash_password("pw123456"),
+        real_name="报名姓名", phone="013800000002",
+        school="报名学校", student_id="000456",
+    )
+    bot = store.create_bot(
+        entrant["id"], "bot-v3", binary_path="/tmp/v3", format="elf",
+        game_id="holdem",
+    )
+    contest = store.create_contest(
+        "破同分导出赛", organizer_id=organizer["id"], game_id="holdem",
+        status="open", require_real_name=1,
+        stages_json=(
+            '[{"key":"final","type":"round_robin",'
+            '"scoring":"poker_3_1_0"}]'
+        ),
+    )
+    entry = store.add_contest_entry(contest["id"], entrant["id"], bot["id"])
+    _finish_export_contest(
+        store,
+        contest["id"],
+        organizer["id"],
+        entry,
+        bot,
+        label="schema3-export",
+        stage_key="final",
+    )
+    with store._tx() as connection:
+        official_rows = connection.execute(
+            "SELECT entry_id,rank,stage_idx,points,bot_id,user_id,tiebreaks_json "
+            "FROM contest_official_results WHERE contest_id=?",
+            (contest["id"],),
+        ).fetchall()
+    assert len(official_rows) == 2
+    by_entry = {row["entry_id"]: dict(row) for row in official_rows}
+    winner_row = by_entry[entry["id"]]
+    loser_entry_id = next(eid for eid in by_entry if eid != entry["id"])
+    loser_row = by_entry[loser_entry_id]
+    assert winner_row["rank"] == 1
+    winner_tiebreaks = _json.loads(winner_row["tiebreaks_json"])
+    assert winner_tiebreaks["points"] == 3.0
+    # 冠军唯一一胜来自 0 分对手：整条链都是确定的 0/1 值。
+    assert winner_tiebreaks["buchholz"] == 0.0
+    assert winner_tiebreaks["normalized_delta"] == 1.0
+
+    # 覆盖跨组键的发射：导出层只做权威投影，两种链的字段统一按数值透出。
+    extended = {
+        **winner_tiebreaks,
+        "group_rank": 2,
+        "points_rate": 0.75,
+        "opponent_strength": 0.5,
+        "normalized_delta_rate": 0.25,
+        "technical_loss_rate": 0.0,
+        "draw_order": 7,
+    }
+    store.upsert_official_result(
+        contest["id"], entry["id"], winner_row["rank"],
+        stage_idx=winner_row["stage_idx"], points=winner_row["points"],
+        bot_id=winner_row["bot_id"], user_id=winner_row["user_id"],
+        tiebreaks_json=_json.dumps(extended),
+    )
+    # 历史 legacy 官方行可能只有冻结名次而无破同分：必须整排留空而不是猜值。
+    store.upsert_official_result(
+        contest["id"], loser_entry_id, loser_row["rank"],
+        stage_idx=loser_row["stage_idx"], points=loser_row["points"],
+        bot_id=loser_row["bot_id"], user_id=loser_row["user_id"],
+        tiebreaks_json="{}",
+    )
+    _, token = app.state.auth.authenticate("orgv3", "pw123456")
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append({"action": action, **fields}),
+    )
+
+    client = TestClient(app)
+    v3 = client.get(
+        f"/api/contests/{contest['id']}/export?format=csv&schema=3",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert v3.status_code == 200, v3.text
+    assert v3.headers["content-disposition"] == (
+        f'attachment; filename="contest-{contest["id"]}-participants-v3.csv"'
+    )
+    v2 = client.get(
+        f"/api/contests/{contest['id']}/export?format=csv&schema=2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert v2.status_code == 200
+    v2_headers = next(
+        csv.reader(io.StringIO(v2.content.decode("utf-8-sig")))
+    )
+    v3_reader = csv.DictReader(io.StringIO(v3.content.decode("utf-8-sig")))
+    assert v3_reader.fieldnames[: len(v2_headers)] == v2_headers
+    tiebreak_headers = v3_reader.fieldnames[len(v2_headers):]
+    assert tiebreak_headers == [
+        "对手分(buchholz)",
+        "对手分删最低(buchholz_cut1)",
+        "胜者分(sonneborn_berger)",
+        "直接交手得分率(head_to_head)",
+        "归一分差(normalized_delta)",
+        "技术负(technical_losses)",
+        "组内名次(group_rank)",
+        "每局积分率(points_rate)",
+        "对手强度(opponent_strength)",
+        "每局归一分差率(normalized_delta_rate)",
+        "技术负率(technical_loss_rate)",
+        "冻结抽签序(draw_order)",
+    ]
+    rows_by_entry = {
+        row["报名ID(entry_id)"]: row for row in v3_reader
+    }
+    winner_csv = rows_by_entry[str(entry["id"])]
+    expected_keys = [
+        "buchholz", "buchholz_cut1", "sonneborn_berger", "head_to_head",
+        "normalized_delta", "technical_losses", "group_rank", "points_rate",
+        "opponent_strength", "normalized_delta_rate", "technical_loss_rate",
+        "draw_order",
+    ]
+    for header, key in zip(tiebreak_headers, expected_keys):
+        expected = extended.get(key)
+        assert winner_csv[header] == ("" if expected is None else str(expected))
+    loser_csv = rows_by_entry[str(loser_entry_id)]
+    assert all(loser_csv[header] == "" for header in tiebreak_headers)
+    schema3_audit = next(
+        a for a in audits if a["detail"].startswith("schema=3;")
+    )
+    assert schema3_audit["detail"] == (
+        "schema=3; rows=2; identity=required; legacy_fallback_rows=0"
+    )
+    assert schema3_audit["target"] == contest["id"]
+
+    # 畸形官方破同分快照：409 fail closed，带私有头且不产生下载文件名。
+    for malformed in (
+        '{"sonneborn_berger": "not-a-number"}',
+        "[]",
+        '{"buchholz": NaN}',
+        '{"head_to_head": 1e999}',
+        f'{{"buchholz": 1{"0" * 400}}}',
+    ):
+        store.upsert_official_result(
+            contest["id"], entry["id"], winner_row["rank"],
+            stage_idx=winner_row["stage_idx"], points=winner_row["points"],
+            bot_id=winner_row["bot_id"], user_id=winner_row["user_id"],
+            tiebreaks_json=malformed,
+        )
+        broken = client.get(
+            f"/api/contests/{contest['id']}/export?format=csv&schema=3",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert broken.status_code == 409, malformed
+        assert broken.headers["cache-control"] == "private, no-store, max-age=0"
+        assert "content-disposition" not in broken.headers
+        # 同一快照下 v2 不解析破同分，保持既有可用性。
+        still_v2 = client.get(
+            f"/api/contests/{contest['id']}/export?format=csv&schema=2",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert still_v2.status_code == 200
     store.close()
 
 
