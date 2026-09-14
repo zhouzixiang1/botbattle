@@ -55,6 +55,21 @@ const PRIVATE_HEADERS = [
   '报名时间(registered_at)',
 ] as const
 
+const PRIVATE_TIEBREAK_HEADERS = [
+  '对手分(buchholz)',
+  '对手分删最低(buchholz_cut1)',
+  '胜者分(sonneborn_berger)',
+  '直接交手得分率(head_to_head)',
+  '归一分差(normalized_delta)',
+  '技术负(technical_losses)',
+  '组内名次(group_rank)',
+  '每局积分率(points_rate)',
+  '对手强度(opponent_strength)',
+  '每局归一分差率(normalized_delta_rate)',
+  '技术负率(technical_loss_rate)',
+  '冻结抽签序(draw_order)',
+] as const
+
 const PUBLIC_HEADERS = [
   'rank',
   'overall_rank',
@@ -675,12 +690,12 @@ test('organizer downloads stable identity exports while non-organizers and non-i
       `/api/contests/${identityContestId}/official-results?format=csv`,
     )
     const organizerResults = organizer.page.getByRole('link', {
-      name: '导出组织者成绩明细（含实名报名资料）',
+      name: '导出组织者成绩明细（含破同分与实名报名资料）',
       exact: true,
     })
     await expect(organizerResults).toHaveAttribute(
       'href',
-      `/api/contests/${identityContestId}/export?format=csv&schema=2`,
+      `/api/contests/${identityContestId}/export?format=csv&schema=3`,
     )
     await expectTouchSafeWithoutRootOverflow(organizer.page, organizerResults)
     await focusByKeyboard(organizer.page, organizerResults)
@@ -689,9 +704,22 @@ test('organizer downloads stable identity exports while non-organizers and non-i
     await organizer.page.keyboard.press('Enter')
     const downloadedResults = await resultsDownloadPromise
     expect(downloadedResults.suggestedFilename()).toBe(
-      `contest-${identityContestId}-participants-v2.csv`,
+      `contest-${identityContestId}-participants-v3.csv`,
     )
-    expect(parseCsv(await readDownloadText(downloadedResults))).toEqual(privateCsv)
+    const detailCsv = parseCsv(await readDownloadText(downloadedResults))
+    expect(detailCsv.headers).toEqual([
+      ...PRIVATE_HEADERS,
+      ...PRIVATE_TIEBREAK_HEADERS,
+    ])
+    // v3 以 v2 的 29 列为严格前缀；真实赛事未完赛，官方破同分列必须整排留空。
+    expect(detailCsv.rows).toEqual(
+      privateCsv.rows.map((row) => ({
+        ...row,
+        ...Object.fromEntries(
+          PRIVATE_TIEBREAK_HEADERS.map((header) => [header, '']),
+        ),
+      })),
+    )
 
     await organizer.page.unroute(finishedDetailPattern)
     await organizer.page.unroute(`**/api/contests/${identityContestId}/official-results`)

@@ -2484,9 +2484,9 @@ export default function ContestDetail() {
                 </Button>
                 {canExportIdentity && (
                   <Button asChild variant="outline" size="sm" className={EXPORT_LINK_CLASS}>
-                    <a href={`/api/contests/${id}/export?format=csv&schema=2`} download>
+                    <a href={`/api/contests/${id}/export?format=csv&schema=3`} download>
                       <Download aria-hidden="true" className="size-3.5" />
-                      导出组织者成绩明细（含实名报名资料）
+                      导出组织者成绩明细（含破同分与实名报名资料）
                     </a>
                   </Button>
                 )}

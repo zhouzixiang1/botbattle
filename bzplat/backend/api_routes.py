@@ -5616,6 +5616,10 @@ def contest_export(
     ``schema=2`` adds stable ids, account/Bot display names, identity provenance,
     stage/result context and human-readable Chinese statuses.  PII is projected
     only when the contest itself requires real-name registration.
+    ``schema=3`` keeps every v2 column unchanged and appends the frozen official
+    tiebreak chain from ``contest_official_results.tiebreaks_json`` (the same
+    authoritative projection as the public official-results CSV; entries without
+    an official row keep empty tiebreak cells).
     """
     def private_error(status_code: int, detail: str) -> HTTPException:
         return HTTPException(
@@ -5633,9 +5637,9 @@ def contest_export(
     try:
         schema_version = 1 if schema is None else int(schema)
     except (TypeError, ValueError):
-        raise private_error(400, "仅支持 schema=1 或 schema=2") from None
-    if schema_version not in (1, 2):
-        raise private_error(400, "仅支持 schema=1 或 schema=2")
+        raise private_error(400, "仅支持 schema=1、schema=2 或 schema=3") from None
+    if schema_version not in (1, 2, 3):
+        raise private_error(400, "仅支持 schema=1、schema=2 或 schema=3")
     # 组织者鉴权（实名隐私——仅组织者/admin 可导出）。用 _extract_token + verify_session
     # 取当前用户（endpoint 无 Depends(require_user)，直接从 request 解析）。
     token = _extract_token(request)
@@ -5803,19 +5807,11 @@ def contest_export(
         "报名时间(registered_at)",
     ]
 
-    def gen_v2():
-        buf = io.StringIO()
-        writer = _csv.writer(buf)
-        yield "\ufeff"
-        writer.writerow(v2_headers)
-        yield buf.getvalue()
-        buf.seek(0); buf.truncate(0)
-        for row in rows:
-            row_requires_identity = bool(
-                int(row.get("identity_required") or 0)
-            )
-            writer.writerow(
-                [
+    def _v2_row_cells(row: dict[str, Any]) -> list:
+        row_requires_identity = bool(
+            int(row.get("identity_required") or 0)
+        )
+        return [
                     _csv_safe_cell(
                         row.get("entry_id")
                         if row.get("entry_id") is not None
@@ -5899,8 +5895,86 @@ def contest_export(
                     ),
                     _csv_safe_cell(row.get("awarded") or ""),
                     _csv_safe_cell(row.get("registered_at") or ""),
-                ]
-            )
+        ]
+
+    def gen_v2():
+        buf = io.StringIO()
+        writer = _csv.writer(buf)
+        yield "\ufeff"
+        writer.writerow(v2_headers)
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for row in rows:
+            writer.writerow(_v2_row_cells(row))
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    v3_tiebreak_columns = (
+        ("对手分(buchholz)", "buchholz"),
+        ("对手分删最低(buchholz_cut1)", "buchholz_cut1"),
+        ("胜者分(sonneborn_berger)", "sonneborn_berger"),
+        ("直接交手得分率(head_to_head)", "head_to_head"),
+        ("归一分差(normalized_delta)", "normalized_delta"),
+        ("技术负(technical_losses)", "technical_losses"),
+        ("组内名次(group_rank)", "group_rank"),
+        ("每局积分率(points_rate)", "points_rate"),
+        ("对手强度(opponent_strength)", "opponent_strength"),
+        ("每局归一分差率(normalized_delta_rate)", "normalized_delta_rate"),
+        ("技术负率(technical_loss_rate)", "technical_loss_rate"),
+        ("冻结抽签序(draw_order)", "draw_order"),
+    )
+    v3_headers = v2_headers + [label for label, _ in v3_tiebreak_columns]
+
+    def _tiebreak_cells(row: dict[str, Any]) -> list:
+        raw = row.get("official_tiebreaks_json")
+        if raw is None or raw == "":
+            return ["" for _ in v3_tiebreak_columns]
+
+        def _reject_constant(value: str):
+            raise ValueError(f"non-canonical tiebreak constant: {value}")
+
+        try:
+            parsed = json.loads(raw, parse_constant=_reject_constant)
+        except (TypeError, ValueError):
+            raise private_error(409, "正式名次破同分数据损坏，暂不可导出") from None
+        if not isinstance(parsed, dict):
+            raise private_error(409, "正式名次破同分数据损坏，暂不可导出")
+        cells: list[Any] = []
+        for _, key in v3_tiebreak_columns:
+            value = parsed.get(key)
+            if value is None:
+                cells.append("")
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise private_error(409, "正式名次破同分数据损坏，暂不可导出")
+            # math.isfinite 对超 float 范围的巨型 int 抛 OverflowError，
+            # 必须与 NaN/Infinity 一样按损坏快照 409，不能逃逸成 500。
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise private_error(409, "正式名次破同分数据损坏，暂不可导出")
+            cells.append(_csv_safe_cell(value))
+        return cells
+
+    # v3 在首字节前完成全部行与破同分解析：畸形快照必须 409 fail closed，
+    # 不能在 StreamingResponse 已提交 200 后中途断流。
+    v3_rows = (
+        [_v2_row_cells(row) + _tiebreak_cells(row) for row in rows]
+        if schema_version == 3
+        else None
+    )
+
+    def gen_v3():
+        buf = io.StringIO()
+        writer = _csv.writer(buf)
+        yield "\ufeff"
+        writer.writerow(v3_headers)
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for cells in v3_rows:
+            writer.writerow(cells)
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
 
@@ -5922,18 +5996,26 @@ def contest_export(
         ),
     )
 
-    filename = (
-        f"contest-{contest_id}-export.csv"
-        if schema_version == 1
-        else f"contest-{contest_id}-participants-v2.csv"
-    )
+    if schema_version == 1:
+        filename = f"contest-{contest_id}-export.csv"
+    elif schema_version == 2:
+        filename = f"contest-{contest_id}-participants-v2.csv"
+    else:
+        filename = f"contest-{contest_id}-participants-v3.csv"
     headers = {
         **_CONTEST_IDENTITY_PRIVATE_HEADERS,
         "Content-Disposition": f'attachment; filename="{filename}"',
     }
 
+    generator = (
+        gen_v1()
+        if schema_version == 1
+        else gen_v2()
+        if schema_version == 2
+        else gen_v3()
+    )
     return StreamingResponse(
-        gen_v1() if schema_version == 1 else gen_v2(),
+        generator,
         media_type="text/csv; charset=utf-8",
         headers=headers,
     )
