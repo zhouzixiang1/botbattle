@@ -1,6 +1,7 @@
 """SQLite 存储层导出。"""
 from .db import (
     BotDeletedError,
+    UserStorageQuotaExceededError,
     BotOwnerDeleteBusyError,
     ContestRealNameRosterForbidden,
     ContestRosterWriteValidationError,

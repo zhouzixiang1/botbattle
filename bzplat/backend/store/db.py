@@ -162,6 +162,10 @@ class RankedBotSelectionBusyError(ValueError):
     """Changing the ranked representative would cross an active rated lifecycle."""
 
 
+class UserStorageQuotaExceededError(ValueError):
+    """云存储写事务内配额/文件数拒绝（含用户可读 message）。"""
+
+
 class BotDeletedError(ValueError):
     """An owner mutation targeted a retained, logically deleted Bot identity."""
 
@@ -7559,6 +7563,124 @@ class Store:
             return "ok"
 
     # ── bots ──────────────────────────────────────────────────
+
+    # ---- 用户云存储清单（实体 blob 由 UserStorageManager 管理） ----
+
+    def all_user_storage_shas(self) -> dict[int, set[str]]:
+        """user_id → 该用户清单引用的全部内容指纹（延迟清扫的权威输入）。"""
+        with self._tx() as c:
+            out: dict[int, set[str]] = {}
+            for row in c.execute(
+                "SELECT user_id,sha256 FROM user_storage_files"
+            ).fetchall():
+                out.setdefault(int(row["user_id"]), set()).add(str(row["sha256"]))
+            return out
+
+    def list_user_storage_files(self, user_id: int) -> list[dict]:
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT name,sha256,size_bytes,created_at,updated_at "
+                "FROM user_storage_files WHERE user_id=? ORDER BY name",
+                (int(user_id),),
+            ).fetchall()
+            return [_row(r) for r in rows]
+
+    def user_storage_usage(self, user_id: int) -> dict:
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes "
+                "FROM user_storage_files WHERE user_id=?",
+                (int(user_id),),
+            ).fetchone()
+            return {"files": int(row["files"]), "bytes": int(row["bytes"])}
+
+    def replace_user_storage_file(
+        self, user_id: int, name: str, sha256: str, size_bytes: int
+    ) -> dict:
+        """同名覆盖并返回被替换条目；配额与文件数在同一 BEGIN IMMEDIATE 内卡死。"""
+        from bzplat.backend.runtime.limits import (
+            USER_STORAGE_MAX_FILES,
+            USER_STORAGE_QUOTA_BYTES,
+        )
+
+        now = _now()
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            existing = c.execute(
+                "SELECT name,sha256,size_bytes FROM user_storage_files "
+                "WHERE user_id=? AND name=?",
+                (int(user_id), name),
+            ).fetchone()
+            usage = c.execute(
+                "SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes "
+                "FROM user_storage_files WHERE user_id=?",
+                (int(user_id),),
+            ).fetchone()
+            retained = int(usage["bytes"]) - (
+                int(existing["size_bytes"]) if existing else 0
+            )
+            if existing is None and int(usage["files"]) >= USER_STORAGE_MAX_FILES:
+                raise UserStorageQuotaExceededError(
+                    f"云存储最多 {USER_STORAGE_MAX_FILES} 个文件，请先删除部分文件"
+                )
+            if retained + int(size_bytes) > USER_STORAGE_QUOTA_BYTES:
+                raise UserStorageQuotaExceededError(
+                    "云存储空间不足，请先删除部分文件后再上传"
+                )
+            c.execute(
+                "INSERT INTO user_storage_files"
+                "(user_id,name,sha256,size_bytes,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(user_id,name) DO UPDATE SET "
+                "sha256=excluded.sha256,size_bytes=excluded.size_bytes,"
+                "updated_at=excluded.updated_at",
+                (int(user_id), name, sha256, int(size_bytes), now, now),
+            )
+            return {
+                "replaced": _row(existing) if existing else None,
+                "file": {
+                    "name": name,
+                    "sha256": sha256,
+                    "size_bytes": int(size_bytes),
+                    "updated_at": now,
+                },
+            }
+
+    def delete_user_storage_file(self, user_id: int, name: str) -> dict | None:
+        """删除一个命名条目；返回被删内容指纹。
+
+        blob 实体不在此处回收：立即 unlink 与并发上传（同内容晋升保留
+        旧实体）之间存在交错窗口，会把刚提交的清单行指向已删除文件。
+        回收统一由 UserStorageManager.sweep_unreferenced 延迟执行——
+        只清「无清单引用且文件空闲超过宽限期」的实体，任何在途事务
+        提交后清单必有引用，最坏只是回收推迟。
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            existing = c.execute(
+                "SELECT name,sha256,size_bytes FROM user_storage_files "
+                "WHERE user_id=? AND name=?",
+                (int(user_id), name),
+            ).fetchone()
+            if existing is None:
+                return None
+            c.execute(
+                "DELETE FROM user_storage_files WHERE user_id=? AND name=?",
+                (int(user_id), name),
+            )
+            return _row(existing)
+
+    def count_user_storage_sha_references(
+        self, user_id: int, sha256: str
+    ) -> int:
+        with self._tx() as c:
+            return int(
+                c.execute(
+                    "SELECT COUNT(*) FROM user_storage_files "
+                    "WHERE user_id=? AND sha256=?",
+                    (int(user_id), sha256),
+                ).fetchone()[0]
+            )
 
     def create_local_ai_agent(
         self,

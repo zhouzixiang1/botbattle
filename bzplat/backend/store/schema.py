@@ -244,6 +244,19 @@ CREATE TABLE IF NOT EXISTS bot_versions (
 -- 用户电脑上的 Bot 连接身份。Bot 行仍是公开名称/所有者/游戏的唯一身份，
 -- agent 只声明“这一场由哪台用户电脑回答裁判请求”，绝不伪装成上传版本。
 -- 原始连接令牌只在创建/轮换响应中出现一次；数据库永久只保存 SHA-256。
+-- 用户云存储命名清单（实体 blob 在数据库旁 user_assets/ 目录，内容寻址）。
+CREATE TABLE IF NOT EXISTS user_storage_files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,
+    sha256      TEXT    NOT NULL,
+    size_bytes  INTEGER NOT NULL CHECK(typeof(size_bytes)='integer' AND size_bytes > 0),
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    UNIQUE(user_id,name)
+);
+CREATE INDEX IF NOT EXISTS idx_user_storage_files_user ON user_storage_files(user_id);
+
 CREATE TABLE IF NOT EXISTS local_ai_agents (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     public_id             TEXT    NOT NULL UNIQUE,

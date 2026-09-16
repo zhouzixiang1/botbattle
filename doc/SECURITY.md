@@ -273,7 +273,7 @@ method + 精确/规范化 API 路径执行硬顶：
 - 认证与账号资料 JSON：**64 KiB**，超限为 `413 auth_body_too_large`；
 - 其余 `POST` / `PUT` / `PATCH` / `DELETE` API：**1 MiB**，超限为 `413 api_body_too_large`；
 
-- `POST /api/bots`、`POST /api/bots/{id}/versions`：**257 MiB** 请求体（256 MiB Bot + 1 MiB multipart 开销），超限为 `413 upload_body_too_large`；
+- `POST /api/bots`、`POST /api/bots/{id}/versions`：**257 MiB** 请求体（256 MiB Bot + 1 MiB multipart 开销），超限为 `413 upload_body_too_large`；`POST /api/storage/files` 同为 257 MiB（256 MiB 单文件 + 1 MiB 开销），超限为 `413 storage_body_too_large`；
 - `POST /api/feedback/bugs/{public_id}/attachments`：**6 MiB** 请求体（5 MiB 图片 + 1 MiB multipart 开销），超限为 `413 attachment_body_too_large`；
 - `POST /api/auth/avatar`：**3 MiB** 请求体（2 MiB 图片 + 1 MiB multipart 开销），超限为 `413 avatar_body_too_large`。
 

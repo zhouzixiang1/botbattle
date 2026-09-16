@@ -12,6 +12,15 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.2',
+    date: '2026-09-16',
+    title: '用户云存储上线',
+    items: [
+      '「设置 → 云存储」可以上传和管理你自己的数据文件（共 256 MB）。',
+      '文件同名上传会覆盖旧版；本版本先开放管理入口，Bot 读取能力随下个版本开放。',
+    ],
+  },
+  {
     version: 'v1.1',
     date: '2026-09-16',
     title: 'Bot 体积上限提升',
