@@ -1,49 +1,21 @@
 # Bot 开发指南
 
-本页面向准备上传 Bot 的玩家。平台支持两种上传形态：
+本页面向准备上传 Bot 的玩家。平台唯一接受的上传产物是 **Linux x86_64 ELF**：必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件；不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF，也不接受 `.py` 源文件、Shell 脚本、压缩包或源码目录。文件叫什么名字并不重要，平台按文件内容校验格式与架构。
 
-| 类型 | 上传内容 | 大小上限 | 平台处理 |
-|---|---|---|---|
-| 编译好的 ELF | 单个 Linux x86_64 可执行文件 | 256 MiB | 直接进沙箱 |
-| 源码 Bot | zip 源码包 | 64 MiB | C/C++/Go 平台编译；Python 直接运行 |
+因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建；最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
-ELF 必须是 64 位 `x86-64`/`amd64`；不接受 Windows PE、macOS Mach-O、ARM64 ELF。
-源码 zip 内使用 POSIX 相对路径，默认入口：`main.cpp`（或 `main.c` / `main.go` /
-`__main__.py`），也可在表单里显式声明。C/C++ 当前只编译入口单个源文件（多文件工程请合并为单文件或改用 PyInstaller 打包）；Go 编译整个包。编译在离线沙箱内完成（约 2–3 秒），
-命令固定 `gcc/g++ -O2 -static` 并定义 `BOTARENA_ONLINE=1` 宏；Python 第一版仅标准库，需第三方库时请用 PyInstaller 打包成 ELF 再上传。
-
-因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建。
-最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
-
-开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则。先复制一份完整示例跑通，
-再替换其中的决策函数，通常是最快的上手方式。
-
-你还可以在「设置 → 云存储」上传最多 256 MB 的数据文件（如模型权重）。每次对局
-开始时，你的云盘会被只读挂载到 Bot 进程的 `/mnt/data` 和 `/app/data`（工作目录
-`/app` 下的相对路径 `data/xxx` 也可用）。对局中读到的是开赛瞬间的快照，之后修改
-云盘从下一场对局开始生效；同名上传覆盖旧文件。
-
-如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置。本地接入当前只支持 Traditional，且不计平台排行榜、不参加赛事。
+开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则；先复制一份完整示例跑通，再替换其中的决策函数，通常是最快的上手方式。如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置；本地接入当前只支持 Traditional。
 
 ## 1. 选择运行模式
 
-- **Traditional（默认）**：每个决策点重启进程；每次收到
-  `{"requests":[...],"responses":[...]}` 完整历史。
-- **LongRunning**：首回合收到同一完整历史；输出首个响应后必须立即输出精确握手
-  `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`；后续收到 `{"request":...}`，进程不得退出。
+- **Traditional（默认）**：每个决策点重启进程；每次收到 `{"requests":[...],"responses":[...]}` 完整历史。
+- **LongRunning**：首回合收到同一完整历史；输出首个响应后必须立即输出精确握手 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`；后续收到 `{"request":...}`，进程不得退出。
 
-两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封。LongRunning 未完成精确
-握手会直接协议判负，不会回退成 Traditional。
-
-Traditional Bot 可以只读取一行完整信封、输出一行响应后退出；它也可以像下方示例一样
-保持读取循环，由平台在取得该回合响应后结束进程。LongRunning Bot 必须保持进程运行并
-持续读取增量信封。
+两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封；LongRunning 未完成精确握手会直接协议判负，不会回退成 Traditional。Traditional Bot 可以只读取一行完整信封、输出一行响应后退出，也可以像下方示例一样保持读取循环，由平台在取得该回合响应后结束进程；LongRunning Bot 必须保持进程运行并持续读取增量信封。
 
 ## 2. 完整可复制的 C 最小 Bot
 
-下面是一个可用于 Holdem 的完整 `bot.c`。策略永远 call/check。它在首个 JSON 响应后
-输出 LongRunning 握手，因此同一个 ELF 可选择 Traditional 或 LongRunning；Traditional
-只读取本次 JSON 响应后便结束进程。
+下面是一个可用于 Holdem 的完整 `bot.c`，策略永远 call/check；它在首个 JSON 响应后输出 LongRunning 握手，因此同一个 ELF 可选择 Traditional 或 LongRunning，Traditional 只读取本次 JSON 响应后便结束进程。
 
 <!-- SAMPLE:holdem:c -->
 ```c
@@ -74,14 +46,11 @@ int main(void) {
 }
 ```
 
-把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印独立日志行；想让 Bot 作者在终局后
-查看策略诊断，应把有界信息放进同一 JSON 的顶层 `debug`。stderr 只用于平台运维排查崩溃，
-不会作为作者调试面板的数据源。
+把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印独立日志行；想让 Bot 作者在终局后查看策略诊断，应把有界信息放进同一 JSON 的顶层 `debug`。stderr 只用于平台运维排查崩溃，不会作为作者调试面板的数据源。
 
 ## 3. 完整可复制的 Python 最小 Bot
 
-下面是等价的完整 `bot.py`。源文件不能直接上传，必须按后文使用 Linux amd64 容器中的
-PyInstaller 打包成 ELF。
+下面是等价的完整 `bot.py`；源文件不能直接上传，必须按后文使用 Linux amd64 容器中的 PyInstaller 打包成 ELF。
 
 <!-- SAMPLE:holdem:python -->
 ```python
@@ -126,14 +95,11 @@ if __name__ == "__main__":
     main()
 ```
 
-把代码完整保存为当前目录下的 `bot.py`。PyInstaller 会把解释器和依赖一起打进单文件
-ELF；这不代表平台会执行原始 `.py` 文件。
+把代码完整保存为当前目录下的 `bot.py`。PyInstaller 会把解释器和依赖一起打进单文件 ELF；这不代表平台会执行原始 `.py` 文件。
 
 ## 4. Linux：构建 C 与 Python
 
-先安装 Docker Engine，并确认 `docker version` 正常。以下命令在 Bash 中执行，当前目录
-应包含上面的 `bot.c` 和 `bot.py`。即使开发机是 ARM Linux，也要保留
-`--platform linux/amd64`。
+先安装 Docker Engine，并确认 `docker version` 正常；以下命令在 Bash 中执行，当前目录应包含上面的 `bot.c` 和 `bot.py`。即使开发机是 ARM Linux，也要保留 `--platform linux/amd64`。
 
 ### C：Alpine 静态编译
 
@@ -169,9 +135,7 @@ docker run --rm --platform linux/amd64 \
 
 ## 5. Windows：构建 C 与 Python
 
-安装 Docker Desktop，启用 WSL 2 后端，并确保使用 Linux containers。打开 PowerShell，
-进入保存 `bot.c` / `bot.py` 的目录。Windows 上的编译器和本机 PyInstaller 会生成 PE，
-不能作为平台上传文件；必须通过下列 Linux amd64 容器构建。
+安装 Docker Desktop，启用 WSL 2 后端，并确保使用 Linux containers；打开 PowerShell，进入保存 `bot.c` / `bot.py` 的目录。Windows 上的编译器和本机 PyInstaller 会生成 PE，不能作为平台上传文件，必须通过下列 Linux amd64 容器构建。
 
 ### C：Alpine 静态编译
 
@@ -203,16 +167,11 @@ docker run --rm --platform linux/amd64 `
   '
 ```
 
-如果你已在 WSL 的 Linux 终端中工作，也可以直接执行上一节的 Linux 命令。关键不是
-终端名称，而是构建环境必须为 Linux x86_64。Windows ARM 设备仍应使用 Docker 的
-`--platform linux/amd64`，不要上传 WSL 本机生成的 `aarch64` 文件。
+如果你已在 WSL 的 Linux 终端中工作，也可以直接执行上一节的 Linux 命令；关键不是终端名称，而是构建环境必须为 Linux x86_64。Windows ARM 设备仍应使用 Docker 的 `--platform linux/amd64`，不要上传 WSL 本机生成的 `aarch64` 文件。
 
 ## 6. macOS：构建 C 与 Python
 
-安装 Docker Desktop，打开 Terminal，进入保存源码的目录。macOS 本机 `clang` 生成
-Mach-O，本机 PyInstaller 也只生成 Mach-O；PyInstaller 不支持从 macOS 原生跨系统打包
-Linux ELF。Intel Mac 和 Apple Silicon 都使用下面的 Linux amd64 容器命令，Apple
-Silicon 尤其不能删除 `--platform linux/amd64`。
+安装 Docker Desktop，打开 Terminal，进入保存源码的目录。macOS 本机 `clang` 生成 Mach-O，本机 PyInstaller 也只生成 Mach-O，且 PyInstaller 不支持从 macOS 原生跨系统打包 Linux ELF；Intel Mac 和 Apple Silicon 都使用下面的 Linux amd64 容器命令，Apple Silicon 尤其不能删除 `--platform linux/amd64`。
 
 ### C：Alpine 静态编译
 
@@ -274,13 +233,11 @@ docker run --rm --platform linux/amd64 `
 ELF 64-bit LSB executable, x86-64
 ```
 
-看到 `PE32`、`MS Windows`、`Mach-O`、`ARM aarch64`、`script` 或仅显示 Python source，
-都说明文件不符合上传要求。不要只靠扩展名判断，也不要把错误格式改名后上传。
+看到 `PE32`、`MS Windows`、`Mach-O`、`ARM aarch64`、`script` 或仅显示 Python source，都说明文件不符合上传要求；不要只靠扩展名判断，也不要把错误格式改名后上传。
 
 ## 8. 在 Linux 容器中做通信冒烟
 
-以下命令用一个最小 Holdem 首回合请求运行 C 产物。Python 产物只需把最后的文件名换成
-`/work/bot_py_linux_amd64`。
+以下命令用一个最小 Holdem 首回合请求运行 C 产物；Python 产物只需把最后的文件名换成 `/work/bot_py_linux_amd64`。
 
 ```bash
 printf '%s\n' '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}' |
@@ -296,8 +253,7 @@ docker run --rm -i --platform linux/amd64 \
 >>>BOTZONE_REQUEST_KEEP_RUNNING<<<
 ```
 
-真实 Traditional 对局读取第一行响应后会结束本次进程；真实 LongRunning 对局会校验
-第二行握手并继续向同一进程发送增量请求。
+真实 Traditional 对局读取第一行响应后会结束本次进程；真实 LongRunning 对局会校验第二行握手并继续向同一进程发送增量请求。
 
 ## 9. 上传预检
 
@@ -309,20 +265,15 @@ docker run --rm -i --platform linux/amd64 \
 4. 校验本游戏的 response payload 类型；
 5. LongRunning 额外要求精确握手。
 
-预检使用独立的 **8 秒首回合健康检查**。它只证明文件可以启动并完成一次首回合通信；
-上传后仍应创建挑战，验证完整历史重放、增量状态和整场策略。该 8 秒不会计入正式对局，
-也不会改变正式对局创建时冻结的版本化时限。
+预检使用独立的 **8 秒首回合健康检查**，只证明文件可以启动并完成一次首回合通信；上传后仍应创建挑战，验证完整历史重放、增量状态和整场策略。该 8 秒不会计入正式对局，也不会改变正式对局创建时冻结的版本化时限。
 
-平台会先准备 Linux x86_64 沙箱镜像，再开始这 8 秒计时。若镜像仓库或平台沙箱故障，
-上传会明确提示平台暂不可用，不会把镜像下载时间误判成 Bot 响应慢。
+平台会先准备 Linux x86_64 沙箱镜像，再开始这 8 秒计时；若镜像仓库或平台沙箱故障，上传会明确提示平台暂不可用，不会把镜像下载时间误判成 Bot 响应慢。
 
-如果 Pencil 提示“ELF 已在沙箱中启动，但没有按 Botzone JSON 首回合协议响应”，说明文件
-格式和沙箱启动已经通过，问题位于 stdin/stdout 通信：程序必须读取
-`{"requests":[...],"responses":[]}`，再输出一整行
-`{"response":{"x":x,"y":y}}`，末尾写入换行并立即 flush。旧 SAU 裁判使用的
-`name?`、`new`、`move`、`take` 等文本命令不是本平台协议；仅重命名该二进制或切换
-Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例保留 JSON 输入输出层，
-再接入原有决策函数并重新编译。
+如果 Pencil 提示“ELF 已在沙箱中启动，但没有按 Botzone JSON 首回合协议响应”，说明文件格式和沙箱启动已经通过，问题位于 stdin/stdout 通信：
+
+- 程序必须读取 `{"requests":[...],"responses":[]}`，再输出一整行 `{"response":{"x":x,"y":y}}`，末尾写入换行并立即 flush；
+- 旧 SAU 裁判使用的 `name?`、`new`、`move`、`take` 等文本命令不是本平台协议；仅重命名该二进制或切换 Traditional/LongRunning 都不能转换协议；
+- 应从本指南的 Pencil 示例保留 JSON 输入输出层，再接入原有决策函数并重新编译。
 
 ## 10. 常见故障
 
@@ -345,9 +296,7 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 
 ## 11. 沙箱与时限
 
-同一账号可以为同一游戏保留多个 Bot 作为不同实现或练习版本，但只有“我的 Bot”中当前派遣的一个
-排行榜 Bot 会进入自动排位和公开榜单。更新正式参榜程序时，优先在该 Bot 下上传新版本；另建 Bot
-不会自动继承旧 Bot 的 Rating、RD 或历史对局。未派遣 Bot 仍可参加手动练习和由组织者创建的锦标赛。
+同一账号可以为同一游戏保留多个 Bot 作为不同实现或练习版本，但只有“我的 Bot”中当前派遣的一个排行榜 Bot 会进入自动排位和公开榜单；更新正式参榜程序时，优先在该 Bot 下上传新版本，另建 Bot 不会自动继承旧 Bot 的 Rating、RD 或历史对局。未派遣 Bot 仍可参加手动练习和由组织者创建的锦标赛。
 
 - 日常挑战、自动排位、人机 Bot 侧与上传预检使用节能沙箱：每个 Bot 1 核、512 MiB、无网络、只读根文件系统，仅 `/tmp` 可写。
 - 锦标赛统一使用赛事沙箱：每个 Bot 2 核、2 GiB；参赛者不能在日常挑战中选择该档位，主机资源不足时赛事会等待，不会自动降档。
@@ -364,14 +313,8 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 {"response":0,"debug":{"phase":"river","equity":0.41,"pot_odds":0.28,"choice":"call"}}
 ```
 
-`debug` 可以是字符串、数值、数组或对象；建议用短对象，便于按座位、决策序号和 duplicate
-leg 阅读。平台会截断、清洗并脱敏，不能把它当持久存储或秘密保管箱。应用日志仍写 stderr，
-但 stderr 只供管理员运维排障，不会混入调试面板或公开下载。
+`debug` 可以是字符串、数值、数组或对象；建议用短对象，便于按座位、决策序号和 duplicate leg 阅读。平台会截断、清洗并脱敏，不能把它当持久存储或秘密保管箱；应用日志仍写 stderr，但 stderr 只供管理员运维排障，不会混入调试面板或公开下载。
 
-对局终态页面的“导出对局日志（JSON）”是三游戏共用的单场 canonical 公共回放快照，不是
-Bot 运行日志。它不会导出原始请求/响应行、stdout/stderr 或上述私有 `debug`；若要让比赛双方作者
-查看策略诊断，仍应使用有界 `debug` 与页面私有调试面板。五子棋的“导出棋谱（JSON）”还会增加
-规则专项派生字段，与通用日志是两个独立格式。按月或批量对局数据集仍处于下线状态。
+对局终态页面的“导出对局日志（JSON）”是三游戏共用的单场 canonical 公共回放快照，不是 Bot 运行日志；它不会导出原始请求/响应行、stdout/stderr 或上述私有 `debug`，若要让比赛双方作者查看策略诊断，仍应使用有界 `debug` 与页面私有调试面板。五子棋的“导出棋谱（JSON）”还会增加规则专项派生字段，与通用日志是两个独立格式；按月或批量对局数据集仍处于下线状态。
 
-完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) ·
-[五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。
+完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) · [五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。
