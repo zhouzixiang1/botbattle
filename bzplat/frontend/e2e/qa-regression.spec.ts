@@ -3809,6 +3809,16 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     { width: 320, height: 568 },
   ]) {
     await page.setViewportSize(viewport)
+    // 布局模式切换（desktopRail↔ultra3zone）会短暂卸载重挂 canvas；
+    // 用 auto-wait 消除 React 重渲染与 boundingBox 的竞态。
+    await expect(canvas).toBeVisible()
+    await page.waitForFunction(() => {
+      const el = document.querySelector('canvas[aria-label^="点格棋对局画面"]')
+      return el !== null && el.getBoundingClientRect().width > 0
+    })
+    // React 在布局切换后可能立即再次提交（matchMedia 异步触发第二次渲染）；
+    // 给一帧稳定窗再量尺寸。
+    await page.waitForTimeout(100)
     const bounds = await canvas.boundingBox()
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
@@ -3825,7 +3835,9 @@ test('Pencil human canvas rejects the production box-center click and stays squa
         const columns = getComputedStyle(element).gridTemplateColumns
           .split(/\s+/)
           .map((value) => Number.parseFloat(value))
-        return columns[0] ?? 0
+        // ultra3zone 三列布局 [左栏, 棋盘, 右栏]；desktopRail 两列 [棋盘, 侧栏]。
+        const canvasIndex = columns.length >= 3 ? 1 : 0
+        return columns[canvasIndex] ?? columns[0] ?? 0
       })
       // 棋盘受 68rem 与首屏可用高度（100dvh-22rem）钳制，并优先用满主列轨道。
       const expectedMax = Math.min(1088, viewport.height - 352, canvasTrackWidth)
@@ -4208,6 +4220,13 @@ test('Pencil replay gives the square board priority while the timeline remains u
     { width: 1312, height: 700 },
   ]) {
     await page.setViewportSize(viewport)
+    // 布局模式切换会短暂卸载重挂 canvas；用 auto-wait 消除竞态。
+    await expect(canvas).toBeVisible()
+    await page.waitForFunction(() => {
+      const el = document.querySelector('canvas[aria-label^="点格棋对局画面"]')
+      return el !== null && el.getBoundingClientRect().width > 0
+    })
+    await page.waitForTimeout(100)
     const desktopCanvas = await canvas.boundingBox()
     const desktopTimeline = await timeline.boundingBox()
     const desktopOverview = await overview.boundingBox()
@@ -4233,6 +4252,13 @@ test('Pencil replay gives the square board priority while the timeline remains u
     { width: 844, height: 390 },
   ]) {
     await page.setViewportSize(viewport)
+    // 同上：跨 1280/1536 断点时 canvas 会重挂。
+    await expect(canvas).toBeVisible()
+    await page.waitForFunction(() => {
+      const el = document.querySelector('canvas[aria-label^="点格棋对局画面"]')
+      return el !== null && el.getBoundingClientRect().width > 0
+    })
+    await page.waitForTimeout(100)
     const boardBounds = await canvas.boundingBox()
     const overviewBounds = await overview.boundingBox()
     const timelineBounds = await timeline.boundingBox()
@@ -5187,7 +5213,7 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   expect(runningMatches.matches.every((match) => match.status === 'running')).toBe(true)
   expect(runningMatches.matches.some((match) => match.id === createdMatchId)).toBe(true)
   const matchRow = adminPage
-    .getByText(`${createdMatchId.slice(0, 16)}…`, { exact: true })
+    .getByText(`${createdMatchId.slice(0, 12)}…`, { exact: true })
     .locator('xpath=ancestor::tr[1]')
   await expect(matchRow).toBeVisible()
 
