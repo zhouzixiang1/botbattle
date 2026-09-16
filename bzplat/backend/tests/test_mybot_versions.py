@@ -196,7 +196,7 @@ def test_manual_multipart_routes_preserve_openapi_contract(tmp_path):
         }
         assert responses <= set(operation["responses"])
     for path in ("/api/bots", "/api/bots/{bot_id}/versions"):
-        assert "101 MiB" in paths[path]["post"]["responses"]["413"]["description"]
+        assert "257 MiB" in paths[path]["post"]["responses"]["413"]["description"]
 
 
 def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkeypatch):
@@ -247,10 +247,10 @@ def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkey
     asyncio.run(exercise())
 
 
-def test_upload_endpoint_reads_only_limit_plus_one_before_manager(
+def test_upload_endpoint_streams_bounded_reads_and_rejects_oversized(
     tmp_path, monkeypatch
 ):
-    """The API must reject an oversized body without retaining the whole file."""
+    """流式读取按当前生效上限有界；超限载荷绝不进入 BotManager。"""
     import bzplat.backend.api_routes as api_routes
     from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -284,8 +284,51 @@ def test_upload_endpoint_reads_only_limit_plus_one_before_manager(
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_size"
-    assert read_sizes == [5]
+    # 5 字节载荷在上限 4 之下分两个有界 chunk 读完即拒绝。
+    assert read_sizes == [4, 4]
     assert manager_called is False
+
+
+def test_upload_endpoint_stages_stream_and_cleans_up(
+    tmp_path, monkeypatch
+):
+    """正常载荷完整流到暂存文件；端点结束（成功或失败）后暂存目录被清理。"""
+    import bzplat.backend.api_routes as api_routes
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    app = _app(tmp_path)
+    _setup(app)
+    payload = b"streamed-payload-bytes"
+    captured: dict = {}
+    read_sizes: list[int] = []
+    original_read = StarletteUploadFile.read
+
+    async def tracked_read(upload, size=-1):
+        read_sizes.append(size)
+        return await original_read(upload, size)
+
+    def fake_manager(_owner, _name, staged, **_kwargs):
+        captured["staged"] = staged
+        captured["content"] = Path(staged.path).read_bytes()
+        return {"id": 777, "owner_id": 1, "name": "streamed", "current_version": 1}
+
+    monkeypatch.setattr(api_routes, "MAX_BYTES", 1024 * 1024)
+    monkeypatch.setattr(StarletteUploadFile, "read", tracked_read)
+    monkeypatch.setattr(app.state.bot_manager, "create_from_upload", fake_manager)
+
+    response = TestClient(app).post(
+        "/api/bots",
+        headers=_login(app),
+        data={"name": "streamed", "game_id": "holdem"},
+        files={"file": ("bot.bin", payload, "application/octet-stream")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["content"] == payload
+    assert captured["staged"].size == len(payload)
+    # 端点返回后暂存目录已被清理（close 幂等，双重清理安全）。
+    assert not Path(captured["staged"].path).exists()
+    assert all(size <= 1024 * 1024 for size in read_sizes)
 
 
 def test_upload_admission_is_shared_busy_and_worker_cancel_safe(

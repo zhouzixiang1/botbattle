@@ -391,7 +391,7 @@ Bot 资料或另一项记录。
 
 ### 上传
 
-“我的 Bot”页只接受 **Linux x86_64 ELF64（小端）**，最大 100 MiB。Windows `.exe`、macOS
+“我的 Bot”页只接受 **Linux x86_64 ELF64（小端）**，最大 256 MiB。Windows `.exe`、macOS
 Mach-O、ARM64 ELF 和原始 `.py` 都会被拒绝。Linux、Windows 与 macOS 的 C/Python 构建
 方法见 [Bot 开发指南](#/wiki?slug=bot-dev)。
 
@@ -456,6 +456,12 @@ ELF 版本替代。
 - 通知与邮件偏好；
 - 收藏的 Bot 列表；
 - 实名资料（参加要求实名的赛事时使用）。
+
+## 9. 更新说明
+
+平台每次发布带用户可见变化的版本后，登录时会看到一次「平台更新」弹窗，
+说明这次更新了什么。关掉即可，同一版本不会重复弹出；
+随时可以在页脚点「更新日志」回看全部历史。
 
 完整 Bot 协议与跨平台构建说明见 [通信协议](#/wiki?slug=protocol)和
 [Bot 开发指南](#/wiki?slug=bot-dev)。

@@ -381,9 +381,9 @@ def resolve_docker_resource_profile(
 # 保留旧名作为默认低配的只读兼容常量。
 BOT_CPUS = float(PLATFORM_LOW_PROFILE.cpus)
 BOT_MEMORY_MB = PLATFORM_LOW_PROFILE.memory_mb
-# 上传会在进程内保留一份 bytes，并由进程级 admission 串行预检。100 MiB
-# 足以覆盖常见 PyInstaller 单文件产物，同时避免无界内存/磁盘占用。
-MAX_BOT_UPLOAD_BYTES = 100 * 1024 * 1024
+# 上传经流式暂存落盘，进程内存只占用单个 chunk；预检仍由进程级 admission
+# 串行执行。256 MiB 覆盖 PyInstaller 单文件产物与嵌入式权重文件。
+MAX_BOT_UPLOAD_BYTES = 256 * 1024 * 1024
 # 单次 Bot stdout 响应行的传输硬顶。StreamReader 与协议解析共用同一常量，
 # 防止超长无换行输出先撑大进程内存、随后才在业务层判错。
 MAX_BOT_RESPONSE_LINE_BYTES = 64 * 1024

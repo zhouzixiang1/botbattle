@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense } from 'react'
+import { useEffect, useState, lazy, Suspense } from 'react'
 import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate } from 'react-router-dom'
 import { CircleUserRound, Menu, LogOut, User as UserIcon, Loader2, Mail, PanelLeftClose, PanelLeft, Settings2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -6,6 +6,14 @@ import { useAuth } from '@/components/useAuth'
 import { errMsg } from '@/api'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
+import { ReleaseNotesDialog } from '@/components/shell/release-notes-dialog'
+import {
+  RELEASE_NOTES,
+  RELEASE_NOTES_CHECK_EVENT,
+  RELEASE_NOTES_STORAGE_KEY,
+  unseenReleaseNotes,
+  type ReleaseNote,
+} from '@/release-notes'
 import { GlobalSearch } from '@/components/shell/global-search'
 import BrandMark from '@/components/BrandMark'
 import { NAV_ITEMS, ADMIN_NAV, type NavItem } from '@/components/shell/nav-config'
@@ -108,7 +116,36 @@ export function AppShell() {
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
+  const [releaseNotesShowAll, setReleaseNotesShowAll] = useState(false)
+  const [releaseNotesUnseen, setReleaseNotesUnseen] = useState<ReleaseNote[]>([])
   useScrollRestoration()
+
+  const openReleaseNotesHistory = () => {
+    setReleaseNotesShowAll(true)
+    setReleaseNotesOpen(true)
+  }
+
+  // 真实登录成功后检查一次未读更新；持久会话的静默恢复不触发。
+  useEffect(() => {
+    const check = () => {
+      try {
+        const unseen = unseenReleaseNotes(
+          localStorage.getItem(RELEASE_NOTES_STORAGE_KEY),
+          RELEASE_NOTES,
+        )
+        if (unseen.length > 0) {
+          setReleaseNotesUnseen(unseen)
+          setReleaseNotesShowAll(false)
+          setReleaseNotesOpen(true)
+        }
+      } catch {
+        // localStorage 不可用时跳过，页脚仍可手动查看。
+      }
+    }
+    window.addEventListener(RELEASE_NOTES_CHECK_EVENT, check)
+    return () => window.removeEventListener(RELEASE_NOTES_CHECK_EVENT, check)
+  }, [])
 
   const onLogout = async () => {
     setMobileOpen(false)
@@ -474,11 +511,27 @@ export function AppShell() {
         {/* 页脚（跟随主体宽度，不跨侧栏）：平台标题 + 版权行 */}
         <footer className="border-t border-border">
           <div className="flex w-full min-w-0 flex-col gap-0.5 px-[var(--page-gutter)] py-4 text-xs text-muted-foreground">
-            <span>botarena · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>botarena · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
+              <button
+                type="button"
+                onClick={openReleaseNotesHistory}
+                className="rounded-sm underline-offset-2 outline-none transition-colors hover:text-foreground focus-visible:underline focus-visible:ring-2 focus-visible:ring-ring"
+                data-release-notes-link
+              >
+                更新日志
+              </button>
+            </div>
             <span>© DAISec Lab · 版权所有</span>
           </div>
         </footer>
       </div>
+      <ReleaseNotesDialog
+        open={releaseNotesOpen}
+        onOpenChange={setReleaseNotesOpen}
+        showAll={releaseNotesShowAll}
+        notes={releaseNotesUnseen}
+      />
     </div>
   )
 }

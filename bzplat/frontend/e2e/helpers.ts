@@ -7,6 +7,8 @@ import {
   type Route,
 } from '@playwright/test'
 
+import { RELEASE_NOTES_STORAGE_KEY, RELEASE_VERSION } from '../src/release-notes'
+
 export const PASSWORD = process.env.BZ_E2E_PASSWORD || 'Test1234'
 const QA_CAPTCHA_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='
 
@@ -214,6 +216,17 @@ export function monitorBrowser(page: Page): BrowserMonitor {
   }
 }
 
+/**
+ * 登录成功会触发「平台更新」弹窗（每个版本一次）。与弹窗行为无关的
+ * 登录流程在进入登录页时预置已读标记，保证弹窗确定不出现、零等待成本；
+ * 弹窗自身的显隐与记忆语义由 qa-regression 的专项用例守护。
+ */
+export async function suppressReleaseNotesOnLogin(page: Page): Promise<void> {
+  await page.evaluate(([key, version]) => {
+    try { localStorage.setItem(key, version) } catch { /* 忽略 */ }
+  }, [RELEASE_NOTES_STORAGE_KEY, RELEASE_VERSION])
+}
+
 export async function loginThroughUi(
   page: Page,
   username: string,
@@ -250,6 +263,7 @@ export async function loginThroughUi(
   await page.route(captchaPattern, fulfillQaCaptcha)
   try {
     await page.goto('/#/login')
+    await suppressReleaseNotesOnLogin(page)
     await page.locator('#login-username').fill(username)
     await page.locator('#login-password').fill(password)
     await page.getByPlaceholder('图中字符或算式结果').fill('skip')

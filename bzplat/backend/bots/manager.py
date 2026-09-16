@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from threading import Lock, RLock
@@ -42,12 +43,60 @@ class BotError(Exception):
         self.message = message
 
 
-def _classify_upload(raw: bytes):
+class StagedBotUpload:
+    """流式暂存的上传载荷：内容在磁盘上，进程内存只占单个 chunk。
+
+    由上传端点把 multipart 的 spool 分块拷到 canonical 上传根下的暂存目录，
+    manager 消费（或失败）后负责 close 清理。
+    """
+
+    def __init__(self, path: Path, size: int) -> None:
+        self.path = path
+        self.size = size
+
+    def close(self) -> None:
+        shutil.rmtree(self.path.parent, ignore_errors=True)
+
+
+def _staged_new(upload_root: Path) -> StagedBotUpload:
+    """在上传根内开一个暂存目录；与最终版本目录同文件系统。"""
+    root = Path(upload_root)
+    root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=".incoming-", dir=root))
+    return StagedBotUpload(temp_dir / "payload.bin", 0)
+
+
+def _payload_size(raw: "bytes | StagedBotUpload") -> int:
+    if isinstance(raw, StagedBotUpload):
+        return raw.size
+    return len(raw)
+
+
+def _classify_upload(raw: "bytes | StagedBotUpload"):
     """Classify once at the upload boundary and expose a stable API error."""
     try:
+        if isinstance(raw, StagedBotUpload):
+            with Path(raw.path).open("rb") as staged:
+                head = staged.read(4096)
+            return require_supported_binary(classify_binary(head))
         return require_supported_binary(classify_binary(raw))
     except BinaryRejectError as exc:
         raise BotError("unsupported_binary", str(exc)) from exc
+
+
+def _hashing_copy(source: Path, dest: Path, *, chunk: int = 1024 * 1024) -> tuple[str, int]:
+    """单遍流式拷贝并计算 sha256；进程内存只占单个 chunk。"""
+    digest = hashlib.sha256()
+    total = 0
+    with Path(source).open("rb") as src, Path(dest).open("wb") as out:
+        while True:
+            block = src.read(chunk)
+            if not block:
+                break
+            digest.update(block)
+            total += len(block)
+            out.write(block)
+    return digest.hexdigest(), total
 
 
 class BotManager:
@@ -65,6 +114,27 @@ class BotManager:
         self._upload_root_identity: tuple[int, int] | None = None
         self._bot_locks_guard = Lock()
         self._bot_locks: dict[int, RLock] = {}
+
+    def new_staged_upload(self) -> StagedBotUpload:
+        """为流式上传端点分配一个暂存槽（canonical 上传根内、同文件系统）。"""
+        return _staged_new(self.upload_root)
+
+    def _purge_stale_staging(self, *, min_age_seconds: float = 86400.0) -> None:
+        """清掉上次进程崩溃可能遗留的 `.incoming-*` 暂存目录。
+
+        只按目录名前缀与 mtime 年龄匹配，best-effort；正常路径的清理
+        由端点与 _write_version 的 finally 负责，这里只是崩溃兜底。
+        """
+        try:
+            cutoff = time.time() - min_age_seconds
+            for entry in self.upload_root.glob(".incoming-*"):
+                try:
+                    if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                        shutil.rmtree(entry, ignore_errors=True)
+                except OSError:
+                    continue
+        except OSError:
+            return
 
     @contextmanager
     def _bot_version_lock(self, bot_id: int) -> Iterator[None]:
@@ -87,7 +157,7 @@ class BotManager:
         self,
         owner_id: int,
         name: str,
-        raw: bytes,
+        raw: "bytes | StagedBotUpload",
         *,
         display_name: str = "",
         description: str = "",
@@ -109,7 +179,8 @@ class BotManager:
         rmode = (runtime_mode or DEFAULT_RUNTIME_MODE).strip().lower()
         if rmode not in VALID_RUNTIME_MODES:
             raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
-        if not raw or len(raw) > MAX_BYTES:
+        size = _payload_size(raw)
+        if not size or size > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = _classify_upload(raw)
         if self.store.get_bot_by_owner_name(owner_id, name):
@@ -168,15 +239,16 @@ class BotManager:
             raise
 
     def upload_version(
-        self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = "",
-        runtime_mode: str | None = None, binary_runner=None
+        self, bot_id: int, owner_id: int, raw: "bytes | StagedBotUpload", *,
+        upload_note: str = "", runtime_mode: str | None = None, binary_runner=None
     ) -> dict:
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
             raise BotError("not_found", "bot 不存在")
         self._require_owner_live(bot)
-        if not raw or len(raw) > MAX_BYTES:
+        size = _payload_size(raw)
+        if not size or size > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = _classify_upload(raw)
         # 分配版本号、原子落盘、DB 写入和失败回滚必须属于同一 per-bot 临界区。
@@ -264,7 +336,7 @@ class BotManager:
     def _write_version(
         self,
         bot_id: int,
-        raw: bytes,
+        raw: "bytes | StagedBotUpload",
         info,
         *,
         upload_note: str,
@@ -277,7 +349,6 @@ class BotManager:
                 require_supported_binary(info)
             except BinaryRejectError as exc:
                 raise BotError("unsupported_binary", str(exc)) from exc
-            checksum = hashlib.sha256(raw).hexdigest()
             # 回滚只切换当前激活版本，不删除较新的历史版本。新上传必须接在
             # 历史最大版本之后；若用 current_version + 1，v2 -> 回滚 v1 后
             # 再上传会重复插入 v2，触发 bot_versions 唯一约束并返回 500。
@@ -296,7 +367,12 @@ class BotManager:
             dest = dest_dir / "bot.bin"
             promoted = False
             try:
-                temp_dest.write_bytes(raw)
+                if isinstance(raw, StagedBotUpload):
+                    checksum, payload_size = _hashing_copy(raw.path, temp_dest)
+                else:
+                    checksum = hashlib.sha256(raw).hexdigest()
+                    payload_size = len(raw)
+                    temp_dest.write_bytes(raw)
                 temp_dest.chmod(0o755)
                 # Preflight the hidden temporary file before publishing either a
                 # bot_versions row or bots.current_version.  A concurrent match can
@@ -327,7 +403,7 @@ class BotManager:
                         binary_path=str(dest),
                         upload_note=upload_note,
                         checksum=checksum,
-                        size_bytes=len(raw),
+                        size_bytes=payload_size,
                         os=info.os,
                         arch=info.arch,
                         format=info.format,
@@ -342,6 +418,8 @@ class BotManager:
                 raise
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+                if isinstance(raw, StagedBotUpload):
+                    raw.close()
             if not self.store.get_rating(bot_id):
                 self.store.ensure_rating(bot_id)
             return self.store.get_bot(bot_id)
@@ -429,6 +507,7 @@ class BotManager:
                 self._upload_root_identity = self._directory_identity(root)
                 self._fsync_path(root, directory=True)
                 self._fsync_path(root.parent, directory=True)
+            self._purge_stale_staging()
         return root
 
     def _build_game_contract_cutover_plan(

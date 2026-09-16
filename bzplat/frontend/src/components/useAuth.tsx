@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { requestReleaseNotesCheck } from '@/release-notes'
 import {
   apiGet,
   apiPost,
@@ -115,6 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (authGenerationRef.current !== generation) return currentUserStore.get() ?? d.user
         confirmAuthenticatedSession(d.user)
         setUser(d.user)
+        requestReleaseNotesCheck()
         return d.user
       } finally {
         if (authGenerationRef.current === generation) setLoading(false)

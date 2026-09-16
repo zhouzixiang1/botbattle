@@ -673,7 +673,7 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
   await expect(page.locator('main [data-slot="summary-strip"]')).toHaveCount(0)
-  await expect(page.locator('main')).toContainText('最大 100 MiB')
+  await expect(page.locator('main')).toContainText('最大 256 MiB')
   const name = page.locator('#upload-name')
   for (const invalid of ['a', '1bot', 'a-b']) {
     await name.fill(invalid)
@@ -687,6 +687,41 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
   await name.fill('ab')
   expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
+  await monitor.expectClean()
+})
+
+test('release notes dialog auto-opens once after login and footer reopens full history', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  // 访客浏览不被更新弹窗打断（弹窗只在真实登录成功后触发）。
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Bot 对战' })).toBeVisible()
+  await expect(page.getByRole('dialog')).toBeHidden()
+
+  // 清掉已读标记后手工登录（不走 loginThroughUi，保留弹窗供断言）。
+  await page.goto('/#/login')
+  await page.evaluate(() => localStorage.removeItem('bz-release-notes-seen'))
+  await page.locator('#login-username').fill(USER)
+  await page.locator('#login-password').fill(PASSWORD)
+  await page.getByPlaceholder('图中字符或算式结果').fill('skip')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('平台更新')
+  await expect(dialog).toContainText('v1.1')
+  await expect(dialog).toContainText('256 MiB')
+  await dialog.getByRole('button', { name: '知道了', exact: true }).click()
+  await expect(dialog).toBeHidden()
+
+  // 已读后刷新（持久会话静默恢复）不再弹出，但页脚「更新日志」可回看全部历史。
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Bot 对战' })).toBeVisible()
+  await expect(dialog).toBeHidden()
+  await page.locator('[data-release-notes-link]').click()
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('更新日志')
+  await expect(dialog).toContainText('v1.1')
+  await dialog.locator('[data-release-notes-confirm]').click()
+  await expect(dialog).toBeHidden()
   await monitor.expectClean()
 })
 
@@ -1493,18 +1528,40 @@ test('contest detail ignores a stale response after navigating to another contes
   }])
 })
 
-async function chooseBot(page: Page, trigger: Locator, query: string, mineOnly: boolean) {
+async function chooseBot(
+  page: Page,
+  trigger: Locator,
+  query: string,
+  mineOnly: boolean,
+  viaUser?: string,
+) {
   await trigger.click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   if (mineOnly) {
     await expect(dialog.getByRole('button', { name: '全部 Bot', exact: true })).toHaveCount(0)
+  } else if (viaUser) {
+    // 公开 Bot 列表已跨分页，「全部 Bot」只过滤当前页，按名搜索不再可靠。
+    // 跨用户夹具固定走「按用户搜索」→ owner 过滤列表，不随共享库数据量漂移。
+    await dialog.getByRole('button', { name: '按用户搜索', exact: true }).click()
+    await dialog.getByPlaceholder('搜索用户名…').fill(viaUser)
+    await dialog
+      .locator('li')
+      .filter({ hasText: `@${viaUser}` })
+      .getByRole('button')
+      .first()
+      .click()
+    await dialog.locator('li').filter({ hasText: query }).getByRole('button').first().click()
+    return
+  } else {
+    // 自博弈：owner 过滤的「我的 Bot」列表同样不受公开分页影响。
+    await dialog.getByRole('button', { name: '我的 Bot（自博弈）', exact: true }).click()
   }
   const input = dialog.getByPlaceholder(
     mineOnly ? '搜索我的 Bot 名称…' : '搜索 Bot 名称…',
   )
   await input.fill(query)
-  await dialog.locator('li').filter({ hasText: query }).getByRole('button').click()
+  await dialog.locator('li').filter({ hasText: query }).getByRole('button').first().click()
 }
 
 /**
@@ -4752,7 +4809,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await versionFile.evaluate((element) => {
     const input = element as HTMLInputElement
     const file = new File(['oversized'], 'too-large.bin', { type: 'application/octet-stream' })
-    Object.defineProperty(file, 'size', { value: 100 * 1024 * 1024 + 1 })
+    Object.defineProperty(file, 'size', { value: 256 * 1024 * 1024 + 1 })
     const transfer = new DataTransfer()
     transfer.items.add(file)
     input.files = transfer.files
@@ -5077,6 +5134,7 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
     page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
     `${OTHER_USER}_holdem`,
     false,
+    OTHER_USER,
   )
   const startResponse = await submitExecutionWithCommittedPoll(
     page,
@@ -5323,6 +5381,7 @@ test('real Pencil human play accepts several canvas-picked edges without illegal
       page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
       `${OTHER_USER}_pencil`,
       false,
+      OTHER_USER,
     )
 
     page.on('websocket', (socket) => {
@@ -5439,6 +5498,7 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
     page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
     `${OTHER_USER}_holdem`,
     false,
+    OTHER_USER,
   )
   await expect(page.getByText('人类对战使用该 Bot 的当前激活版本')).toBeVisible()
   await expect(page.getByRole('combobox', { name: /版本/ })).toHaveCount(0)
@@ -5651,6 +5711,7 @@ test('human play stops reconnecting after a real action rate policy close', asyn
       page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
       `${OTHER_USER}_holdem`,
       false,
+      OTHER_USER,
     )
     const startResponse = await submitExecutionWithCommittedPoll(
       page,
