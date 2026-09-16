@@ -12,6 +12,16 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.3',
+    date: '2026-09-17',
+    title: '源码 Bot 上线：C / C++ / Go / Python',
+    items: [
+      '上传源码 zip 即可建 Bot，平台自动编译（Python 直接运行）。同名文件 main.cpp / main.go / __main__.py 会作为默认入口。',
+      '编译时自动定义 _BOTZONE_ONLINE / BOTARENA_ONLINE 宏，方便区分本地与线上。',
+      '云存储文件会在对局开始时挂载到 Bot 的 /mnt/data 目录（只读）；对 Python 暂只支持标准库。',
+    ],
+  },
+  {
     version: 'v1.2',
     date: '2026-09-16',
     title: '用户云存储上线',

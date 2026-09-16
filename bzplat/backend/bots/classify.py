@@ -66,6 +66,13 @@ def classify_binary(data: bytes) -> BinaryInfo:
                 "macho", "macos", _macho_arch(data), False,
                 _unsupported("macOS Mach-O 不受支持"),
             )
+    if data[:2] == b"#!":
+        # 平台为 python 源码 Bot 生成的 launcher 脚本；普通上传路径仍按
+        # 不支持拒绝（runnable=False），仅 allow_script_entry 显式接受。
+        return BinaryInfo(
+            "script", "linux", "amd64", False,
+            _unsupported("脚本不是可上传格式（仅平台生成的 python launcher 使用）"),
+        )
     return BinaryInfo(
         "unknown", "unknown", "unknown", False,
         _unsupported("无法识别的可执行格式"),

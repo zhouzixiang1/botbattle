@@ -140,7 +140,7 @@ def test_pencil_run_duplicate_is_rejected_instead_of_falling_back():
 
 
 class _FakeBinaryRunner:
-    def __init__(self) -> None:
+    def __init__(self, image="", extra_volumes=(), allow_script_entry=False,) -> None:
         self.stopped: list[str] = []
         self._sessions: dict[str, object] = {}
         self.runtime_ready_calls = 0
@@ -150,8 +150,7 @@ class _FakeBinaryRunner:
         _path: str,
         *,
         runtime_mode: str,
-        profile=PLATFORM_LOW_PROFILE,
-    ) -> str:
+        profile=PLATFORM_LOW_PROFILE, image="", extra_volumes=(), allow_script_entry=False,) -> str:
         sid = f"session-{runtime_mode}"
         self._sessions[sid] = SimpleNamespace(
             binary_path=_path,
@@ -169,8 +168,7 @@ class _FakeBinaryRunner:
         _path: str,
         *,
         runtime_mode: str,
-        profile=PLATFORM_LOW_PROFILE,
-    ) -> str:
+        profile=PLATFORM_LOW_PROFILE, image="", extra_volumes=(), allow_script_entry=False,) -> str:
         sid = f"session-{runtime_mode}"
         self._sessions[sid] = SimpleNamespace(
             binary_path=_path,
@@ -580,8 +578,7 @@ def test_traditional_slow_attempt_check_is_outside_bot_clock(monkeypatch):
     binary._sessions[parent.session_id] = parent
 
     async def start_session(
-        binary_path, *, runtime_mode, profile, execution_scope=None
-    ):
+        binary_path, *, runtime_mode, profile, execution_scope=None, image="", extra_volumes=(), allow_script_entry=False,):
         binary._sessions["child"] = BotSession(
             "child",
             BinaryInfo("elf", "linux", "amd64", True),
@@ -878,6 +875,9 @@ def test_longrunning_handshake_timeout_from_binary_runner_is_decision_timeout(
             runtime_mode,
             profile,
             execution_scope=None,
+            image="",
+            extra_volumes=(),
+            allow_script_entry=False,
         ):
             self.next_id += 1
             sid = f"bot-{self.next_id}"

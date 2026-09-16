@@ -38,7 +38,7 @@ class _PreflightTransport:
         self.extra_timeouts: list[float] = []
         self.stopped: list[str] = []
 
-    async def start_session(self, path, *, runtime_mode):
+    async def start_session(self, path, *, runtime_mode, image="", extra_volumes=(), allow_script_entry=False,):
         sid = f"s{len(self.started)}"
         self.started.append((str(path), runtime_mode))
         return sid
@@ -289,7 +289,7 @@ class _TraditionalLifecycleTransport:
             long_running=False,
         )
 
-    async def prepare_session(self, path, *, runtime_mode, profile=None):
+    async def prepare_session(self, path, *, runtime_mode, profile=None, image="", extra_volumes=(), allow_script_entry=False,):
         sid = f"logical-{len(self.prepared)}"
         self.prepared.append(str(path))
         self._sessions[sid] = self._state(str(path), runtime_mode, profile)
@@ -348,7 +348,7 @@ def test_traditional_human_match_prepares_history_without_idle_process():
 
 
 class _PrepareFailureTransport(_TraditionalLifecycleTransport):
-    async def prepare_session(self, path, *, runtime_mode, profile=None):
+    async def prepare_session(self, path, *, runtime_mode, profile=None, image="", extra_volumes=(), allow_script_entry=False):
         if str(path).endswith("bad.bin"):
             raise BotCrashedError("cannot start")
         return await super().prepare_session(

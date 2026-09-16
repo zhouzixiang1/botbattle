@@ -38,6 +38,7 @@ from .public_contract import (
 )
 
 from .schema import (
+    DOCKER_LAUNCH_JOURNAL_TABLE_SQL,
     CODE_RESET,
     COMMENT_TARGET_TYPES,
     EMAIL_CODE_MAX_FAILED_ATTEMPTS,
@@ -4871,6 +4872,41 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "deployment_drain_reason",
             "TEXT NOT NULL DEFAULT ''",
         )
+    journal_check = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='docker_launch_journal'"
+    ).fetchone()
+    if journal_check is not None and "build" not in str(journal_check[0] or ""):
+        # 源码构建通道新增 owner_kind='build'。journal 是单行瞬态表，
+        # 仅在 idle 时原位重建；非 idle 属启动期异常状态，fail closed。
+        state = conn.execute(
+            "SELECT state FROM docker_launch_journal WHERE singleton=1"
+        ).fetchone()
+        if state is not None and state[0] != "idle":
+            raise RuntimeError(
+                "docker launch journal 非 idle，拒绝重建 CHECK 约束"
+            )
+        conn.execute("DROP TABLE docker_launch_journal")
+        conn.executescript(DOCKER_LAUNCH_JOURNAL_TABLE_SQL)
+        conn.execute(
+            "INSERT OR IGNORE INTO docker_launch_journal(singleton,state,"
+            "updated_at) VALUES(1,'idle',?)",
+            (_now(),),
+        )
+
+    if "bot_versions" in tables:
+        _add_col(
+            conn,
+            "bot_versions",
+            "source_format",
+            "TEXT NOT NULL DEFAULT 'elf' "
+            "CHECK (source_format IN ('elf','c','cpp','go','python'))",
+        )
+        _add_col(conn, "bot_versions", "source_path", "TEXT NOT NULL DEFAULT ''")
+        _add_col(
+            conn, "bot_versions", "build_recipe_json", "TEXT NOT NULL DEFAULT ''"
+        )
+        _add_col(conn, "bot_versions", "runtime_image", "TEXT NOT NULL DEFAULT ''")
     if "broadcast_recipients" in tables:
         _add_col(conn, "broadcast_recipients", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         _add_col(conn, "broadcast_recipients", "max_attempts", "INTEGER NOT NULL DEFAULT 5")
@@ -6752,6 +6788,18 @@ class Store:
         ).fetchone() is None
         with self._tx() as conn:
             conn.executescript(SCHEMA)
+            if fresh_schema:
+                # SCHEMA 内联 journal 定义不含完整形状约束（历史原因）；
+                # fresh 库补跑完整 DDL 确保 CHECK 与重建形态一致。
+                conn.execute(
+                    "DROP TABLE IF EXISTS docker_launch_journal"
+                )
+                conn.executescript(DOCKER_LAUNCH_JOURNAL_TABLE_SQL)
+                conn.execute(
+                    "INSERT OR IGNORE INTO docker_launch_journal(singleton,"
+                    "state,updated_at) VALUES(1,'idle',?)",
+                    (_now(),),
+                )
             _migrate(conn, fresh_schema=fresh_schema)
             if fresh_schema:
                 _certify_fresh_rating_projection(conn)
@@ -9802,6 +9850,10 @@ class Store:
         upload_note: str = "",
         checksum: str = "",
         size_bytes: int = 0,
+        source_format: str = "elf",
+        source_path: str = "",
+        build_recipe_json: str = "",
+        runtime_image: str = "",
         os: str = SUPPORTED_BINARY_OS,
         arch: str = SUPPORTED_BINARY_ARCH,
         format: str = SUPPORTED_BINARY_FORMAT,
@@ -9845,7 +9897,9 @@ class Store:
             cur = c.execute(
                 "INSERT INTO bot_versions(bot_id, version, binary_path, "
                 "upload_note, checksum, size_bytes, os, arch, format, runtime_mode, "
-                "protocol_version,uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source_format, source_path, build_recipe_json, runtime_image, "
+                "protocol_version,uploaded_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     bot_id,
                     version,
@@ -9857,6 +9911,10 @@ class Store:
                     arch,
                     format,
                     runtime_mode,
+                    source_format,
+                    source_path,
+                    build_recipe_json,
+                    runtime_image,
                     protocol,
                     _now(),
                 ),

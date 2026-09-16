@@ -1,17 +1,27 @@
 # Bot 开发指南
 
-本页面向准备上传 Bot 的玩家。平台唯一接受的上传产物是 **Linux x86_64 ELF**：
+本页面向准备上传 Bot 的玩家。平台支持两种上传形态：
 
-- 必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件；
-- 不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF；
-- 不接受 `.py` 源文件、Shell 脚本、压缩包或源码目录；
-- 文件叫什么名字并不重要，平台按文件内容校验格式与架构。
+| 类型 | 上传内容 | 大小上限 | 平台处理 |
+|---|---|---|---|
+| 编译好的 ELF | 单个 Linux x86_64 可执行文件 | 256 MiB | 直接进沙箱 |
+| 源码 Bot | zip 源码包 | 64 MiB | C/C++/Go 平台编译；Python 直接运行 |
+
+ELF 必须是 64 位 `x86-64`/`amd64`；不接受 Windows PE、macOS Mach-O、ARM64 ELF。
+源码 zip 内使用 POSIX 相对路径，默认入口：`main.cpp`（或 `main.c` / `main.go` /
+`__main__.py`），也可在表单里显式声明。C/C++ 当前只编译入口单个源文件（多文件工程请合并为单文件或改用 PyInstaller 打包）；Go 编译整个包。编译在离线沙箱内完成（约 2–3 秒），
+命令固定 `gcc/g++ -O2 -static` 并定义 `BOTARENA_ONLINE=1` 宏；Python 第一版仅标准库，需第三方库时请用 PyInstaller 打包成 ELF 再上传。
 
 因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建。
 最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
 开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则。先复制一份完整示例跑通，
 再替换其中的决策函数，通常是最快的上手方式。
+
+你还可以在「设置 → 云存储」上传最多 256 MB 的数据文件（如模型权重）。每次对局
+开始时，你的云盘会被只读挂载到 Bot 进程的 `/mnt/data` 和 `/app/data`（工作目录
+`/app` 下的相对路径 `data/xxx` 也可用）。对局中读到的是开赛瞬间的快照，之后修改
+云盘从下一场对局开始生效；同名上传覆盖旧文件。
 
 如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置。本地接入当前只支持 Traditional，且不计平台排行榜、不参加赛事。
 

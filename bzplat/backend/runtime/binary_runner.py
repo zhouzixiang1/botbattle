@@ -235,6 +235,11 @@ class BotSession:
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
     execution_scope: ExecutionScope | None = None
+    # 源码 Bot 扩展：运行镜像覆盖（python 运行镜像）与附加只读卷
+    # （版本源码包 / 云盘快照）。为空时沿用 runner 默认镜像与基础挂载。
+    image: str = ""
+    extra_volumes: tuple[tuple[str, str], ...] = ()
+    allow_script_entry: bool = False
     _decision_timer: _DecisionTransportTimer | None = field(
         default=None, repr=False
     )
@@ -562,6 +567,9 @@ class BinaryRunner:
         runtime_mode: str,
         profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
         execution_scope: ExecutionScope | None = None,
+        image: str = "",
+        extra_volumes: tuple[tuple[str, str], ...] = (),
+        allow_script_entry: bool = False,
     ) -> BotSession:
         """校验二进制并创建逻辑会话；不启动进程。"""
         if execution_scope is not None:
@@ -574,8 +582,19 @@ class BinaryRunner:
             raise BotCrashedError(f"bot 二进制不存在: {path}")
         # 文件内容始终是权威真相：绝不信任数据库历史值或调用方传入的
         # ``BinaryInfo(runnable=True)``，避免 PE/脚本通过伪造元数据回退到 local。
+        # python 源码 Bot 的“产物”是平台生成的 launcher 脚本（allow_script_entry），
+        # 同样由文件内容而非元数据判定。
         with path.open("rb") as binary:
-            detected = require_supported_binary(classify_binary(binary.read(4096)))
+            head = binary.read(4096)
+        if allow_script_entry:
+            detected = classify_binary(head)
+            if detected.format != "script":
+                raise BinaryRejectError("python 源码 Bot 的入口产物必须是平台 launcher 脚本")
+            detected = BinaryInfo(
+                "script", "linux", "amd64", True, "platform python launcher"
+            )
+        else:
+            detected = require_supported_binary(classify_binary(head))
         if info is not None:
             require_supported_binary(info)
             expected = (info.format, info.os, info.arch, info.runnable)
@@ -590,6 +609,9 @@ class BinaryRunner:
             session_id=sid, info=info, binary_path=path, mode=mode,
             profile=resolved_profile, runtime_mode=runtime_mode,
             execution_scope=execution_scope,
+            image=str(image or ""),
+            extra_volumes=tuple(extra_volumes),
+            allow_script_entry=bool(allow_script_entry),
         )
         return session
 
@@ -601,6 +623,9 @@ class BinaryRunner:
         runtime_mode: str = DEFAULT_RUNTIME_MODE,
         profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
         execution_scope: ExecutionScope | None = None,
+        image: str = "",
+        extra_volumes: tuple[tuple[str, str], ...] = (),
+        allow_script_entry: bool = False,
     ) -> str:
         """只登记 Traditional 的历史状态，不启动整场闲置 Bot 进程。"""
         if runtime_mode != DEFAULT_RUNTIME_MODE:
@@ -611,11 +636,22 @@ class BinaryRunner:
             runtime_mode=runtime_mode,
             profile=profile,
             execution_scope=execution_scope,
+            image=image,
+            extra_volumes=extra_volumes,
+            allow_script_entry=allow_script_entry,
         )
         if session.mode == "docker":
             # Traditional 的逻辑会话在游戏 Session/棋钟启动前建立；此处完成
             # 镜像准备，避免冷拉取时间计入 Pencil 的 900 秒累计棋钟。
-            await self.ensure_runtime_ready()
+            if session.image and session.image != self._linux_image:
+                await asyncio.to_thread(
+                    _ensure_linux_image_ready_sync,
+                    self._docker_bin,
+                    session.image,
+                    prepare_timeout=self._image_prepare_timeout,
+                )
+            else:
+                await self.ensure_runtime_ready()
         self._sessions[session.session_id] = session
         logger.debug(
             "bot protocol session prepared sid=%s path=%s",
@@ -629,13 +665,19 @@ class BinaryRunner:
                             action_timeout: float = DEFAULT_ACTION_TIMEOUT,
                             runtime_mode: str = DEFAULT_RUNTIME_MODE,
                             profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
-                            execution_scope: ExecutionScope | None = None) -> str:
+                            execution_scope: ExecutionScope | None = None,
+                            image: str = "",
+                            extra_volumes: tuple[tuple[str, str], ...] = (),
+                            allow_script_entry: bool = False) -> str:
         session = self._new_session(
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
             profile=profile,
             execution_scope=execution_scope,
+            image=image,
+            extra_volumes=extra_volumes,
+            allow_script_entry=allow_script_entry,
         )
         sid = session.session_id
         mode = session.mode
@@ -739,7 +781,8 @@ class BinaryRunner:
             raise
 
     def _select_mode(self, info: BinaryInfo) -> str:
-        require_supported_binary(info)
+        if info.format != "script":
+            require_supported_binary(info)
         # Running an uploaded executable directly on the host is an explicit
         # test-only escape hatch.  Production must fail closed when Docker is
         # unavailable; silently falling back would bypass every sandbox limit.
@@ -797,8 +840,9 @@ class BinaryRunner:
                         launch_token=session.launch_token,
                         owner_kind=owner_kind,
                         binary_path=session.binary_path,
-                        image=self._linux_image,
+                        image=session.image or self._linux_image,
                         profile=session.profile,
+                        extra_volumes=session.extra_volumes,
                     ),
                     name=f"docker-create-{session.session_id}",
                 )

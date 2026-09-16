@@ -48,9 +48,11 @@ from bzplat.backend.security import (
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
 from bzplat.backend.runtime.limits import (
+    SOURCE_UPLOAD_MAX_BYTES,
     USER_STORAGE_MAX_FILES,
     USER_STORAGE_QUOTA_BYTES,
 )
+from bzplat.backend.bots.source_build import SourceBuildError
 from bzplat.backend.user_storage import (
     UserStorageError,
     validate_storage_name,
@@ -464,7 +466,7 @@ def _multipart_file(form: FormData) -> UploadFile:
 _UPLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
-async def _stream_bot_upload(staged, file: UploadFile) -> None:
+async def _stream_bot_upload(staged, file: UploadFile, *, max_bytes: int | None = None) -> None:
     """把 multipart spool 流式拷入已分配的暂存槽（见端点处的宽 try/finally）。
 
     进程内存只占单个 chunk；超限在流中即时拒绝；清理由调用方统一兜底。
@@ -476,18 +478,32 @@ async def _stream_bot_upload(staged, file: UploadFile) -> None:
         while True:
             # 单次请求量不超过当前生效上限，注入收紧的测试也能
             # 观察到有界读取；生产上限下恒为 1 MiB。
-            chunk = await file.read(min(_UPLOAD_STREAM_CHUNK_BYTES, MAX_BYTES))
+            effective_max = MAX_BYTES if max_bytes is None else max_bytes
+            chunk = await file.read(
+                min(_UPLOAD_STREAM_CHUNK_BYTES, effective_max)
+            )
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_BYTES:
+            if total > effective_max:
                 raise BotError(
-                    "invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节"
+                    "invalid_size",
+                    f"上传大小须 1..{effective_max} 字节"
+                    if max_bytes is not None
+                    else f"二进制大小须 1..{MAX_BYTES} 字节",
                 )
             await asyncio.to_thread(out.write, chunk)
     if not total:
         raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
     staged.size = total
+
+
+def _source_upload_limit(source_format: str) -> int:
+    return (
+        SOURCE_UPLOAD_MAX_BYTES
+        if source_format and source_format != "elf"
+        else MAX_BYTES
+    )
 
 
 def _upload_busy_error() -> HTTPException:
@@ -558,6 +574,11 @@ def _with_bot_runnable(
         else SUPPORTED_BINARY_ERROR
     )
     return public
+
+
+def _new_source_builder(request: Request):
+    """上传 admission 内的同步源码构建通道（无则源码上传 503/400）。"""
+    return getattr(request.app.state, "source_builder", None)
 
 
 def _new_preflight_runner(request: Request):
@@ -1400,7 +1421,16 @@ async def upload_bot(
                     runtime_mode = _multipart_text(
                         form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
                     )
-                    await _stream_bot_upload(staged, _multipart_file(form))
+                    source_format = (
+                        _multipart_text(form, "source_format", default="elf")
+                        .strip()
+                        .lower()
+                    )
+                    source_entry = _multipart_text(form, "source_entry")
+                    file = _multipart_file(form)
+                    await _stream_bot_upload(
+                        staged, file, max_bytes=_source_upload_limit(source_format)
+                    )
                 bot = await _finish_upload_step_before_cancel(
                     asyncio.to_thread(
                         _bots(request).create_from_upload,
@@ -1413,6 +1443,9 @@ async def upload_bot(
                         game_id=game_id,
                         runtime_mode=runtime_mode,
                         binary_runner=_new_preflight_runner(request),
+                        source_format=source_format,
+                        source_entry=source_entry,
+                        source_builder=_new_source_builder(request),
                     )
                 )
             finally:
@@ -1437,6 +1470,9 @@ async def upload_bot(
             detail="upload_busy",
         )
         raise _upload_busy_error()
+    except SourceBuildError as e:
+        audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
+        raise HTTPException(400, detail={"code": e.code, "message": e.message})
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -1460,10 +1496,19 @@ async def upload_bot_version(
         async with _bot_upload_admission(request):
             staged = _bots(request).new_staged_upload()
             try:
-                async with request.form(max_files=1, max_fields=4) as form:
+                async with request.form(max_files=1, max_fields=6) as form:
                     upload_note = _multipart_text(form, "upload_note")
                     runtime_mode = _multipart_text(form, "runtime_mode")
-                    await _stream_bot_upload(staged, _multipart_file(form))
+                    source_format = (
+                        _multipart_text(form, "source_format", default="elf")
+                        .strip()
+                        .lower()
+                    )
+                    source_entry = _multipart_text(form, "source_entry")
+                    file = _multipart_file(form)
+                    await _stream_bot_upload(
+                        staged, file, max_bytes=_source_upload_limit(source_format)
+                    )
                 bot = await _finish_upload_step_before_cancel(
                     asyncio.to_thread(
                         _bots(request).upload_version,
@@ -1473,6 +1518,9 @@ async def upload_bot_version(
                         upload_note=upload_note,
                         runtime_mode=runtime_mode or None,
                         binary_runner=_new_preflight_runner(request),
+                        source_format=source_format,
+                        source_entry=source_entry,
+                        source_builder=_new_source_builder(request),
                     )
                 )
             finally:
@@ -1497,6 +1545,11 @@ async def upload_bot_version(
             detail="upload_busy",
         )
         raise _upload_busy_error()
+    except SourceBuildError as e:
+        audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
+        raise HTTPException(
+            400, detail={"code": e.code, "message": e.message}
+        )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(

@@ -57,8 +57,7 @@ class _ProfileTransport:
         *,
         runtime_mode,
         profile,
-        execution_scope=None,
-    ) -> str:
+        execution_scope=None, image="", extra_volumes=(), allow_script_entry=False,) -> str:
         sid = f"logical-{len(self.prepared)}"
         self.prepared.append((str(path), profile))
         self._sessions[sid] = self._state(
@@ -72,8 +71,7 @@ class _ProfileTransport:
         *,
         runtime_mode,
         profile,
-        execution_scope=None,
-    ) -> str:
+        execution_scope=None, image="", extra_volumes=(), allow_script_entry=False,) -> str:
         sid = f"process-{len(self.started)}"
         self.started.append((str(path), profile))
         self._sessions[sid] = self._state(

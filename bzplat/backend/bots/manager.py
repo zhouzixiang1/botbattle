@@ -16,6 +16,7 @@ from threading import Lock, RLock
 from typing import Any, Iterator
 
 from ..bots.classify import (
+    BinaryInfo,
     BinaryRejectError,
     classify_binary,
     require_supported_binary,
@@ -26,7 +27,13 @@ from ..store import (
     RankedBotSelectionBusyError,
     Store,
 )
-from ..runtime.limits import MAX_BOT_UPLOAD_BYTES
+from ..runtime.limits import MAX_BOT_UPLOAD_BYTES, PYTHON_RUNTIME_IMAGE
+from .source_build import (
+    SourceBuildError,
+    ZIP_MAGIC,
+    build_recipe,
+    inspect_source_zip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +79,30 @@ def _payload_size(raw: "bytes | StagedBotUpload") -> int:
     return len(raw)
 
 
-def _classify_upload(raw: "bytes | StagedBotUpload"):
-    """Classify once at the upload boundary and expose a stable API error."""
+def _classify_upload(raw: "bytes | StagedBotUpload", *, source_format: str = "elf"):
+    """Classify once at the upload boundary and expose a stable API error.
+
+    源码上传（source_format != elf）只要求 zip 魔数；语言/入口/结构的
+    完整校验在 _prepare_source_version 的 inspect_source_zip 里做，产物
+    （编译 ELF 或 launcher）在那里再次分类。
+    """
     try:
+        if source_format != "elf":
+            if isinstance(raw, StagedBotUpload):
+                with Path(raw.path).open("rb") as f:
+                    head = f.read(4)
+            else:
+                head = bytes(raw[:4])
+            if head != ZIP_MAGIC:
+                raise BotError(
+                    "invalid_source_zip",
+                    "源码上传必须是 zip 包（入口文件在包内）",
+                )
+            # 占位元数据：bots.format/os/arch 恒为 elf/linux/amd64（真实产物
+            # 在 _prepare_source_version 中分类），语义列不承载源码信息。
+            return BinaryInfo(
+                "elf", "linux", "amd64", True, "source upload placeholder"
+            )
         if isinstance(raw, StagedBotUpload):
             with Path(raw.path).open("rb") as staged:
                 head = staged.read(4096)
@@ -165,6 +193,9 @@ class BotManager:
         game_id: str = "holdem",
         runtime_mode: str | None = None,
         binary_runner=None,
+        source_format: str = "elf",
+        source_entry: str = "",
+        source_builder=None,
     ) -> dict:
         if not _NAME_RE.match(name or ""):
             raise BotError(
@@ -182,7 +213,7 @@ class BotManager:
         size = _payload_size(raw)
         if not size or size > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
-        info = _classify_upload(raw)
+        info = _classify_upload(raw, source_format=source_format)
         if self.store.get_bot_by_owner_name(owner_id, name):
             raise BotError("name_taken", "同名 bot 已存在")
         bot = self.store.create_bot(
@@ -209,6 +240,9 @@ class BotManager:
                 runtime_mode=rmode,
                 game_id=gid,
                 binary_runner=binary_runner,
+                source_format=source_format,
+                source_entry=source_entry,
+                source_builder=source_builder,
             )
             return self.store.publish_uploaded_bot(owner_id, bot["id"])
         except Exception as exc:
@@ -240,7 +274,9 @@ class BotManager:
 
     def upload_version(
         self, bot_id: int, owner_id: int, raw: "bytes | StagedBotUpload", *,
-        upload_note: str = "", runtime_mode: str | None = None, binary_runner=None
+        upload_note: str = "", runtime_mode: str | None = None, binary_runner=None,
+        source_format: str = "elf", source_entry: str = "",
+        source_builder=None,
     ) -> dict:
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         bot = self.store.get_bot(bot_id)
@@ -250,7 +286,7 @@ class BotManager:
         size = _payload_size(raw)
         if not size or size > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
-        info = _classify_upload(raw)
+        info = _classify_upload(raw, source_format=source_format)
         # 分配版本号、原子落盘、DB 写入和失败回滚必须属于同一 per-bot 临界区。
         # 否则并发上传会写同一个 vN，或预检失败误删另一请求的新版本。
         with self._bot_version_lock(bot_id):
@@ -273,6 +309,9 @@ class BotManager:
                 runtime_mode=rmode,
                 game_id=bot["game_id"],
                 binary_runner=binary_runner,
+                source_format=source_format,
+                source_entry=source_entry,
+                source_builder=source_builder,
             )
 
     def _run_preflight(
@@ -283,6 +322,9 @@ class BotManager:
         *,
         binary_path: str | None = None,
         runtime_mode: str,
+        image: str = "",
+        extra_volumes: tuple[tuple[str, str], ...] = (),
+        allow_script_entry: bool = False,
     ) -> tuple[bool, str]:
         """按待发布版本所选模式试跑 canonical 首回合协议。"""
         import asyncio
@@ -295,7 +337,12 @@ class BotManager:
             return False, "预检失败：二进制路径缺失"
         try:
             with Path(path).open("rb") as binary:
-                require_supported_binary(classify_binary(binary.read(4096)))
+                head = binary.read(4096)
+            if allow_script_entry:
+                if classify_binary(head).format != "script":
+                    raise BinaryRejectError("launcher 脚本缺失")
+            else:
+                require_supported_binary(classify_binary(head))
         except (OSError, BinaryRejectError) as exc:
             return False, f"预检失败：{exc}"
         try:
@@ -310,6 +357,9 @@ class BotManager:
                         path,
                         binary_runner,
                         runtime_mode=runtime_mode,
+                        image=image,
+                        extra_volumes=extra_volumes,
+                        allow_script_entry=allow_script_entry,
                     )
                 )
             else:
@@ -324,6 +374,9 @@ class BotManager:
                                 path,
                                 binary_runner,
                                 runtime_mode=runtime_mode,
+                                image=image,
+                                extra_volumes=extra_volumes,
+                                allow_script_entry=allow_script_entry,
                             )
                         )
                     ).result()
@@ -332,6 +385,99 @@ class BotManager:
         except Exception as e:
             logger.warning("preflight bot %s failed: %s", bot_id, e)
             return False, f"预检异常: {e}"
+
+    def _prepare_source_version(
+        self,
+        raw: "bytes | StagedBotUpload",
+        temp_dir: Path,
+        temp_dest: Path,
+        *,
+        source_format: str,
+        source_entry: str,
+        source_builder,
+    ) -> tuple[str, int, str, str]:
+        """源码上传的暂存处理：校验 zip → 构建/打包 → 产物就位 temp_dest。
+
+        返回 (checksum, size, runtime_image, build_recipe_json)。编译型语言
+        产物必须是静态 ELF；python 持久化 src/ 目录并生成 launcher 脚本。
+        temp_dir 内的所有内容（bot.bin、src/、source.zip）随后随版本目录
+        原子晋升，匹配期的源码卷即 <版本目录>/src。
+        """
+        import json as _json
+        import zipfile as _zipfile
+
+        zip_path = temp_dir / "source.zip"
+        if isinstance(raw, StagedBotUpload):
+            shutil.copyfile(raw.path, zip_path)
+        else:
+            zip_path.write_bytes(raw)
+        spec = inspect_source_zip(
+            zip_path,
+            language=source_format,
+            declared_entry=source_entry or None,
+        )
+        recipe = build_recipe(spec)
+        src_dir = temp_dir / "src"
+        src_dir.mkdir()
+        with _zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                target = src_dir / member.filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("wb") as out:
+                    shutil.copyfileobj(source, out)
+
+        if spec.language == "python":
+            import shlex as _shlex
+
+            launcher = (
+                "#!/bin/sh\n"
+                f'exec python3 "$(dirname \"$0\")/src/{_shlex.quote(spec.entry)}" "$@"\n'
+            )
+            temp_dest.write_text(launcher)
+            temp_dest.chmod(0o755)
+            checksum = hashlib.sha256(temp_dest.read_bytes()).hexdigest()
+            return checksum, temp_dest.stat().st_size, PYTHON_RUNTIME_IMAGE, _json.dumps(
+                recipe, ensure_ascii=False, sort_keys=True
+            )
+
+        if source_builder is None:
+            raise SourceBuildError(
+                "build_unavailable", "当前实例未启用源码构建通道"
+            )
+        out_dir = temp_dir / "out"
+        out_dir.mkdir()
+        # 构建容器以非特权用户（65534）运行：源码目录可读、产物目录可写。
+        src_dir.chmod(0o755)
+        out_dir.chmod(0o777)
+        for child in src_dir.rglob("*"):
+            try:
+                child.chmod(0o644 if child.is_file() else 0o755)
+            except OSError:
+                pass
+        source_builder(src_dir, out_dir, recipe)
+        artifact = out_dir / "bot"
+        if not artifact.is_file() or artifact.stat().st_size < 4:
+            raise SourceBuildError(
+                "build_failed", "构建未产出可执行文件"
+            )
+        with artifact.open("rb") as built:
+            require_supported_binary(classify_binary(built.read(4096)))
+        artifact.replace(temp_dest)
+        temp_dest.chmod(0o755)
+        digest = hashlib.sha256()
+        total = 0
+        with temp_dest.open("rb") as f:
+            while True:
+                block = f.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                total += len(block)
+        return digest.hexdigest(), total, "", _json.dumps(
+            recipe, ensure_ascii=False, sort_keys=True
+        )
 
     def _write_version(
         self,
@@ -343,6 +489,9 @@ class BotManager:
         runtime_mode: str,
         game_id: str | None = None,
         binary_runner=None,
+        source_format: str = "elf",
+        source_entry: str = "",
+        source_builder=None,
     ) -> dict:
         with self._bot_version_lock(bot_id):
             try:
@@ -366,8 +515,24 @@ class BotManager:
             temp_dest = temp_dir / "bot.bin"
             dest = dest_dir / "bot.bin"
             promoted = False
+            runtime_image = ""
             try:
-                if isinstance(raw, StagedBotUpload):
+                source_recipe_json = ""
+                if source_format != "elf":
+                    (
+                        checksum,
+                        payload_size,
+                        runtime_image,
+                        source_recipe_json,
+                    ) = self._prepare_source_version(
+                        raw,
+                        temp_dir,
+                        temp_dest,
+                        source_format=source_format,
+                        source_entry=source_entry,
+                        source_builder=source_builder,
+                    )
+                elif isinstance(raw, StagedBotUpload):
                     checksum, payload_size = _hashing_copy(raw.path, temp_dest)
                 else:
                     checksum = hashlib.sha256(raw).hexdigest()
@@ -384,12 +549,22 @@ class BotManager:
                         if game_id is None
                         else game_id
                     )
+                    preflight_kwargs = {}
+                    if source_format == "python":
+                        preflight_kwargs = {
+                            "image": runtime_image,
+                            "extra_volumes": (
+                                (str(temp_dir / "src"), "/app/src"),
+                            ),
+                            "allow_script_entry": True,
+                        }
                     ok, detail = self._run_preflight(
                         bot_id,
                         effective_game_id,
                         binary_runner,
                         binary_path=str(temp_dest),
                         runtime_mode=runtime_mode,
+                        **preflight_kwargs,
                     )
                     if not ok:
                         raise BotError(
@@ -409,6 +584,14 @@ class BotManager:
                         format=info.format,
                         runtime_mode=runtime_mode,
                         version=version,
+                        source_format=source_format,
+                        source_path=(
+                            str(dest_dir / "source.zip")
+                            if source_format != "elf"
+                            else ""
+                        ),
+                        build_recipe_json=source_recipe_json,
+                        runtime_image=runtime_image,
                     )
                 except BotDeletedError as exc:
                     raise BotError("bot_deleted", str(exc)) from exc

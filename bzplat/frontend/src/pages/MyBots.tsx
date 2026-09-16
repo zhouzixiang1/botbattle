@@ -130,6 +130,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [runtimeMode, setRuntimeMode] = useState('traditional')
   const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [sourceFormat, setSourceFormat] = useState('elf')
+  const [sourceEntry, setSourceEntry] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   const uploadControllerRef = useRef<AbortController | null>(null)
@@ -197,6 +199,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
         description,
         game_id: gameId,
         runtime_mode: runtimeMode,
+        source_format: sourceFormat,
+        ...(sourceFormat !== 'elf' && sourceEntry.trim() ? { source_entry: sourceEntry.trim() } : {}),
         file,
       }, {
         signal: controller.signal,
@@ -439,6 +443,40 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                 </Select>
               </div>
               <div className="space-y-1.5">
+                <Label>程序类型</Label>
+                <Select value={sourceFormat} onValueChange={(v) => setSourceFormat(v)}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="elf">编译好的 ELF（默认）</SelectItem>
+                    <SelectItem value="cpp">C / C++ 源码（平台编译）</SelectItem>
+                    <SelectItem value="c">C 源码（平台编译）</SelectItem>
+                    <SelectItem value="go">Go 源码（平台编译）</SelectItem>
+                    <SelectItem value="python">Python 源码（直接运行）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {sourceFormat === 'elf'
+                    ? '上传单个 Linux x86_64 ELF 可执行文件。'
+                    : sourceFormat === 'python'
+                      ? '上传 zip 包，默认入口 __main__.py（或 main.py）；当前仅支持标准库。'
+                      : '上传 zip 包，默认入口 main.cpp / main.c / main.go；平台以 -O2 静态链接编译并定义 _BOTZONE_ONLINE 宏。'}
+                </p>
+                {sourceFormat !== 'elf' && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="upload-entry">入口文件（可选，默认见上）</Label>
+                    <Input
+                      id="upload-entry"
+                      value={sourceEntry}
+                      onChange={(e) => setSourceEntry(e.target.value)}
+                      placeholder={sourceFormat === 'python' ? '__main__.py' : `main.${sourceFormat === 'go' ? 'go' : sourceFormat === 'c' ? 'c' : 'cpp'}`}
+                      maxLength={200}
+                    />
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5">
                 <Label>Botzone 运行模式</Label>
                 <Select value={runtimeMode} onValueChange={setRuntimeMode}>
                   <SelectTrigger className="w-full">
@@ -489,7 +527,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-file">程序文件（Linux x86_64 ELF）</Label>
+              <Label htmlFor="upload-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : '（zip 源码包，最大 64 MiB）'}</Label>
               <label
                 htmlFor="upload-file"
                 className="flex min-h-[var(--control-height)] min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50 max-sm:min-h-11"
@@ -498,10 +536,11 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                 <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
                 <input
                   id="upload-file"
+ accept={sourceFormat === 'elf' ? undefined : '.zip,application/zip'}
                   type="file"
                   onChange={(e) => {
                     const f = e.target.files?.[0] ?? null
-                    const sizeError = f ? botUploadSizeError(f) : null
+                    const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
                     if (f && sizeError) {
                       setError(sizeError)
                       setFile(null)
@@ -516,7 +555,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                仅接受 Linux x86_64 ELF，最大 {BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+                {sourceFormat === 'elf'
+                    ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
+                    : '源码包内使用 POSIX 相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。云盘文件在对局中只读挂载于 /mnt/data。'}
               </p>
             </div>
             <BotUploadProgress stage={uploadStage} percent={uploadPercent} />
