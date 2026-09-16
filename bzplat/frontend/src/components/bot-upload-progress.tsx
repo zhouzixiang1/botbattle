@@ -2,8 +2,8 @@ import { CheckCircle2, UploadCloud } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
-export const BOT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
-export const BOT_UPLOAD_MAX_LABEL = '100 MiB'
+export const BOT_UPLOAD_MAX_BYTES = 256 * 1024 * 1024
+export const BOT_UPLOAD_MAX_LABEL = '256 MiB'
 
 export type BotUploadStage = 'idle' | 'uploading' | 'preflight'
 

@@ -273,13 +273,13 @@ method + 精确/规范化 API 路径执行硬顶：
 - 认证与账号资料 JSON：**64 KiB**，超限为 `413 auth_body_too_large`；
 - 其余 `POST` / `PUT` / `PATCH` / `DELETE` API：**1 MiB**，超限为 `413 api_body_too_large`；
 
-- `POST /api/bots`、`POST /api/bots/{id}/versions`：**101 MiB** 请求体（100 MiB Bot + 1 MiB multipart 开销），超限为 `413 upload_body_too_large`；
+- `POST /api/bots`、`POST /api/bots/{id}/versions`：**257 MiB** 请求体（256 MiB Bot + 1 MiB multipart 开销），超限为 `413 upload_body_too_large`；
 - `POST /api/feedback/bugs/{public_id}/attachments`：**6 MiB** 请求体（5 MiB 图片 + 1 MiB multipart 开销），超限为 `413 attachment_body_too_large`；
 - `POST /api/auth/avatar`：**3 MiB** 请求体（2 MiB 图片 + 1 MiB multipart 开销），超限为 `413 avatar_body_too_large`。
 
-`Content-Length` 只用于超限早拒绝，超限时不调用 `receive` 或下游；缺失、重复、非法或伪小长度不会被信任，每个实际 `http.request` chunk 在交给解析器前仍累计计数。越界 chunk 不下传，后续读取只见断开；容量异常使用 Starlette 的 `MultiPartException` 清理路径，已 rollover 到磁盘的 spool 文件同步关闭。真实 `http.disconnect` 原样透传，不伪报 413；代理身份头不参与容量判断。请求体硬顶之外，业务层仍分别执行 100/5/2 MiB 的实际文件大小与内容校验。Bot 文件与 ASGI envelope 都引用 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES`，避免新建/版本端点与 body limiter 漂移。
+`Content-Length` 只用于超限早拒绝，超限时不调用 `receive` 或下游；缺失、重复、非法或伪小长度不会被信任，每个实际 `http.request` chunk 在交给解析器前仍累计计数。越界 chunk 不下传，后续读取只见断开；容量异常使用 Starlette 的 `MultiPartException` 清理路径，已 rollover 到磁盘的 spool 文件同步关闭。真实 `http.disconnect` 原样透传，不伪报 413；代理身份头不参与容量判断。请求体硬顶之外，业务层仍分别执行 256/5/2 MiB 的实际文件大小与内容校验。Bot 文件与 ASGI envelope 都引用 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES`，避免新建/版本端点与 body limiter 漂移。
 
-通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级异步上传槽。端点签名不声明 `Form/File`，因此 FastAPI 先完成登录认证；取得槽后才手工解析 multipart，并在退出表单上下文时关闭 `UploadFile`。随后只读取 `100 MiB + 1` 个字节，文件本身超出即返回 `400 invalid_size`；槽从解析开始一直持有到隐藏版本落盘、沙箱预检、发布或回滚全部结束。因此不同 Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入多个待检临时目录。等待槽使用主 ASGI 事件循环的 `asyncio.Semaphore`，不会让等待者占用默认线程池；超过 1 秒返回 `503 upload_busy` 与 `Retry-After`，且忙请求尚未读取任何 multipart 字节。客户端中断只取消 HTTP 等待；已开始的文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
+通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级异步上传槽。端点签名不声明 `Form/File`，因此 FastAPI 先完成登录认证；取得槽后才手工解析 multipart，并在退出表单上下文时关闭 `UploadFile`。随后把载荷按不超过上限的 chunk 流式写入 canonical 上传根的暂存目录（进程内存只占单个 chunk），累计超限即返回 `400 invalid_size`；槽从解析开始一直持有到隐藏版本落盘、沙箱预检、发布或回滚全部结束。因此不同 Bot ID 不能绕过单槽预检，同时并行保留多份二进制载荷或写入多个待检暂存目录。等待槽使用主 ASGI 事件循环的 `asyncio.Semaphore`，不会让等待者占用默认线程池；超过 1 秒返回 `503 upload_busy` 与 `Retry-After`，且忙请求尚未读取任何 multipart 字节。客户端中断只取消 HTTP 等待；已开始的文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
 
 ## 安全响应头
 

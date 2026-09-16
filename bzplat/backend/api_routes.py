@@ -452,13 +452,33 @@ def _multipart_file(form: FormData) -> UploadFile:
     raise HTTPException(422, detail="multipart 文件字段 file 缺失或类型错误")
 
 
-async def _read_bot_upload(file: UploadFile) -> bytes:
-    """Read at most the supported limit plus one sentinel byte."""
+_UPLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
 
-    raw = await _finish_upload_step_before_cancel(file.read(MAX_BYTES + 1))
-    if not raw or len(raw) > MAX_BYTES:
+
+async def _stream_bot_upload(staged, file: UploadFile) -> None:
+    """把 multipart spool 流式拷入已分配的暂存槽（见端点处的宽 try/finally）。
+
+    进程内存只占单个 chunk；超限在流中即时拒绝；清理由调用方统一兜底。
+    磁盘写入走 worker 线程，不在事件循环上执行 I/O syscall。
+    """
+
+    total = 0
+    with staged.path.open("wb") as out:
+        while True:
+            # 单次请求量不超过当前生效上限，注入收紧的测试也能
+            # 观察到有界读取；生产上限下恒为 1 MiB。
+            chunk = await file.read(min(_UPLOAD_STREAM_CHUNK_BYTES, MAX_BYTES))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BYTES:
+                raise BotError(
+                    "invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节"
+                )
+            await asyncio.to_thread(out.write, chunk)
+    if not total:
         raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
-    return raw
+    staged.size = total
 
 
 def _upload_busy_error() -> HTTPException:
@@ -1356,32 +1376,38 @@ async def upload_bot(
     runtime_mode = DEFAULT_RUNTIME_MODE
     try:
         async with _bot_upload_admission(request):
-            async with request.form(max_files=1, max_fields=10) as form:
-                name = _multipart_text(form, "name", required=True)
-                display_name = _multipart_text(form, "display_name")
-                description = _multipart_text(form, "description")
-                upload_note = _multipart_text(form, "upload_note")
-                game_id = _multipart_text(
-                    form, "game_id", default="holdem"
+            # 暂存槽在 form 上下文之前分配、宽 try/finally 兜底，
+            # 避免取消落在 form.__aexit__ 与窄作用域 finally 之间时泄漏目录。
+            staged = _bots(request).new_staged_upload()
+            try:
+                async with request.form(max_files=1, max_fields=10) as form:
+                    name = _multipart_text(form, "name", required=True)
+                    display_name = _multipart_text(form, "display_name")
+                    description = _multipart_text(form, "description")
+                    upload_note = _multipart_text(form, "upload_note")
+                    game_id = _multipart_text(
+                        form, "game_id", default="holdem"
+                    )
+                    runtime_mode = _multipart_text(
+                        form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
+                    )
+                    await _stream_bot_upload(staged, _multipart_file(form))
+                bot = await _finish_upload_step_before_cancel(
+                    asyncio.to_thread(
+                        _bots(request).create_from_upload,
+                        user["id"],
+                        name,
+                        staged,
+                        display_name=display_name,
+                        description=description,
+                        upload_note=upload_note,
+                        game_id=game_id,
+                        runtime_mode=runtime_mode,
+                        binary_runner=_new_preflight_runner(request),
+                    )
                 )
-                runtime_mode = _multipart_text(
-                    form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
-                )
-                raw = await _read_bot_upload(_multipart_file(form))
-            bot = await _finish_upload_step_before_cancel(
-                asyncio.to_thread(
-                    _bots(request).create_from_upload,
-                    user["id"],
-                    name,
-                    raw,
-                    display_name=display_name,
-                    description=description,
-                    upload_note=upload_note,
-                    game_id=game_id,
-                    runtime_mode=runtime_mode,
-                    binary_runner=_new_preflight_runner(request),
-                )
-            )
+            finally:
+                staged.close()
     except _DeploymentMaintenance:
         audit_log(
             request,
@@ -1408,7 +1434,7 @@ async def upload_bot(
     except PlatformRunnerError:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
-    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={len(raw)}")
+    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={staged.size}")
     return {"bot": _with_bot_runnable(bot)}
 
 
@@ -1423,21 +1449,25 @@ async def upload_bot_version(
 ):
     try:
         async with _bot_upload_admission(request):
-            async with request.form(max_files=1, max_fields=4) as form:
-                upload_note = _multipart_text(form, "upload_note")
-                runtime_mode = _multipart_text(form, "runtime_mode")
-                raw = await _read_bot_upload(_multipart_file(form))
-            bot = await _finish_upload_step_before_cancel(
-                asyncio.to_thread(
-                    _bots(request).upload_version,
-                    bot_id,
-                    user["id"],
-                    raw,
-                    upload_note=upload_note,
-                    runtime_mode=runtime_mode or None,
-                    binary_runner=_new_preflight_runner(request),
+            staged = _bots(request).new_staged_upload()
+            try:
+                async with request.form(max_files=1, max_fields=4) as form:
+                    upload_note = _multipart_text(form, "upload_note")
+                    runtime_mode = _multipart_text(form, "runtime_mode")
+                    await _stream_bot_upload(staged, _multipart_file(form))
+                bot = await _finish_upload_step_before_cancel(
+                    asyncio.to_thread(
+                        _bots(request).upload_version,
+                        bot_id,
+                        user["id"],
+                        staged,
+                        upload_note=upload_note,
+                        runtime_mode=runtime_mode or None,
+                        binary_runner=_new_preflight_runner(request),
+                    )
                 )
-            )
+            finally:
+                staged.close()
     except _DeploymentMaintenance:
         audit_log(
             request,
@@ -1467,7 +1497,7 @@ async def upload_bot_version(
     except PlatformRunnerError:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
-    audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
+    audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={staged.size}")
     return {"bot": _with_bot_runnable(bot)}
 
 

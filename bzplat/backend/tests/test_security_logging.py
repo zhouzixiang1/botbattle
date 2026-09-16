@@ -57,7 +57,7 @@ def _read(path: Path) -> str:
 
 
 def test_bot_upload_body_limiter_tracks_binary_limit_plus_multipart_envelope():
-    assert MAX_BOT_UPLOAD_BYTES == 100 * 1024 * 1024
+    assert MAX_BOT_UPLOAD_BYTES == 256 * 1024 * 1024
     assert BOT_UPLOAD_BODY_MAX_BYTES == (
         MAX_BOT_UPLOAD_BYTES + BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES
     )
