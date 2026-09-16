@@ -88,7 +88,7 @@ def test_normative_docs_do_not_offer_retired_protocols() -> None:
         "固定 **15×15**",
         "固定 **N=6**",
         "**900 秒",
-        "唯一接受的上传产物是 **Linux x86_64 ELF**",
+        "平台支持两种上传形态",
         "python:3.12-bookworm",
         "--platform linux/amd64",
         "ELF 64-bit LSB executable, x86-64",

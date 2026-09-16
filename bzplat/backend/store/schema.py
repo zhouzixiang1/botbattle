@@ -164,6 +164,37 @@ BUG_REPORT_STATUSES = frozenset({
 # layer and cannot replace it.
 EMAIL_CODE_MAX_FAILED_ATTEMPTS = 5
 
+DOCKER_LAUNCH_JOURNAL_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS docker_launch_journal (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    state           TEXT    NOT NULL DEFAULT 'idle' CHECK (
+        state IN ('idle','creating','created')
+    ),
+    launch_token    TEXT,
+    instance_key    TEXT,
+    owner_kind      TEXT CHECK (
+        owner_kind IS NULL OR owner_kind IN ('execution','preflight','build')
+    ),
+    job_public_id   TEXT,
+    attempt_no      INTEGER CHECK (attempt_no IS NULL OR attempt_no>=1),
+    slot            INTEGER CHECK (slot IS NULL OR slot>=0),
+    container_name  TEXT,
+    host_boot_id    TEXT,
+    updated_at      TEXT    NOT NULL,
+    CONSTRAINT chk_docker_launch_journal_shape CHECK (
+        (state='idle' AND launch_token IS NULL AND instance_key IS NULL
+         AND owner_kind IS NULL AND job_public_id IS NULL
+         AND attempt_no IS NULL AND slot IS NULL AND container_name IS NULL
+         AND host_boot_id IS NULL) OR
+        (state IN ('creating','created') AND launch_token IS NOT NULL
+         AND instance_key IS NOT NULL AND owner_kind IS NOT NULL
+         AND job_public_id IS NOT NULL AND attempt_no IS NOT NULL
+         AND slot IS NOT NULL AND container_name IS NOT NULL
+         AND host_boot_id IS NOT NULL)
+    )
+);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,6 +262,11 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     arch            TEXT    NOT NULL DEFAULT 'amd64',
     format          TEXT    NOT NULL DEFAULT 'elf',
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
+    source_format   TEXT    NOT NULL DEFAULT 'elf'
+        CHECK (source_format IN ('elf','c','cpp','go','python')),
+    source_path     TEXT    NOT NULL DEFAULT '',
+    build_recipe_json TEXT  NOT NULL DEFAULT '',
+    runtime_image   TEXT    NOT NULL DEFAULT '',
     protocol_version TEXT   NOT NULL DEFAULT '',
     retired_at      TEXT,
     retirement_reason TEXT  NOT NULL DEFAULT '',
@@ -713,25 +749,14 @@ CREATE TABLE IF NOT EXISTS docker_launch_journal (
     launch_token    TEXT,
     instance_key    TEXT,
     owner_kind      TEXT CHECK (
-        owner_kind IS NULL OR owner_kind IN ('execution','preflight')
+        owner_kind IS NULL OR owner_kind IN ('execution','preflight','build')
     ),
     job_public_id   TEXT,
     attempt_no      INTEGER CHECK (attempt_no IS NULL OR attempt_no>=1),
     slot            INTEGER CHECK (slot IS NULL OR slot>=0),
     container_name  TEXT,
     host_boot_id    TEXT,
-    updated_at      TEXT    NOT NULL,
-    CONSTRAINT chk_docker_launch_journal_shape CHECK (
-        (state='idle' AND launch_token IS NULL AND instance_key IS NULL
-         AND owner_kind IS NULL AND job_public_id IS NULL
-         AND attempt_no IS NULL AND slot IS NULL AND container_name IS NULL
-         AND host_boot_id IS NULL) OR
-        (state IN ('creating','created') AND launch_token IS NOT NULL
-         AND instance_key IS NOT NULL AND owner_kind IS NOT NULL
-         AND job_public_id IS NOT NULL AND attempt_no IS NOT NULL
-         AND slot IS NOT NULL AND container_name IS NOT NULL
-         AND host_boot_id IS NOT NULL)
-    )
+    updated_at      TEXT
 );
 INSERT OR IGNORE INTO docker_launch_journal(singleton,state,updated_at)
 VALUES(1,'idle',CURRENT_TIMESTAMP);
@@ -1812,6 +1837,7 @@ SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
+VALID_SOURCE_FORMATS = frozenset({"elf", "c", "cpp", "go", "python"})
 VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────

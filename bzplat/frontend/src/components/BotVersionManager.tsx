@@ -102,6 +102,7 @@ export default function BotVersionManager({
   const [note, setNote] = useState('')
   const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
   const [file, setFile] = useState<File | null>(null)
+  const [sourceFormat, setSourceFormat] = useState('elf')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
@@ -213,6 +214,7 @@ export default function BotVersionManager({
       await apiFormWithProgress(`/api/bots/${targetBotId}/versions`, {
         upload_note: note,
         runtime_mode: mode,
+        source_format: sourceFormat,
         file,
       }, {
         signal: controller.signal,
@@ -335,7 +337,22 @@ export default function BotVersionManager({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="ver-file">程序文件（Linux x86_64 ELF）</Label>
+            <div className="space-y-1.5">
+                <Label>程序类型</Label>
+                <Select value={sourceFormat} onValueChange={(v) => setSourceFormat(v)}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="elf">编译好的 ELF（默认）</SelectItem>
+                    <SelectItem value="cpp">C / C++ 源码</SelectItem>
+                    <SelectItem value="c">C 源码</SelectItem>
+                    <SelectItem value="go">Go 源码</SelectItem>
+                    <SelectItem value="python">Python 源码</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Label htmlFor="ver-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : '（zip 源码包，最大 64 MiB）'}</Label>
             <label
               htmlFor="ver-file"
               className="flex min-h-[var(--control-height)] min-w-0 max-sm:min-h-11 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
@@ -347,7 +364,7 @@ export default function BotVersionManager({
                 type="file"
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null
-                  const sizeError = f ? botUploadSizeError(f) : null
+                  const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
                   if (f && sizeError) {
                     toast.error(sizeError)
                     setFile(null)
@@ -361,7 +378,9 @@ export default function BotVersionManager({
               />
             </label>
             <p className="text-xs text-muted-foreground">
-              仅接受 Linux x86_64 ELF，最大 {BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+              {sourceFormat === 'elf'
+                  ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
+                  : '源码 zip 包（默认入口 main.cpp / main.c / main.go / __main__.py）；平台编译并定义 _BOTZONE_ONLINE 宏。'}
             </p>
           </div>
           {mutationError && <ErrorMsg msg={mutationError} />}

@@ -145,6 +145,9 @@ async def preflight_bot(
     *,
     runtime_mode: str,
     timeout: float = 8.0,
+    image: str = "",
+    extra_volumes: tuple[tuple[str, str], ...] = (),
+    allow_script_entry: bool = False,
 ) -> tuple[bool, str]:
     """Bot 预检：按用户选择的运行模式执行正式协议首回合。
 
@@ -157,6 +160,9 @@ async def preflight_bot(
         binary_runner,
         runtime_mode=runtime_mode,
         timeout=timeout,
+        image=image,
+        extra_volumes=extra_volumes,
+        allow_script_entry=allow_script_entry,
     )
 
 

@@ -145,6 +145,9 @@ async def preflight_exchange(
     *,
     runtime_mode: str,
     timeout: float,
+    image: str = "",
+    extra_volumes: tuple[tuple[str, str], ...] = (),
+    allow_script_entry: bool = False,
 ) -> Any:
     """按所选运行模式执行与正式对局一致的首回合交换。
 
@@ -153,7 +156,13 @@ async def preflight_exchange(
     """
     if runtime_mode not in VALID_RUNTIME_MODES:
         raise ValueError(f"未知运行模式: {runtime_mode}")
-    sid = await binary_runner.start_session(binary_path, runtime_mode=runtime_mode)
+    sid = await binary_runner.start_session(
+        binary_path,
+        runtime_mode=runtime_mode,
+        image=image,
+        extra_volumes=extra_volumes,
+        allow_script_entry=allow_script_entry,
+    )
     try:
         response_line = await binary_runner.send(
             sid,

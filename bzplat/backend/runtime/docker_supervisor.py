@@ -45,6 +45,10 @@ class DockerSupervisorError(RuntimeError):
     """A definite local Docker configuration/control failure."""
 
 
+class DockerBuildTimeout(RuntimeError):
+    """构建容器超出预算时限（调用方转为用户可见错误）。"""
+
+
 class DockerControlUncertain(DockerSupervisorError):
     """Docker may have applied a create/inspect/remove operation."""
 
@@ -169,6 +173,17 @@ class DockerSupervisor:
         self.launch_journal = launch_journal
         self._launch_lock_path = Path(str(resolved_db) + ".docker-launch.lock")
 
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _launch_flock_sync(self):
+        """Synchronous launch flock for worker threads (build path)."""
+        fd = self._acquire_launch_lock()
+        try:
+            yield
+        finally:
+            self._release_launch_lock(fd)
+
     def _acquire_launch_lock(self) -> int:
         fd = os.open(self._launch_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
@@ -229,11 +244,18 @@ class DockerSupervisor:
         image: str,
         profile: DockerResourceProfile = PLATFORM_LOW_PROFILE,
         launch_token: str | None = None,
+        extra_volumes: tuple[tuple[str, str], ...] = (),
     ) -> list[str]:
         profile = resolve_docker_resource_profile(profile)
         labels: list[str] = []
         for key, value in identity.labels(slot, launch_token=launch_token):
             labels.extend(["--label", f"{key}={value}"])
+        volume_args: list[str] = []
+        for host_path, target in extra_volumes:
+            # 附加卷一律只读：云盘快照与源码包都不允许 Bot 写入。
+            volume_args.extend(
+                ["--volume", f"{host_path}:{target}:ro"]
+            )
         return [
             "--pull=never",
             "--name",
@@ -261,6 +283,7 @@ class DockerSupervisor:
             "linux/amd64",
             "--volume",
             f"{binary_path}:/app/bot:ro",
+            *volume_args,
             "--workdir",
             "/app",
             "--entrypoint",
@@ -362,6 +385,7 @@ class DockerSupervisor:
         binary_path: Path,
         image: str,
         profile: DockerResourceProfile = PLATFORM_LOW_PROFILE,
+        extra_volumes: tuple[tuple[str, str], ...] = (),
     ) -> str:
         profile = resolve_docker_resource_profile(profile)
         name = identity.container_name(slot)
@@ -405,6 +429,7 @@ class DockerSupervisor:
             image=image,
             profile=profile,
             launch_token=launch_token,
+            extra_volumes=extra_volumes,
         )
         try:
             result = self._run(["create", "-i", *options])
@@ -541,13 +566,201 @@ class DockerSupervisor:
             await _drain_shielded(cleanup)
             raise
 
+    def build_sandbox_options(
+        self,
+        *,
+        identity: DockerExecutionIdentity,
+        slot: int,
+        name: str,
+        src_dir: Path,
+        out_dir: Path,
+        command: str,
+        image: str,
+        profile: DockerResourceProfile,
+        launch_token: str | None = None,
+    ) -> list[str]:
+        profile = resolve_docker_resource_profile(profile)
+        labels: list[str] = []
+        for key, value in identity.labels(slot, launch_token=launch_token):
+            labels.extend(["--label", f"{key}={value}"])
+        return [
+            "--pull=never",
+            "--name",
+            name,
+            *labels,
+            "--network=none",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,nodev,size=512m",
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "65534:65534",
+            f"--cpus={profile.docker_cpus}",
+            f"--memory={profile.docker_memory}",
+            f"--memory-swap={profile.docker_memory}",
+            "--pids-limit=128",
+            "--ulimit",
+            "nofile=128:128",
+            "--ulimit",
+            "nproc=128:128",
+            "--log-driver=none",
+            "--platform",
+            "linux/amd64",
+            "--volume",
+            f"{src_dir}:/src:ro",
+            "--volume",
+            f"{out_dir}:/out",
+            "--workdir",
+            "/src",
+            "--entrypoint",
+            "sh",
+            image,
+            "-c",
+            command,
+        ]
+
+    def run_build(
+        self,
+        *,
+        identity: DockerExecutionIdentity,
+        slot: int,
+        launch_token: str,
+        src_dir: Path,
+        out_dir: Path,
+        command: str,
+        image: str,
+        profile: DockerResourceProfile,
+        timeout_sec: float,
+    ) -> int:
+        """在上传 admission 内同步执行一次源码构建容器并返回退出码。
+
+        与执行/预检共用 launch journal：begin(creating) → create →
+        mark_created → start + StartedAt 确认 → clear(journal 回 idle) →
+        wait（超时则 kill）→ 精确 name 清理。构建容器永不进入 match slot。
+        """
+        profile = resolve_docker_resource_profile(profile)
+        name = identity.container_name(slot)
+        journal = getattr(self, "launch_journal", None)
+        if journal is None:
+            raise DockerControlUncertain("Docker launch journal 未配置")
+        # 与对局/预检共用跨进程 launch flock：构建跑在 worker 线程，
+        # 直接用同步 flock（launch_guard 是 asyncio 版）。
+        with self._launch_flock_sync():
+            try:
+                journal.begin_docker_launch(
+                    launch_token=launch_token,
+                    instance_key=self.instance,
+                    owner_kind="build",
+                    job_public_id=identity.job_public_id,
+                    attempt_no=identity.attempt_no,
+                    slot=slot,
+                    container_name=name,
+                    host_boot_id=host_boot_id(),
+                )
+            except Exception as exc:
+                raise DockerControlUncertain(
+                    f"构建容器 create intent 无法持久化：{exc}"
+                ) from exc
+            options = self.build_sandbox_options(
+                identity=identity,
+                slot=slot,
+                name=name,
+                src_dir=src_dir,
+                out_dir=out_dir,
+                command=command,
+                image=image,
+                profile=profile,
+                launch_token=launch_token,
+            )
+            try:
+                result = self._run(["create", *options])
+            except DockerControlUncertain as exc:
+                raise DockerCreateAmbiguous(
+                    "构建容器 create 未确认"
+                ) from exc
+            if result.returncode != 0:
+                raise DockerCreateAmbiguous(
+                    f"构建容器 create 失败（exit {result.returncode}）"
+                )
+            try:
+                journal.mark_docker_launch_created(launch_token)
+            except Exception as exc:
+                self.remove_names([name])
+                raise DockerControlUncertain(
+                    "构建容器 create 后 journal 无法确认"
+                ) from exc
+            try:
+                started = self._run(["start", name])
+                if started.returncode != 0:
+                    raise DockerControlUncertain(
+                        f"构建容器 start 未确认（exit {started.returncode}）"
+                    )
+                if not self._started_at(name):
+                    raise DockerControlUncertain(
+                        "构建容器 start 未进入 StartedAt"
+                    )
+                journal.clear_docker_launch_created(launch_token)
+            except BaseException:
+                # 失败路径尽力把 journal 收回 idle，避免下一次 launch
+                # 撞上遗留 creating/created 状态（容器已按精确 name 删除）。
+                try:
+                    journal.clear_docker_launch_created(launch_token)
+                except Exception:
+                    pass
+                self.remove_names([name])
+                raise
+
+        wait_timed_out = False
+        try:
+            waited = self._run(
+                ["wait", name], timeout=max(1.0, float(timeout_sec)), uncertain=False
+            )
+            exit_code = int((waited.stdout or "1").strip() or "1")
+        except DockerSupervisorError:
+            # _run 把 subprocess 超时统一转成 DockerSupervisorError：
+            # 构建超时走同一收尾（kill → wait → 清理）。
+            wait_timed_out = True
+            exit_code = -1
+            try:
+                self._run(["kill", name], uncertain=False)
+                self._run(["wait", name], timeout=30.0, uncertain=False)
+            except DockerSupervisorError:
+                pass
+        # 构建容器清理 best-effort：daemon 侧并发回收可能出现
+        # "removal already in progress" 竞态，该一次性容器由实例级
+        # namespace 恢复兜底，不把整个构建判失败。
+        for _attempt in range(2):
+            removed = self._run(["rm", "-f", name], uncertain=False)
+            if removed.returncode == 0:
+                break
+            import time as _time
+
+            _time.sleep(0.2)
+        if removed.returncode != 0:
+            logger.warning(
+                "build container cleanup deferred name=%s exit=%s stderr=%s",
+                name,
+                removed.returncode,
+                (removed.stderr or "")[:120],
+            )
+        if wait_timed_out:
+            raise DockerBuildTimeout(
+                f"构建超过 {float(timeout_sec):.0f}s 超时"
+            )
+        return exit_code
+
     def remove_names(self, names: Iterable[str]) -> None:
         exact = [name for name in names if name]
         if not exact:
             return
         result = self._run(["rm", "-f", *exact])
         if result.returncode != 0:
-            raise DockerControlUncertain("Docker rm 未确认")
+            raise DockerControlUncertain(
+                f"Docker rm 未确认（exit {result.returncode}："
+                f"{(result.stderr or '')[:200]}）"
+            )
 
     def _journal_snapshot(self) -> dict[str, Any]:
         journal = getattr(self, "launch_journal", None)

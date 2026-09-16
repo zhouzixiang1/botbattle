@@ -125,8 +125,7 @@ class _FakeRunner:
         binary_path,
         *,
         runtime_mode="longrunning",
-        profile=PLATFORM_LOW_PROFILE,
-    ):
+        profile=PLATFORM_LOW_PROFILE, **_extra):
         """traditional 每回合重启：返回临时 session id（复用同一 session 的响应队列）。"""
         self._tmp_counter += 1
         sid = f"tmp_trad_{self._tmp_counter}"

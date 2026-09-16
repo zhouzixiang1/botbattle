@@ -36,7 +36,11 @@ from bzplat.backend.qa_safety import (
     assert_qa_upload_root_isolated,
     qa_instance_enabled,
 )
-from bzplat.backend.runtime.binary_runner import BinaryRunner
+from bzplat.backend.runtime.binary_runner import (
+    DEFAULT_IMAGE_PREPARE_TIMEOUT,
+    BinaryRunner,
+    _ensure_linux_image_ready_sync,
+)
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     BOT_UPLOAD_ADMISSION_SLOTS,
@@ -46,10 +50,12 @@ from bzplat.backend.runtime.config import (
     HUMAN_WS_HANDSHAKE_WINDOW_SECONDS,
 )
 from bzplat.backend.runtime.docker_supervisor import (
+    DockerExecutionIdentity,
     DockerSupervisor,
     validate_local_docker_configuration,
 )
 from bzplat.backend.runtime.limits import (
+    BOT_BUILD_PROFILE,
     clamp_concurrent,
     concurrent_ceiling,
     default_max_concurrent,
@@ -232,12 +238,89 @@ def create_app(
         supervisor=shared_supervisor,
     )
 
+    def _source_builder(src_dir, out_dir, recipe):
+        """上传 admission 内的同步源码构建（与预检共用 supervisor 纪律）。"""
+        import uuid as _uuid
+
+        from bzplat.backend.runtime.docker_supervisor import (
+            DockerBuildTimeout,
+            DockerSupervisorError,
+        )
+        from bzplat.backend.bots.source_build import (
+            SourceBuildError,
+            build_command,
+        )
+
+        if shared_supervisor is None:
+            raise SourceBuildError(
+                "build_unavailable", "当前实例未配置 Docker 构建通道"
+            )
+        command = build_command(recipe)
+        token = _uuid.uuid4().hex
+        try:
+            _ensure_linux_image_ready_sync(
+                shared_supervisor.docker_bin,
+                recipe["image"],
+                prepare_timeout=DEFAULT_IMAGE_PREPARE_TIMEOUT,
+            )
+            exit_code = shared_supervisor.run_build(
+                identity=DockerExecutionIdentity(
+                    instance=shared_supervisor.instance,
+                    job_public_id=f"build-{token[:12]}",
+                    attempt_no=1,
+                ),
+                slot=150,
+                launch_token=token,
+                src_dir=src_dir,
+                out_dir=out_dir,
+                command=command,
+                image=recipe["image"],
+                profile=BOT_BUILD_PROFILE,
+                timeout_sec=float(recipe["timeout_sec"]),
+            )
+        except DockerBuildTimeout as exc:
+            raise SourceBuildError(
+                "build_timeout", str(exc)
+            ) from exc
+        except SourceBuildError:
+            raise
+        except (DockerSupervisorError, RuntimeError) as exc:
+            # PlatformRunnerError / DockerLaunchInvariantError 均 RuntimeError 系：
+            # 统一转用户可读错误，不让源码上传产生 500。
+            raise SourceBuildError(
+                "build_unavailable", f"构建沙箱暂不可用：{exc}"
+            ) from exc
+        if exit_code != 0:
+            raise SourceBuildError(
+                "build_failed",
+                f"编译失败（exit {exit_code}）；请在本地用同样的静态链接命令验证",
+            )
+
     match_runner = MatchRunner(
         binary_runner,
         action_timeout=ACTION_TIMEOUT_SEC,
         local_ai_hub=local_ai_service.hub,
     )
-    orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
+    match_mounts_dir = Path(db_path).expanduser().resolve().parent / "match_mounts"
+    if match_mounts_dir.is_dir():
+        # 对局快照属进程生命周期；启动时不存在合法存活的挂载，整体回收崩溃残留。
+        import shutil as _shutil
+
+        for _stale in match_mounts_dir.iterdir():
+            _shutil.rmtree(_stale, ignore_errors=True)
+    if qa_instance:
+        match_mounts_dir = assert_qa_runtime_path_isolated(
+            match_mounts_dir,
+            source_root,
+            purpose="BZ_QA_INSTANCE 云盘对局快照目录",
+        )
+    orch = MatchOrchestrator(
+        store,
+        runner=match_runner,
+        max_concurrent=effective_conc,
+        mount_root=match_mounts_dir,
+        user_storage=user_storage,
+    )
     execution_dispatcher: ExecutionDispatcher | None = None
     contest_manager = ContestManager(
         store,
@@ -411,6 +494,7 @@ def create_app(
     app.state.captcha = captcha
     app.state.captcha_store = captcha
     app.state.bot_manager = bot_manager
+    app.state.source_builder = _source_builder
     app.state.user_storage = user_storage
     app.state.binary_runner = binary_runner
     app.state.local_ai_service = local_ai_service

@@ -234,6 +234,9 @@ async def _open_match_session(
     runtime_mode: str,
     *,
     failed_seat: int,
+    seat_image: str = "",
+    seat_volumes: tuple[tuple[str, str], ...] = (),
+    allow_script: bool = False,
     profile: DockerResourceProfile = PLATFORM_LOW_PROFILE,
     execution_scope: ExecutionScope | None = None,
 ) -> str:
@@ -244,11 +247,18 @@ async def _open_match_session(
             if execution_scope is not None
             else {}
         )
+        seat_kwargs = (
+            {"image": seat_image, "extra_volumes": seat_volumes}
+            if seat_image or seat_volumes
+            else {}
+        )
         if runtime_mode == _bz.RUNTIME_TRADITIONAL:
             return await runner.prepare_session(
                 binary_path,
                 runtime_mode=runtime_mode,
                 profile=profile,
+                allow_script_entry=allow_script,
+                **seat_kwargs,
                 **scope_kwargs,
             )
         if runtime_mode == _bz.RUNTIME_LONGRUNNING:
@@ -256,6 +266,8 @@ async def _open_match_session(
                 binary_path,
                 runtime_mode=runtime_mode,
                 profile=profile,
+                allow_script_entry=allow_script,
+                **seat_kwargs,
                 **scope_kwargs,
             )
         raise ValueError(f"未知运行模式: {runtime_mode}")
@@ -324,10 +336,18 @@ async def _traditional_decide_one_shot(
     try:
         scope = getattr(session, "execution_scope", None)
         scope_kwargs = {"execution_scope": scope} if scope is not None else {}
+        seat_kwargs = {}
+        if getattr(session, "image", "") or getattr(session, "extra_volumes", ()):
+            seat_kwargs = {
+                "image": session.image,
+                "extra_volumes": session.extra_volumes,
+            }
         tmp_sid = await runner.start_session(
             session.binary_path,
             runtime_mode=_bz.RUNTIME_TRADITIONAL,
             profile=session.profile,
+            allow_script_entry=getattr(session, "allow_script_entry", False),
+            **seat_kwargs,
             **scope_kwargs,
         )
     except BotCrashedError as exc:
@@ -836,6 +856,8 @@ class MatchRunner:
         time_control_id: str | None = None,
         time_budget_per_side: float | None = None,
         execution_scope: ExecutionScope | None = None,
+        seat_runtime_a: dict | None = None,
+        seat_runtime_b: dict | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """跑两个二进制 bot。
@@ -890,6 +912,7 @@ class MatchRunner:
                 raise ValueError("Docker 座位不能绑定本地 Bot 连接")
             if not path:
                 raise ValueError("Docker 座位缺少 Bot 二进制")
+            seat_runtime = (seat_runtime_a if seat == 0 else seat_runtime_b) or {}
             return (
                 await _open_match_session(
                     self.runner,
@@ -900,6 +923,12 @@ class MatchRunner:
                         environment, execution_profile_version
                     ),
                     execution_scope=execution_scope,
+                    seat_image=str(seat_runtime.get("image") or ""),
+                    seat_volumes=tuple(
+                        (str(h), str(t_))
+                        for h, t_ in seat_runtime.get("extra_volumes", ())
+                    ),
+                    allow_script=bool(seat_runtime.get("allow_script_entry")),
                 ),
                 None,
             )
@@ -1026,6 +1055,7 @@ class MatchRunner:
         time_control_id: str | None = None,
         time_budget_per_side: float | None = None,
         execution_scope: ExecutionScope | None = None,
+        seat_runtime: dict | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
@@ -1049,6 +1079,7 @@ class MatchRunner:
         profile = _profile_for_environment(
             execution_environment, execution_profile_version
         )
+        _sr = seat_runtime or {}
         sid_bot = await _open_match_session(
             self.runner,
             bot_path,
@@ -1056,6 +1087,11 @@ class MatchRunner:
             failed_seat=bot_seat,
             profile=profile,
             execution_scope=execution_scope,
+            seat_image=str(_sr.get("image") or ""),
+            seat_volumes=tuple(
+                (str(h), str(t_)) for h, t_ in _sr.get("extra_volumes", ())
+            ),
+            allow_script=bool(_sr.get("allow_script_entry")),
         )
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
@@ -1206,6 +1242,8 @@ class MatchRunner:
         time_control_id: str | None = None,
         time_budget_per_side: float | None = None,
         execution_scope: ExecutionScope | None = None,
+        seat_runtime_a: dict | None = None,
+        seat_runtime_b: dict | None = None,
         **match_params: Any,
     ) -> Any:
         """复式：按计划跑多个计分场，每场独立判胜负。
@@ -1288,6 +1326,8 @@ class MatchRunner:
                 sid_a: str | None = None
                 sid_b: str | None = None
                 try:
+                    _sr_a = seat_runtime_a or {}
+                    _sr_b = seat_runtime_b or {}
                     sid_a = await _open_match_session(
                         self.runner,
                         path_a,
@@ -1297,6 +1337,12 @@ class MatchRunner:
                             env_a, execution_profile_version
                         ),
                         execution_scope=execution_scope,
+                        seat_image=str(_sr_a.get("image") or ""),
+                        seat_volumes=tuple(
+                            (str(h), str(t_))
+                            for h, t_ in _sr_a.get("extra_volumes", ())
+                        ),
+                        allow_script=bool(_sr_a.get("allow_script_entry")),
                     )
                     sid_b = await _open_match_session(
                         self.runner,
@@ -1307,6 +1353,12 @@ class MatchRunner:
                             env_b, execution_profile_version
                         ),
                         execution_scope=execution_scope,
+                        seat_image=str(_sr_b.get("image") or ""),
+                        seat_volumes=tuple(
+                            (str(h), str(t_))
+                            for h, t_ in _sr_b.get("extra_volumes", ())
+                        ),
+                        allow_script=bool(_sr_b.get("allow_script_entry")),
                     )
 
                     async def decide(

@@ -50,6 +50,12 @@ PLATFORM_HIGH_PROFILE = DockerResourceProfile(
     cpus=2,
     memory_mb=2048,
 )
+# 源码构建容器专用档位：不进入 execution 档位注册表，仅上传构建通道使用。
+BOT_BUILD_PROFILE = DockerResourceProfile(
+    name="bot_build",
+    cpus=2,
+    memory_mb=2048,
+)
 _EXECUTION_RESOURCE_PROFILE_V0: Mapping[str, DockerResourceProfile] = (
     MappingProxyType(
         {_LEGACY_PLATFORM_LOW_PROFILE.name: _LEGACY_PLATFORM_LOW_PROFILE}
@@ -358,12 +364,17 @@ def resolve_docker_resource_profile(
 ) -> DockerResourceProfile:
     """返回白名单中的规范档位，拒绝伪造或未知资源值。"""
     if isinstance(profile, str):
+        if profile == BOT_BUILD_PROFILE.name:
+            # 构建档位只服务上传编译通道，不进入 execution 档位注册表。
+            return BOT_BUILD_PROFILE
         resolved = DOCKER_RESOURCE_PROFILES.get(profile)
         if resolved is None:
             raise ValueError(f"未知 Docker 资源档位: {profile}")
         return resolved
     if not isinstance(profile, DockerResourceProfile):
         raise TypeError("Docker 资源档位必须是平台白名单值")
+    if profile is BOT_BUILD_PROFILE:
+        return BOT_BUILD_PROFILE
     # 先按 identity 找到调用方已经从历史注册表取得的规范对象，避免当前和
     # legacy 规格值暂时相同的时候把旧 job 悄悄改绑到当前版本。
     for profiles in EXECUTION_RESOURCE_PROFILE_REGISTRY.values():
@@ -384,6 +395,18 @@ BOT_MEMORY_MB = PLATFORM_LOW_PROFILE.memory_mb
 # 上传经流式暂存落盘，进程内存只占用单个 chunk；预检仍由进程级 admission
 # 串行执行。256 MiB 覆盖 PyInstaller 单文件产物与嵌入式权重文件。
 MAX_BOT_UPLOAD_BYTES = 256 * 1024 * 1024
+# 源码 Bot：上传 zip 与解压 guard、构建容器预算、镜像 tag（版本随镜像演进时
+# 必须同步递增 tag 并冻结进 bot_versions.build_recipe_json）。
+SOURCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+SOURCE_MAX_FILES = 500
+SOURCE_MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
+BOT_BUILD_TIMEOUT_SEC = 120.0
+BOT_BUILD_CONTAINER_CPUS = 2.0
+BOT_BUILD_CONTAINER_MEMORY_MB = 2048
+BUILDER_IMAGE = "botbattle-builder:bookworm-1"
+# v1 复用构建镜像作为 python 运行镜像（已含 python3 标准库）；
+# 科学栈（numpy/torch）镜像受部署机网络限速延后，启用时必须换新 tag。
+PYTHON_RUNTIME_IMAGE = "botbattle-builder:bookworm-1"
 # 用户云存储：每用户总配额与文件数上限；单文件大小不得超过同一配额。
 USER_STORAGE_QUOTA_BYTES = 256 * 1024 * 1024
 USER_STORAGE_MAX_FILES = 500

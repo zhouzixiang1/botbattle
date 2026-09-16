@@ -7,10 +7,13 @@ export const BOT_UPLOAD_MAX_LABEL = '256 MiB'
 
 export type BotUploadStage = 'idle' | 'uploading' | 'preflight'
 
-export function botUploadSizeError(file: File): string | null {
-  return file.size > BOT_UPLOAD_MAX_BYTES
-    ? `文件超过 ${BOT_UPLOAD_MAX_LABEL} 上限`
-    : null
+export const SOURCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+export const SOURCE_UPLOAD_MAX_LABEL = '64 MiB'
+
+export function botUploadSizeError(file: File, sourceFormat = 'elf'): string | null {
+  const max = sourceFormat === 'elf' ? BOT_UPLOAD_MAX_BYTES : SOURCE_UPLOAD_MAX_BYTES
+  const label = sourceFormat === 'elf' ? BOT_UPLOAD_MAX_LABEL : SOURCE_UPLOAD_MAX_LABEL
+  return file.size > max ? `文件超过 ${label} 上限` : null
 }
 
 export function BotUploadProgress({

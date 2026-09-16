@@ -133,7 +133,7 @@ def _mutated_sample_elf(*, elf_class=2, endian=1, osabi=0, machine=0x3E) -> byte
     ("data", "expected_format"),
     [
         (_valid_pe(), "pe"),
-        (b"#!/usr/bin/env python3\nprint(1)\n", "unknown"),
+        (b"#!/usr/bin/env python3\nprint(1)\n", "script"),
         (_mutated_sample_elf(elf_class=1, machine=0x03), "elf"),
         (_mutated_sample_elf(machine=0xB7), "elf"),
         (_mutated_sample_elf(endian=2), "elf"),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import hashlib
 import json
 import logging
@@ -436,9 +437,15 @@ class MatchOrchestrator:
         *,
         runner: MatchRunner | None = None,
         max_concurrent: int = MAX_CONCURRENT_MATCHES,
+        mount_root: Path | None = None,
+        user_storage=None,
     ) -> None:
         self.store = store
         self.runner = runner or MatchRunner(BinaryRunner())
+        # 云盘对局快照根（db 邻接 match_mounts/）；user_storage 提供内容寻址
+        # blob 路径，缺省（单测窄构造）不挂云盘。
+        self.mount_root = mount_root
+        self.user_storage = user_storage
         self.max_concurrent = max(
             1, min(int(max_concurrent), MAX_CONCURRENT_MATCHES)
         )
@@ -607,7 +614,7 @@ class MatchOrchestrator:
             expected_protocol=self.store.get_active_game_contract(bot["game_id"])[
                 "protocol_version"
             ],
-        )
+        )[0:2]
         return version
 
     def _runtime_for_bot_version(
@@ -617,7 +624,7 @@ class MatchOrchestrator:
         *,
         seat: int | None = None,
         expected_protocol: str | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, dict]:
         """Resolve exactly one immutable runtime or fail closed.
 
         A non-null ``version_id`` is authoritative: missing rows, cross-Bot
@@ -678,7 +685,73 @@ class MatchOrchestrator:
             version_id=version_id,
             seat=seat,
         )
-        return path, mode
+        return path, mode, runtime
+
+    def _seat_runtime_extras(self, bot: dict, version_row: dict | None) -> dict:
+        """版本声明的运行扩展：python 镜像 + 版本源码只读卷 + 脚本豁免。
+
+        云盘快照卷由 _run_claimed 按 Bot 归属用户另挂，不在此处。
+        """
+        if not version_row:
+            return {}
+        source_format = str(version_row.get("source_format") or "elf")
+        extras: dict = {}
+        image = str(version_row.get("runtime_image") or "")
+        if image:
+            extras["image"] = image
+        if source_format != "elf":
+            src_dir = (
+                Path(str(version_row.get("binary_path") or "")).parent / "src"
+            )
+            if not src_dir.is_dir():
+                raise BotVersionContractError(
+                    "Bot 版本源码目录缺失，不能启动"
+                )
+            extras["extra_volumes"] = ((str(src_dir), "/app/src"),)
+            if source_format == "python":
+                extras["allow_script_entry"] = True
+        return extras
+
+    def _user_drive_snapshot(self, match_id: str, seat: int, owner_id: int) -> Path | None:
+        """对局开打前给 Bot 归属用户的云盘做一份硬链接快照目录。
+
+        硬链接指向内容寻址 blob：上传替换/删除只改清单与新建文件，
+        快照内的友好名指向的 inode 在本场对局内恒定，天然保证单场一致。
+        无文件或未配置时不挂载。
+        """
+        if self.user_storage is None or self.mount_root is None:
+            return None
+        files = self.store.list_user_storage_files(owner_id)
+        if not files:
+            return None
+        root = self.mount_root / str(match_id) / f"seat{seat}"
+        root.mkdir(parents=True, exist_ok=True)
+        for entry in files:
+            blob = self.user_storage.blob_path(owner_id, str(entry["sha256"]))
+            if not blob.is_file():
+                logger.error(
+                    "user drive snapshot missing blob match=%s owner=%s name=%s",
+                    match_id, owner_id, entry["name"],
+                )
+                raise BotVersionContractError("用户云盘文件缺失，不能开赛")
+            try:
+                (root / entry["name"]).hardlink_to(blob)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                logger.error(
+                    "user drive snapshot link failed match=%s owner=%s: %s",
+                    match_id, owner_id, exc,
+                )
+                raise BotVersionContractError("用户云盘快照失败，不能开赛") from exc
+        return root
+
+    def _drop_match_mounts(self, match_id: str) -> None:
+        if self.mount_root is None:
+            return
+        import shutil as _shutil
+
+        _shutil.rmtree(self.mount_root / str(match_id), ignore_errors=True)
 
     def _verify_runtime_binary_integrity(
         self,
@@ -1121,6 +1194,8 @@ class MatchOrchestrator:
             if self._tasks.get(match_id) is not done_task:
                 return
             self._tasks.pop(match_id, None)
+            # 云盘对局快照随该 match 的最后一个 attempt 结束一并回收。
+            self._drop_match_mounts(match_id)
             if is_human:
                 self._human_active_users.discard(int(job["human_user_id"]))
             # A task cancelled before its coroutine body (or while entering the
@@ -2090,7 +2165,7 @@ class MatchOrchestrator:
                 version_id: int | None,
                 *,
                 seat: int,
-            ) -> tuple[str | None, str, str | None]:
+            ) -> tuple[str | None, str, str | None, dict]:
                 if environments[seat] == EXECUTION_ENV_REMOTE_LOCAL:
                     # Claim freezes the transport identity, not merely the
                     # reusable local_ai_agents row id.  Never resolve that row
@@ -2099,21 +2174,40 @@ class MatchOrchestrator:
                     public_id = frozen_local_agent_public_ids[seat]
                     if public_id is None:  # pragma: no cover - guarded above
                         raise ValueError("本地 Bot 对局缺少冻结连接身份")
-                    return None, DEFAULT_RUNTIME_MODE, public_id
-                path, mode = self._runtime_for_bot_version(
+                    return None, DEFAULT_RUNTIME_MODE, public_id, {}
+                path, mode, version_row = self._runtime_for_bot_version(
                     bot,
                     version_id,
                     seat=seat,
                     expected_protocol=str(m.get("protocol_version") or ""),
                 )
-                return path, mode, None
+                return (
+                    path,
+                    mode,
+                    None,
+                    self._seat_runtime_extras(bot, version_row),
+                )
 
-            path_a, mode_a, local_agent_a = runtime_for_seat(
+            path_a, mode_a, local_agent_a, seat_runtime_a = runtime_for_seat(
                 bot_a, version_a_id, seat=0
             )
-            path_b, mode_b, local_agent_b = runtime_for_seat(
+            path_b, mode_b, local_agent_b, seat_runtime_b = runtime_for_seat(
                 bot_b, version_b_id, seat=1
             )
+            # 云盘快照：本场对局内 Bot 读到的用户文件固定为开打时内容。
+            for _seat, (_bot, _extras) in enumerate(
+                ((bot_a, seat_runtime_a), (bot_b, seat_runtime_b))
+            ):
+                if environments[_seat] == EXECUTION_ENV_REMOTE_LOCAL:
+                    continue
+                _drive = self._user_drive_snapshot(
+                    match_id, _seat, int(_bot["owner_id"])
+                )
+                if _drive is not None:
+                    volumes = list(_extras.get("extra_volumes", ()))
+                    volumes.append((str(_drive), "/mnt/data"))
+                    volumes.append((str(_drive), "/app/data"))
+                    _extras["extra_volumes"] = tuple(volumes)
             logger.info(
                 "match start id=%s game=%s type=%s a=%s(%s,%s) "
                 "b=%s(%s,%s) duplicate=%s",
@@ -2138,6 +2232,8 @@ class MatchOrchestrator:
                     execution_profile_version=execution_profile_version,
                     time_control_id=time_control.id,
                     execution_scope=execution_scope,
+                    seat_runtime_a=seat_runtime_a,
+                    seat_runtime_b=seat_runtime_b,
                     duplicate=True,
                 )
             else:
@@ -2152,6 +2248,8 @@ class MatchOrchestrator:
                     execution_environments=environments,
                     execution_profile_version=execution_profile_version,
                     local_agent_ids=(local_agent_a, local_agent_b),
+                    seat_runtime_a=seat_runtime_a,
+                    seat_runtime_b=seat_runtime_b,
                     match_id=match_id,
                     time_control_id=time_control.id,
                     execution_scope=execution_scope,
@@ -2873,12 +2971,25 @@ class MatchOrchestrator:
             events: list[dict] = []
             self._active_replay_events[match_id] = events
             try:
-                bot_path, bot_mode = self._runtime_for_bot_version(
-                    bot,
-                    version_id,
-                    seat=bot_seat,
-                    expected_protocol=str(m.get("protocol_version") or ""),
+                bot_path, bot_mode, human_version_row = (
+                    self._runtime_for_bot_version(
+                        bot,
+                        version_id,
+                        seat=bot_seat,
+                        expected_protocol=str(m.get("protocol_version") or ""),
+                    )
                 )
+                _human_seat_runtime = self._seat_runtime_extras(
+                    bot, human_version_row
+                )
+                _human_drive = self._user_drive_snapshot(
+                    match_id, bot_seat, int(bot["owner_id"])
+                )
+                if _human_drive is not None:
+                    _vols = list(_human_seat_runtime.get("extra_volumes", ()))
+                    _vols.append((str(_human_drive), "/mnt/data"))
+                    _vols.append((str(_human_drive), "/app/data"))
+                    _human_seat_runtime["extra_volumes"] = tuple(_vols)
             except BotVersionContractError as exc:
                 logger.error(
                     "human match %s has invalid frozen Bot contract: %s",
@@ -2963,6 +3074,7 @@ class MatchOrchestrator:
                     execution_profile_version=execution_profile_version,
                     time_control_id=time_control.id,
                     execution_scope=execution_scope,
+                    seat_runtime=_human_seat_runtime,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)

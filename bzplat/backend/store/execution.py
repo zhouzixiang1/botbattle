@@ -1204,7 +1204,7 @@ class ExecutionRepository:
         host_boot_id: str,
     ) -> dict:
         """Persist create intent before the daemon can observe a request."""
-        if owner_kind not in {"execution", "preflight"}:
+        if owner_kind not in {"execution", "preflight", "build"}:
             raise ValueError(f"unknown Docker launch owner: {owner_kind}")
         values = (
             str(launch_token),
