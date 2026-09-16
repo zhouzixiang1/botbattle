@@ -23,6 +23,7 @@ import {
   versionRow,
   withCleanup,
 } from './helpers'
+import { RELEASE_NOTES, RELEASE_VERSION } from '../src/release-notes'
 import {
   GOMOKU_TEMPLATE_TIME_CONTROLS,
   HOLDEM_TEMPLATE_TIME_CONTROL,
@@ -707,8 +708,11 @@ test('release notes dialog auto-opens once after login and footer reopens full h
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('平台更新')
-  await expect(dialog).toContainText('v1.1')
-  await expect(dialog).toContainText('256 MiB')
+  // 首次（无已读记录）只展示最新一条；断言跟随 release-notes 常量，
+  // 不随版本递增逐次改写用例。
+  await expect(dialog).toContainText(RELEASE_VERSION)
+  await expect(dialog).toContainText(RELEASE_NOTES[0]!.title)
+  await expect(dialog).toContainText(RELEASE_NOTES[0]!.items[0]!)
   await dialog.getByRole('button', { name: '知道了', exact: true }).click()
   await expect(dialog).toBeHidden()
 
@@ -719,7 +723,9 @@ test('release notes dialog auto-opens once after login and footer reopens full h
   await page.locator('[data-release-notes-link]').click()
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('更新日志')
-  await expect(dialog).toContainText('v1.1')
+  for (const note of RELEASE_NOTES) {
+    await expect(dialog).toContainText(note.version)
+  }
   await dialog.locator('[data-release-notes-confirm]').click()
   await expect(dialog).toBeHidden()
   await monitor.expectClean()

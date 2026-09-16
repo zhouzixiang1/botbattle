@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -47,6 +48,14 @@ from bzplat.backend.security import (
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
 from bzplat.backend.runtime.limits import (
+    USER_STORAGE_MAX_FILES,
+    USER_STORAGE_QUOTA_BYTES,
+)
+from bzplat.backend.user_storage import (
+    UserStorageError,
+    validate_storage_name,
+)
+from bzplat.backend.runtime.limits import (
     MAX_BOT_RESPONSE_LINE_BYTES,
     MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
 )
@@ -59,7 +68,7 @@ from bzplat.backend.runtime.local_ai_service import (
     LocalAIAgentBusyError,
     LocalAIRateLimitError,
 )
-from bzplat.backend.store import BotDeletedError
+from bzplat.backend.store import BotDeletedError, UserStorageQuotaExceededError
 
 logger = logging.getLogger(__name__)
 _LOCAL_AI_DB_TOUCH_INTERVAL_SECONDS = 15.0
@@ -1499,6 +1508,208 @@ async def upload_bot_version(
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={staged.size}")
     return {"bot": _with_bot_runnable(bot)}
+
+
+def _user_storage(request: Request):
+    manager = getattr(request.app.state, "user_storage", None)
+    if manager is None:
+        raise HTTPException(503, "用户云存储暂不可用，请稍后重试")
+    return manager
+
+
+_STORAGE_STREAM_CHUNK_BYTES = 1024 * 1024
+
+
+def _commit_user_storage_file(
+    manager, user_id: int, name: str, sha256: str, size_bytes: int,
+    staged_file,
+) -> dict:
+    """同步提交：先晋升 blob（内容寻址、幂等），再进 Store 配额事务。
+
+    Store 拒绝（配额/文件数）时回收刚晋升且不再被引用的 blob；
+    崩溃夹在两步之间只留下无引用 blob，不影响任何清单读。
+    """
+    from pathlib import Path as _Path
+
+    manager.promote_staged(_Path(staged_file), user_id, sha256)
+    # 事务拒绝（配额/文件数）时保留刚晋升的 blob：立即回收与并发上传
+    # （同内容晋升复用旧实体）存在交错窗口，可能把别的会话刚提交的清单
+    # 行指向已删除文件。无引用实体统一由 sweep_unreferenced 延迟回收。
+    outcome = manager.store.replace_user_storage_file(
+        user_id, name, sha256, size_bytes
+    )
+    return outcome["file"]
+
+
+@router.get("/api/storage/files")
+def list_user_storage_files(request: Request, user=Depends(require_user)):
+    """当前用户的云存储清单与配额用量。"""
+    store = _store(request)
+    manager = _user_storage(request)
+    files = store.list_user_storage_files(user["id"])
+    usage = store.user_storage_usage(user["id"])
+    return {
+        "files": [
+            {
+                "name": f["name"],
+                "sha256": f["sha256"],
+                "size_bytes": int(f["size_bytes"]),
+                "created_at": f["created_at"],
+                "updated_at": f["updated_at"],
+            }
+            for f in files
+        ],
+        "usage": usage,
+        "quota": {
+            "bytes": USER_STORAGE_QUOTA_BYTES,
+            "max_files": USER_STORAGE_MAX_FILES,
+        },
+    }
+
+
+@router.post("/api/storage/files")
+async def upload_user_storage_file(
+    request: Request, user=Depends(require_user)
+):
+    """流式上传一个文件到云存储；同名覆盖，配额在写事务内卡死。"""
+    manager = _user_storage(request)
+    try:
+        async with _bot_upload_admission(request):
+            staging = manager.new_staging()
+            staged_file = staging / "payload.bin"
+            try:
+                async with request.form(max_files=1, max_fields=4) as form:
+                    name_override = _multipart_text(form, "name")
+                    file = _multipart_file(form)
+                    if name_override:
+                        # 显式 name 字段按原样严格校验，不做路径剥离。
+                        name = validate_storage_name(name_override)
+                    else:
+                        # 文件名可能附带客户端本地路径；只取最终文件名段。
+                        raw_name = file.filename or ""
+                        base = raw_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+                        name = validate_storage_name(base)
+                    import hashlib as _hashlib
+
+                    digest = _hashlib.sha256()
+                    total = 0
+                    with staged_file.open("wb") as out:
+                        while True:
+                            chunk = await file.read(
+                                min(
+                                    _STORAGE_STREAM_CHUNK_BYTES,
+                                    USER_STORAGE_QUOTA_BYTES,
+                                )
+                            )
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > USER_STORAGE_QUOTA_BYTES:
+                                raise UserStorageError(
+                                    "invalid_size",
+                                    "云存储单文件最大 "
+                                    f"{USER_STORAGE_QUOTA_BYTES // (1024 * 1024)} MiB",
+                                )
+                            digest.update(chunk)
+                            await asyncio.to_thread(out.write, chunk)
+                    if not total:
+                        raise UserStorageError("invalid_size", "文件不能为空")
+                    sha256 = digest.hexdigest()
+                    committed = await _finish_upload_step_before_cancel(
+                        asyncio.to_thread(
+                            _commit_user_storage_file,
+                            manager,
+                            user["id"],
+                            name,
+                            sha256,
+                            total,
+                            staged_file,
+                        )
+                    )
+            finally:
+                manager.drop_staging(staging)
+    except _DeploymentMaintenance:
+        audit_log(
+            request,
+            "user_storage_upload",
+            result="busy",
+            user=user.get("username"),
+            detail="deployment_maintenance",
+        )
+        raise _deployment_maintenance_error()
+    except _BotUploadBusy:
+        audit_log(
+            request,
+            "user_storage_upload",
+            result="fail",
+            user=user.get("username"),
+            detail="upload_busy",
+        )
+        raise _upload_busy_error()
+    except UserStorageError as e:
+        audit_log(
+            request, "user_storage_upload", result="fail",
+            user=user.get("username"), detail=e.code,
+        )
+        raise HTTPException(
+            400, detail={"code": e.code, "message": e.message}
+        )
+    except UserStorageQuotaExceededError as e:
+        audit_log(
+            request, "user_storage_upload", result="fail",
+            user=user.get("username"), detail="quota_exceeded",
+        )
+        raise HTTPException(
+            400,
+            detail={"code": "storage_quota_exceeded", "message": str(e)},
+        )
+    audit_log(
+        request,
+        "user_storage_upload",
+        result="ok",
+        user=user.get("username"),
+        target=name,
+        detail=f"size={total}",
+    )
+    return {"file": committed}
+
+
+@router.delete("/api/storage/files/{name}")
+def delete_user_storage_file(
+    name: str, request: Request, user=Depends(require_user)
+):
+    """删除一个云存储文件；清单删除后无引用的实体一并回收。"""
+    manager = _user_storage(request)
+    try:
+        clean_name = validate_storage_name(name)
+    except UserStorageError as e:
+        audit_log(
+            request,
+            "user_storage_delete",
+            result="fail",
+            user=user.get("username"),
+            detail=e.code,
+        )
+        raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    removed = manager.store.delete_user_storage_file(user["id"], clean_name)
+    if removed is None:
+        raise HTTPException(404, "文件不存在")
+    # 实体回收走延迟清扫：立即 unlink 与并发同内容上传存在交错窗口。
+    audit_log(
+        request,
+        "user_storage_delete",
+        result="ok",
+        user=user.get("username"),
+        target=clean_name,
+        detail=f"size={int(removed['size_bytes'])}",
+    )
+    return {
+        "ok": True,
+        "removed": {
+            "name": clean_name,
+            "size_bytes": int(removed["size_bytes"]),
+        },
+    }
 
 
 @router.get("/api/bots/{bot_id}/versions")
@@ -6340,6 +6551,10 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
         )
     for bot_id in result["bot_ids"]:
         _bots(request).purge_bot_files(bot_id)
+    # 用户云存储清单行已随 users 级联删除；目录实体一并回收（清扫兜底）。
+    storage = getattr(request.app.state, "user_storage", None)
+    if storage is not None:
+        shutil.rmtree(storage.root / str(user_id), ignore_errors=True)
     audit_log(request, "admin_delete_user", result="ok", user=admin.get("username"), target=user_id)
     return {"ok": True}
 

@@ -250,7 +250,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
 - `BZ_BOT_LOCAL`、`BZ_SKIP_CAPTCHA`、`BZ_TEST_CAPTCHA` 任一 truthy 值都必须与 `BZ_QA_INSTANCE=1` 同时出现；CLI 在日志 handler、SQLite 和运行目录创建前拒绝非 QA 组合。不要在普通开发命令中单独导出这些开关，也不要把它们写进生产 `.env`。
 - QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
-- QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
+- QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs`、`user_assets` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。用户云存储目录可用 `BZ_USER_ASSETS_DIR` 显式指定，QA 实例同样做隔离校验。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
 - 每个并行 worktree 要把示例 `BZ_INSTANCE_KEY` 换成自己的稳定唯一值；不要与生产或其他 worktree 共用。即使当前使用 `BZ_BOT_LOCAL=1`，也保留该约束以防切回 Docker 后误清理。
 - `BZ_QA_INSTANCE=1` 通过独立代码能力门强制禁用自动排位；复制库中的 `execution_control.auto_enabled` 即使为真也无效，API 尝试开启返回 409。生产同样只以该字段作为自动 producer 的唯一开关，不存在 QA/生产两套参数 profile。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md) §1.3“建立独立 worktree 与分支”与 §1.4“数据库、端口与运行时隔离”。

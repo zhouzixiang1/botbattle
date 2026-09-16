@@ -384,6 +384,9 @@ BOT_MEMORY_MB = PLATFORM_LOW_PROFILE.memory_mb
 # 上传经流式暂存落盘，进程内存只占用单个 chunk；预检仍由进程级 admission
 # 串行执行。256 MiB 覆盖 PyInstaller 单文件产物与嵌入式权重文件。
 MAX_BOT_UPLOAD_BYTES = 256 * 1024 * 1024
+# 用户云存储：每用户总配额与文件数上限；单文件大小不得超过同一配额。
+USER_STORAGE_QUOTA_BYTES = 256 * 1024 * 1024
+USER_STORAGE_MAX_FILES = 500
 # 单次 Bot stdout 响应行的传输硬顶。StreamReader 与协议解析共用同一常量，
 # 防止超长无换行输出先撑大进程内存、随后才在业务层判错。
 MAX_BOT_RESPONSE_LINE_BYTES = 64 * 1024

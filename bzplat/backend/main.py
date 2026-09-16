@@ -128,6 +128,12 @@ def create_app(
         )
     )
     bug_attachments_dir = Path(db_path).expanduser().resolve().parent / "bug_attachments"
+    user_assets_raw = os.environ.get("BZ_USER_ASSETS_DIR")
+    user_assets_dir = (
+        Path(user_assets_raw)
+        if user_assets_raw
+        else Path(db_path).expanduser().resolve().parent / "user_assets"
+    )
     if upload_root is None:
         # Explicit/temporary DBs must not silently share the caller's production
         # bot_uploads directory. For the normal CWD botzone.db this remains ./bot_uploads.
@@ -147,6 +153,11 @@ def create_app(
             bug_attachments_dir,
             source_root,
             purpose="BZ_QA_INSTANCE Bug 附件目录",
+        )
+        user_assets_dir = assert_qa_runtime_path_isolated(
+            user_assets_dir,
+            source_root,
+            purpose="BZ_QA_INSTANCE 用户云存储目录",
         )
     prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
     if not prefer_local:
@@ -174,6 +185,11 @@ def create_app(
     auth = AuthManager(store, mailer=mailer, communications=communications)
     captcha = CaptchaStore()
     bot_manager = BotManager(store, upload_root=upload_root)
+    from bzplat.backend.user_storage import UserStorageManager
+
+    user_storage = UserStorageManager(store, root=user_assets_dir)
+    # 启动时回收无清单引用且空闲超宽限期的实体与崩溃暂存残留。
+    user_storage.sweep_unreferenced()
     execution_dispatcher: ExecutionDispatcher | None = None
     shared_supervisor = (
         None
@@ -395,6 +411,7 @@ def create_app(
     app.state.captcha = captcha
     app.state.captcha_store = captcha
     app.state.bot_manager = bot_manager
+    app.state.user_storage = user_storage
     app.state.binary_runner = binary_runner
     app.state.local_ai_service = local_ai_service
     app.state.human_play_handshake_gate = human_play_handshake_gate

@@ -17,10 +17,12 @@ export function BotUploadProgress({
   stage,
   percent,
   className,
+  progressLabel = 'Bot 文件上传进度',
 }: {
   stage: BotUploadStage
   percent: number | null
   className?: string
+  progressLabel?: string
 }) {
   if (stage === 'idle') return null
   const transferred = stage === 'preflight'
@@ -47,7 +49,7 @@ export function BotUploadProgress({
       <div
         className="h-1.5 overflow-hidden rounded-full bg-muted"
         role="progressbar"
-        aria-label={transferred ? '服务端预检中' : 'Bot 文件上传进度'}
+        aria-label={transferred ? '服务端预检中' : progressLabel}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={width ?? undefined}

@@ -23,7 +23,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER
-from bzplat.backend.runtime.limits import MAX_BOT_UPLOAD_BYTES
+from bzplat.backend.runtime.limits import (
+    MAX_BOT_UPLOAD_BYTES,
+    USER_STORAGE_QUOTA_BYTES,
+)
 
 logger = logging.getLogger(__name__)
 _access_logger = logging.getLogger(ACCESS_LOGGER)
@@ -47,11 +50,15 @@ BOT_UPLOAD_BODY_MAX_BYTES = (
 )
 _MAX_BOT_UPLOAD_MIB = MAX_BOT_UPLOAD_BYTES // (1024 * 1024)
 BUG_ATTACHMENT_BODY_MAX_BYTES = 5 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
+USER_STORAGE_BODY_MAX_BYTES = (
+    USER_STORAGE_QUOTA_BYTES + MULTIPART_OVERHEAD_BYTES
+)
 AVATAR_BODY_MAX_BYTES = 2 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
 _BOT_VERSION_UPLOAD_PATH = re.compile(r"/api/bots/[^/]+/versions")
 _BUG_ATTACHMENT_UPLOAD_PATH = re.compile(
     r"/api/feedback/bugs/[^/]+/attachments"
 )
+_USER_STORAGE_UPLOAD_PATH = re.compile(r"^/api/storage/files$")
 _LOCAL_AI_ROTATE_PATH = re.compile(
     r"^/api/local-ai/agents/[^/]+/rotate$"
 )
@@ -71,6 +78,13 @@ _BOT_UPLOAD_TOO_LARGE = {
     "code": "upload_body_too_large",
     "message": (
         f"Bot 二进制最大 {_MAX_BOT_UPLOAD_MIB} MiB，"
+        "上传请求体超过允许的 multipart 上限"
+    ),
+}
+_USER_STORAGE_TOO_LARGE = {
+    "code": "storage_body_too_large",
+    "message": (
+        f"云存储单文件最大 {USER_STORAGE_QUOTA_BYTES // (1024 * 1024)} MiB，"
         "上传请求体超过允许的 multipart 上限"
     ),
 }
@@ -289,6 +303,9 @@ class BotUploadBodyLimitMiddleware:
         elif method == "POST" and _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
             limit = BUG_ATTACHMENT_BODY_MAX_BYTES
             detail = _BUG_ATTACHMENT_TOO_LARGE
+        elif method == "POST" and _USER_STORAGE_UPLOAD_PATH.fullmatch(path):
+            limit = USER_STORAGE_BODY_MAX_BYTES
+            detail = _USER_STORAGE_TOO_LARGE
         elif method == "POST" and path == "/api/auth/avatar":
             limit = AVATAR_BODY_MAX_BYTES
             detail = _AVATAR_TOO_LARGE
