@@ -362,3 +362,82 @@ def test_storage_table_created_and_reopen_idempotent(tmp_path):
     store.close()
     reopened = Store(str(tmp_path / "storage.db"))
     reopened.close()
+
+
+def test_repromote_refreshes_mtime_for_grace_window(tmp_path):
+    """删除后重新上传同内容：promote 必须刷新 mtime（宽限期证据）。"""
+    import os
+    import time
+
+    app, _store, user, _other, token, _ = _app(tmp_path)
+    client = TestClient(app)
+    root = _blob_root(app)
+    assert (
+        client.post(
+            "/api/storage/files",
+            headers=_auth(token),
+            files={"file": ("w.bin", b"AAAA", "application/octet-stream")},
+        ).status_code
+        == 200
+    )
+    sha = hashlib.sha256(b"AAAA").hexdigest()
+    blob = root / str(user["id"]) / sha
+    # 模拟实体是历史遗留（mtime 早于两倍宽限期）。
+    old = time.time() - 7200.0
+    os.utime(blob, (old, old))
+    assert blob.stat().st_mtime < time.time() - 3600.0
+    # 重新上传同内容：无条件 replace 必须把 mtime 拉回当下。
+    assert (
+        client.post(
+            "/api/storage/files",
+            headers=_auth(token),
+            files={"file": ("w2.bin", b"AAAA", "application/octet-stream")},
+        ).status_code
+        == 200
+    )
+    assert blob.stat().st_mtime >= time.time() - 3600.0
+
+
+def test_sweep_rechecks_references_in_race_window(tmp_path, monkeypatch):
+    """快照读与 unlink 之间刚获得引用的实体不得被回收（复核防线）。"""
+    import os
+    import time
+
+    app, store, user, _other, token, _ = _app(tmp_path)
+    client = TestClient(app)
+    root = _blob_root(app)
+    assert (
+        client.post(
+            "/api/storage/files",
+            headers=_auth(token),
+            files={"file": ("w.bin", b"AAAA", "application/octet-stream")},
+        ).status_code
+        == 200
+    )
+    sha = hashlib.sha256(b"AAAA").hexdigest()
+    blob = root / str(user["id"]) / sha
+    old = time.time() - 7200.0
+    os.utime(blob, (old, old))
+    # 清单行确实存在（等价于“快照之后、unlink 之前并发上传已提交”），
+    # 但让快照读返回陈旧的空视图，模拟竞态窗口。
+    monkeypatch.setattr(store, "all_user_storage_shas", lambda: {})
+    result = app.state.user_storage.sweep_unreferenced(min_age_seconds=3600.0)
+    assert result["blobs"] == 0
+    assert blob.is_file(), "unlink 前复核必须救回刚获得引用的实体"
+    monkeypatch.undo()
+    # 快照恢复一致后（仍超宽限期、无引用），可正常回收。
+    assert client.delete("/api/storage/files/w.bin", headers=_auth(token)).status_code == 200
+    result = app.state.user_storage.sweep_unreferenced(min_age_seconds=0)
+    assert result["blobs"] == 1
+    assert not blob.exists()
+
+
+def test_lifespan_starts_periodic_storage_sweep(tmp_path):
+    """周期回收任务随 lifespan 启动并在关停时取消。"""
+    app, *_ = _app(tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/site/info").status_code == 200
+        task = app.state._user_storage_sweep_task
+        assert task is not None and not task.done()
+        assert task.get_name() == "user-storage-sweep"
+    assert app.state._user_storage_sweep_task.done()

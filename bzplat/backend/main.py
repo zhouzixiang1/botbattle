@@ -48,6 +48,7 @@ from bzplat.backend.runtime.config import (
     HUMAN_WS_HANDSHAKE_MAX_BUCKETS,
     HUMAN_WS_HANDSHAKE_MAX_INFLIGHT,
     HUMAN_WS_HANDSHAKE_WINDOW_SECONDS,
+    USER_STORAGE_SWEEP_INTERVAL_SEC,
 )
 from bzplat.backend.runtime.docker_supervisor import (
     DockerExecutionIdentity,
@@ -416,6 +417,35 @@ def create_app(
         )
         _app.state.delivery_worker = delivery_worker
         _app.state._delivery_worker_task = delivery_task
+
+        # 用户云盘 blob 延迟回收：启动清一次不够——运行期“配额拒绝保留
+        # + DELETE 只删清单行”会持续产生无引用实体，认证用户循环上传+删除
+        # 即可线性吃满磁盘。回收安全由 promote 刷 mtime 与 unlink 前引用
+        # 复核两道防线保证，扫描本体在 worker 线程执行不阻塞事件循环。
+        async def _user_storage_sweep_loop() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(USER_STORAGE_SWEEP_INTERVAL_SEC)
+                    result = await asyncio.to_thread(
+                        user_storage.sweep_unreferenced
+                    )
+                    if result["blobs"] or result["staging"]:
+                        logger.info(
+                            "user storage sweep removed blobs=%s staging=%s"
+                            " bytes=%s",
+                            result["blobs"],
+                            result["staging"],
+                            result["bytes"],
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("user storage sweep failed")
+
+        storage_sweep_task = asyncio.create_task(
+            _user_storage_sweep_loop(), name="user-storage-sweep"
+        )
+        _app.state._user_storage_sweep_task = storage_sweep_task
         try:
             yield
         finally:
@@ -423,6 +453,7 @@ def create_app(
             task.cancel()
             sched_task.cancel()
             delivery_task.cancel()
+            storage_sweep_task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
@@ -433,6 +464,10 @@ def create_app(
                 pass
             try:
                 await delivery_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await storage_sweep_task
             except asyncio.CancelledError:
                 pass
             # Match tasks can be inside asyncio subprocess pipe setup.  Drain
