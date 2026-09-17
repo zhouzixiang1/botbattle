@@ -79,3 +79,7 @@ samples/national_v156_bz/
 
 # 用户云存储运行时产物（同 bot_uploads）
 user_assets/
+# 云盘对局快照（运行产物，服务启动即清空）
+match_mounts/
+# 数据库冷备份（部署维护窗产物）
+botzone.db.coldbak-*
