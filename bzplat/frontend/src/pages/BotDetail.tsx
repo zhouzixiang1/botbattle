@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/table'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import Comments from '@/components/Comments'
 import Pagination from '@/components/Pagination'
@@ -227,7 +228,7 @@ function DenseMatchParticipants({ match, states }: { match: MatchRow; states: re
   return (
     <div data-match-participants="true" className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-x-2">
       <DenseParticipant source={match} side={0} state={states[0]} />
-      <span className="pt-0.5 text-[10px] font-medium text-muted-foreground">vs</span>
+      <span className="pt-0.5 text-xs font-medium text-muted-foreground">vs</span>
       <DenseParticipant source={match} side={1} state={states[1]} />
     </div>
   )
@@ -341,8 +342,8 @@ function RatingChart({ points }: { points: RatingPoint[] }) {
     <ChartContainer config={chartConfig} className="h-[200px] w-full">
       <LineChart data={data} margin={{ left: 8, right: 12, top: 8, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-        <XAxis dataKey="idx" tickLine={false} axisLine={false} tickMargin={8} className="text-[10px]" />
-        <YAxis domain={['dataMin - 20', 'dataMax + 20']} tickLine={false} axisLine={false} width={40} className="text-[10px]" />
+        <XAxis dataKey="idx" tickLine={false} axisLine={false} tickMargin={8} className="text-xs" />
+        <YAxis domain={['dataMin - 20', 'dataMax + 20']} tickLine={false} axisLine={false} width={40} className="text-xs" />
         <ChartTooltip content={<ChartTooltipContent labelKey="rating" />} />
         <Line
           dataKey="rating"
@@ -376,6 +377,8 @@ export default function BotDetail() {
   const [opponentsLoading, setOpponentsLoading] = useState(true)
   const [favorited, setFavorited] = useState(false)
   const [favCount, setFavCount] = useState(0)
+  // 「更多数据」折叠（纯展示层）：计分样本与评分变化默认收起
+  const [showMoreStats, setShowMoreStats] = useState(false)
   // 对局历史分页
   const [matchesPage, setMatchesPage] = useState(1)
   const [matchesTotal, setMatchesTotal] = useState(0)
@@ -581,6 +584,7 @@ export default function BotDetail() {
   const ratedMatches = profile.rated_matches ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
   const isRanked = Boolean(profile.is_ranked)
   const GameIcon = gameIcon(profile.game_id)
+  const hasConfidence = profile.confidence_low != null && profile.confidence_high != null
 
   return (
     <PageFrame width="full" layout="public-bot-detail">
@@ -630,14 +634,25 @@ export default function BotDetail() {
           </div>
           <dl className="mt-2 grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 border-t pt-2 text-sm md:grid-cols-3 xl:grid-cols-2">
             <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">Rating / 95% 区间</dt>
+              <dt className="text-xs text-muted-foreground">评分</dt>
               <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-                {fmtRating(profile.rating)}
-                <span className="ml-1.5 font-normal text-muted-foreground">
-                  {profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
-                    ? `RD ${Number(profile.rd).toFixed(0)} · ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
-                    : '暂无区间'}
-                </span>
+                {hasConfidence ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        tabIndex={0}
+                        className="inline-block cursor-help font-semibold underline decoration-dotted underline-offset-4 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                      >
+                        {fmtRating(profile.rating)}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      实力波动范围 {profile.confidence_low!.toFixed(0)}–{profile.confidence_high!.toFixed(0)}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  fmtRating(profile.rating)
+                )}
               </dd>
             </div>
             <div className="min-w-0">
@@ -651,27 +666,39 @@ export default function BotDetail() {
                     ? '历史评分保留'
                     : profile.rank == null
                       ? `${ratedMatches}/${profile.ranking_min_matches} 场`
-                    : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}%`}
+                    : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}% 的参榜 Bot`}
                 </span>
               </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">计分样本</dt>
-              <dd className="mt-0.5 font-mono font-semibold tabular-nums">{ratedMatches} 场 <span className="font-normal text-muted-foreground">· {profile.unique_opponents ?? 0} 个对手</span></dd>
             </div>
             <div className="min-w-0">
               <dt className="text-xs text-muted-foreground">战绩</dt>
               <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.wins ?? 0} 胜 · {profile.draws ?? 0} 平 · {profile.losses ?? 0} 负</dd>
             </div>
-            <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">评分变化</dt>
-              <dd className="mt-0.5 font-mono font-semibold tabular-nums">上次 {fmtSigned(profile.rating_delta)} <span className="font-normal text-muted-foreground">· 30 日 {fmtSigned(profile.recent_delta_30d)}</span></dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">正常完成率</dt>
-              <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)} <span className="font-normal text-muted-foreground">· 技术负 {profile.technical_failures ?? 0}</span></dd>
-            </div>
           </dl>
+          <button
+            type="button"
+            onClick={() => setShowMoreStats((value) => !value)}
+            aria-expanded={showMoreStats}
+            className="mt-1 inline-flex min-h-11 items-center gap-1 self-start text-xs font-medium text-primary hover:underline sm:min-h-0"
+          >
+            <ChevronDown
+              aria-hidden="true"
+              className={`size-3.5 transition-transform ${showMoreStats ? 'rotate-180' : ''}`}
+            />
+            {showMoreStats ? '收起更多数据' : '更多数据'}
+          </button>
+          {showMoreStats && (
+            <dl className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">计分样本</dt>
+                <dd className="mt-0.5 font-mono font-semibold tabular-nums">{ratedMatches} 场 <span className="font-normal text-muted-foreground">· {profile.unique_opponents ?? 0} 个对手</span></dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">评分变化</dt>
+                <dd className="mt-0.5 font-mono font-semibold tabular-nums">上次 {fmtSigned(profile.rating_delta)} <span className="font-normal text-muted-foreground">· 30 日 {fmtSigned(profile.recent_delta_30d)}</span></dd>
+              </div>
+            </dl>
+          )}
         </DataRegion>
 
         <Tabs defaultValue="history" className="w-full min-w-0">
@@ -758,7 +785,7 @@ export default function BotDetail() {
           <TabsContent value="opponents">
             <DataRegion
               title="对手战绩"
-              description={`当前评分池计分交手 · 第 ${opponentsPage} 页 · 每页 ${opponentsPerPage} 个 · 共 ${opponentsTotal} 个对手`}
+              description={`已计分交手 · 共 ${opponentsTotal} 个对手`}
             >
               {opponentsError ? (
                 <div className="space-y-3 px-4 py-6">
@@ -837,7 +864,7 @@ export default function BotDetail() {
           </TabsContent>
 
           <TabsContent value="rating">
-            <DataRegion title="评分变化" description={`Glicko-2 · ${history.length} 个数据点`} actions={<Trophy className="size-4 text-primary" />} contentClassName="p-3">
+            <DataRegion title="评分走势" description={`最近 ${history.length} 场计分对局的评分变化`} actions={<Trophy className="size-4 text-primary" />} contentClassName="p-3">
               <RatingChart points={history} />
             </DataRegion>
           </TabsContent>

@@ -1,7 +1,28 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { fmtMemoryMiB } from '../src/lib/format.ts'
+import { fmtBytes, fmtMemoryMiB } from '../src/lib/format.ts'
+
+test('fmtBytes 统一文件大小：全站 KB/MB/GB 口径，杜绝 B/KiB/MiB 混排', () => {
+  // 小于 1 KiB 保持字节
+  assert.equal(fmtBytes(0), '0 B')
+  assert.equal(fmtBytes(19), '19 B')
+  assert.equal(fmtBytes(1023), '1023 B')
+  // KB / MB 一位小数（与云存储配额「256.0 MB」口径一致）
+  assert.equal(fmtBytes(1024), '1.0 KB')
+  assert.equal(fmtBytes(2048), '2.0 KB')
+  assert.equal(fmtBytes(64 * 1024 * 1024), '64.0 MB')
+  assert.equal(fmtBytes(256 * 1024 * 1024), '256.0 MB')
+  // GB 两位小数
+  assert.equal(fmtBytes(1024 * 1024 * 1024), '1.00 GB')
+  assert.equal(fmtBytes(1.5 * 1024 * 1024 * 1024), '1.50 GB')
+  // 空值/非法值 fail closed 到 fallback
+  assert.equal(fmtBytes(null), '—')
+  assert.equal(fmtBytes(undefined), '—')
+  assert.equal(fmtBytes(Number.NaN), '—')
+  assert.equal(fmtBytes(-1), '—')
+  assert.equal(fmtBytes(null, '未知'), '未知')
+})
 
 test('fmtMemoryMiB 统一内存单位：分子分母同格式，杜绝 GiB/MiB 混排', () => {
   // 小于 1 GiB 保持 MiB

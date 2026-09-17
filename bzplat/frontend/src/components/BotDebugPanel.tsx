@@ -99,7 +99,7 @@ export default function BotDebugPanel({
                 {([0, 1] as const).map((seat) => (
                   <TabsTrigger key={seat} value={String(seat)} className="min-w-0">
                     <span className="truncate">{seatNames[seat]} · 座位 {seat + 1}</span>
-                    <span className="ml-1 text-[10px] opacity-70">({bySeat[seat].length})</span>
+                    <span className="ml-1 text-xs opacity-70">({bySeat[seat].length})</span>
                   </TabsTrigger>
                 ))}
               </TabsList>
@@ -113,7 +113,7 @@ export default function BotDebugPanel({
                   <TabsContent key={seat} value={String(seat)} className="min-w-0">
                     <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
                       <span className="min-w-0 truncate text-xs text-muted-foreground">
-                        {entries.length ? `${entries.length} 次有调试输出的决策` : '该 Bot 未输出 debug'}
+                        {entries.length ? `${entries.length} 次有调试输出的决策` : '暂无调试输出'}
                       </span>
                       {entries.length > 0 && (
                         <Tooltip>

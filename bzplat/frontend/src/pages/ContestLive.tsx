@@ -309,23 +309,28 @@ export default function ContestLive() {
         )}
         title={live.contest.title}
         // 长赛况元信息经 children 承载（共享 PageHeader 的 description 有 max-w-3xl 上限，
-        // 宽屏会折成多行）；文案与 DOM 契约保持不变，仅取消宽度上限。
+        // 宽屏会折成多行）；主行只保留阶段·游戏·时限，其余信息降为次行小字。
         children={(
-          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm leading-relaxed text-muted-foreground">
-            <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
-            <span>
-              {timeControl
-                ? `${timeControlLabel(timeControl)} · ${timeControlDescription(timeControl)}`
-                : '对局时限配置暂不可用'}
-            </span>
-            {seriesText && <span>{seriesText}</span>}
-            {unboundedTiebreak && (
-              <span className="font-medium text-warning-foreground">
-                淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶
+          <span className="flex min-w-0 flex-col gap-0.5 text-sm leading-relaxed text-muted-foreground">
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <span>{liveStageLabel} · {gameLabel(live.contest.game_id)}</span>
+              <span>
+                {timeControl
+                  ? timeControlLabel(timeControl)
+                  : '对局时限配置暂不可用'}
               </span>
-            )}
-            {scheduleText && <span className="inline-flex items-center gap-1"><CalendarClock aria-hidden="true" className="size-3.5" />{scheduleText}</span>}
-            {resultsPending && <span className="font-medium text-primary">成绩正在整理，正式名次稍后公布</span>}
+            </span>
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              {timeControl && <span>{timeControlDescription(timeControl)}</span>}
+              {seriesText && <span>{seriesText}</span>}
+              {unboundedTiebreak && (
+                <span className="font-medium text-warning-foreground">
+                  淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶
+                </span>
+              )}
+              {scheduleText && <span className="inline-flex items-center gap-1"><CalendarClock aria-hidden="true" className="size-3.5" />{scheduleText}</span>}
+              {resultsPending && <span className="font-medium text-primary">成绩正在整理，正式名次稍后公布</span>}
+            </span>
           </span>
         )}
         actions={(
@@ -335,7 +340,8 @@ export default function ContestLive() {
         )}
       />
       {error && !offline && <ErrorMsg msg={`${error}；已保留上一次赛况。`} />}
-      <FormatSnapshotAudit value={live.contest.format_snapshot} />
+      {/* 直播投影不含组织者身份，访客视角固定只显示抽签方式摘要。 */}
+      <FormatSnapshotAudit value={live.contest.format_snapshot} variant="summary" />
       <LiveContestSpectator
         status={status}
         stageLabel={liveStageLabel}

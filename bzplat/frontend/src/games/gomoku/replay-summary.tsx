@@ -44,7 +44,7 @@ export function GomokuReplaySummary({ vm }: GameAuxiliaryProps) {
         data-testid="gomoku-seat-colors"
         className="font-medium text-foreground"
       >
-        座位 1 执{gomokuColorLabel(state.seatColors[0])} · 座位 2 执{gomokuColorLabel(state.seatColors[1])}
+        开局提案方执{gomokuColorLabel(state.seatColors[0])} · 交换决策方执{gomokuColorLabel(state.seatColors[1])}
       </span>
       {state.candidates.length > 0 && (
         <span data-testid="gomoku-candidate-summary" className="text-muted-foreground">

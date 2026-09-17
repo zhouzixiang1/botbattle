@@ -26,18 +26,18 @@ export const PLATFORM_TERMINAL_REASONS: ReasonMap = {
   platform_error: danger('平台运行异常'),
   admin_aborted: danger('管理员中止'),
   auto_yield_foreground: neutral('自动排位为前台任务让路'),
-  auto_idle_policy_cutover: neutral('自动排位策略升级后收口'),
+  auto_idle_policy_cutover: neutral('自动排位已暂停'),
   contest_bot_unavailable: danger('赛事 Bot 不可用'),
   contest_both_bots_unavailable: danger('赛事双方 Bot 均不可用'),
-  contest_ended_pending_orphan: danger('赛事结束时仍有孤立对局'),
+  contest_ended_pending_orphan: danger('赛事已结束，未完成的对局不再继续'),
   human_inactive: danger('真人玩家连续超时'),
-  orphan_after_restart: danger('执行恢复时中止（旧记录）'),
+  orphan_after_restart: danger('对局已中止（历史记录）'),
   orphan_after_service_restart: danger('服务重启后中止'),
-  orphan_after_runtime_recovery: danger('执行环境恢复时中止'),
-  orphan_pending_after_restart: danger('执行恢复时取消排队（旧记录）'),
+  orphan_after_runtime_recovery: danger('平台维护后中止'),
+  orphan_pending_after_restart: danger('排队已取消（历史记录）'),
   orphan_pending_after_service_restart: danger('服务重启后取消排队'),
-  orphan_pending_after_runtime_recovery: danger('执行环境恢复时取消排队'),
-  orphan_pending_no_contest: danger('无归属赛事的排队对局'),
+  orphan_pending_after_runtime_recovery: danger('平台维护后取消排队'),
+  orphan_pending_no_contest: danger('所属赛事已不存在，排队已取消'),
   invalid_game_id: danger('游戏类型无效'),
   invalid_match_config: danger('对局配置无效'),
 }
@@ -61,6 +61,23 @@ export function resolveTerminalReason(
 
 export function createTerminalReasonResolver(gameReasons: ReasonMap): TerminalReasonResolver {
   return (reason, status) => resolveTerminalReason(reason, status, gameReasons)
+}
+
+/**
+ * 技术终局/技术故障原因的唯一展示投影：已知码取平台标签，未知码一律中性
+ * 「技术原因」，绝不把内部英文码或后端错误串泄漏到界面。
+ */
+/** 棋类裁判已知技术码：保留特异性，未知码仍一律中性「技术原因」。 */
+const GAME_TECHNICAL_LABELS: Record<string, string> = {
+  illegal_opening: '指定开局不合法',
+  illegal_swap: '交换动作不合法',
+  illegal_candidates: '五手候选不合法',
+  illegal_selection: '保留点选择不合法',
+}
+
+export function technicalReasonLabel(reason: unknown): string {
+  const code = String(reason ?? '').trim()
+  return PLATFORM_TERMINAL_REASONS[code]?.label ?? GAME_TECHNICAL_LABELS[code] ?? '技术原因'
 }
 
 /**

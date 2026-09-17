@@ -91,10 +91,13 @@ export function ThreadView({
             onChange={(event) => onReplyChange(event.target.value)}
             rows={3}
             maxLength={10_000}
-            placeholder={isOpen ? '输入回复；不要粘贴密码、令牌或其他敏感信息' : '此会话已关闭'}
+            placeholder={isOpen ? '输入回复…' : '此会话已关闭'}
             disabled={!isOpen || sending}
             className="max-h-36 min-h-20 resize-y"
           />
+          {isOpen && (
+            <p className="mt-1 text-xs text-muted-foreground">请勿在回复中粘贴密码、令牌等敏感信息。</p>
+          )}
           <div className="mt-2 flex min-w-0 flex-wrap items-center gap-3">
             {onEmailChange && (
               <label className="flex min-h-10 cursor-pointer items-center gap-2 text-xs text-muted-foreground">

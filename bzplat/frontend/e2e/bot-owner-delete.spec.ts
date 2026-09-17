@@ -220,7 +220,7 @@ test('deleting the only Bot on page two returns to page one without reloading th
 
   await page.goto('/#/my-bots')
   await page.getByRole('button', { name: '第 2 页', exact: true }).click()
-  await expect(page.getByText('第 2 页', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '第 2 页', exact: true })).toHaveAttribute('aria-current', 'page')
   const targetRow = page.getByRole('link', { name: pageTwoBot.display_name, exact: true })
     .locator('xpath=ancestor::li[1]')
   await targetRow.getByRole('button', { name: `管理 ${pageTwoBot.display_name}`, exact: true }).click()
@@ -238,7 +238,7 @@ test('deleting the only Bot on page two returns to page one without reloading th
   network.releaseDelete()
   expect((await deleted).status()).toBe(200)
 
-  await expect(page.getByText('第 1 页', { exact: true })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: '分页导航' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '第一页 Bot 1', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: pageTwoBot.display_name, exact: true })).toHaveCount(0)
   await expect.poll(() => network.mineReadPages.length).toBeGreaterThan(readsBeforeDelete)

@@ -191,6 +191,8 @@ async function openGomokuCreateForm(page: Page) {
   await form.getByRole('combobox').first().click()
   await page.getByRole('option', { name: '五子棋', exact: true }).last().click()
   await expect(form.getByText('限 22–26 人', { exact: true })).toBeVisible()
+  // 保护种子来源等属于「高级设置」，默认折叠。
+  await form.getByRole('button', { name: /高级设置/ }).click()
   return form
 }
 
@@ -246,6 +248,7 @@ test('Pencil preset submits independent format, time control, and group count at
   } finally {
     releaseSourceCandidates()
   }
+  await form.getByRole('button', { name: /高级设置/ }).click()
   await form.getByLabel('分组数量').fill('3')
   await form.getByLabel('标题').fill('点格棋线上分组预赛')
   const navigation = form.getByRole('combobox', { name: '关联赛事（可选）' })
@@ -568,7 +571,7 @@ test('challenge shows alternate-unrated and human Bot-only timing at 390px', asy
   await expect(form.getByText('替代时限属于练习模式，本局不计平台排行榜。')).toBeVisible()
   await form.getByRole('button', { name: '我亲自上场', exact: true }).click()
   await expect(form.getByText('非对称练习：所选时限只约束 Bot；你仍使用页面的防挂机时限。')).toBeVisible()
-  await expect(form.getByText(/只计 Bot 的完整请求到完整响应/)).toBeVisible()
+  await expect(form.getByText(/只计 Bot 用时/)).toBeVisible()
   expect((await form.getByRole('combobox', { name: '对局时限' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   expect(gamesReads).toBe(1)

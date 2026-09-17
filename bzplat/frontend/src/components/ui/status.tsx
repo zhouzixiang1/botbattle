@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 
 /** 空状态：图标 + 文案，居中 */
 export function EmptyState({
-  text = '暂无数据',
+  text = '暂无内容',
   icon,
   className,
 }: {

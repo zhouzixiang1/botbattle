@@ -68,6 +68,25 @@ function botLabel(bot: AdminBot): string {
   return bot.current_version ? `${name} · v${bot.current_version}` : name
 }
 
+/**
+ * 把后端返回的跳过原因翻译成面向管理员的中文；内部用户/Bot 编号换成选择列表里的名字。
+ * 未识别的原因一律显示中性文案，不把原始错误串直接上屏。
+ */
+function describeSkipIssue(reason: string, staged: readonly StagedAssignment[]): string {
+  const userId = reason.match(/user (\d+)/)?.[1]
+  const assignment = staged.find((item) => String(item.user.id) === userId)
+  const who = assignment ? `「${userLabel(assignment.user)}」` : '该选手'
+  if (/已报名/.test(reason)) return `${who}已在报名名单中`
+  if (/重复/.test(reason)) return `${who}在本次提交中重复出现`
+  if (/实名信息不完整/.test(reason)) return `${who}的实名信息不完整`
+  if (/已停用/.test(reason)) return `${who}的账号已停用`
+  if (/不存在/.test(reason)) return `${who}的账号不存在`
+  if (/不属于/.test(reason)) return `${who}所选择的 Bot 不属于该用户`
+  if (/游戏/.test(reason)) return `${who}所选择的 Bot 游戏与本赛事不一致`
+  if (/不可运行|不可用/.test(reason)) return `${who}所选择的 Bot 当前不可运行`
+  return `${who}不满足报名条件`
+}
+
 export function AdminContestRosterAssign({
   contestId,
   gameId,
@@ -740,7 +759,7 @@ export function AdminContestRosterAssign({
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2" role="alert">
               <p className="text-sm font-medium text-destructive">以下项目未加入，请核对后重试：</p>
               <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-destructive">
-                {submitIssues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+                {submitIssues.map((issue, index) => <li key={`${issue}-${index}`}>{describeSkipIssue(issue, staged)}</li>)}
               </ul>
             </div>
           )}

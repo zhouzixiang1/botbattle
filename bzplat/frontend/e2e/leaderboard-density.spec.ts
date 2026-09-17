@@ -262,25 +262,38 @@ for (const viewport of VIEWPORTS) {
       const main = page.locator('main')
       await expect(main.getByRole('heading', { name: '排行榜', exact: true })).toBeVisible()
       await expect(main).toContainText('每款游戏独立使用 Glicko-2 数值评分')
-      await expect(main).toContainText('Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加')
-      await expect(main).toContainText('赛事积分不进入平台 Rating')
+      // 规则墙改为一句话 + 可展开说明：默认只显示门槛与更新方式。
+      await expect(main).toContainText('打满 10 场计分对局后进入公开排名；评分随胜负自动更新')
+      const rulesToggle = main.getByRole('button', { name: '了解评分规则', exact: true })
+      await expect(rulesToggle).toBeVisible()
+      await expect(main).not.toContainText('赛事积分不进入平台评分')
+      await rulesToggle.click()
+      await expect(main).toContainText('赛事积分不进入平台评分')
+      await expect(main).toContainText('实力可能波动的范围')
       await expect(main.locator('[data-slot="summary-strip"]')).toHaveCount(0)
       await expect(main.getByText('Bot 总数', { exact: true })).toHaveCount(0)
       await expect(main.getByText('最近更新', { exact: true })).toHaveCount(0)
+      // 队列默认折叠为一行摘要；展开后才出现完整面板。
+      const queueSummary = page.getByTestId('execution-queue-summary')
+      await expect(queueSummary).toBeVisible()
+      await expect(queueSummary).toContainText('对局执行')
+      await expect(queueSummary).toContainText('当前 2 场进行中')
+      await queueSummary.click()
       const queuePanel = page.getByTestId('execution-queue-panel')
       await expect(queuePanel).toBeVisible()
-      if (viewport.name === 'mobile') {
-        await queuePanel.locator('summary').click()
-      }
       await expect(queuePanel).toContainText('正在执行')
       await expect(queuePanel).toContainText('等待执行')
-      await expect(queuePanel).toContainText('全站当前对局槽上限 2 场')
+      await expect(queuePanel).toContainText('同时最多 2 场对局')
+      // 窄屏任务列表默认收在「查看队列详情」里；已展开时不可再点收起。
+      if (await queuePanel.getByRole('link', { name: '进入观赛' }).count() === 0) {
+        await queuePanel.locator('summary').first().click()
+      }
       await expect(queuePanel.getByRole('link', { name: '进入观赛' })).toHaveCount(2)
       await expect(queuePanel.getByRole('link', { name: '进入观赛' }).first()).toHaveAttribute(
         'href',
         '#/match/holdem-human-active-match',
       )
-      await expect(queuePanel).toContainText('人机对战，不计平台排行榜')
+      await expect(queuePanel).toContainText('人机对局 · 不计平台排行榜')
       const holdemTab = page.getByRole('tab', { name: '德州扑克', exact: true })
       const gomokuTab = page.getByRole('tab', { name: '五子棋', exact: true })
       await expect(holdemTab).toHaveAttribute('aria-selected', 'true')
@@ -312,7 +325,7 @@ for (const viewport of VIEWPORTS) {
           activeLayout.locator('[data-slot="table-header"]'),
         ).not.toHaveAttribute('data-sticky-region')
         await expect(main.getByRole('columnheader', { name: 'Bot / 所有者', exact: true })).toBeVisible()
-        await expect(main.getByRole('columnheader', { name: '最近对局', exact: true })).toBeVisible()
+        await expect(main.getByRole('columnheader', { name: '评分变化', exact: true })).toBeVisible()
         await assertTopRankingRowsUnobscured(activeLayout, `${role}/${viewport.name}`)
       }
 

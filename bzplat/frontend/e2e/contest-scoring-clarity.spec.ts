@@ -656,7 +656,7 @@ test('Swiss bye points stay separate from actual wins in stage and official stan
 
   await main.getByRole('tab', { name: /阶段积分/ }).click()
   await expect(main.getByText(/本阶段计分：胜 3 \/ 平 1 \/ 负 0/)).toBeVisible()
-  await expect(main.getByText(/计分场战绩不包含瑞士轮轮空/)).toBeVisible()
+  await expect(main.getByText(/瑞士轮轮空不计入胜场/)).toBeVisible()
   const stageRow = main.getByRole('row').filter({ hasText: '测01' })
   await expect(stageRow.getByRole('cell').first()).toHaveText('2')
   await expect(stageRow).toContainText('1 胜 / 0 平 / 1 负 · 轮空 1')
@@ -672,9 +672,8 @@ test('Swiss bye points stay separate from actual wins in stage and official stan
   const stagePanel = main
     .getByRole('heading', { name: '阶段排名与晋级', exact: true })
     .locator('xpath=ancestor::*[@data-slot="data-region"][1]')
-  await expect(stagePanel).toContainText(
-    '1 胜 / 0 平 / 1 负 · 轮空 1',
-  )
+  await stagePanel.getByText('计分明细').first().hover()
+  await expect(page.getByText(/1 胜 \/ 0 平 \/ 1 负 · 轮空 1/)).toBeVisible()
   await expect(stagePanel).not.toContainText('名次不可用')
   await expect(stagePanel.getByRole('row').filter({ hasText: '测01' }).getByRole('cell').first()).toHaveText('2')
   await expect(stagePanel).toContainText('2 场计分')
@@ -725,19 +724,20 @@ test('stage standings expose the authoritative tie-break chain instead of implyi
   await expect(cbotRow.getByRole('cell').first()).toHaveText('6')
   await expect(bluffingRow.getByRole('cell').first()).toHaveText('7')
   await expect(bot3Row.getByRole('cell').first()).toHaveText('8')
-  await expect(cbotRow).toContainText('对手分 Cut1 381')
-  await expect(cbotRow).toContainText('胜者分 SB 195')
-  await expect(bluffingRow).toContainText('胜者分 SB 171')
+  await expect(cbotRow).toContainText('对手分（去掉最高） 381')
+  await expect(cbotRow).toContainText('胜者加权对手分 195')
+  await expect(bluffingRow).toContainText('胜者加权对手分 171')
   await expect(bluffingRow).toContainText('直接交手 100%')
   await expect(bluffingRow).toContainText('归一分差 687.16')
-  await expect(bot3Row).toContainText('胜者分 SB 162')
+  await expect(bot3Row).toContainText('胜者加权对手分 162')
   await expect(lowerRow).toContainText('积分已区分')
-  await expect(lowerRow).not.toContainText('对手分 Cut1')
+  await expect(lowerRow).not.toContainText('对手分（去掉最高）')
 
   await page.setViewportSize({ width: 390, height: 844 })
   await stageTable.focus()
   await expect(stageTable).toBeFocused()
-  await expect(bluffingRow).toContainText('胜者分 SB 171')
+  // 窄屏排名依据收纳为首项摘要；悬停/聚焦可见完整破同分链。
+  await expect(bluffingRow).toContainText(/等 \d+ 项/)
   await assertNoRootOverflow(page)
 
   detailPayload = rankingStageDetail({
@@ -760,10 +760,10 @@ test('stage standings expose the authoritative tie-break chain instead of implyi
   const groupAFirst = groupedTable.getByRole('row').filter({ hasText: 'group-a-first' })
   const groupASecond = groupedTable.getByRole('row').filter({ hasText: 'group-a-second' })
   const groupBOnly = groupedTable.getByRole('row').filter({ hasText: 'group-b-only' })
-  await expect(groupAFirst).toContainText('胜者分 SB 90')
-  await expect(groupASecond).toContainText('胜者分 SB 80')
+  await expect(groupAFirst).toContainText('胜者加权对手分 90')
+  await expect(groupASecond).toContainText('胜者加权对手分 80')
   await expect(groupBOnly).toContainText('积分已区分')
-  await expect(groupBOnly).not.toContainText('胜者分 SB 70')
+  await expect(groupBOnly).not.toContainText('胜者加权对手分 70')
 
   detailPayload = rankingStageDetail({
     title: '跨组六项链',
@@ -797,7 +797,7 @@ test('stage standings expose the authoritative tie-break chain instead of implyi
   await expect(crossA).toContainText('标准化对手强度 55%')
   await expect(crossA).toContainText('每局归一分差 6.25')
   await expect(crossA).toContainText('技术负率 0%')
-  await expect(crossA).toContainText('冻结抽签序 9')
+  await expect(crossA).toContainText('抽签顺序 9')
   await expect(crossB).toContainText('每局积分率 70%')
   await expect(crossB).toContainText('技术负率 10%')
   await monitor.expectClean()
@@ -833,10 +833,10 @@ test('group-to-knockout official results keep overall and group ranks independen
   const officialTable = main.getByRole('region', { name: '赛事正式名次表', exact: true })
   const winner = officialTable.getByRole('row').filter({ hasText: 'group-a-first' })
   const eliminated = officialTable.getByRole('row').filter({ hasText: 'group-a-second' })
-  await expect(winner.getByRole('cell').first()).toHaveText('1')
-  await expect(winner.getByRole('cell').nth(1)).toHaveText('A组 · 1')
-  await expect(eliminated.getByRole('cell').first()).toHaveText('3')
-  await expect(eliminated.getByRole('cell').nth(1)).toHaveText('A组 · 2')
+  await expect(winner.getByRole('cell').first()).toContainText('1')
+  await expect(winner.getByRole('cell').first()).toContainText('A组 · 1')
+  await expect(eliminated.getByRole('cell').first()).toContainText('3')
+  await expect(eliminated.getByRole('cell').first()).toContainText('A组 · 2')
   await monitor.expectClean()
 })
 
@@ -885,19 +885,19 @@ test('official results scope ordinary tiebreak details to equal points inside th
   const contradictorySource = officialTable.getByRole('row').filter({ hasText: 'contradictory-source' })
 
   await expect(groupAUnique).toContainText('积分已区分')
-  await expect(groupAUnique).not.toContainText('对手分 Cut1')
-  await expect(groupAUnique).not.toContainText('胜者分 SB')
+  await expect(groupAUnique).not.toContainText('对手分（去掉最高）')
+  await expect(groupAUnique).not.toContainText('胜者加权对手分')
   await expect(groupAUnique).not.toContainText('直接交手')
   await expect(groupBUnique).toContainText('积分已区分')
-  await expect(groupBUnique).not.toContainText('对手分 Cut1')
-  await expect(groupBUnique).not.toContainText('胜者分 SB')
+  await expect(groupBUnique).not.toContainText('对手分（去掉最高）')
+  await expect(groupBUnique).not.toContainText('胜者加权对手分')
   await expect(groupBUnique).not.toContainText('直接交手')
-  await expect(groupCTiedFirst).toContainText('对手分 Cut1 28')
-  await expect(groupCTiedFirst).toContainText('胜者分 SB 18')
-  await expect(groupCTiedSecond).toContainText('对手分 Cut1 24')
-  await expect(groupCTiedSecond).toContainText('胜者分 SB 16')
+  await expect(groupCTiedFirst).toContainText('对手分（去掉最高） 28')
+  await expect(groupCTiedFirst).toContainText('胜者加权对手分 18')
+  await expect(groupCTiedSecond).toContainText('对手分（去掉最高） 24')
+  await expect(groupCTiedSecond).toContainText('胜者加权对手分 16')
   await expect(malformedGroup).toContainText('破同分范围不可用')
-  await expect(malformedGroup).not.toContainText('对手分 Cut1')
+  await expect(malformedGroup).not.toContainText('对手分（去掉最高）')
   for (const invalidProvenanceRow of [
     unknownSourceA,
     unknownSourceB,
@@ -905,8 +905,8 @@ test('official results scope ordinary tiebreak details to equal points inside th
     contradictorySource,
   ]) {
     await expect(invalidProvenanceRow).toContainText('破同分范围不可用')
-    await expect(invalidProvenanceRow).not.toContainText('对手分 Cut1')
-    await expect(invalidProvenanceRow).not.toContainText('胜者分 SB')
+    await expect(invalidProvenanceRow).not.toContainText('对手分（去掉最高）')
+    await expect(invalidProvenanceRow).not.toContainText('胜者加权对手分')
     await expect(invalidProvenanceRow).not.toContainText('直接交手')
   }
   await monitor.expectClean()

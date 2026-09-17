@@ -44,7 +44,7 @@ export function RuntimeEnvironmentBadge({
     <Badge
       variant="outline"
       className={cn(
-        'shrink-0 text-[10px]',
+        'shrink-0 text-xs',
         environment === 'remote_local' && 'border-primary/30 bg-primary/5 text-primary',
         className,
       )}

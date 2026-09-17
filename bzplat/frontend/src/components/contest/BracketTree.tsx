@@ -205,7 +205,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                 >
                   {isCollapsed ? <ChevronRight aria-hidden="true" className="size-3.5" /> : <ChevronDown aria-hidden="true" className="size-3.5" />}
                   第 {r.round} 轮
-                  <Badge variant="secondary" className="text-[10px]">{r.pairings.length}</Badge>
+                  <Badge variant="secondary" className="text-xs">{r.pairings.length}</Badge>
                 </Button>
                 {!isCollapsed && (
                   <div id={roundPanelId} className="space-y-2">
@@ -230,7 +230,7 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                           }`}
                         >
                           {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
-                            <Badge variant="outline" className="mb-2 text-[10px]">
+                            <Badge variant="outline" className="mb-2 text-xs">
                               决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
                             </Badge>
                           )}
@@ -243,13 +243,13 @@ export default function BracketTree({ pairings, completedRounds, duplicate = fal
                           {/* 排期时间 + 状态徽章（紧凑展示） */}
                           <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
                             {scheduled && (
-                              <span className="text-[10px] text-muted-foreground">{scheduled}</span>
+                              <span className="text-xs text-muted-foreground">{scheduled}</span>
                             )}
                             {status && status !== 'completed' && (
                               <StatusBadge status={status} />
                             )}
                             {status === 'completed' && (
-                              <PairingResult pairing={p} className="text-[10px]" />
+                              <PairingResult pairing={p} className="text-xs" />
                             )}
                           </div>
                           {p.match_id && status === 'completed' && (

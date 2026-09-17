@@ -147,7 +147,7 @@ export default function Search() {
             <Input
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="输入用户名、Bot 名称或对局标识"
+              placeholder="输入用户名或 Bot 名称"
               aria-label="搜索关键词"
               className="w-full pl-9"
               autoFocus
@@ -269,7 +269,6 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
           <Table aria-label="搜索到的对局" className="min-w-[46rem]">
             <TableHeader>
               <TableRow>
-                <TableHead>序号</TableHead>
                 <TableHead>时间</TableHead>
                 <TableHead className="w-full min-w-[16rem]">对阵</TableHead>
                 <TableHead>赛果</TableHead>
@@ -278,9 +277,8 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {matches.map((match, index) => (
+              {matches.map((match) => (
                 <TableRow key={match.id}>
-                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
                   <TableCell className="whitespace-normal">
                     <MatchParticipants source={match} variant="inline" />

@@ -277,6 +277,10 @@ test('final stage settings project scale and are saved before publishing', async
 
   const fairness = page.locator('[data-slot="data-region"]').filter({ has: page.getByRole('heading', { name: '赛制公平性与规模' }) })
   await expect(fairness).toBeVisible()
+  // 面板默认只显示预计耗时，展开后才可见完整设置与估算数字。
+  await expect(fairness.getByText(/预计耗时约/)).toBeVisible()
+  await fairness.getByRole('button', { name: '查看完整设置' }).click()
+  await fairness.getByRole('button', { name: '查看估算' }).click()
   await expect(fairness.getByText('当前 10 人超过建议范围；仍可发布，请结合基础场数和耗时选择。', { exact: true })).toBeVisible()
   await expect(fairness.getByText('基础对局记录', { exact: true }).locator('..')).toContainText('202 场')
   await expect(fairness.getByText('基础计分场', { exact: true }).locator('..')).toContainText('202 场')
@@ -321,6 +325,7 @@ test('Swiss live projection respects the no-repeat cap for small cohorts', async
   await page.goto('/#/contests/7002')
 
   const fairness = page.locator('[data-slot="data-region"]').filter({ has: page.getByRole('heading', { name: '赛制公平性与规模' }) })
+  await fairness.getByRole('button', { name: '查看完整设置' }).click()
   const prelim = fairness.getByRole('group', { name: '预赛瑞士轮' })
   await expect(prelim).toContainText('6 组')
   await expect(prelim).toContainText('12 场')
@@ -427,6 +432,8 @@ test('built-in id with a custom stage graph publishes without injecting template
 
   await page.goto('/#/contests/7003')
   await expect(page.getByRole('heading', { name: '赛制公平性与规模' })).toBeVisible()
+  await page.getByRole('button', { name: '查看完整设置' }).click()
+  await page.getByRole('button', { name: '查看估算' }).click()
   await expect(page.getByText('基础对局').locator('..')).toContainText('202 场')
   await expect(page.getByText('冻结阶段拓扑与内置模板不一致，已停用公平性设置编辑；发布时将保留当前冻结阶段。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '截止报名·出排期' }).click()

@@ -662,16 +662,26 @@ function OfficialTiebreakDetail({
     if (!crossGroup) {
       return <span className="text-xs text-warning">跨组破同分明细缺失</span>
     }
+    const segments = [
+      `组内第 ${crossGroup.group_rank} 名`,
+      `每局积分率 ${TIEBREAK_NUMBER.format(crossGroup.points_rate * 100)}%`,
+      `标准化对手强度 ${TIEBREAK_NUMBER.format(crossGroup.opponent_strength * 100)}%`,
+      `每局归一分差 ${TIEBREAK_NUMBER.format(crossGroup.normalized_delta_rate)}`,
+      `技术负率 ${TIEBREAK_NUMBER.format(crossGroup.technical_loss_rate * 100)}%`,
+      `抽签顺序 ${crossGroup.draw_order}`,
+    ]
     return (
       <span className="block min-w-0 whitespace-normal text-xs leading-snug text-muted-foreground">
-        {[
-          `组内第 ${crossGroup.group_rank} 名`,
-          `每局积分率 ${TIEBREAK_NUMBER.format(crossGroup.points_rate * 100)}%`,
-          `标准化对手强度 ${TIEBREAK_NUMBER.format(crossGroup.opponent_strength * 100)}%`,
-          `每局归一分差 ${TIEBREAK_NUMBER.format(crossGroup.normalized_delta_rate)}`,
-          `技术负率 ${TIEBREAK_NUMBER.format(crossGroup.technical_loss_rate * 100)}%`,
-          `冻结抽签序 ${crossGroup.draw_order}`,
-        ].join(' · ')}
+        {/* 窄屏收纳为首项摘要，悬停/键盘聚焦可见完整跨组破同分链；md 起直接完整展示。 */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span tabIndex={0} className="cursor-help break-words underline decoration-dotted underline-offset-2 md:hidden">
+              {`${segments[0]} 等 ${segments.length} 项`}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-72 break-words">{segments.join(' · ')}</TooltipContent>
+        </Tooltip>
+        <span className="hidden md:block">{segments.join(' · ')}</span>
       </span>
     )
   }
@@ -688,15 +698,27 @@ function OfficialTiebreakDetail({
   const tiebreaks = result.tiebreaks
   if (!tiebreaks) return <span className="text-xs text-warning">破同分明细缺失</span>
   const values: string[] = []
-  if (typeof tiebreaks.buchholz_cut1 === 'number') values.push(`对手分 Cut1 ${TIEBREAK_NUMBER.format(tiebreaks.buchholz_cut1)}`)
-  if (typeof tiebreaks.sonneborn_berger === 'number') values.push(`胜者分 SB ${TIEBREAK_NUMBER.format(tiebreaks.sonneborn_berger)}`)
+  if (typeof tiebreaks.buchholz_cut1 === 'number') values.push(`对手分（去掉最高） ${TIEBREAK_NUMBER.format(tiebreaks.buchholz_cut1)}`)
+  if (typeof tiebreaks.sonneborn_berger === 'number') values.push(`胜者加权对手分 ${TIEBREAK_NUMBER.format(tiebreaks.sonneborn_berger)}`)
   if (typeof tiebreaks.head_to_head === 'number') values.push(`直接交手 ${TIEBREAK_NUMBER.format(tiebreaks.head_to_head * 100)}%`)
   if (typeof tiebreaks.normalized_delta === 'number') values.push(`归一分差 ${TIEBREAK_NUMBER.format(tiebreaks.normalized_delta)}`)
-  if (typeof tiebreaks.technical_losses === 'number') values.push(`技术负 ${tiebreaks.technical_losses}`)
-  if (typeof tiebreaks.seed === 'number') values.push(`报名序 ${tiebreaks.seed}`)
+  if (typeof tiebreaks.technical_losses === 'number') values.push(`技术性告负 ${tiebreaks.technical_losses}`)
+  if (typeof tiebreaks.seed === 'number') values.push(`种子顺位 ${tiebreaks.seed}`)
+  if (values.length === 0) {
+    return <span className="block min-w-0 whitespace-normal text-xs leading-snug text-muted-foreground">破同分明细缺失</span>
+  }
   return (
     <span className="block min-w-0 whitespace-normal text-xs leading-snug text-muted-foreground">
-      {values.length > 0 ? values.join(' · ') : '破同分明细缺失'}
+      {/* 窄屏收纳为首项摘要，悬停/键盘聚焦可见完整破同分链；md 起直接完整展示。 */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0} className="cursor-help break-words underline decoration-dotted underline-offset-2 md:hidden">
+            {values.length > 1 ? `${values[0]} 等 ${values.length} 项` : values[0]}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72 break-words">{values.join(' · ')}</TooltipContent>
+      </Tooltip>
+      <span className="hidden md:block">{values.join(' · ')}</span>
     </span>
   )
 }
@@ -810,6 +832,9 @@ export default function ContestDetail() {
   entriesPageRef.current = entriesPage
   // 内容区按生命周期显示：报名期优先选手，赛中优先对阵，完赛优先正式名次。
   const [contentTab, setContentTab] = useState<'matchups' | 'entries' | 'standings' | 'official'>('entries')
+  // 纯展示层折叠：「赛制公平性与规模」面板与正式名次「规则说明」默认收起。
+  const [showFairnessDetails, setShowFairnessDetails] = useState(false)
+  const [showOfficialRules, setShowOfficialRules] = useState(false)
   // 积分榜客户端分页（量级通常 < 200，客户端 slice 足够；每页 30 行）
   const [standingsPage, setStandingsPage] = useState(1)
   const standingsPerPage = 30
@@ -1242,6 +1267,8 @@ export default function ContestDetail() {
     setStageTab(0)
     setStandingsPage(1)
     setContentTab('entries')
+    setShowFairnessDetails(false)
+    setShowOfficialRules(false)
     lastLoadedStatusRef.current = null
     actionLockRef.current = false
     setBusyAction(false)
@@ -1396,7 +1423,7 @@ export default function ContestDetail() {
         }，${formatContestDuration(totalSeconds)}`
       : `${overviewScheduleLabel}数量将在排期生成时按报名人数核定`
     const tiebreakNotice = hasUnboundedTiebreak
-      ? '淘汰平局将追加换边的两场决胜组，直到决出晋级者；加赛次数不封顶，不计入基础场数与 ETA。'
+      ? '淘汰赛打平时会加赛两场换边决胜，直到决出晋级者；加赛不计入基础场数与预计耗时。'
       : ''
     const frozenTimeControl = templateTimeControls.find((control) => control.id === draftTimeControlId)
       || parseMatchTimeControl(contest.time_control, contest.game_id ?? '')
@@ -1440,7 +1467,7 @@ export default function ContestDetail() {
     if (!targetId) return
     if (!await confirm({
       title: '强制结束赛事？',
-      desc: '后端将根据关联对局的实际终态执行恢复性收尾，并计算正式名次；若仍有运行中的对局，请求会被拒绝。此操作不可撤销。',
+      desc: '将核对所有已关联的对局结果并结算正式名次；仍有对局进行中时无法结束。此操作不可撤销。',
       danger: true,
       confirmText: '确认结束',
     })) return
@@ -1455,7 +1482,7 @@ export default function ContestDetail() {
     if (!targetId) return
     if (!await confirm({
       title: '强制收束这场赛事？',
-      desc: '剩余未开打的对阵将标记为“未进行”、不再产生比赛；进行中的对局会被中止；正式名次仅按已完成的比赛计算。此操作不可撤销，且不等同于“强制结束”（后者要求全部对阵都已打完）。',
+      desc: '未开打的对阵将作废、不再产生比赛，进行中的对局会被中止；正式名次只按已完成的比赛计算。此操作不可撤销，且不等同于“强制结束”（后者要求全部对局都已打完）。',
       danger: true,
       confirmText: '确认收束',
     })) return
@@ -1521,9 +1548,6 @@ export default function ContestDetail() {
   const currentStageDuplicate = currentStageContractAvailable && stages[stageTab]?.duplicate === true
   const currentStageLegacyAggregate = currentStageContract === 'aggregate'
   const currentStageRankingMode = stageRankingMode(stages[stageTab])
-  const stageConceptualPairings = new Set(stagePairings.map((pairing) => contestPairingSeriesKey(pairing, curStageType))).size
-  const stageEncounterTotal = selectedStageStanding?.counts?.encounter_groups?.total ?? stageConceptualPairings
-  const stageEncounterCompleted = selectedStageStanding?.counts?.encounter_groups?.completed
   const stageMatchJobTotal = selectedStageStanding?.counts?.match_jobs?.total ?? stagePairings.length
   const stageMatchJobCompleted = selectedStageStanding?.counts?.match_jobs?.completed
   const stageScoringGamePlanned = selectedStageStanding?.counts?.scoring_games?.planned
@@ -1585,6 +1609,32 @@ export default function ContestDetail() {
     return rows
   }, [stageStandings])
 
+  // 阶段进度句：从阶段 Tab 徽标下沉为「本阶段」副标题（Tab 只保留赛制名与当前态）。
+  const stageProgressLineLabel = (index: number): string | null => {
+    const stage = stages[index]
+    if (!stage || (stageContracts[index] ?? 'invalid') === 'invalid') return null
+    const prog = stageProgress.get(index)
+    const summary = stageStandings.find((item) => item.stage_idx === index)
+    const matchJobs = summary?.counts?.match_jobs
+    const scoringGames = summary?.counts?.scoring_games
+    const completed = matchJobs?.completed ?? prog?.completed ?? 0
+    const total = matchJobs?.total ?? prog?.total ?? 0
+    const roundTag = prog && prog.maxRound > 0 && completed < total ? `第${prog.maxRound}轮 · ` : ''
+    if (summary && (summary.counts?.match_jobs || total > 0)) {
+      return `${roundTag}${stageStandingProgressLabel(
+        summary,
+        stage.duplicate === true,
+        stage.series_scoring === 'aggregate_match_points_v1',
+      )}`
+    }
+    if (total <= 0) return null
+    if (stage.series_scoring === 'aggregate_match_points_v1') return `${completed}/${total} 场历史系列对局`
+    if (stage.duplicate) {
+      return `${completed}/${total} 组复式交锋${scoringGames ? ` · ${scoringGames.completed}/${scoringGames.planned} 场计分` : ''}`
+    }
+    return `${scoringGames?.completed ?? completed}/${scoringGames?.planned ?? total} 场计分`
+  }
+
   if (!contest) {
     return (
       <PageFrame width="full" layout="public-contest-detail-loading">
@@ -1622,7 +1672,7 @@ export default function ContestDetail() {
     : SCORING_LABEL[
         stages[contest.current_stage_idx ?? 0]?.scoring || ''
       ] || '按本阶段规则计分'
-  const templateLabel = contest.template_name || contest.template_id || '未指定模板'
+  const templateLabel = contest.template_name || (contest.template_id ? '自定义赛制' : '未指定赛制')
   const stageLabel = stages.length > 0
     ? `${Math.min((contest.current_stage_idx ?? 0) + 1, stages.length)} / ${stages.length}`
     : '未配置'
@@ -1639,10 +1689,11 @@ export default function ContestDetail() {
     : serverIsOrganizer
       ? `每页 ${entriesPerPage} 人；导出按报名 ID、用户 ID 与 Bot ID 稳定关联账号和显示名。`
       : `每页 ${entriesPerPage} 人；公开显示账号和 Bot 身份。`
+  const officialShortDescription = '完赛后的权威名次；赛事积分不改变平台 Rating。'
   const officialDescription = [
-    '完赛后固化的权威结果；赛事积分不改变平台 Rating。计分场战绩不把瑞士轮轮空记作胜场，轮空次数单独列出；同分行显示实际使用的破同分链。',
+    '计分场战绩不把瑞士轮轮空记作胜场，轮空次数单独列出；同分行显示实际使用的破同分链。',
     hasInvalidStageContract
-      ? '部分冻结赛制配置不可用，页面不会推断其复式、系列或计分单位。'
+      ? '部分赛制信息暂缺，仅展示已有内容，不作推测。'
       : null,
     isDuplicate
       ? '复式交锋每组包含两场同牌换座的独立计分场，两场分别记胜、平、负。'
@@ -1651,7 +1702,7 @@ export default function ContestDetail() {
       ? '历史阶段标注为“旧版系列结算”，继续按完整系列一次性结算，不会改写为新版独立计分场。'
       : null,
     hasCrossGroupOverall
-      ? '分组阶段同时保留各组榜与公平跨组总榜：依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和冻结抽签序；不同组之间不使用直接交手。决赛选手的总榜顺序完全取决于积分清零后的决赛，未晋级选手再按跨组总榜列于其后，两阶段积分不可直接比较。'
+      ? '分组阶段同时保留各组榜与公平跨组总榜：依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和抽签顺序；不同组之间不使用直接交手。决赛选手的总榜顺序完全取决于积分清零后的决赛，未晋级选手再按跨组总榜列于其后，两阶段积分不可直接比较。'
       : null,
     contest.require_real_name
       ? '公开成绩 CSV 永不包含报名时实名资料。'
@@ -1809,7 +1860,7 @@ export default function ContestDetail() {
               </div>
             )
           })()}
-          <FormatSnapshotAudit value={contest.format_snapshot} />
+          <FormatSnapshotAudit value={contest.format_snapshot} variant={serverIsOrganizer ? 'full' : 'summary'} />
           {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="flex min-w-0 items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
               <Timer aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -1867,6 +1918,8 @@ export default function ContestDetail() {
           ) : undefined}
           contentClassName="min-w-0"
         >
+          {showFairnessDetails ? (
+            <>
           <TemplateGuidancePanel
             template={selectedTemplateGuidance}
             templates={templateCatalog}
@@ -1935,10 +1988,42 @@ export default function ContestDetail() {
                     className="min-h-11 w-full"
                   />
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    至少 {config.min} 组；发布时还会校验每组至少 2 人。随机均衡抽签只执行一次并随排期冻结。
+                    至少 {config.min} 组；发布时还会校验每组至少 2 人。随机均衡抽签只执行一次并随排期固定。
                   </p>
                 </div>
               ))}
+            </div>
+          )}
+              <div className="border-t px-3 py-1.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="min-h-11 px-2 text-xs sm:min-h-7"
+                  aria-expanded
+                  onClick={() => setShowFairnessDetails(false)}
+                >
+                  收起完整设置
+                </Button>
+              </div>
+            </>
+          ) : (
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-sm text-muted-foreground">
+              <span className="min-w-0 break-words">
+                {projectedEstimate?.eta_seconds != null
+                  ? `预计耗时${formatContestDuration(projectedEstimate.eta_seconds)}；赛制设置与规模估算已收起。`
+                  : '预计耗时以发布排期核定为准；赛制设置与规模估算已收起。'}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="min-h-11 sm:min-h-8"
+                aria-expanded={false}
+                onClick={() => setShowFairnessDetails(true)}
+              >
+                查看完整设置
+              </Button>
             </div>
           )}
         </DataRegion>
@@ -1954,7 +2039,7 @@ export default function ContestDetail() {
         {isShowcase ? (
           <div className="flex min-w-0 w-full items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
             <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary" />
-            <span className="min-w-0 break-words"><span className="font-medium text-foreground">合成演示 · 只读。</span> 此页面用于展示赛事生命周期，报名、换 Bot、时间和阶段推进均已冻结。</span>
+            <span className="min-w-0 break-words"><span className="font-medium text-foreground">合成演示 · 只读。</span> 此页面用于展示赛事生命周期，报名、换 Bot、时间和阶段推进均已锁定，仅供演示浏览。</span>
           </div>
         ) : (
           <>
@@ -1991,7 +2076,7 @@ export default function ContestDetail() {
               </span>
             </TooltipTrigger>
             <TooltipContent>
-              由后端核验关联对局终态并执行恢复性收尾
+              核对全部对局结果后结算正式名次
             </TooltipContent>
           </Tooltip>
         )}
@@ -2119,48 +2204,14 @@ export default function ContestDetail() {
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
                 <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))} className="min-w-0 flex-1">
                   <TabsList variant="line" className="w-full justify-start overflow-y-hidden pb-1">
-                    {stages.map((s, i) => {
-                      const stageContract = stageContracts[i] ?? 'invalid'
-                      const prog = stageProgress.get(i)
-                      const summary = stageStandings.find((item) => item.stage_idx === i)
-                      const matchJobs = summary?.counts?.match_jobs
-                      const scoringGames = summary?.counts?.scoring_games
-                      const completed = matchJobs?.completed ?? prog?.completed ?? 0
-                      const total = matchJobs?.total ?? prog?.total ?? 0
-                      const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || `阶段${i + 1}`
-                      const roundTag = prog && prog.maxRound > 0 && completed < total
-                        ? `第${prog.maxRound}轮`
-                        : null
-                      const progressLabel = stageContract === 'invalid'
-                        ? '赛制配置暂不可用'
-                        : summary && (summary.counts?.match_jobs || total > 0)
-                        ? stageStandingProgressLabel(
-                            summary,
-                            s.duplicate === true,
-                            s.series_scoring === 'aggregate_match_points_v1',
-                          )
-                        : total > 0
-                          ? s.series_scoring === 'aggregate_match_points_v1'
-                            ? `${completed}/${total} 场历史系列对局`
-                            : s.duplicate
-                              ? `${completed}/${total} 组复式交锋${scoringGames ? ` · ${scoringGames.completed}/${scoringGames.planned} 场计分` : ''}`
-                              : `${scoringGames?.completed ?? completed}/${scoringGames?.planned ?? total} 场计分`
-                          : null
-                      return (
-                        <TabsTrigger key={s.key || i} value={String(i)} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
-                          <span>{typeLabel}</span>
-                          {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
-                          {contest.current_stage_idx === i && contest.status !== 'finished' && (
-                            <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
-                          )}
-                          {progressLabel && (
-                            <span className="text-[10px] text-muted-foreground">
-                              {progressLabel}
-                            </span>
-                          )}
-                        </TabsTrigger>
-                      )
-                    })}
+                    {stages.map((s, i) => (
+                      <TabsTrigger key={s.key || i} value={String(i)} className="min-h-11 gap-1.5 sm:min-h-[var(--control-height)]">
+                        <span>{STAGE_TYPE_LABEL[s.type || ''] || `阶段${i + 1}`}</span>
+                        {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                          <Badge variant="outline" className="text-xs text-primary">当前</Badge>
+                        )}
+                      </TabsTrigger>
+                    ))}
                   </TabsList>
                 </Tabs>
                 {currentStageContractAvailable && stagePairings.length > 0 && (
@@ -2190,27 +2241,28 @@ export default function ContestDetail() {
               </div>
 
               {stages[stageTab] && (
-                <OverflowText
-                  lines={3}
-                  tooltip={false}
-                  className="border-t px-2 pt-1.5 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
-                >
-                  <span className="font-medium text-foreground">本阶段配置：</span>
-                  {currentStageContractAvailable ? [
-                    STAGE_TYPE_LABEL[stages[stageTab].type || ''] || (stages[stageTab].type ? '自定义赛制' : null),
-                    SCORING_LABEL[stages[stageTab].scoring || ''] || (stages[stageTab].scoring ? '自定义计分' : null),
-                    stages[stageTab].duplicate ? '复式交锋（同牌换座，两场独立计分）' : null,
-                    stages[stageTab].series_scoring === 'aggregate_match_points_v1'
-                      ? '旧版系列结算（冻结历史口径）'
-                      : null,
-                    stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
-                    stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
-                    stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,
-                    stages[stageTab].advance_per_group ? `每组晋级 ${stages[stageTab].advance_per_group}` : null,
-                    stages[stageTab].rest_after_minutes ? `休息 ${stages[stageTab].rest_after_minutes} 分` : null,
-                    stages[stageTab].allow_bot_swap_in_rest ? '休息可换 Bot' : null,
-                  ].filter(Boolean).join(' · ') : '赛制配置暂不可用；页面不会推断复式、系列或计分单位。'}
-                </OverflowText>
+                <div className="min-w-0 border-t px-2 pt-1.5 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                  {stageProgressLineLabel(stageTab) && (
+                    <p className="pb-0.5 font-medium text-foreground">{stageProgressLineLabel(stageTab)}</p>
+                  )}
+                  <OverflowText lines={3} tooltip={false} className="[overflow-wrap:anywhere]">
+                    <span className="font-medium text-foreground">本阶段配置：</span>
+                    {currentStageContractAvailable ? [
+                      STAGE_TYPE_LABEL[stages[stageTab].type || ''] || (stages[stageTab].type ? '自定义赛制' : null),
+                      SCORING_LABEL[stages[stageTab].scoring || ''] || (stages[stageTab].scoring ? '自定义计分' : null),
+                      stages[stageTab].duplicate ? '复式交锋（同牌换座，两场独立计分）' : null,
+                      stages[stageTab].series_scoring === 'aggregate_match_points_v1'
+                        ? '旧版系列结算（历史口径）'
+                        : null,
+                      stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
+                      stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
+                      stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,
+                      stages[stageTab].advance_per_group ? `每组晋级 ${stages[stageTab].advance_per_group}` : null,
+                      stages[stageTab].rest_after_minutes ? `休息 ${stages[stageTab].rest_after_minutes} 分` : null,
+                      stages[stageTab].allow_bot_swap_in_rest ? '休息可换 Bot' : null,
+                    ].filter(Boolean).join(' · ') : '赛制配置暂不可用，仅展示已有内容。'}
+                  </OverflowText>
+                </div>
               )}
             </div>
           )}
@@ -2228,10 +2280,12 @@ export default function ContestDetail() {
               ? '赛制配置暂不可用；以下仅保留已有记录，不推断计分口径或阶段进度。'
               : stagePairings.length > 0
               ? currentStageLegacyAggregate
-                ? `当前阶段 ${stageEncounterCompleted == null ? stageEncounterTotal : `${stageEncounterCompleted}/${stageEncounterTotal}`} 个对手系列 · ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 场历史系列对局${stageScoringGamePlanned == null ? '' : ` · ${stageScoringGameCompleted == null ? stageScoringGamePlanned : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 次旧版系列结算`}。完整系列按冻结规则只结算 1 次胜、平、负，不作为新版独立计分场。`
+                ? `当前阶段 ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 场历史系列对局；完整系列只结算 1 次胜、平、负。`
                 : currentStageDuplicate
-                ? `当前阶段 ${stageEncounterCompleted == null ? stageEncounterTotal : `${stageEncounterCompleted}/${stageEncounterTotal}`} 个对手系列 · ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 组复式交锋${stageScoringGamePlanned == null ? '' : ` · ${stageScoringGameCompleted == null ? `计划 ${stageScoringGamePlanned}` : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 场计分`}。`
-                : `当前阶段 ${stageEncounterCompleted == null ? stageEncounterTotal : `${stageEncounterCompleted}/${stageEncounterTotal}`} 个对手系列 · ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 条对局记录${stageScoringGamePlanned == null ? ` · ${stageMatchJobTotal} 场计分` : ` · ${stageScoringGameCompleted == null ? stageScoringGamePlanned : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 场计分`}。`
+                ? `当前阶段 ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 组复式交锋。`
+                : stageScoringGamePlanned == null
+                  ? `当前阶段 ${stageMatchJobCompleted == null ? stageMatchJobTotal : `${stageMatchJobCompleted}/${stageMatchJobTotal}`} 场计分。`
+                  : `当前阶段 ${stageScoringGameCompleted == null ? stageScoringGamePlanned : `${stageScoringGameCompleted}/${stageScoringGamePlanned}`} 场计分。`
               : '排期生成后将在这里显示。'}
             className="h-full"
             contentClassName="min-w-0 p-3"
@@ -2340,7 +2394,7 @@ export default function ContestDetail() {
                               </OverflowText>
                             </Link>
                           )}
-                          {e.seed ? <Badge variant="outline">报名序 {e.seed}</Badge> : null}
+                          {e.seed ? <Badge variant="outline">种子顺位 {e.seed}</Badge> : null}
                           {e.group_id && (
                             <Badge variant="secondary" className="min-w-0 max-w-full">
                               <OverflowText tooltip={e.group_id} tooltipFocusable={false} className="max-w-32">{e.group_id}</OverflowText>
@@ -2395,18 +2449,18 @@ export default function ContestDetail() {
           <DataRegion
             title="阶段积分"
             description={currentStageContractAvailable
-              ? `赛事积分与平台 Rating 相互独立；本阶段计分：${currentScoringLabel}。${currentStageLegacyAggregate ? '本历史阶段沿用旧版系列结算，完整系列只产生 1 次胜、平、负，页面不会将其改写为独立计分场；' : currentStageDuplicate ? '复式每组的两场 70 手计分场分别记胜、平、负；' : ''}计分场战绩不包含瑞士轮轮空，轮空分与次数单独列出。同分行显示后端实际使用的完整破同分链；正式结果以完赛后的权威名次为准。`
+              ? `本阶段计分：${currentScoringLabel}；${currentStageLegacyAggregate ? '历史阶段沿用旧版系列结算，' : ''}瑞士轮轮空不计入胜场，同分行显示实际采用的破同分规则。`
               : '赛制配置暂不可用；已停止推断本阶段积分、计分场战绩和晋级。'}
           >
               <DataTable className="rounded-none border-0 border-b" scrollLabel="阶段积分表">
-                <Table className="min-w-[58rem]">
+                <Table className="min-w-[44rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">名次</TableHead>
                       <TableHead className="min-w-[6rem]">Bot</TableHead>
                       <TableHead>积分</TableHead>
                       <TableHead className="min-w-[13rem]">{currentStageContractAvailable ? (currentStageLegacyAggregate ? '旧版系列战绩 / 轮空' : '计分场战绩 / 轮空') : '计分构成'}</TableHead>
-                      <TableHead className="min-w-[22rem]">排名依据</TableHead>
+                      <TableHead className="min-w-[14rem]">排名依据</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2445,7 +2499,7 @@ export default function ContestDetail() {
                             </span>
                             <span className="ml-1.5">· {scoreBreakdown(s)}</span>
                           </TableCell>
-                          <TableCell className="min-w-[22rem] max-w-[30rem] py-1">
+                          <TableCell className="min-w-[14rem] max-w-[24rem] py-1">
                             <OfficialTiebreakDetail
                               result={s}
                               hasPointTie={hasPointTie}
@@ -2474,9 +2528,19 @@ export default function ContestDetail() {
         <TabsContent value="official" className="mt-2">
           <DataRegion
             title="正式名次"
-            description={officialDescription}
+            description={officialShortDescription}
             actions={
               <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="min-h-11 sm:min-h-[var(--control-height)]"
+                  aria-expanded={showOfficialRules}
+                  onClick={() => setShowOfficialRules((value) => !value)}
+                >
+                  规则说明
+                </Button>
                 <Button asChild variant="outline" size="sm" className={EXPORT_LINK_CLASS}>
                   <a href={`/api/contests/${id}/official-results?format=csv`} download>
                     <Download aria-hidden="true" className="size-3.5" />导出公开成绩 CSV
@@ -2493,29 +2557,27 @@ export default function ContestDetail() {
               </>
             }
           >
-              {hasCrossGroupOverall && (
+              {showOfficialRules && (
                 <p className="border-b px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                  页面和公开成绩 CSV 均使用后端冻结字段：overall_rank、group_id、rank_in_group，以及完整的六项跨组破同分值；缺失或错类型时不会按数组位置推断。
+                  {officialDescription}
                 </p>
               )}
               <DataTable className="rounded-none border-0" scrollLabel="赛事正式名次表">
-                <Table className="min-w-[78rem]">
+                <Table className="min-w-[46rem]">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-14">总榜</TableHead>
-                      <TableHead className="min-w-[6rem]">分组名次</TableHead>
-                      <TableHead>Bot</TableHead>
+                      <TableHead className="w-24">名次</TableHead>
+                      <TableHead className="min-w-[7rem]">Bot</TableHead>
                       <TableHead>选手</TableHead>
                       <TableHead>积分</TableHead>
-                      <TableHead className="min-w-[13rem]">{hasInvalidStageContract ? '计分构成' : hasLegacyAggregateStage ? '计分构成（含旧版系列）' : '计分场构成'}</TableHead>
-                      <TableHead className="min-w-[22rem]">破同分依据</TableHead>
-                      <TableHead>奖项</TableHead>
+                      <TableHead className="min-w-[12rem]">{hasInvalidStageContract ? '计分构成' : hasLegacyAggregateStage ? '计分构成（含旧版系列）' : '计分场构成'}</TableHead>
+                      <TableHead className="min-w-[14rem]">破同分依据</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {officialResults.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={8}>
+                        <TableCell colSpan={6}>
                           <EmptyState
                             text={contest.official_results_ready ? '正式名次为空' : '正式名次尚未生成'}
                             icon={<Trophy className="size-7 opacity-40" />}
@@ -2549,13 +2611,22 @@ export default function ContestDetail() {
                         : hasLegacyAggregateStage
                       return (
                       <TableRow key={result.entry_id}>
-                        <TableCell className="py-1 font-mono text-base font-semibold text-primary">
-                          {rankingCoordinates?.overall_rank ?? '—'}
-                        </TableCell>
-                        <TableCell className="py-1 font-mono text-xs text-muted-foreground">
-                          {rankingCoordinates?.group_id && rankingCoordinates.rank_in_group
-                            ? `${rankingCoordinates.group_id.endsWith('组') ? rankingCoordinates.group_id : `${rankingCoordinates.group_id}组`} · ${rankingCoordinates.rank_in_group}`
-                            : '—'}
+                        <TableCell className="max-w-[14rem] py-1">
+                          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <span className="font-mono text-base font-semibold tabular-nums text-primary">
+                              {rankingCoordinates?.overall_rank ?? '—'}
+                            </span>
+                            {rankingCoordinates?.group_id && rankingCoordinates.rank_in_group && (
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {rankingCoordinates.group_id.endsWith('组') ? rankingCoordinates.group_id : `${rankingCoordinates.group_id}组`} · {rankingCoordinates.rank_in_group}
+                              </span>
+                            )}
+                            {result.awarded && (
+                              <Badge variant="secondary" className="min-w-0 max-w-full">
+                                <OverflowText tooltip={result.awarded} className="max-w-28">{result.awarded}</OverflowText>
+                              </Badge>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="max-w-[12rem] py-1">
                           {result.bot_id != null ? (
@@ -2590,7 +2661,7 @@ export default function ContestDetail() {
                         <TableCell className="py-1 font-mono font-semibold">
                           <span>{result.points ?? 0}</span>
                           {sourceLabel && stages.length > 1 && (
-                            <span className="block font-sans text-[10px] font-normal leading-tight text-muted-foreground">
+                            <span className="block font-sans text-xs font-normal leading-tight text-muted-foreground">
                               {sourceLabel}
                             </span>
                           )}
@@ -2605,16 +2676,13 @@ export default function ContestDetail() {
                             </>
                           ) : sourceContract === 'invalid' ? '赛制配置暂不可用' : '历史计分构成不可用'}
                         </TableCell>
-                        <TableCell className="min-w-[22rem] max-w-[30rem] py-1">
+                        <TableCell className="min-w-[14rem] max-w-[24rem] py-1">
                           <OfficialTiebreakDetail
                             result={result}
                             hasPointTie={hasPointTie}
                             sourceLabel={stages.length > 1 ? sourceLabel : null}
                             rankingMode={sourceRankingMode ?? 'overall'}
                           />
-                        </TableCell>
-                        <TableCell className="py-1 text-muted-foreground">
-                          {result.awarded || '—'}
                         </TableCell>
                       </TableRow>
                       )
@@ -2649,10 +2717,10 @@ function StageStandingPanel({
         ? '排期名单'
         : '等待本阶段'
   const advancementLabel = (value: StageStandingRow['advancement']) => {
-    if (value === 'advanced') return <Badge className="text-[9px]">已晋级</Badge>
-    if (value === 'in_zone') return <Badge variant="outline" className="text-[9px] text-primary">暂列晋级区</Badge>
-    if (value === 'eliminated') return <span className="text-[10px] text-muted-foreground">未晋级</span>
-    if (value === 'outside_zone') return <span className="text-[10px] text-muted-foreground">暂列区外</span>
+    if (value === 'advanced') return <Badge className="text-xs">已晋级</Badge>
+    if (value === 'in_zone') return <Badge variant="outline" className="text-xs text-primary">暂列晋级区</Badge>
+    if (value === 'eliminated') return <span className="text-xs text-muted-foreground">未晋级</span>
+    if (value === 'outside_zone') return <span className="text-xs text-muted-foreground">暂列区外</span>
     return null
   }
 
@@ -2662,7 +2730,7 @@ function StageStandingPanel({
       description={sourceLabel}
       className="h-full min-w-0"
       actions={summary && summary.total_pairings > 0 ? (
-          <Badge variant="outline" className="max-w-full whitespace-normal text-left leading-snug text-[9px]">
+          <Badge variant="outline" className="max-w-full whitespace-normal text-left leading-snug text-xs">
             {stageStandingProgressLabel(summary, duplicate, legacyAggregate)}
           </Badge>
       ) : undefined}
@@ -2708,14 +2776,20 @@ function StageStandingPanel({
                         </Link>
                       ) : <span className="text-xs text-muted-foreground">已删除 Bot</span>}
                     </div>
-                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[11px] leading-snug text-muted-foreground">
+                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs leading-snug text-muted-foreground">
                       <OverflowText tooltip={false} className="min-w-0 max-w-full shrink-0">
                         {row.owner_name ? `@${row.owner_display || row.owner_name}` : '参赛身份不可用'}
                       </OverflowText>
-                      <span className="min-w-0 font-medium text-foreground">
-                        {formatScoringCountsLine(row, duplicate, legacyAggregate)}
-                      </span>
-                      <span className="min-w-0">· {scoreBreakdown(row)}</span>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span tabIndex={0} className="cursor-help break-all underline decoration-dotted underline-offset-2">
+                            计分明细
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-72 break-words">
+                          {formatScoringCountsLine(row, duplicate, legacyAggregate)} · {scoreBreakdown(row)}
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
                   </TableCell>
                   <TableCell className="px-2 py-1 text-right font-mono text-xs font-semibold text-primary">

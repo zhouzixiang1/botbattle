@@ -7,6 +7,7 @@ import Pagination from '@/components/Pagination'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { Input } from '@/components/ui/input'
 import { useConfirm } from '@/hooks/use-confirm'
+import { roleLabel } from '@/lib/labels'
 import { toast } from 'sonner'
 
 interface User {
@@ -109,16 +110,16 @@ export default function UsersTab() {
     }
   }
 
-  const delUser = async (uid: number) => {
+  const delUser = async (u: User) => {
     if (!await confirm({
       title: '删除用户',
-      desc: `确认删除内部用户 ID ${uid}？若存在活跃对局或赛事引用，后端会拒绝。`,
+      desc: `确认删除「${u.username}」？若存在活跃对局或赛事引用，操作会被拒绝。`,
       confirmText: '删除',
       danger: true,
     })) return
-    setBusyId(uid)
+    setBusyId(u.id)
     try {
-      await apiJson(`/api/admin/users/${uid}`, 'DELETE')
+      await apiJson(`/api/admin/users/${u.id}`, 'DELETE')
       await load()
     } catch (e) {
       setError(errMsg(e, '删除失败'))
@@ -228,9 +229,9 @@ export default function UsersTab() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="user">user</SelectItem>
-                      <SelectItem value="organizer">organizer</SelectItem>
-                      <SelectItem value="admin">admin</SelectItem>
+                      <SelectItem value="user">{roleLabel('user')}</SelectItem>
+                      <SelectItem value="organizer">{roleLabel('organizer')}</SelectItem>
+                      <SelectItem value="admin">{roleLabel('admin')}</SelectItem>
                     </SelectContent>
                   </Select>
                 </TableCell>
@@ -269,7 +270,7 @@ export default function UsersTab() {
                     >
                       下线
                     </Button>
-                    <Button type="button" variant="destructive" size="sm" className="max-lg:min-h-11 px-2" disabled={busyId === u.id} onClick={() => void delUser(u.id)}>删除</Button>
+                    <Button type="button" variant="destructive" size="sm" className="max-lg:min-h-11 px-2" disabled={busyId === u.id} onClick={() => void delUser(u)}>删除</Button>
                   </div>
                 </TableCell>
               </TableRow>

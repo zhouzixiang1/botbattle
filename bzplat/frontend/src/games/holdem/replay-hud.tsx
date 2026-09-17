@@ -76,7 +76,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
     : noCompletedTerminal
       ? '未完成手牌'
       : state.matchOver
-        ? state.isDuplicate ? '复式交锋组结束' : '整场完赛'
+        ? state.isDuplicate ? '主客两场结束' : '整场完赛'
         : !hasStarted
           ? '等待发牌'
         : currentSettled
@@ -188,12 +188,12 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
             >
               <div className="flex min-w-0 items-center justify-between gap-2">
                 <OverflowText tooltip={identity.subject} tooltipFocusable={false} className="min-w-0 text-xs font-semibold text-foreground">{identity.subject}</OverflowText>
-                <span className="shrink-0 text-[10px] text-muted-foreground sm:text-[11px]">{identity.kind}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">{identity.kind}</span>
               </div>
               <OverflowText
                 lines={1}
                 tooltip={`${identity.owner ? `${identity.owner} · ` : ''}${identity.seat} · ${hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}`}
-                className="mt-0.5 block text-[10px] text-muted-foreground"
+                className="mt-0.5 block text-xs text-muted-foreground"
               >
                 {identity.owner ? `${identity.owner} · ` : ''}{identity.seat} · {hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}
               </OverflowText>
@@ -242,7 +242,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
                   <div
                     key={`${eventLeg ?? 0}-${hand}-${delta}`}
                     aria-label={`${handLabel}，${subjects[0]} ${formatNet(delta)}`}
-                    className={`min-w-0 rounded px-1 py-1 text-center font-mono text-[10px] font-medium ${delta > 0 ? 'bg-success/10 text-success' : delta < 0 ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}
+                    className={`min-w-0 rounded px-1 py-1 text-center font-mono text-xs font-medium ${delta > 0 ? 'bg-success/10 text-success' : delta < 0 ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}
                   >
                     {formatNet(delta)}
                   </div>
@@ -260,7 +260,7 @@ export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
           data-testid="holdem-duplicate-combined-summary"
           className="mt-1.5 rounded-lg border border-border/70 bg-muted/20 px-2.5 py-1.5 text-[11px] text-muted-foreground"
         >
-          <div className="font-medium text-foreground">复式交锋组合计 · 辅助信息</div>
+          <div className="font-medium text-foreground">主客两场合计 · 辅助信息</div>
           <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-0.5">
             <span>总进度 {completedHands}/{totalMatchHands} 手</span>
             <span>净变化 {subjects[0]} {formatNet(state.combinedNets[0])} · {subjects[1]} {formatNet(state.combinedNets[1])}</span>

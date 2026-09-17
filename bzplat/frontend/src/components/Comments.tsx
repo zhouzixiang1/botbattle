@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Heart, Trash2, MessageSquare } from 'lucide-react'
 import { apiGet, apiJson, apiPost, errMsg } from '@/api'
 import { useAuth } from '@/components/useAuth'
+import { useConfirm } from '@/hooks/use-confirm'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -29,6 +30,7 @@ export default function Comments({
   targetId: string
 }) {
   const { user } = useAuth()
+  const [confirm, confirmDialog] = useConfirm()
   const [comments, setComments] = useState<Comment[]>([])
   const [body, setBody] = useState('')
   const [error, setError] = useState('')
@@ -93,7 +95,14 @@ export default function Comments({
       .catch((e) => setError(errMsg(e)))
   }
 
-  function del(id: number) {
+  async function del(id: number) {
+    const ok = await confirm({
+      title: '删除评论',
+      desc: '删除后无法恢复。确定删除这条评论吗？',
+      confirmText: '删除',
+      danger: true,
+    })
+    if (!ok) return
     apiJson(`/api/comments/${id}`, 'DELETE').then(() => load()).catch((e) => setError(errMsg(e)))
   }
 
@@ -173,6 +182,7 @@ export default function Comments({
           </div>
         )}
         <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+        {confirmDialog}
       </CardContent>
     </Card>
   )

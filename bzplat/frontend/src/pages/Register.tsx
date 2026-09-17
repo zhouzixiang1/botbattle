@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { UserPlus } from 'lucide-react'
+import { ChevronDown, UserPlus } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
 import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
@@ -23,6 +23,8 @@ export default function Register() {
   const [captcha, setCaptcha] = useState<CaptchaValue>({ captcha_id: '', captcha_answer: '' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  // 实名信息默认折叠（纯展示层）：注册时选填，注册后也可在设置页补填。
+  const [realNameOpen, setRealNameOpen] = useState(false)
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -63,36 +65,50 @@ export default function Register() {
               <Label htmlFor="reg-password">密码（至少 8 位）</Label>
               <Input id="reg-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
             </div>
-            {/* 实名信息（可选，注册后也可在设置页补填） */}
-            <fieldset className="min-w-0 space-y-3 rounded-lg border p-3 sm:col-span-2">
-              <legend className="px-1 text-sm font-medium text-foreground">实名信息（选填）</legend>
+            {/* 实名信息（可选，注册后也可在设置页补填）；默认折叠保持注册主流程简洁 */}
+            <fieldset className="min-w-0 space-y-2 rounded-lg border p-3 sm:col-span-2">
+              <button
+                type="button"
+                onClick={() => setRealNameOpen((value) => !value)}
+                aria-expanded={realNameOpen}
+                aria-controls="register-realname-fields"
+                className="flex min-h-11 w-full items-center justify-between gap-2 text-left text-sm font-medium text-foreground hover:text-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-0"
+              >
+                实名信息（选填）
+                <ChevronDown
+                  aria-hidden="true"
+                  className={`size-4 shrink-0 text-muted-foreground transition-transform ${realNameOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
               <p className="text-xs text-muted-foreground">可稍后在设置页补填；仅要求实名的赛事会用到。</p>
-              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="reg-realname">姓名</Label>
-                  <Input id="reg-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
+              {realNameOpen && (
+                <div id="register-realname-fields" className="grid min-w-0 gap-3 pt-1 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="reg-realname">姓名</Label>
+                    <Input id="reg-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="reg-phone">手机号</Label>
+                    <Input
+                      id="reg-phone"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      inputMode="tel"
+                      maxLength={11}
+                      pattern="1[3-9][0-9]{9}"
+                    />
+                    <p className="text-xs text-muted-foreground">选填；填写时须为 11 位大陆手机号</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="reg-school">学校</Label>
+                    <Input id="reg-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="reg-studentid">学号</Label>
+                    <Input id="reg-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="reg-phone">手机号</Label>
-                  <Input
-                    id="reg-phone"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    inputMode="tel"
-                    maxLength={11}
-                    pattern="1[3-9][0-9]{9}"
-                  />
-                  <p className="text-xs text-muted-foreground">选填；填写时须为 11 位大陆手机号</p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="reg-school">学校</Label>
-                  <Input id="reg-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="reg-studentid">学号</Label>
-                  <Input id="reg-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
-                </div>
-              </div>
+              )}
             </fieldset>
             <CaptchaField onChange={setCaptcha} className="sm:col-span-2" />
             {error && <ErrorMsg msg={error} className="sm:col-span-2" />}

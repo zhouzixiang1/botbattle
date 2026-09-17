@@ -54,9 +54,9 @@ export default function Judges() {
   return (
     <PageFrame width="default" layout="public-judges">
       <PageHeader
-        eyebrow="公开审计"
+        eyebrow="公开源码"
         title="裁判源码"
-        description="每款游戏的权威裁判以明文公开；规则定义、协议适配与共享实现均可逐文件核查。"
+        description="每款游戏的权威裁判以明文公开；想确认规则细节，可以直接逐文件查看。"
       />
 
       {games.length > 0 && (
@@ -124,7 +124,7 @@ function JudgeRegion({ game }: { game: JudgeGameMeta }) {
       actions={
         <Button type="button" variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>
           <ChevronDown aria-hidden="true" className={`size-4 transition-transform motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} />
-          {open ? '收起源码' : '查看源码'}
+          {open ? '收起源码' : '展开源码'}
         </Button>
       }
     >

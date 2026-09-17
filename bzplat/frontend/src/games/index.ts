@@ -55,9 +55,9 @@ export function getGame(id: string | null | undefined): GameViewSpec {
   return spec
 }
 
-export function unsupportedGameLabel(id: string | null | undefined): string {
-  const gid = normalizeGameId(id)
-  return gid ? `不支持的游戏（${gid}）` : '未知游戏（缺少 game_id）'
+export function unsupportedGameLabel(_id: string | null | undefined): string {
+  // 面向用户的统一兜底：不把内部规则集/游戏 id 渲染到界面。
+  return '暂不支持观看该对局'
 }
 
 /** 游戏显示名。 */

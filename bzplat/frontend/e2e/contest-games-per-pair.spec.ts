@@ -135,6 +135,8 @@ test('Holdem duplicate templates expose encounter groups and submit games_per_pa
     .getByRole('button', { name: '创建赛事', exact: true })
     .click()
   const form = page.locator('form')
+  // 分组/系列强度等属于「高级设置」，默认折叠。
+  await form.getByRole('button', { name: /高级设置/ }).click()
   const seriesField = form.getByRole('group', { name: '每对选手复式交锋组数' })
   await expect(seriesField).toBeVisible()
   await expect(form.getByText('建议 2–8 人', { exact: true })).toBeVisible()
@@ -197,6 +199,8 @@ test('Holdem preliminary and final templates submit independent stage fairness s
     .getByRole('button', { name: '创建赛事', exact: true })
     .click()
   const form = page.locator('form')
+  // 分组/系列强度等属于「高级设置」，默认折叠。
+  await form.getByRole('button', { name: /高级设置/ }).click()
   const templateSelect = form.getByRole('combobox').nth(1)
   await templateSelect.click()
   await page.getByRole('option', { name: '德州：预赛（大规模瑞士快速排名）', exact: true }).click()

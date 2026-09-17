@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 
 function CopyIdentifier({
   value,
-  label = '内部 ID',
+  label = '编号',
   className,
 }: {
   value: string | number | null | undefined

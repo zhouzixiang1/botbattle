@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { KeyRound, MailCheck } from 'lucide-react'
+import { toast } from 'sonner'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
 import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
@@ -39,6 +40,26 @@ export default function ResetPassword() {
       setStep('reset')
     } catch (err) {
       setError(errMsg(err, '请求失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 后端图形验证码一次性消费；重发成功后重挂验证码组件换新码，连续重发才可用。
+  const [captchaEpoch, setCaptchaEpoch] = useState(0)
+  const onResend = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const d = await apiJson<{ message?: string }>('/api/auth/request-reset', 'POST', {
+        email_or_username: emailOrUsername,
+        captcha_id: captcha.captcha_id,
+        captcha_answer: captcha.captcha_answer,
+      })
+      toast.success(d.message || '验证码已重新发送')
+      setCaptchaEpoch((value) => value + 1)
+    } catch (err) {
+      setError(errMsg(err, '重发失败'))
     } finally {
       setBusy(false)
     }
@@ -133,14 +154,20 @@ export default function ResetPassword() {
                 <MailCheck className="size-4" />
                 {busy ? '提交中…' : '重置密码'}
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => setStep('request')}
-                className="w-full text-muted-foreground"
-              >
-                重新发送验证码
-              </Button>
+              <div className="space-y-2 rounded-lg border border-dashed border-border px-3 py-3">
+                <p className="text-xs text-muted-foreground">没有收到邮件？输入图形验证码后可重新发送。</p>
+                <CaptchaField key={captchaEpoch} onChange={setCaptcha} />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || !emailOrUsername}
+                  aria-busy={busy}
+                  onClick={() => void onResend()}
+                  className="w-full gap-1.5"
+                >
+                  重新发送验证码
+                </Button>
+              </div>
             </form>
           )}
         </CardContent>

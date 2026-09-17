@@ -261,7 +261,7 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   await beta.getByRole('button', { name: '退出排名', exact: true }).click()
   const exitDialog = page.getByRole('dialog', { name: '退出排行榜' })
   await expect(exitDialog).toContainText('历史已完成评分与对局记录保留')
-  await expect(exitDialog).toContainText('尚未开始的旧计分排队会取消')
+  await expect(exitDialog).toContainText('已排队、还没开始的对局会取消')
   await expect(exitDialog).toContainText('进行中或待结算的计分对局，暂不能退出')
   await exitDialog.getByRole('button', { name: '确认退出', exact: true }).click()
   await expect(beta.getByText('未参榜', { exact: true })).toBeVisible()
@@ -430,9 +430,15 @@ test('Leaderboard explains the dispatch rule and labels unrated execution snapsh
   await page.goto('/#/leaderboard')
   const main = page.locator('main')
   await expect(main).toContainText('每个账号每款游戏最多派遣一个 Bot')
-  await expect(main).toContainText('仅展示当前派遣参榜的 Bot')
+  await expect(main).toContainText('打满 10 场计分对局后进入公开排名')
+  // 详细规则收进「了解评分规则」折叠；展开后可读到派遣与计分边界。
+  await main.getByRole('button', { name: '了解评分规则', exact: true }).click()
+  await expect(main).toContainText('只统计当前派遣参榜的 Bot')
+  await expect(main).toContainText('赛事积分不进入平台评分')
   await expect(main).toContainText('该游戏暂无已派遣参榜 Bot')
-  await expect(page.getByTestId('execution-queue-panel')).toContainText('至少一方未派遣参榜，不计平台排行榜')
+  // 队列默认折叠为一行摘要，展开后可见未计分原因标签。
+  await page.getByTestId('execution-queue-summary').click()
+  await expect(page.getByTestId('execution-queue-panel')).toContainText('未派遣排行榜 Bot · 不计平台排行榜')
 
   expect(network.unexpectedBackendRequests).toEqual([])
   expect(network.forbiddenMainRequests).toEqual([])

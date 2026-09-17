@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  Bot,
+  ChevronRight,
   Gauge,
   Minus,
   TrendingDown,
@@ -16,9 +18,11 @@ import {
 } from '@/components/execution-queue'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   DataTable,
   Table,
@@ -143,11 +147,23 @@ function RatingFacts({ row }: { row: RankingRow }) {
   const hasConfidence = row.confidence_low != null && row.confidence_high != null
   return (
     <div className="min-w-0 tabular-nums">
-      <div className="min-w-0 font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
-      <div className="mt-0.5 min-w-0 text-xs leading-snug text-muted-foreground">
-        RD {Number(row.rd).toFixed(0)}
-        {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
-      </div>
+      {hasConfidence ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              tabIndex={0}
+              className="inline-block min-w-0 cursor-help font-mono text-sm font-semibold text-foreground underline decoration-dotted underline-offset-4 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              {fmtRating(row.rating)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            实力波动范围 {row.confidence_low!.toFixed(0)}–{row.confidence_high!.toFixed(0)}
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <span className="font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</span>
+      )}
     </div>
   )
 }
@@ -178,9 +194,9 @@ function RankingFacts({ row }: { row: RankingRow }) {
 function SampleFacts({ row }: { row: RankingRow }) {
   return (
     <div className="tabular-nums">
-      <div className="min-w-0 font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
-      <div className="mt-0.5 min-w-0 font-mono text-xs text-muted-foreground">
-        {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
+      <div className="min-w-0 font-mono text-xs text-foreground">{row.wins} 胜 · {row.draws} 平 · {row.losses} 负</div>
+      <div className="mt-0.5 min-w-0 text-xs text-muted-foreground">
+        {row.rated_matches} 场计分 · {row.unique_opponents} 个对手
       </div>
     </div>
   )
@@ -209,6 +225,41 @@ function RecentMatch({ row }: { row: RankingRow }) {
   )
 }
 
+/** 排名门槛一句话 + 可展开的评分规则说明（默认收起，避免说明墙）。 */
+function RankingRuleNote({ minMatches }: { minMatches: number }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="min-w-0 text-xs text-muted-foreground">
+      <p>
+        {minMatches
+          ? `打满 ${minMatches} 场计分对局后进入公开排名；评分随胜负自动更新。`
+          : '打满计分对局后进入公开排名；评分随胜负自动更新。'}
+        {!open && (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="ml-1 inline-flex min-h-11 items-center font-medium text-primary hover:underline sm:min-h-0"
+          >
+            了解评分规则
+          </button>
+        )}
+      </p>
+      {open && (
+        <p className="mt-1 max-w-3xl leading-relaxed">
+          排行榜只统计当前派遣参榜的 Bot；每个账号每款游戏最多派遣一个。评分会结合对手强弱与对局结果自动更新，并不是简单的胜场计数；赛事积分不进入平台评分。评分旁的虚线区间表示实力可能波动的范围，对局越多越稳定。百分位按公开名次映射；30 日变化缺少窗口起点时显示「—」。
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="ml-1 inline-flex min-h-11 items-center font-medium text-primary hover:underline sm:min-h-0"
+          >
+            收起
+          </button>
+        </p>
+      )}
+    </div>
+  )
+}
+
 function DesktopRows({
   rows,
   title,
@@ -224,23 +275,21 @@ function DesktopRows({
   return (
     <>
       <TableRow className="bg-muted/30 hover:bg-muted/30" data-testid={testId}>
-        <TableCell colSpan={7} className="h-7 px-3 py-1 text-xs font-semibold text-muted-foreground">
+        <TableCell colSpan={5} className="h-7 px-3 py-1 text-xs font-semibold text-muted-foreground">
           {title} · 本页 {rows.length} / 共 {globalCount}
         </TableCell>
       </TableRow>
       {rows.map((row) => (
         <TableRow key={row.bot_id}>
-          <TableCell className="w-14 font-mono text-xs font-semibold text-muted-foreground">
-            {row.rank == null ? '—' : `#${row.rank}`}
+          <TableCell className="w-16 whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
+            {row.rank == null ? `${row.rated_matches}/${row.ranking_min_matches} 场` : `#${row.rank}`}
           </TableCell>
           {/* 堆叠事实（与移动卡一致）：inline 单行版会让表格按 max-content
               求和撑到 ~1555px（1440 视口必横向滚动），堆叠后各列 ≤ ~150px。 */}
           <TableCell className="max-w-xs"><BotIdentity row={row} inline /></TableCell>
           <TableCell><RatingFacts row={row} /></TableCell>
-          <TableCell><RankingFacts row={row} /></TableCell>
           <TableCell><SampleFacts row={row} /></TableCell>
           <TableCell><ChangeFacts row={row} /></TableCell>
-          <TableCell><RecentMatch row={row} /></TableCell>
         </TableRow>
       ))}
     </>
@@ -270,7 +319,7 @@ function MobileSection({
             <div className="flex min-w-0 items-start justify-between gap-3">
               <BotIdentity row={row} />
               {row.rank == null ? (
-                <Badge variant="secondary" className="shrink-0 font-mono">{row.rated_matches}/{row.ranking_min_matches}</Badge>
+                <Badge variant="secondary" className="shrink-0 font-mono">{row.rated_matches}/{row.ranking_min_matches} 场</Badge>
               ) : (
                 <Badge variant="outline" className="shrink-0 font-mono">#{row.rank}</Badge>
               )}
@@ -302,6 +351,8 @@ export default function Leaderboard() {
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
   const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
+  // 队列详情默认折叠为一行摘要；展开后才挂载面板并继续轮询（面板组件本身不变）。
+  const [queueOpen, setQueueOpen] = useState(false)
   // 每页 14 行配合堆叠事实行高与固定队列面板，控制首屏总高；翻页语义不变。
   const perPage = 14
 
@@ -407,26 +458,54 @@ export default function Leaderboard() {
 
       {error && <ErrorMsg msg={error} />}
 
-      <ExecutionQueuePanel
-        snapshot={queue}
-        loading={queueLoading || (!queue && queuePolling)}
-        error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
-        stale={!!queue && (queueOffline || !!queueError)}
-        lastUpdatedAt={queueLastUpdatedAt}
-        onRetry={refreshQueue}
-        // 排队展示上限收紧到 2：等待列表只保留前 2 条 + 条数溢出提示，
-        // 正在执行列表不受影响；压掉长队列下首屏的队列高度。
-        maxQueued={2}
-        compactOnMobile
-        compactCapacity
-        dense
-      />
+      {queueOpen ? (
+        <ExecutionQueuePanel
+          snapshot={queue}
+          loading={queueLoading || (!queue && queuePolling)}
+          error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
+          stale={!!queue && (queueOffline || !!queueError)}
+          lastUpdatedAt={queueLastUpdatedAt}
+          onRetry={refreshQueue}
+          // 排队展示上限收紧到 2：等待列表只保留前 2 条 + 条数溢出提示，
+          // 正在执行列表不受影响；压掉长队列下首屏的队列高度。
+          maxQueued={2}
+          compactOnMobile
+          compactCapacity
+          dense
+          action={(
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="min-h-11 sm:min-h-0"
+              onClick={() => setQueueOpen(false)}
+            >
+              收起队列
+            </Button>
+          )}
+        />
+      ) : (
+        <button
+          type="button"
+          data-testid="execution-queue-summary"
+          aria-expanded={false}
+          onClick={() => setQueueOpen(true)}
+          className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          <span className="inline-flex min-w-0 items-center gap-2 font-medium text-foreground">
+            <Bot className="size-4 shrink-0 text-primary" aria-hidden="true" />
+            对局执行
+            <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
+              {queue ? `当前 ${queue.capacity.running_matches} 场进行中` : '正在获取对局执行情况…'}
+            </span>
+          </span>
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        </button>
+      )}
 
       <DataRegion
         title="数值评分明细"
-        description={rankingMinMatches
-          ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。Rating 由 Glicko-2 根据对手实力与不确定度更新，并非简单按胜场相加；赛事积分不进入平台 Rating。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。`
-          : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。'}
+        description={<RankingRuleNote minMatches={rankingMinMatches} />}
         actions={<Gauge className="size-4 text-primary" />}
         density="compact"
       >
@@ -438,16 +517,14 @@ export default function Leaderboard() {
           <>
             <div className="hidden md:block" data-testid="leaderboard-desktop">
               <DataTable className="rounded-none border-0" scrollLabel="排行榜数值明细">
-                <Table aria-label="排行榜数值明细" className="min-w-[64rem] [--table-row-height:3rem]">
+                <Table aria-label="排行榜数值明细" className="min-w-[48rem] [--table-row-height:3rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>名次</TableHead>
                       <TableHead className="min-w-48">Bot / 所有者</TableHead>
-                      <TableHead>Rating / 95% 区间</TableHead>
-                      <TableHead>名次 / 百分位</TableHead>
-                      <TableHead>场次 / 对手 / 战绩</TableHead>
+                      <TableHead>评分</TableHead>
+                      <TableHead>战绩</TableHead>
                       <TableHead>评分变化</TableHead>
-                      <TableHead>最近对局</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
