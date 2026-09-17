@@ -8,14 +8,17 @@
 2. 阅读所选游戏的固定规则和 payload：
    [德州扑克](#/wiki?slug=texas)、[五子棋](#/wiki?slug=gomoku)或
    [点格棋](#/wiki?slug=pencil)。
-3. 从对应页面复制完整 C / Python 示例，再按
-   [Bot 开发指南](#/wiki?slug=bot-dev)构建为 Linux amd64 可执行文件。
-4. 上传前确认文件类型包含 `ELF 64-bit` 和 `x86-64`，再选择与程序一致的运行模式。
+3. 从对应页面复制完整 C / Python 示例，把源码打成 zip 直接上传，
+   或按[Bot 开发指南](#/wiki?slug=bot-dev)在本地构建 Linux amd64 可执行文件。
+4. ELF 路线上传前确认文件类型包含 `ELF 64-bit` 和 `x86-64`，再选择与程序一致的运行模式。
 
 想在上传前直接用自己电脑运行程序，可使用[本地 Bot 接入](#/wiki?slug=local-ai)。它由用户电脑主动连接，适合练习和调试，不计平台排行榜，也不能代替正式赛事版本。
 
-平台只接受 **Linux x86_64 ELF**。Windows、Linux 和 macOS 都可以使用开发指南中的
-Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py` 源文件不能上传运行。
+平台支持两种上传形态：**源码 zip 直传**（C / C++ / Go / Python 3，服务端编译，
+不需要本地构建工具）和 **Linux x86_64 ELF**。ELF 路线在 Windows、Linux 和 macOS
+都可以使用开发指南中的 Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py`
+源文件不能作为 ELF 上传。已在其他对战平台写过程序的选手请先读
+[迁移指南](#/wiki?slug=migration)。
 
 ## 协议速查
 
@@ -38,7 +41,8 @@ Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py` 源文件不能上�
 | 页面 | 内容 |
 |------|------|
 | [通信协议](#/wiki?slug=protocol) | 信封、运行模式、三个游戏 payload 与故障处理 |
-| [Bot 开发指南](#/wiki?slug=bot-dev) | 完整最小示例、跨平台构建、验证、预检与排错 |
+| [Bot 开发指南](#/wiki?slug=bot-dev) | 两种上传形态、完整最小示例、跨平台构建、验证、预检与排错 |
+| [迁移指南](#/wiki?slug=migration) | 从其他对战平台搬运程序参赛：语言与库差异、协议对接、云盘权重与报名流程 |
 | [本地 Bot 接入](#/wiki?slug=local-ai) | 三种运行环境、本机连接、令牌安全、消息格式与排错 |
 | [德州扑克](#/wiki?slug=texas) | 固定规则、动作码、请求字段与牌编码 |
 | [五子棋](#/wiki?slug=gomoku) | 固定规则、坐标、通信要点与完整示例 |

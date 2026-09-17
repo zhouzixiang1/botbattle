@@ -140,7 +140,7 @@ def test_player_wiki_is_quickstart_first_and_scopes_compatibility_guidance() -> 
     assert "Pencil 为每方累计 900 秒（默认）或单步 1 秒" in protocol
     assert "人机局的 `applies_to` 为 `bot_only`" in protocol
 
-    for platform in ("## 4. Linux", "## 5. Windows", "## 6. macOS"):
+    for platform in ("## 5. Linux", "## 6. Windows", "## 7. macOS"):
         assert platform in bot_dev
     assert "C：Alpine 静态编译" in bot_dev
     assert "Python：Linux PyInstaller 打包" in bot_dev
@@ -151,7 +151,15 @@ def test_player_wiki_is_quickstart_first_and_scopes_compatibility_guidance() -> 
     wiki_text = "\n".join(
         path.read_text(encoding="utf-8") for path in (ROOT / "wiki").glob("*.md")
     )
-    prose_without_required_signal = wiki_text.replace(
+    # MIGRATION.md 是唯一的定向外部平台迁移页，其中对 Botzone 的引用是
+    # 用户可操作信息（用户明确要求的迁移指南）；其余 Wiki 页面继续禁止
+    # 宽泛的外站对比文案。
+    wiki_text_without_migration = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "wiki").glob("*.md")
+        if path.name != "MIGRATION.md"
+    )
+    prose_without_required_signal = wiki_text_without_migration.replace(
         ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<", ""
     )
     # Botzone/SAU 只作为 Pencil 预检故障的精确诊断信号出现，不重新提供
@@ -163,7 +171,8 @@ def test_player_wiki_is_quickstart_first_and_scopes_compatibility_guidance() -> 
     assert "`name?`、`new`、`move`、`take` 等文本命令不是本平台协议" in bot_dev
     assert "Traditional/LongRunning 都不能转换协议" in bot_dev
     prose_without_scoped_diagnostics = prose_without_required_signal
-    for allowed in ("Botzone JSON 首回合协议", "Botzone JSON 首回合通信"):
+    # `_BOTZONE_ONLINE` 是编译宏标识符（源码直传自动定义），不是对比文案。
+    for allowed in ("Botzone JSON 首回合协议", "Botzone JSON 首回合通信", "_BOTZONE_ONLINE"):
         prose_without_scoped_diagnostics = prose_without_scoped_diagnostics.replace(
             allowed, ""
         )

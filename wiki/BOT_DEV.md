@@ -1,10 +1,10 @@
 # Bot 开发指南
 
-本页面向准备上传 Bot 的玩家。平台唯一接受的上传产物是 **Linux x86_64 ELF**：必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件；不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF，也不接受 `.py` 源文件、Shell 脚本、压缩包或源码目录。文件叫什么名字并不重要，平台按文件内容校验格式与架构。
+本页面向准备上传 Bot 的玩家。平台支持两种上传形态：**源码 zip 直传**（C / C++ / Go / Python 3，平台在服务端编译或直接运行）和 **Linux x86_64 ELF**（必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件）。两条路线的功能、赛事与云盘能力完全一致；源码直传不需要本地装编译器，推荐优先使用。
 
-因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建；最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
+ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF，也不接受 `.py` 源文件、Shell 脚本或未打包的源码目录。文件叫什么名字并不重要，平台按文件内容校验格式与架构；即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建，最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
-开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则；先复制一份完整示例跑通，再替换其中的决策函数，通常是最快的上手方式。如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置；本地接入当前只支持 Traditional。
+开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则；先复制一份完整示例跑通，再替换其中的决策函数，通常是最快的上手方式。如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置；本地接入当前只支持 Traditional。从其他对战平台迁移程序请先读[迁移指南](#/wiki?slug=migration)。
 
 ## 1. 选择运行模式
 
@@ -13,7 +13,22 @@
 
 两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封；LongRunning 未完成精确握手会直接协议判负，不会回退成 Traditional。Traditional Bot 可以只读取一行完整信封、输出一行响应后退出，也可以像下方示例一样保持读取循环，由平台在取得该回合响应后结束进程；LongRunning Bot 必须保持进程运行并持续读取增量信封。
 
-## 2. 完整可复制的 C 最小 Bot
+## 2. 源码 zip 直传（推荐）
+
+把整个源码目录打成 zip 上传，平台在服务端编译或运行，本地不需要任何构建工具。
+
+| 项 | 约定 |
+|----|------|
+| 支持语言 | C、C++、Go、Python 3 |
+| 打包上限 | zip 不超过 64 MiB、500 个文件，解压后不超过 96 MiB；路径穿越、符号链接与加密成员会被拒绝 |
+| 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。入口不在候选里时，在上传表单显式填写 |
+| C / C++ | 服务端以 `gcc/g++ -O2 -static` 编译，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1`；可用库为 nlohmann/json 与 Eigen（g++ 12.2 / Go 1.19 / Python 3.11 环境） |
+| Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行；**仅标准库**，numpy、torch 等第三方库不可用 |
+| 构建时限 | 服务端编译 120 秒超时；源码先编译，再进入与 ELF 相同的上传预检 |
+
+本章之后的示例源码（`bot.c` / `bot.py`）两条路线通用：源码直传直接把它们打进 zip；ELF 路线按后续章节在本地构建。
+
+## 3. 完整可复制的 C 最小 Bot
 
 下面是一个可用于 Holdem 的完整 `bot.c`，策略永远 call/check；它在首个 JSON 响应后输出 LongRunning 握手，因此同一个 ELF 可选择 Traditional 或 LongRunning，Traditional 只读取本次 JSON 响应后便结束进程。
 
@@ -48,7 +63,7 @@ int main(void) {
 
 把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印独立日志行；想让 Bot 作者在终局后查看策略诊断，应把有界信息放进同一 JSON 的顶层 `debug`。stderr 只用于平台运维排查崩溃，不会作为作者调试面板的数据源。
 
-## 3. 完整可复制的 Python 最小 Bot
+## 4. 完整可复制的 Python 最小 Bot
 
 下面是等价的完整 `bot.py`；源文件不能直接上传，必须按后文使用 Linux amd64 容器中的 PyInstaller 打包成 ELF。
 
@@ -97,7 +112,7 @@ if __name__ == "__main__":
 
 把代码完整保存为当前目录下的 `bot.py`。PyInstaller 会把解释器和依赖一起打进单文件 ELF；这不代表平台会执行原始 `.py` 文件。
 
-## 4. Linux：构建 C 与 Python
+## 5. Linux：构建 C 与 Python
 
 先安装 Docker Engine，并确认 `docker version` 正常；以下命令在 Bash 中执行，当前目录应包含上面的 `bot.c` 和 `bot.py`。即使开发机是 ARM Linux，也要保留 `--platform linux/amd64`。
 
@@ -133,7 +148,7 @@ docker run --rm --platform linux/amd64 \
 
 生成的 `bot_c_linux_amd64` 或 `bot_py_linux_amd64` 才是上传文件。
 
-## 5. Windows：构建 C 与 Python
+## 6. Windows：构建 C 与 Python
 
 安装 Docker Desktop，启用 WSL 2 后端，并确保使用 Linux containers；打开 PowerShell，进入保存 `bot.c` / `bot.py` 的目录。Windows 上的编译器和本机 PyInstaller 会生成 PE，不能作为平台上传文件，必须通过下列 Linux amd64 容器构建。
 
@@ -169,7 +184,7 @@ docker run --rm --platform linux/amd64 `
 
 如果你已在 WSL 的 Linux 终端中工作，也可以直接执行上一节的 Linux 命令；关键不是终端名称，而是构建环境必须为 Linux x86_64。Windows ARM 设备仍应使用 Docker 的 `--platform linux/amd64`，不要上传 WSL 本机生成的 `aarch64` 文件。
 
-## 6. macOS：构建 C 与 Python
+## 7. macOS：构建 C 与 Python
 
 安装 Docker Desktop，打开 Terminal，进入保存源码的目录。macOS 本机 `clang` 生成 Mach-O，本机 PyInstaller 也只生成 Mach-O，且 PyInstaller 不支持从 macOS 原生跨系统打包 Linux ELF；Intel Mac 和 Apple Silicon 都使用下面的 Linux amd64 容器命令，Apple Silicon 尤其不能删除 `--platform linux/amd64`。
 
@@ -203,7 +218,7 @@ docker run --rm --platform linux/amd64 \
   '
 ```
 
-## 7. 上传前验证文件类型
+## 8. 上传前验证文件类型
 
 任何操作系统都应在上传前检查产物。Linux / macOS Terminal：
 
@@ -235,7 +250,7 @@ ELF 64-bit LSB executable, x86-64
 
 看到 `PE32`、`MS Windows`、`Mach-O`、`ARM aarch64`、`script` 或仅显示 Python source，都说明文件不符合上传要求；不要只靠扩展名判断，也不要把错误格式改名后上传。
 
-## 8. 在 Linux 容器中做通信冒烟
+## 9. 在 Linux 容器中做通信冒烟
 
 以下命令用一个最小 Holdem 首回合请求运行 C 产物；Python 产物只需把最后的文件名换成 `/work/bot_py_linux_amd64`。
 
@@ -255,7 +270,7 @@ docker run --rm -i --platform linux/amd64 \
 
 真实 Traditional 对局读取第一行响应后会结束本次进程；真实 LongRunning 对局会校验第二行握手并继续向同一进程发送增量请求。
 
-## 9. 上传预检
+## 10. 上传预检
 
 上传新版本时先选择正确的游戏和运行模式。平台预检会：
 
@@ -275,7 +290,7 @@ docker run --rm -i --platform linux/amd64 \
 - 旧 SAU 裁判使用的 `name?`、`new`、`move`、`take` 等文本命令不是本平台协议；仅重命名该二进制或切换 Traditional/LongRunning 都不能转换协议；
 - 应从本指南的 Pencil 示例保留 JSON 输入输出层，再接入原有决策函数并重新编译。
 
-## 10. 常见故障
+## 11. 常见故障
 
 | 故障 | 结果 | 修复 |
 |------|------|------|
@@ -294,7 +309,7 @@ docker run --rm -i --platform linux/amd64 \
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
 | 依赖网络或持久磁盘 | 沙箱内失败 | 只读 stdin、写 stdout，状态放内存 |
 
-## 11. 沙箱与时限
+## 12. 沙箱与时限
 
 同一账号可以为同一游戏保留多个 Bot 作为不同实现或练习版本，但只有“我的 Bot”中当前派遣的一个排行榜 Bot 会进入自动排位和公开榜单；更新正式参榜程序时，优先在该 Bot 下上传新版本，另建 Bot 不会自动继承旧 Bot 的 Rating、RD 或历史对局。未派遣 Bot 仍可参加手动练习和由组织者创建的锦标赛。
 
