@@ -588,6 +588,21 @@ yield 与物理启动以 Docker create intent 事务确定唯一顺序。executi
    继续设置取消标记，但不能撤销或跳过 launch journal。runner 必须沿既有 token/name/label/journal exact cleanup
    收敛，确认物理容器与 intent 均清零后才释放资源并让前台 claim。
 
+`owner_kind=build`（源码上传构建）与 execution/preflight 共用同一 journal 单例与 launch flock，其 create 阶段的
+每条失败路径必须同样收敛：docker CLI 确定性报告 create 未发生（或精确 name 容器已 `rm` 成功）时，supervisor 在
+label/name 双零复查后经 `clear_docker_launch_failed`（仅接受本 token 的 `creating` 状态）把 journal 收回
+`idle`；create 结果不确定且同 host boot 零证据时保持既有保守纪律——journal 停留 `creating` 并经
+`docker_uncertain_callback` 让唯一 dispatcher 进入 manual pause（迟到容器不可排除），boot 变化才允许按
+boot-change 收口。构建失败在进程存活期间静默遗留 `creating`、阻断全部后续 launch 属于 P1 缺陷，回归见
+`tests/test_build_launch_journal.py`。
+
+两个有意取舍与 execution 路径不同，勿"顺手对齐"：其一，构建对 create `rc!=0` 一律按确定性失败收尾（execution
+路径对 rc!=0 保持 uncertain 保守），因为 build 容器 name 含唯一 token、未 start、不占 match slot，即使极小概率
+的传输层竞态留下迟到容器，也只造成一个由实例级 namespace 恢复兜底的孤儿，换来的是最常见失败形态不再卡死平台；
+其二，收尾中 journal 已推进 `created` 而 `rm` 未确认时仍清 journal——遗留 `created` 会让 dispatcher 的 idle
+断言陷入无收敛方的 bounded pause 循环，孤儿容器反而是更轻的后果。start 阶段失败（create 已确认）仍走原有的
+best-effort clear + 精确 name 清理，clear 失败时同样经回调通知 dispatcher。
+
 producer 与 claim 都必须在各自 `BEGIN IMMEDIATE` 内重新检查持久前台真相；外层 dispatcher 的空闲快照
 只用于节流和展示，不能成为并发 enqueue 穿透门禁。`auto_match_fair_state` 追加可幂等迁移列
 `dispatch_policy_version` / `next_eligible_at` / `gate_reason`，以持久化策略代际、最早可运行时间和门禁原因。首次

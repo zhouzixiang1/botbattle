@@ -1314,6 +1314,26 @@ class ExecutionRepository:
                 )
             self._clear_docker_launch_tx(conn, launch_token=launch_token)
 
+    def clear_docker_launch_failed(self, launch_token: str) -> None:
+        """确定性失败的 creating 收尾：CLI 已证明容器未创建/已精确删除。
+
+        只允许 supervisor 在 launch flock 内、对本次 launch_token 完成
+        label/name 双零复核后调用；同一 host boot 上零证据无法排除迟到
+        容器的 uncertain 失败仍须走 manual pause（clear_docker_launch_after_boot_change
+        或 pause_for_docker_uncertainty），不得借用本方法绕过保守语义。
+        """
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            launch = self._docker_launch_tx(conn)
+            if (
+                launch["state"] != "creating"
+                or launch["launch_token"] != launch_token
+            ):
+                raise DockerLaunchInvariantError(
+                    "only a failed Docker launch intent may be cleared"
+                )
+            self._clear_docker_launch_tx(conn, launch_token=launch_token)
+
     def clear_docker_launch_after_boot_change(
         self,
         launch_token: str,

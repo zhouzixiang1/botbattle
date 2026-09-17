@@ -277,6 +277,10 @@ def create_app(
                 image=recipe["image"],
                 profile=BOT_BUILD_PROFILE,
                 timeout_sec=float(recipe["timeout_sec"]),
+                # create 结果不确定时让唯一 dispatcher 进入与 journal
+                # 状态匹配的 pause（creating → manual，否则 bounded retry），
+                # 不允许构建失败静默遗留 creating 卡死对局启动。
+                docker_uncertain_callback=_pause_for_unscoped_docker,
             )
         except DockerBuildTimeout as exc:
             raise SourceBuildError(
