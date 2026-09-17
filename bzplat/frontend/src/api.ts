@@ -476,12 +476,29 @@ function isAuthPublicHash(): boolean {
   )
 }
 
+/** 后端错误 detail 可能是纯字符串，也可能是 {code,message} 字典经 stringify 的串；
+ * 统一提取人类可读 message（回退 code），避免把原始 JSON 展示给用户。 */
+export function humanizeDetail(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith('{')) return raw
+  try {
+    const obj = JSON.parse(trimmed) as { message?: unknown; code?: unknown }
+    if (typeof obj?.message === 'string' && obj.message.trim()) return obj.message
+    if (typeof obj?.code === 'string' && obj.code.trim()) return obj.code
+  } catch {
+    /* 非 JSON 对象字面量，按原串展示 */
+  }
+  return raw
+}
+
 async function readErrorDetail(r: Response): Promise<string> {
   let detail = `${r.status} ${r.statusText}`
   try {
     const j = (await r.clone().json()) as { detail?: unknown }
     if (j?.detail) {
-      detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
+      detail = humanizeDetail(
+        typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail),
+      )
     }
   } catch {
     /* 非 JSON */
@@ -614,10 +631,13 @@ export async function apiFetch<T = unknown>(
 export class ApiError extends Error {
   status: number
   detail: string
-  constructor(path: string, status: number, detail: string) {
+  /** 物化 detail 前的原始串（{code,message} 字典 stringify 等），仅调试用。 */
+  rawDetail: string
+  constructor(path: string, status: number, detail: string, rawDetail = detail) {
     super(`${path}: ${detail}`)
     this.status = status
     this.detail = detail
+    this.rawDetail = rawDetail
   }
 }
 
@@ -783,7 +803,11 @@ export function apiFormWithProgress<T = unknown>(
       let detail = `${status} ${statusText}`
       if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
         const rawDetail = (parsed as { detail?: unknown }).detail
-        if (rawDetail) detail = typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail)
+        if (rawDetail) {
+          detail = humanizeDetail(
+            typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail),
+          )
+        }
       }
 
       try {
