@@ -89,8 +89,8 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
           className="min-h-[var(--control-height-lg)] min-w-0 flex-1"
         />
       </div>
+      <p className="text-xs text-muted-foreground">看不清？点击图片可换一张。</p>
       {err && <span role="alert" className="text-xs text-destructive">{err}</span>}
-      <span className="text-xs text-muted-foreground">看不清可点击图片刷新</span>
     </div>
   )
 }

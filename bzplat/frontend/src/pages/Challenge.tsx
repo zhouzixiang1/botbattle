@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ArrowLeftRight, User, Bot as BotIcon, Laptop, Plus, Play, Trophy, X as XIcon } from 'lucide-react'
+import { ArrowLeftRight, User, Bot as BotIcon, Laptop, Plus, Play, Trophy, X as XIcon, ChevronDown } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
 import {
@@ -108,6 +108,8 @@ export default function Challenge() {
   ])
   // Bot-vs-Bot 中“我的 Bot”可映射到任一物理座位；切换时完整交换双方配置。
   const [mySeat, setMySeat] = useState<0 | 1>(0)
+  // 运行位置属于高级选项：默认节能沙箱，展开后才可切换本地 Bot。
+  const [advancedSeat, setAdvancedSeat] = useState<number | null>(null)
   // 第二方类型：'bot' 或 'human'（人类固定使用内部位置 1）。
   const [seat2Kind, setSeat2Kind] = useState<'bot' | 'human'>('bot')
   // 弹窗：pickingSeat 标记当前为哪个座位挑 bot（'s1'|'s2'）。
@@ -672,7 +674,7 @@ export default function Challenge() {
             <div className="flex flex-wrap items-center gap-2">
               <Label>{seatLabel}</Label>
               {seat2Kind === 'bot' && idx === mySeat && (
-                <Badge variant="secondary" className="text-[11px]">
+                <Badge variant="secondary" className="text-xs">
                   {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
                 </Badge>
               )}
@@ -688,26 +690,51 @@ export default function Challenge() {
             )}
           </div>
         )}
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">运行位置</Label>
-          <Select
-            value={seat.environment}
-            onValueChange={(value) => {
-              if (value === 'platform_low' || value === 'remote_local') {
-                setSeatEnvironment(slot, value)
-              }
-            }}
-            disabled={seat2Kind === 'human'}
-          >
-            <SelectTrigger className="w-full" aria-label={`${seatLabel}运行位置`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="platform_low">节能沙箱</SelectItem>
-              {seat2Kind === 'bot' && <SelectItem value="remote_local">本地 Bot（我的电脑）</SelectItem>}
-            </SelectContent>
-          </Select>
-        </div>
+        {(() => {
+          const advancedOpen = seat.environment === 'remote_local' || advancedSeat === idx
+          return (
+            <details
+              data-testid={`challenge-advanced-${idx}`}
+              className="rounded-lg border border-border/60 px-2.5 py-1.5"
+              open={advancedOpen}
+            >
+              <summary
+                className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-7"
+                onClick={(event) => {
+                  // 受控展开：open 由状态驱动，避免轮询重渲染吞掉手动展开。
+                  event.preventDefault()
+                  setAdvancedSeat((current) => (current === idx ? null : idx))
+                }}
+              >
+                <span>高级：运行位置</span>
+                <ChevronDown aria-hidden="true" className={cn('size-3.5 shrink-0 transition-transform', advancedOpen && 'rotate-180')} />
+              </summary>
+              <div className="space-y-1 pb-1 pt-2">
+                <Label className="text-xs text-muted-foreground">运行位置</Label>
+                <Select
+                  value={seat.environment}
+                  onValueChange={(value) => {
+                    if (value === 'platform_low' || value === 'remote_local') {
+                      setSeatEnvironment(slot, value)
+                    }
+                  }}
+                  disabled={seat2Kind === 'human'}
+                >
+                  <SelectTrigger className="w-full" aria-label={`${seatLabel}运行位置`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="platform_low">节能沙箱</SelectItem>
+                    {seat2Kind === 'bot' && <SelectItem value="remote_local">本地 Bot（我的电脑）</SelectItem>}
+                  </SelectContent>
+                </Select>
+                {seat2Kind === 'bot' && (
+                  <p className="text-xs text-muted-foreground">默认在平台节能沙箱运行。</p>
+                )}
+              </div>
+            </details>
+          )
+        })()}
 
         {seat.environment === 'platform_low' ? (
           <>
@@ -729,7 +756,7 @@ export default function Challenge() {
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-foreground">
               <BotIcon className="size-4 shrink-0 text-primary" />
               <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seat.bot.display_name || seat.bot.name}</strong>
-              <Badge variant={seat.bot.is_ranked ? 'default' : 'outline'} className="text-[11px]">
+              <Badge variant={seat.bot.is_ranked ? 'default' : 'outline'} className="text-xs">
                 <Trophy className="size-3" aria-hidden="true" />
                 {seat.bot.is_ranked ? '排行榜 Bot' : '练习 Bot'}
               </Badge>
@@ -1036,7 +1063,7 @@ export default function Challenge() {
                     <div className="flex flex-wrap items-center gap-2">
                       <Label>{playerLabels[1]}</Label>
                       {seat2Kind === 'bot' && mySeat === 1 && (
-                        <Badge variant="secondary" className="text-[11px]">
+                        <Badge variant="secondary" className="text-xs">
                           {user?.role === 'admin' ? '发起方 Bot' : '我的 Bot'}
                         </Badge>
                       )}
@@ -1084,7 +1111,7 @@ export default function Challenge() {
               <p className="text-xs text-muted-foreground">
                 {seat2Kind === 'human'
                   ? `${playerLabels[0]}使用节能沙箱，${playerLabels[1]}由你亲自上场；本局不计平台排行榜。`
-                  : '节能沙箱由平台运行；本地 Bot 由你的电脑回答裁判请求，可两边都选本地连接。'}
+                  : '对局默认在平台节能沙箱运行；如需用自己的电脑运行 Bot，展开「高级：运行位置」选择本地连接。'}
               </p>
             </div>
 

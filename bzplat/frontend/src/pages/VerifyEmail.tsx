@@ -98,7 +98,7 @@ export default function VerifyEmail() {
           <Separator className="my-4" />
 
           <div className="space-y-3">
-            <p className="text-sm text-muted-foreground">未收到邮件？填写验证码后重发：</p>
+            <p className="text-sm text-muted-foreground">没有收到邮件？输入图形验证码后可重新发送。</p>
             <CaptchaField onChange={setCaptcha} />
             <Button
               type="button"

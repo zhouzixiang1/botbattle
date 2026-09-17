@@ -303,8 +303,8 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     }
 
     const s = scaleFactor(W)
-    const name0 = seatDisplay(opts.seats?.[0], 0).subject
-    const name1 = seatDisplay(opts.seats?.[1], 1).subject
+    const name0 = seatDisplay(opts.seats?.[0], 0, 'board').subject
+    const name1 = seatDisplay(opts.seats?.[1], 1, 'board').subject
     const ruleLabel = isCurrentGomokuCompetitionRuleset(next.ruleset)
       ? '现行五手二打规则'
       : isGomokuCompetitionRuleset(next.ruleset)
@@ -331,7 +331,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     const seat0 = `${name0}（${gomokuColorLabel(next.seatColors[0])}）`
     const seat1 = `${name1}（${gomokuColorLabel(next.seatColors[1])}）`
     ctx.fillText(
-      fitText(ctx, `座位 1 ${seat0}  ·  座位 2 ${seat1}`, W - Math.max(20, 24 * s)),
+      fitText(ctx, `${seat0}  vs  ${seat1}`, W - Math.max(20, 24 * s)),
       Math.max(10, 12 * s),
       Math.max(34, 42 * s),
     )

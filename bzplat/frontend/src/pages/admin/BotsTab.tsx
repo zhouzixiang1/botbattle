@@ -39,6 +39,22 @@ interface Version {
   unsupported_reason?: string | null
 }
 
+/** 不可运行诊断：中文说明优先；缺失时回退「格式待检」，原始格式信息收进 Tooltip。 */
+function RunnableWarning({ format, os, arch, reason }: { format: string; os: string; arch: string; reason?: string | null }) {
+  const content = (
+    <span tabIndex={reason ? undefined : 0} className={reason ? 'mt-0.5 block text-xs font-normal text-destructive' : 'mt-0.5 block cursor-help text-xs font-normal text-destructive underline decoration-dotted underline-offset-2'}>
+      {reason || '格式待检'}
+    </span>
+  )
+  if (reason) return content
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{content}</TooltipTrigger>
+      <TooltipContent className="font-mono text-xs">{`${format}/${os}-${arch}`}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 export default function BotsTab() {
   const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
@@ -87,16 +103,16 @@ export default function BotsTab() {
     }
   }
 
-  const del = async (id: number) => {
+  const del = async (bot: Bot) => {
     if (!await confirm({
       title: '删除 Bot',
-      desc: `确认删除 Bot #${id}？同时删除其版本与文件。`,
+      desc: `确认删除「${bot.display_name || bot.name}」？将同时删除其全部版本与文件。`,
       confirmText: '删除',
       danger: true,
     })) return
-    setBusyId(id)
+    setBusyId(bot.id)
     try {
-      await apiJson(`/api/admin/bots/${id}`, 'DELETE')
+      await apiJson(`/api/admin/bots/${bot.id}`, 'DELETE')
       await load()
     } catch (e) {
       setError(errMsg(e, '删除失败'))
@@ -167,12 +183,10 @@ export default function BotsTab() {
                   <TableCell className="max-w-[13rem] px-2.5 py-1.5 font-medium text-foreground">
                     <OverflowText tooltip={b.display_name || b.name}>
                       {b.display_name || b.name}
-                      {b.is_builtin ? <span className="ml-1 text-[10px] font-normal text-primary">内置</span> : null}
+                      {b.is_builtin ? <span className="ml-1 text-xs font-normal text-primary">内置</span> : null}
                     </OverflowText>
                     {b.runnable === false && (
-                      <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
-                        诊断：{b.unsupported_reason || `${b.format}/${b.os}-${b.arch}`}
-                      </span>
+                      <RunnableWarning format={b.format} os={b.os} arch={b.arch} reason={b.unsupported_reason} />
                     )}
                   </TableCell>
                   <TableCell className="px-2.5 py-1.5">
@@ -180,17 +194,17 @@ export default function BotsTab() {
                       <Link to={`/user/${encodeURIComponent(b.owner_name)}`} className="text-primary hover:underline">
                         {b.owner_display || b.owner_name}
                       </Link>
-                    ) : <span className="text-muted-foreground">内部用户 ID {b.owner_id}</span>}
+                    ) : <span className="text-muted-foreground">所属用户已注销</span>}
                   </TableCell>
                   <TableCell className="px-2.5 py-1.5 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
                   <TableCell className="px-2.5 py-1.5">
                     <div className="flex gap-1">
                       {b.is_deleted
-                        ? <Badge variant="destructive" className="text-[10px]">所有者已删除</Badge>
+                        ? <Badge variant="destructive" className="text-xs">所有者已删除</Badge>
                         : b.is_active
-                          ? <Badge variant="secondary" className="text-[10px]">启用</Badge>
-                          : <Badge variant="outline" className="text-[10px] text-muted-foreground">停用</Badge>}
-                      {b.runnable === false && <Badge variant="destructive" className="text-[10px]">不可运行</Badge>}
+                          ? <Badge variant="secondary" className="text-xs">启用</Badge>
+                          : <Badge variant="outline" className="text-xs text-muted-foreground">停用</Badge>}
+                      {b.runnable === false && <Badge variant="destructive" className="text-xs">不可运行</Badge>}
                     </div>
                   </TableCell>
                   <TableCell className="px-2.5 py-1.5">
@@ -220,7 +234,7 @@ export default function BotsTab() {
                         size="sm"
                         className="max-lg:min-h-11 px-2"
                         disabled={busyId === b.id}
-                        onClick={() => void del(b.id)}
+                        onClick={() => void del(b)}
                       >
                         删除
                       </Button>
@@ -250,9 +264,7 @@ export default function BotsTab() {
                                 <TableCell className="px-2 py-1">
                                   v{v.version}
                                   {v.runnable === false && (
-                                    <span className="mt-0.5 block break-all text-[10px] text-destructive">
-                                      诊断：{v.unsupported_reason || `${v.format}/${v.os}-${v.arch}`}
-                                    </span>
+                                    <RunnableWarning format={v.format} os={v.os} arch={v.arch} reason={v.unsupported_reason} />
                                   )}
                                 </TableCell>
                                 <TableCell className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</TableCell>

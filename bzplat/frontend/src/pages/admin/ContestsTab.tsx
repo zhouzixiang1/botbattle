@@ -17,6 +17,9 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
 } from './ui'
 import Pagination from '@/components/Pagination'
 import { AdminContestRosterAssign } from '@/components/contest/AdminContestRosterAssign'
@@ -274,16 +277,17 @@ export default function ContestsTab() {
       })
   }
 
-  const removeEntry = async (contestId: number, userId: number) => {
+  const removeEntry = async (contestId: number, entry: Entry) => {
+    const name = entry.username || '该用户'
     const ok = await confirm({
       title: '移除报名',
-      desc: `从当前名册移除用户 #${userId}？`,
+      desc: `从当前名册移除「${name}」？`,
       confirmText: '移除',
       danger: true,
     })
     if (!ok) return
     try {
-      await apiJson(`/api/admin/contests/${contestId}/entries/${userId}`, 'DELETE')
+      await apiJson(`/api/admin/contests/${contestId}/entries/${entry.user_id}`, 'DELETE')
       await loadEntries(contestId)
     } catch (cause) {
       setError(errMsg(cause, '移除失败'))
@@ -329,7 +333,18 @@ export default function ContestsTab() {
                     </TableCell>
                     <TableCell className="w-24 whitespace-normal px-2 py-1.5 text-xs text-muted-foreground">
                       <div className="text-foreground">{gameLabel(contest.game_id)}</div>
-                      <div>{contest.template_name || contest.template_id || '未指定模板'}</div>
+                      {contest.template_name ? (
+                        <div>{contest.template_name}</div>
+                      ) : contest.template_id ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span tabIndex={0} className="cursor-help underline decoration-dotted underline-offset-2">未指定模板</span>
+                          </TooltipTrigger>
+                          <TooltipContent className="font-mono text-xs">{contest.template_id}</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <div>未指定模板</div>
+                      )}
                     </TableCell>
                     <TableCell className="px-2 py-1.5">
                       <div className="flex flex-wrap gap-1">
@@ -393,7 +408,12 @@ export default function ContestsTab() {
                           <Badge variant="secondary" className="self-center">已取消 · 可清理</Badge>
                         )}
                         {isShowcase && (
-                          <Badge variant="outline" className="self-center">合成演示 · 所有写操作已禁用</Badge>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="outline" className="cursor-help self-center">演示</Badge>
+                            </TooltipTrigger>
+                            <TooltipContent className="text-xs">内置演示数据，仅供浏览；所有写操作已停用。</TooltipContent>
+                          </Tooltip>
                         )}
                       </div>
                     </TableCell>
@@ -451,7 +471,7 @@ export default function ContestsTab() {
                                   <TableCell className="px-2 py-1">{fmtTime(entry.registered_at)}</TableCell>
                                   {mutableRoster && (
                                     <TableCell className="px-2 py-1">
-                                      <Button type="button" variant="destructive" size="xs" onClick={() => void removeEntry(contest.id, entry.user_id)}>移除</Button>
+                                      <Button type="button" variant="destructive" size="xs" onClick={() => void removeEntry(contest.id, entry)}>移除</Button>
                                     </TableCell>
                                   )}
                                 </TableRow>

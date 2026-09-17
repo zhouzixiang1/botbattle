@@ -173,6 +173,23 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
 
 ## 部署排空状态机
 
+### journal 非 idle 阻断升级的恢复 runbook
+
+升级到含 `owner_kind='build'` CHECK 重建的版本时，若上一 release 恰在 Docker launch 中途
+崩溃（journal 停在 `creating`/`created`）且未经旧代码重启收敛，新版本启动会在
+`Store._migrate` 以「docker launch journal 非 idle，拒绝重建 CHECK 约束」fail closed。恢复
+步骤（顺序执行）：
+
+1. 优先方式：用**旧 release** 正常启动一次——其 dispatcher 启动对账（instance namespace
+   清场 + journal 收敛）会把 journal 收回 idle；随后停服、再升级。
+2. 若旧 release 不可用：确认本主机没有平台容器在跑（`docker ps` 无本实例 label 的容器），
+   并先在库副本上演练后，在停服状态下执行：
+   `UPDATE docker_launch_journal SET state='idle',launch_token=NULL,instance_key=NULL,owner_kind=NULL,job_public_id=NULL,attempt_no=NULL,slot=NULL,container_name=NULL,host_boot_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE singleton=1;`
+3. 重启新版本服务，确认日志出现 `execution dispatcher startup: running`。
+
+严禁在有存活平台容器时执行第 2 步——`creating` 状态保守保留正是因为同 host boot 的
+零证据不能排除迟到容器。
+
 部署前先以不输出敏感值的方式核对 `.env`：`BZ_BOT_LOCAL`、`BZ_SKIP_CAPTCHA`、`BZ_TEST_CAPTCHA` 必须未设或为假；`BZ_PUBLIC_ORIGIN` 必须是实际公网 HTTPS origin，`BZ_SECURE_COOKIE=1`、`BZ_HSTS=1`、`BZ_RATE_LIMIT=1`，反向代理部署还要启用 `BZ_TRUST_PROXY=1` 并把 `BZ_TRUSTED_PROXY_CIDRS` 收紧到真实本机代理 peer。`scripts/platform-ctl.sh` 会在 status/start/restart/stop 等任何生产控制动作前重新拒绝三项测试开关；不要靠手工 `unset` 后绕过对目标 `.env` 的审查。
 
 计划部署使用独立、持久的 `deployment_drain_requested` 控制位，不能用 dispatcher 的

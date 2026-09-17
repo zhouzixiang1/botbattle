@@ -92,7 +92,7 @@ export function EliminationTiebreakStatus({
     <section aria-label="淘汰赛决胜状态" className={cn('bg-muted/25 px-4 py-3', className)}>
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-semibold text-foreground">淘汰赛决胜状态</h3>
-        <Badge variant="outline" className="text-[10px]">两场换边一组 · 不封顶</Badge>
+        <Badge variant="outline" className="text-xs">两场换边一组 · 不封顶</Badge>
       </div>
       {relevant.length === 0 ? (
         <p className="mt-2 text-xs text-warning-foreground">决胜状态暂不可用</p>
@@ -101,7 +101,7 @@ export function EliminationTiebreakStatus({
           {relevant.map((encounter) => (
             <div key={`${encounter.round_num}:${encounter.bracket_slot}`} className="py-2 first:pt-0 last:pb-0">
               <p className="text-xs font-medium text-foreground">
-                第 {encounter.round_num} 轮 · 对阵 {encounter.bracket_slot + 1} · {participantLabel(encounter, 'a')} vs {participantLabel(encounter, 'b')}
+                第 {encounter.round_num} 轮 · {participantLabel(encounter, 'a')} vs {participantLabel(encounter, 'b')}
               </p>
               {(encounter.groups?.length ?? 0) === 0 ? (
                 <p className="mt-1 text-xs text-muted-foreground">主赛平局 · {encounterStatus(encounter)}</p>

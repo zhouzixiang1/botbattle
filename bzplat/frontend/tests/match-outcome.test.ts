@@ -28,7 +28,7 @@ test('duplicate outcome reports two scoring games without inventing one overall 
   assert.equal(isPublicMatchOutcome(duplicate), true)
   assert.deepEqual(outcomeParticipantStates(duplicate), ['neutral', 'neutral'])
   assert.equal(singleOutcomeWinner(duplicate), undefined)
-  assert.equal(outcomeLabelForSeat(duplicate, 0), '复式 · 1胜 / 0平 / 1负')
+  assert.equal(outcomeLabelForSeat(duplicate, 0), '主客两场合计 · 1胜 / 0平 / 1负')
   assert.deepEqual(
     describeMatchOutcome(
       { status: 'completed', outcome: duplicate },
@@ -38,7 +38,7 @@ test('duplicate outcome reports two scoring games without inventing one overall 
       availability: 'available',
       kind: 'duplicate',
       primary: 'Alpha 1胜 · 平 0 · Beta 1胜',
-      secondary: '已完成 2/2 场计分 · 交锋组合计分差（Alpha） 0 BB',
+      secondary: '已完成 2/2 场计分 · 主客两场合计分差（Alpha） 0 BB',
       games: ['第 1 场：Alpha胜', '第 2 场：Beta胜'],
       winner: undefined,
       technical: false,
@@ -140,7 +140,7 @@ test('technical termination identifies the failed seat without claiming a duplic
   assert.equal(description.primary, '技术终局 · 已计 1/2 场')
   assert.match(description.secondary ?? '', /Alpha 1胜 · 平 0 · Beta 0胜/)
   assert.match(description.secondary ?? '', /Beta 技术判负/)
-  assert.match(description.secondary ?? '', /原因：超时/)
+  assert.match(description.secondary ?? '', /原因：Bot 决策超时/)
   assert.deepEqual(description.games, ['第 2 场：Alpha胜'])
   assert.equal(description.winner, undefined)
 })

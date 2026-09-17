@@ -119,7 +119,7 @@ export default function Home() {
         </Button>
       </StickyToolbar>
 
-      <DataRegion title="最新对局" description="同一赛事连续开赛时只保留最近一条记录，方便浏览不同来源的对局。">
+      <DataRegion title="最新对局">
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
         ) : loading ? (
@@ -146,10 +146,10 @@ export default function Home() {
                       return (
                         <TableRow key={match.id}>
                           <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
-                          <TableCell>
-                            <span className="flex min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap">
+                          <TableCell className="whitespace-normal">
+                            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                               <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                              <span>{gameLabel(match.game_id)}</span>
+                              <span className="min-w-0 truncate">{gameLabel(match.game_id)}</span>
                               <MatchNatureBadge matchType={match.match_type} source={match} />
                             </span>
                           </TableCell>

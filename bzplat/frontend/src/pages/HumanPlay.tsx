@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { PlayCircle, ArrowRight, Clock } from 'lucide-react'
+import { PlayCircle, ArrowRight, Clock, ChevronDown } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import MatchBoard from '@/components/MatchBoard'
 import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
@@ -11,7 +11,7 @@ import { OverflowText } from '@/components/ui/overflow-text'
 import { ErrorMsg, Loading } from '@/components/ui/status'
 import { apiGet, playWsUrl } from '@/api'
 import { findGame, gameLabel, normalizeGameId, resolveTerminalReason, unsupportedGameLabel } from '@/games'
-import { describePlatformEvent } from '@/games/reasons'
+import { describePlatformEvent, technicalReasonLabel } from '@/games/reasons'
 import type { SeatInfo } from '@/games/canvas-types'
 import { eventSeatSubject } from '@/games/seat-display'
 import {
@@ -404,8 +404,8 @@ export default function HumanPlay() {
     match,
     endInfo?.winner ?? (endVm && gameSpec ? gameSpec.winner(endVm) : undefined),
     over,
-    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-    (seat) => (match ? seatHeaderLabel(match, seat as 0 | 1) : `座位 ${seat + 1}`),
+    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）；缺匹配数据时用通用匿名兜底。
+    (seat) => (match ? seatHeaderLabel(match, seat as 0 | 1) : seat === 0 ? '玩家一' : '玩家二'),
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
@@ -436,7 +436,7 @@ export default function HumanPlay() {
     gameSpec?.seatDetail?.(currentVm, seat) ?? gameSpec?.seatColors?.[seat]
   )
   const myPosition = match
-    ? `真人 · 座位 ${humanSeat + 1}${seatDetail(humanSeat) ? ` · ${seatDetail(humanSeat)}` : ''}`
+    ? `你（${humanSeat === 0 ? '玩家一' : '玩家二'}）${seatDetail(humanSeat) ? ` · ${seatDetail(humanSeat)}` : ''}`
     : '正在确认你的位置'
 
   // 对阵卡：xl+ 并入棋盘主列（与棋盘列同宽），xl 以下保持整行堆叠。
@@ -451,12 +451,12 @@ export default function HumanPlay() {
           className="order-1 py-0.5"
         />
         <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
-          <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+          <div className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
             {match ? gameLabel(gameId) : '连接中'}
           </div>
           <div className="mt-0.5 text-sm font-semibold text-foreground">{myPosition}</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
-            {over ? '对局已结束' : reconnecting ? '正在恢复连接' : '实时同步'} · {events.length} 条事件
+            {over ? '对局已结束' : reconnecting ? '正在恢复连接' : '实时同步'}
           </div>
         </div>
         <MatchParticipantIdentity
@@ -581,16 +581,6 @@ export default function HumanPlay() {
 
       <StickyToolbar label="人类对战状态" className="justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-          {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
-          <Badge variant="outline">Bot：{timeControl ? timeControlLabel(timeControl) : '时限不可用'}</Badge>
-          <OverflowText
-            className="max-w-full text-xs text-muted-foreground"
-            tooltip={timeControl
-              ? timeControlDescription(timeControl, true)
-              : 'Bot 时限配置暂不可用；页面不会猜测或代填 Bot 棋钟。'}
-          >
-            非对称练习：真人仅用防挂机时限
-          </OverflowText>
           {over ? (
             <span className="min-w-0 break-words font-medium text-foreground">
               对局结束 · {winnerLabel}
@@ -619,6 +609,25 @@ export default function HumanPlay() {
           ) : (
               <span className="text-muted-foreground">等待中…</span>
           )}
+          {/* 性质/时限/练习说明是次要信息：收进「对局信息」折叠，主行只留当前状态。 */}
+          <details className="group min-w-0" data-testid="human-match-info">
+            <summary className="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-7">
+              对局信息
+              <ChevronDown aria-hidden="true" className="size-3.5 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pt-1 text-xs text-muted-foreground">
+              {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
+              <Badge variant="outline">Bot：{timeControl ? timeControlLabel(timeControl) : '时限不可用'}</Badge>
+              <OverflowText
+                className="max-w-full"
+                tooltip={timeControl
+                  ? timeControlDescription(timeControl, true)
+                  : 'Bot 时限配置暂不可用；页面不会猜测或代填 Bot 棋钟。'}
+              >
+                非对称练习：真人仅用防挂机时限
+              </OverflowText>
+            </div>
+          </details>
         </div>
         {over && endSummary && (
           <OverflowText tooltip={endSummary} className="max-w-full font-mono text-xs text-muted-foreground sm:max-w-sm">
@@ -763,7 +772,7 @@ function EventLogCard({
       const subject = eventSeatSubject(seats, event.seat)
       const turn = Number(event.turn)
       const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
-      return `${subject} 技术故障${turnText}：${String(event.error || 'Bot 响应异常')}`
+      return `${subject} 技术故障${turnText}：${technicalReasonLabel(event.reason)}`
     }
     const platformDescription = describePlatformEvent(event)
     if (platformDescription) return platformDescription
@@ -773,7 +782,7 @@ function EventLogCard({
     <DataRegion
       data-testid="human-event-log"
       title="最近动作"
-      description={`显示最近 ${recentEvents.length}/${events.length} 条权威事件 · 最新在前`}
+      description="最新在上"
       className="flex min-w-0 flex-col"
       contentClassName="p-2 text-xs"
     >

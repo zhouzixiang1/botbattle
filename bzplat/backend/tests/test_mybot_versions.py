@@ -163,13 +163,21 @@ def test_manual_multipart_routes_preserve_openapi_contract(tmp_path):
                 "upload_note",
                 "game_id",
                 "runtime_mode",
+                "source_format",
+                "source_entry",
                 "file",
             },
             {"400", "401", "413", "503"},
         ),
         "/api/bots/{bot_id}/versions": (
             {"file"},
-            {"upload_note", "runtime_mode", "file"},
+            {
+                "upload_note",
+                "runtime_mode",
+                "source_format",
+                "source_entry",
+                "file",
+            },
             {"400", "401", "413", "503"},
         ),
         "/api/auth/avatar": (

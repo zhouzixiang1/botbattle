@@ -27,7 +27,12 @@ from ..store import (
     RankedBotSelectionBusyError,
     Store,
 )
-from ..runtime.limits import MAX_BOT_UPLOAD_BYTES, PYTHON_RUNTIME_IMAGE
+from ..runtime.limits import (
+    MAX_BOT_UPLOAD_BYTES,
+    PYTHON_RUNTIME_IMAGE,
+    SOURCE_UPLOAD_MAX_BYTES,
+)
+from .classify import program_header_has_dynamic_interpreter
 from .source_build import (
     SourceBuildError,
     ZIP_MAGIC,
@@ -211,8 +216,11 @@ class BotManager:
         if rmode not in VALID_RUNTIME_MODES:
             raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
         size = _payload_size(raw)
-        if not size or size > MAX_BYTES:
-            raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
+        limit = (
+            MAX_BYTES if source_format == "elf" else SOURCE_UPLOAD_MAX_BYTES
+        )
+        if not size or size > limit:
+            raise BotError("invalid_size", f"文件大小须 1..{limit} 字节")
         info = _classify_upload(raw, source_format=source_format)
         if self.store.get_bot_by_owner_name(owner_id, name):
             raise BotError("name_taken", "同名 bot 已存在")
@@ -284,8 +292,11 @@ class BotManager:
             raise BotError("not_found", "bot 不存在")
         self._require_owner_live(bot)
         size = _payload_size(raw)
-        if not size or size > MAX_BYTES:
-            raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
+        limit = (
+            MAX_BYTES if source_format == "elf" else SOURCE_UPLOAD_MAX_BYTES
+        )
+        if not size or size > limit:
+            raise BotError("invalid_size", f"文件大小须 1..{limit} 字节")
         info = _classify_upload(raw, source_format=source_format)
         # 分配版本号、原子落盘、DB 写入和失败回滚必须属于同一 per-bot 临界区。
         # 否则并发上传会写同一个 vN，或预检失败误删另一请求的新版本。
@@ -343,7 +354,10 @@ class BotManager:
                     raise BinaryRejectError("launcher 脚本缺失")
             else:
                 require_supported_binary(classify_binary(head))
-        except (OSError, BinaryRejectError) as exc:
+        except OSError:
+            # OSError 的 str 可能携带宿主绝对路径，不进入用户可见 detail。
+            return False, "预检失败：无法读取上传产物"
+        except BinaryRejectError as exc:
             return False, f"预检失败：{exc}"
         try:
             try:
@@ -419,14 +433,21 @@ class BotManager:
         recipe = build_recipe(spec)
         src_dir = temp_dir / "src"
         src_dir.mkdir()
-        with _zipfile.ZipFile(zip_path) as archive:
-            for member in archive.infolist():
-                if member.is_dir():
-                    continue
-                target = src_dir / member.filename
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member) as source, target.open("wb") as out:
-                    shutil.copyfileobj(source, out)
+        try:
+            with _zipfile.ZipFile(zip_path) as archive:
+                for member in archive.infolist():
+                    if member.is_dir():
+                        continue
+                    target = src_dir / member.filename
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as source, target.open("wb") as out:
+                        shutil.copyfileobj(source, out)
+        except _zipfile.BadZipFile as exc:
+            # inspect 只读 central directory；成员数据损坏/CRC 失败在解压
+            # 阶段才暴露。用户输入问题必须落 4xx，而不是打成 500。
+            raise SourceBuildError(
+                "invalid_source_zip", "源码包损坏或校验失败，请重新打包上传"
+            ) from exc
 
         if spec.language == "python":
             import shlex as _shlex
@@ -462,8 +483,23 @@ class BotManager:
             raise SourceBuildError(
                 "build_failed", "构建未产出可执行文件"
             )
+        if artifact.stat().st_size > MAX_BYTES:
+            # 源码包限 64 MiB，但静态链接产物（内嵌数据）可能远超之；
+            # 版本目录与磁盘配额不允许无上限晋升。
+            raise SourceBuildError(
+                "build_failed",
+                f"编译产物超过平台上限（{MAX_BYTES} 字节），请精简内嵌数据",
+            )
         with artifact.open("rb") as built:
-            require_supported_binary(classify_binary(built.read(4096)))
+            built_head = built.read(4096)
+        require_supported_binary(classify_binary(built_head))
+        if program_header_has_dynamic_interpreter(built_head):
+            # 动态链接产物依赖运行镜像的 ld.so/glibc；构建镜像与运行镜像
+            # 演进一旦漂移就会出现“预检通过、对局起不来”。
+            raise SourceBuildError(
+                "build_failed",
+                "编译产物是动态链接 ELF；请使用静态链接（-static）",
+            )
         artifact.replace(temp_dest)
         temp_dest.chmod(0o755)
         digest = hashlib.sha256()

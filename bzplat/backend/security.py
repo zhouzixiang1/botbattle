@@ -35,6 +35,9 @@ _audit_logger = logging.getLogger(AUDIT_LOGGER)
 _AUTH_STRICT = (20, 60)
 _CAPTCHA_LIMIT = (60, 60)
 _UPLOAD_STRICT = (6, 60)
+# 云盘上传：比 Bot 上传宽（合法批量恢复常见），带宽面由单槽 admission
+# 串行与 257 MiB body 硬顶兜底。
+_STORAGE_UPLOAD_LIMIT = (30, 60)
 _CHALLENGE_STRICT = (8, 60)
 _FEEDBACK_STRICT = (5, 60)
 _LOCAL_AI_ROTATE_STRICT = (5, 60)
@@ -750,6 +753,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             or (path.startswith("/api/bots/") and path.endswith("/versions"))
         ):
             return _UPLOAD_STRICT
+        # 用户云盘上传：单请求即最大 256 MiB body，需要独立于一般 API 的
+        # 带宽保护；但合法场景常见批量恢复文件，放得比 Bot 上传（每次
+        # 编译+预检的重操作，6/min）宽——单槽 admission 串行与 body 硬顶
+        # 已限制实际带宽消耗。
+        if method == "POST" and path == "/api/storage/files":
+            return _STORAGE_UPLOAD_LIMIT
         if path == "/api/matches/challenge":
             return _CHALLENGE_STRICT
         if method == "POST" and _LOCAL_AI_ROTATE_PATH.fullmatch(path):

@@ -1,7 +1,7 @@
 import type { RawEvent } from '@/games/base'
 import type { SeatInfo } from '@/games/canvas-types'
 import { resolveTerminalReason } from '@/games/reasons'
-import { eventSeatSubject } from '@/games/seat-display'
+import { eventSeatSubject, seatHasIdentity } from '@/games/seat-display'
 import { holdemEventLeg, holdemPhysicalSeatForEvent } from './reducer'
 
 function displaySeat(value: unknown): string {
@@ -27,7 +27,9 @@ export function describeHoldemEvent(event: RawEvent, seats?: SeatInfo[]): string
   if (event.type === 'action') {
     const action = actions[String(event.action)] ?? String(event.action ?? '?')
     const physicalSeat = holdemPhysicalSeatForEvent(event.player, event)
-    return `${legPrefix}${eventSeatSubject(seats, physicalSeat)} · ${action}${event.amount ? ` ${String(event.amount)}` : ''}（座位 ${displaySeat(physicalSeat)}）`
+    // 有公开身份时主语已足够；只有匿名兜底才补充座位号。
+    const seatNote = seatHasIdentity(seats?.[physicalSeat]) ? '' : `（座位 ${displaySeat(physicalSeat)}）`
+    return `${legPrefix}${eventSeatSubject(seats, physicalSeat)} · ${action}${event.amount ? ` ${String(event.amount)}` : ''}${seatNote}`
   }
   if (event.type === 'settle') {
     const winners = (event.winners as unknown[] | undefined)

@@ -47,6 +47,18 @@ const TABS: AdminTab[] = [
   { key: 'logs', label: '日志', description: '运行日志与故障排查', icon: ScrollText },
 ]
 
+/** 页头一句话：本模块最常用的动作（与左栏描述不重复）。 */
+const TAB_ACTION_HINTS: Record<TabKey, string> = {
+  dashboard: '查看平台运行状况，管理部署排空与闲时排位。',
+  users: '搜索账号，调整角色、启用状态或强制下线。',
+  bots: '上架或下架 Bot，排查版本能否运行。',
+  'local-ai': '查看用户本地电脑的连接占用，必要时撤销连接。',
+  matches: '查阅对局进度与技术故障样本，必要时中止对局。',
+  contests: '推进赛事阶段、修正时间并管理参赛名册。',
+  communications: '回复用户来信，处理问题反馈与群发通知。',
+  logs: '按级别和关键字检索运行、访问与管理操作记录。',
+}
+
 function resolveTab(value: string | null): TabKey {
   // 旧 ?tab=email 链接继续落到新通信中心，不让收藏失效。
   if (value === 'email') return 'communications'
@@ -96,7 +108,7 @@ export default function Admin() {
       <PageHeader
         eyebrow="平台运维"
         title="管理控制台"
-        description={`${active.label}：${active.description}`}
+        description={TAB_ACTION_HINTS[tab]}
         className="[&_h1]:sm:text-[1.375rem] [&_[data-slot=page-header-actions]>[data-slot=button]]:max-lg:min-h-11"
         actions={<Button asChild variant="outline" size="sm" className="max-lg:min-h-11"><Link to="/feedback">查看用户视角</Link></Button>}
       />

@@ -295,7 +295,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
         : !next.hasStarted
           ? '对局结束 · 未完成任何一手'
           : next.isDuplicate
-            ? '对局结束 · 复式交锋组结束'
+            ? '对局结束 · 主客两场结束'
             : '对局结束 · 赛果已结算'
       if (
         next.terminalStatus !== 'error'

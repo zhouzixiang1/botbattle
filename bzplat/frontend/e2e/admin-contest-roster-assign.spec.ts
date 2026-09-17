@@ -444,7 +444,8 @@ test('partial explicit assignment stays open with exact reasons and can be corre
 
   await expect(dialog).toBeVisible()
   const alert = dialog.getByRole('alert')
-  await expect(alert).toContainText(`bot ${ALPHA_BOTS[0].id} 当前不可运行，跳过`)
+  // mock 返回后端原始机读原因；UI 经 describeSkipIssue 映射为中文。
+  await expect(alert).toContainText('该选手所选择的 Bot 当前不可运行')
   await expect(dialog.getByRole('button', { name: '确认指派 1 人', exact: true })).toBeEnabled()
 
   await dialog.getByLabel(`更换 ${ALPHA_USER.username} 的 Bot`).click()

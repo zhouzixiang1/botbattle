@@ -3,12 +3,12 @@ import { CheckCircle2, UploadCloud } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export const BOT_UPLOAD_MAX_BYTES = 256 * 1024 * 1024
-export const BOT_UPLOAD_MAX_LABEL = '256 MiB'
+export const BOT_UPLOAD_MAX_LABEL = '256 MB'
 
 export type BotUploadStage = 'idle' | 'uploading' | 'preflight'
 
 export const SOURCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
-export const SOURCE_UPLOAD_MAX_LABEL = '64 MiB'
+export const SOURCE_UPLOAD_MAX_LABEL = '64 MB'
 
 export function botUploadSizeError(file: File, sourceFormat = 'elf'): string | null {
   const max = sourceFormat === 'elf' ? BOT_UPLOAD_MAX_BYTES : SOURCE_UPLOAD_MAX_BYTES
@@ -21,9 +21,9 @@ export function BotUploadProgress({
   percent,
   className,
   progressLabel = 'Bot 文件上传进度',
-  verifyingLabel = '文件已上传，正在服务端预检',
+  verifyingLabel = '文件已上传，正在服务端检查',
   verifyingHint = '平台正在校验 ELF 格式并运行标准首回合协议；通过后才会发布版本。',
-  verifyingProgressLabel = '服务端预检中',
+  verifyingProgressLabel = '服务端检查中',
 }: {
   stage: BotUploadStage
   percent: number | null

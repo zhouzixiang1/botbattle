@@ -1,5 +1,7 @@
 import { AlertTriangle, Clock3, ListOrdered, UsersRound } from 'lucide-react'
+import { useState } from 'react'
 
+import { Button } from '@/components/ui/button'
 import {
   formatContestDuration,
   stageSeriesDisplayLabel,
@@ -39,6 +41,7 @@ export function TemplateGuidancePanel({
   frozen = false,
   className = '',
 }: TemplateGuidancePanelProps) {
+  const [showEstimates, setShowEstimates] = useState(false)
   if (!template && !estimate) return null
   const fit = template ? templateParticipantFit(template, participantCount) : 'unknown'
   const fitMessage = template ? templateFitMessage(template, participantCount) : null
@@ -91,39 +94,52 @@ export function TemplateGuidancePanel({
         </p>
       )}
 
-      {/* 公平性数字、并发说明与风险警示并作一行流式排布；无估算时仍保留警示。 */}
+      {/* 默认只突出预计耗时；其余三个估算数字收进「查看估算」，组织者按需展开。 */}
       {(estimate || risk !== 'none' || hasUnboundedTiebreak) && (
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
           {estimate && (
             <dl className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
               <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">基础对局记录</dt>
-                <dd className="font-mono font-semibold tabular-nums text-foreground">
-                  {estimate.estimated_matches == null ? '待估算' : `${estimate.estimated_matches} 场`}
-                </dd>
-              </div>
-              <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">基础计分场</dt>
-                <dd className="font-mono font-semibold tabular-nums text-foreground">
-                  {scoringGames == null ? '待估算' : `${scoringGames} 场`}
-                </dd>
-              </div>
-              <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">并发上限</dt>
-                <dd className="font-mono font-semibold tabular-nums text-foreground">
-                  {estimate.max_concurrent == null ? '按容量准入' : `${estimate.max_concurrent} 场`}
-                </dd>
-              </div>
-              <div className="inline-flex min-w-0 items-baseline gap-1.5">
-                <dt className="text-muted-foreground">基础 ETA</dt>
+                <dt className="text-muted-foreground">预计耗时</dt>
                 <dd className="inline-flex items-baseline gap-1 font-mono font-semibold tabular-nums text-foreground">
                   <Clock3 aria-hidden="true" className="size-3.5 self-center text-muted-foreground" />
                   {formatContestDuration(estimate.eta_seconds)}
                 </dd>
               </div>
-              <div className="min-w-0 max-w-full text-xs leading-relaxed text-muted-foreground">
-                并发数是代码槽位上限；每条任务的冻结 CPU、内存和 sandbox 向量可能降低实际并发并延长用时。
+              <div className="inline-flex items-baseline">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="min-h-11 px-2 text-xs sm:min-h-7"
+                  aria-expanded={showEstimates}
+                  onClick={() => setShowEstimates((value) => !value)}
+                >
+                  {showEstimates ? '收起估算' : '查看估算'}
+                </Button>
               </div>
+              {showEstimates && (
+                <>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">基础对局记录</dt>
+                    <dd className="font-mono font-semibold tabular-nums text-foreground">
+                      {estimate.estimated_matches == null ? '待估算' : `${estimate.estimated_matches} 场`}
+                    </dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">基础计分场</dt>
+                    <dd className="font-mono font-semibold tabular-nums text-foreground">
+                      {scoringGames == null ? '待估算' : `${scoringGames} 场`}
+                    </dd>
+                  </div>
+                  <div className="inline-flex min-w-0 items-baseline gap-1.5">
+                    <dt className="text-muted-foreground">并发上限</dt>
+                    <dd className="font-mono font-semibold tabular-nums text-foreground">
+                      {estimate.max_concurrent == null ? '按容量准入' : `${estimate.max_concurrent} 场`}
+                    </dd>
+                  </div>
+                </>
+              )}
             </dl>
           )}
           {(risk !== 'none' || hasUnboundedTiebreak) && (

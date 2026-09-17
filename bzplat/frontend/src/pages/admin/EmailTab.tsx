@@ -5,6 +5,7 @@ import {
   Bug,
   CalendarClock,
   CheckCircle2,
+  Copy,
   Inbox,
   MailCheck,
   MailPlus,
@@ -44,7 +45,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Identifier } from '@/components/ui/overflow-text'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Switch } from '@/components/ui/switch'
@@ -167,6 +167,24 @@ function CountGrid({ values }: { values: Record<string, number> }) {
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+/** 长编号次级展示：截断 + 悬浮完整值 + 一键复制，不让内部编号占满版面。 */
+function CopyIdButton({ value, label = '复制 ID' }: { value: string; label?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard.writeText(value)
+          .then(() => toast.success('已复制'))
+          .catch(() => toast.error('复制失败，请手动选择复制'))
+      }}
+      className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <Copy aria-hidden="true" className="size-3" />
+      {label}
+    </button>
+  )
 }
 
 function DiagnosticSummary({ bug }: { bug: BugDetail }) {
@@ -314,7 +332,7 @@ function BroadcastCompose({ onCreated, onClose }: { onCreated: (publicId: string
     const boundFingerprint = previewFingerprint
     if (!await confirm({
       title: '确认群发通知',
-      desc: `将向已固定的 ${boundPreview.audience_count} 名用户投递；批准后不会重新计算受众。`,
+      desc: `将向已确认的 ${boundPreview.audience_count} 名用户发送；批准后名单不再变化。`,
       confirmText: scheduledAt ? '确认定时发送' : '确认发送',
     })) return
     if (
@@ -348,7 +366,7 @@ function BroadcastCompose({ onCreated, onClose }: { onCreated: (publicId: string
       <div className="mb-3 flex min-w-0 flex-wrap items-start gap-2 border-b pb-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">新建群发通知</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">先预览固定受众快照，再二次确认发送；站内信始终保留。</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">发送前先预览收信人名单，确认无误再发；站内信始终保留。</p>
         </div>
         <Button type="button" variant="ghost" size="sm" className="ml-auto" disabled={approving} onClick={closeCompose}><XCircle className="size-4" />关闭</Button>
       </div>
@@ -368,7 +386,16 @@ function BroadcastCompose({ onCreated, onClose }: { onCreated: (publicId: string
           {audienceKind === 'selected_users' && <div className="space-y-1.5"><Label htmlFor="broadcast-users">公开用户名</Label><Textarea id="broadcast-users" value={usernames} onChange={(event) => { setUsernames(event.target.value); invalidate() }} rows={5} placeholder="每行一个，也可用逗号分隔" /></div>}
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="flex min-h-10 items-center gap-2"><Switch checked disabled aria-label="站内信必选" /><span className="text-sm">站内信（必选）</span></div>
-            <div className="mt-1 flex min-h-10 items-center gap-2"><Switch checked={email} onCheckedChange={(value) => { setEmail(value); invalidate() }} aria-label="同时发送邮件" className="before:absolute before:-inset-x-3 before:-inset-y-3.5 before:content-['']" /><span className="text-sm">同时发送邮件</span></div>
+            {/* 开关的 ≥44px 触控目标由整行 label 提供：点开关或文字都能切换。 */}
+            <label htmlFor="broadcast-email-toggle" className="mt-1 flex min-h-11 cursor-pointer items-center gap-2">
+              <Switch
+                id="broadcast-email-toggle"
+                checked={email}
+                onCheckedChange={(value) => { setEmail(value); invalidate() }}
+                aria-label="同时发送邮件"
+              />
+              <span className="text-sm">同时发送邮件</span>
+            </label>
           </div>
           <div className="space-y-1.5"><Label htmlFor="broadcast-schedule">定时发送（可选）</Label><Input id="broadcast-schedule" type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /></div>
         </div>
@@ -380,11 +407,11 @@ function BroadcastCompose({ onCreated, onClose }: { onCreated: (publicId: string
             <Button type="button" disabled={previewBusy || approving} aria-busy={previewBusy} onClick={() => void previewBroadcast()}><MailCheck className="size-4" />{previewBusy ? '正在计算受众…' : '预览受众与内容'}</Button>
           ) : (
             <section className="rounded-xl border border-primary/25 bg-primary/5 p-3" aria-label="群发预览">
-              <div className="flex flex-wrap items-center gap-2"><CheckCircle2 className="size-4 text-primary" /><h4 className="text-sm font-semibold">快照已固定</h4><Badge className="ml-auto tabular-nums">{preview.audience_count} 人</Badge></div>
+              <div className="flex flex-wrap items-center gap-2"><CheckCircle2 className="size-4 text-primary" /><h4 className="text-sm font-semibold">收信人名单已确认</h4><Badge className="ml-auto tabular-nums">{preview.audience_count} 人</Badge></div>
               <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
                 <div><dt className="text-muted-foreground">渠道</dt><dd className="mt-0.5">{preview.channels.map((item) => item === 'in_app' ? '站内信' : '邮件').join(' + ')}</dd></div>
                 <div><dt className="text-muted-foreground">预览有效期</dt><dd className="mt-0.5 font-mono">{fmtTime(preview.preview_expires_at)}</dd></div>
-                <div className="min-w-0 sm:col-span-2"><dt className="text-muted-foreground">快照校验</dt><dd className="mt-0.5"><Identifier>{preview.audience_snapshot_hash}</Identifier></dd></div>
+                <div className="min-w-0 sm:col-span-2"><dt className="text-muted-foreground">名单记录</dt><dd className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1"><span className="break-all font-mono">{preview.audience_snapshot_hash.slice(0, 12)}…</span><CopyIdButton value={preview.audience_snapshot_hash} /></dd></div>
               </dl>
               <div className="mt-3 flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" size="sm" disabled={approving} onClick={invalidate}>返回修改</Button><Button type="button" size="sm" disabled={previewBusy || approving} onClick={() => void approve()}><Megaphone className="size-4" />{approving ? '正在批准…' : scheduledAt ? '批准定时发送' : '批准并发送'}</Button></div>
             </section>
@@ -724,7 +751,7 @@ export default function CommunicationsTab() {
                 {selection.kind === 'bug' && bug && <>
                   <header className="border-b px-3 py-3">
                     <div className="flex min-w-0 flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-words text-sm font-semibold">{bug.title}</h3><Badge>{BUG_STATUS_LABELS[bug.status] || bug.status}</Badge></div>
-                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{bug.reporter_username || bug.username || '访客'}</span><span>{BUG_CATEGORY_LABELS[bug.category] || bug.category}</span><span>{BUG_IMPACT_LABELS[bug.impact] || bug.impact}</span><span className="break-all font-mono">{bug.public_id}</span></div>
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{bug.reporter_username || bug.username || '访客'}</span><span>{BUG_CATEGORY_LABELS[bug.category] || bug.category}</span><span>{BUG_IMPACT_LABELS[bug.impact] || bug.impact}</span><OverflowText className="max-w-40 font-mono" tooltip={bug.public_id} tooltipFocusable={false}>{bug.public_id}</OverflowText><CopyIdButton value={bug.public_id} /></div>
                     <div className="mt-3 rounded-lg border bg-muted/20 p-3"><h4 className="mb-2 text-xs font-semibold">安全诊断摘要</h4><DiagnosticSummary bug={bug} /></div>
                     {bug.attachments.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{bug.attachments.map((item) => <Button key={item.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(item.public_id, item.original_name)}><Paperclip className="size-3.5" /><OverflowText className="max-w-48" tooltip={item.original_name} tooltipFocusable={false}>{item.original_name}</OverflowText></Button>)}</div>}
                     {BUG_TRANSITIONS[bug.status]?.length > 0 && <div className="mt-3 grid min-w-0 gap-2 border-t pt-3 sm:grid-cols-[10rem_minmax(10rem,1fr)_auto]"><Select value={statusDraft} onValueChange={setStatusDraft}><SelectTrigger size="sm"><SelectValue placeholder="下一状态" /></SelectTrigger><SelectContent>{BUG_TRANSITIONS[bug.status].map((value) => <SelectItem key={value} value={value}>{BUG_STATUS_LABELS[value] || value}</SelectItem>)}</SelectContent></Select><Input value={statusNote} maxLength={2000} onChange={(event) => setStatusNote(event.target.value)} placeholder="处理说明（可选）" /><Button type="button" size="sm" disabled={busy || !statusDraft || (statusDraft === 'duplicate' && !duplicateOf.trim())} onClick={() => void updateBugStatus()}>更新状态</Button>{statusDraft === 'duplicate' && <Input className="sm:col-start-2" value={duplicateOf} onChange={(event) => setDuplicateOf(event.target.value)} placeholder="重复反馈的公开编号 bug_…" />}</div>}
@@ -736,7 +763,7 @@ export default function CommunicationsTab() {
                   <div className="flex min-w-0 flex-wrap items-start gap-2"><div className="min-w-0 flex-1"><h3 className="break-words text-sm font-semibold">{broadcast.subject}</h3><p className="mt-1 text-xs text-muted-foreground">{AUDIENCE_KIND_LABELS[broadcast.audience_kind] || broadcast.audience_kind} · {broadcast.audience_count} 人 · {broadcast.channels.map((item) => item === 'in_app' ? '站内信' : '邮件').join(' + ')}</p></div><BroadcastStatus state={broadcast.state} /></div>
                   <div className="mt-3 whitespace-pre-wrap break-words rounded-lg border bg-muted/20 p-3 text-sm leading-relaxed">{broadcast.body_text}</div>
                   <div className="mt-3 grid gap-3 xl:grid-cols-2"><section><h4 className="mb-2 text-xs font-semibold">受众处理</h4><CountGrid values={broadcast.recipients} /></section><section><h4 className="mb-2 text-xs font-semibold">投递状态</h4><CountGrid values={broadcast.deliveries} /></section></div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><CalendarClock className="size-4" /><span>计划 {broadcast.scheduled_at ? fmtTime(broadcast.scheduled_at) : '未批准'}</span><span>更新 {fmtTime(broadcast.updated_at)}</span><span className="break-all font-mono">{broadcast.public_id}</span></div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><CalendarClock className="size-4" /><span>计划 {broadcast.scheduled_at ? fmtTime(broadcast.scheduled_at) : '未批准'}</span><span>更新 {fmtTime(broadcast.updated_at)}</span><OverflowText className="max-w-40 font-mono" tooltip={broadcast.public_id} tooltipFocusable={false}>{broadcast.public_id}</OverflowText><CopyIdButton value={broadcast.public_id} /></div>
                   {(broadcast.failed_recipients.length > 0 || broadcast.failed_deliveries.length > 0) && <section className="mt-3 rounded-xl border border-destructive/25"><header className="flex flex-wrap items-center gap-2 border-b px-3 py-2"><AlertTriangle className="size-4 text-destructive" /><h4 className="text-sm font-semibold">失败项</h4><Badge variant="destructive">{broadcast.failed_recipients.length + broadcast.failed_deliveries.length}</Badge>{broadcast.state !== 'cancelled' && <Button type="button" size="sm" variant="outline" className="ml-auto" disabled={busy} onClick={() => void retryBroadcast()}><RotateCcw className="size-4" />重试失败项</Button>}</header><div className="divide-y">{[...broadcast.failed_recipients.map((item) => ({ key: item.public_id, user: item.username, error: item.last_error, attempts: `${item.attempt_count}/${item.max_attempts}`, channel: '受众处理' })), ...broadcast.failed_deliveries.map((item) => ({ key: item.public_id, user: item.username, error: item.last_error, attempts: `${item.attempt_count}/${item.max_attempts}`, channel: item.channel === 'email' ? '邮件' : '站内信' }))].map((item) => <div key={item.key} className="grid min-w-0 gap-1 px-3 py-2 text-xs sm:grid-cols-[minmax(7rem,1fr)_5rem_4rem_minmax(8rem,1fr)]"><span className="truncate">{item.user || '未关联用户'}</span><span className="text-muted-foreground">{item.channel}</span><span className="font-mono tabular-nums">{item.attempts}</span><span className="break-words font-mono text-destructive">{item.error || '未知错误'}</span></div>)}</div></section>}
                   {['draft', 'scheduled', 'running'].includes(broadcast.state) && <div className="mt-3 flex justify-end"><Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void cancelBroadcast()}><XCircle className="size-4" />取消未完成投递</Button></div>}
                 </div>}

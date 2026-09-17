@@ -16,6 +16,31 @@ class BinaryRejectError(ValueError):
     """文件不满足平台唯一的可执行格式契约。"""
 
 
+_PT_INTERP = 3
+
+
+def program_header_has_dynamic_interpreter(head: bytes) -> bool | None:
+    """ELF64 程序头内是否声明 PT_INTERP（动态链接器）。
+
+    源码构建产物要求静态链接：PT_INTERP 意味着运行时依赖宿主 ld.so，
+    构建镜像与运行镜像一旦演进漂移就会出现“预检通过、对局起不来”。
+    头部截断放不下完整程序头表时返回 None（无法判定，调用方跳过检查）。
+    """
+    if len(head) < 64 or head[:4] != b"\x7fELF":
+        return None
+    phoff = struct.unpack_from("<Q", head, 0x20)[0]
+    phentsize = struct.unpack_from("<H", head, 0x36)[0]
+    phnum = struct.unpack_from("<H", head, 0x38)[0]
+    if phentsize == 0 or phnum == 0:
+        return None
+    if phoff + phnum * phentsize > len(head):
+        return None
+    return any(
+        struct.unpack_from("<I", head, phoff + i * phentsize)[0] == _PT_INTERP
+        for i in range(phnum)
+    )
+
+
 @dataclass(frozen=True)
 class BinaryInfo:
     # ``pe``/``macho``/``unknown`` 仅用于给历史文件明确诊断，绝不表示可运行。

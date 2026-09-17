@@ -46,23 +46,6 @@ async function expectTouchTarget(locator: Locator, label: string) {
   expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
 }
 
-async function expectPseudoTouchTarget(locator: Locator, label: string) {
-  const size = await locator.evaluate((element) => {
-    const rect = element.getBoundingClientRect()
-    const pseudo = getComputedStyle(element, '::before')
-    const inset = (value: string) => {
-      const parsed = Number.parseFloat(value)
-      return Number.isFinite(parsed) ? parsed : 0
-    }
-    return {
-      width: rect.width - inset(pseudo.left) - inset(pseudo.right),
-      height: rect.height - inset(pseudo.top) - inset(pseudo.bottom),
-    }
-  })
-  expect(size.width, `${label} width`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
-  expect(size.height, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
-}
-
 test.beforeAll(async ({ request }) => {
   const response = await request.get('/api/health')
   expect(response.status(), await response.text()).toBe(200)
@@ -82,8 +65,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
         const menu = page.getByRole('button', { name: '菜单', exact: true })
         await expectTouchTarget(menu, 'mobile shell menu')
         await expectTouchTarget(page.getByRole('button', { name: '搜索', exact: true }), 'mobile shell search')
-        await expectTouchTarget(page.getByRole('link', { name: '账户', exact: true }), 'mobile shell account')
-        await expectTouchTarget(page.getByRole('button', { name: /^当前：/ }), 'mobile shell theme')
+        await expectTouchTarget(page.getByRole('button', { name: '切换主题' }), 'mobile shell theme')
 
         await menu.click()
         const mobileNavigation = page.getByRole('dialog')
@@ -92,7 +74,10 @@ for (const viewport of ADMIN_VIEWPORTS) {
         await expectTouchTarget(mobileNavigation.getByRole('button', { name: '搜索', exact: true }), 'mobile drawer search')
         await expectTouchTarget(mobileNavigation.getByRole('link', { name: '站内信', exact: true }), 'mobile drawer messages')
         await expectTouchTarget(mobileNavigation.getByRole('button', { name: '通知', exact: true }), 'mobile drawer notifications')
-        await expectTouchTarget(mobileNavigation.getByRole('button', { name: /^当前：/ }), 'mobile drawer theme')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: '切换主题' }), 'mobile drawer theme')
+        // 账户入口收敛进抽屉：顶栏不再单列账户按钮。
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '个人主页', exact: true }), 'mobile drawer profile')
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '账号设置', exact: true }), 'mobile drawer settings')
         await mobileNavigation.getByRole('button', { name: '关闭', exact: true }).click()
         await expect(mobileNavigation).toHaveCount(0)
 
@@ -106,7 +91,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     expect(runtimeHealth.status(), await runtimeHealth.text()).toBe(200)
     const runtimeCapacity = (await runtimeHealth.json() as { max_concurrent: number }).max_concurrent
     await expect(page.getByTestId('execution-queue-panel')).toContainText(
-      `全站当前对局槽上限 ${runtimeCapacity} 场`,
+      `同时最多 ${runtimeCapacity} 场对局`,
     )
     await expectNoRootOverflow(page, 'dashboard')
 
@@ -706,7 +691,8 @@ for (const viewport of MAINTENANCE_VIEWPORTS) {
     await expect(toggle).toBeChecked()
     if (viewport.name === 'mobile') {
       await expectTouchTarget(prepare, 'mobile prepare maintenance')
-      await expectPseudoTouchTarget(toggle, 'mobile auto-match switch')
+      // ≥44px 触控目标由开关外层 label 容器提供（不再用负 inset 伪元素扩区）。
+      await expectTouchTarget(page.getByTestId('auto-match-switch-target'), 'mobile auto-match switch target')
     }
     await expectNoRootOverflow(page, `maintenance ready action ${viewport.name}`)
 
@@ -1232,12 +1218,12 @@ test('contest detail changes its primary content and actions with lifecycle stag
   await expect(page.getByRole('tab', { name: /正式名次/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('cell', { name: 'winner_bot', exact: true })).toBeVisible()
   await expect(page.getByText('冠军', { exact: true })).toBeVisible()
-  await expect(page.getByText(/对手分 Cut1 4/)).toBeVisible()
-  await expect(page.getByText(/对手分 Cut1 2/)).toBeVisible()
+  await expect(page.getByText(/对手分（去掉最高） 4/).first()).toBeVisible()
+  await expect(page.getByText(/对手分（去掉最高） 2/).first()).toBeVisible()
   const preliminaryRow = page.getByRole('row').filter({ hasText: 'preliminary_bot' })
   await expect(preliminaryRow.getByText('瑞士轮', { exact: true })).toBeVisible()
   await expect(preliminaryRow.getByText('瑞士轮内名次已确定', { exact: true })).toBeVisible()
-  await expect(preliminaryRow.getByText(/对手分 Cut1/)).toHaveCount(0)
+  await expect(preliminaryRow.getByText(/对手分（去掉最高）/)).toHaveCount(0)
   await expect(page.getByText(/时间配置异常：报名截止时间晚于比赛开始时间/)).toBeVisible()
   await expect(page.getByRole('button', { name: /开放报名|截止报名|立即开赛|强制结束赛事/ })).toHaveCount(0)
   const contestTabs = page.getByRole('tablist').first()

@@ -71,7 +71,9 @@ export default function NotificationBell({ className }: { className?: string }) 
         >
           <Bell className="size-[1.15rem]" />
           {unread > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
+            // 徽标整体外挂在按钮角落（-top-1 -right-1），描边把它从铃铛图形上隔开；
+            // app-shell 工具行 gap-1（4px）正好容纳外扩，不侵入相邻按钮。
+            <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive px-1 text-xs font-bold leading-none text-destructive-foreground ring-2 ring-background">
               {unread > 99 ? '99+' : unread}
             </span>
           )}
@@ -103,7 +105,7 @@ export default function NotificationBell({ className }: { className?: string }) 
                     <span className="font-medium text-foreground">{n.title}</span>
                   </div>
                   {n.body && <OverflowText lines={2} tooltip={n.body} className="mt-0.5 block text-xs text-muted-foreground">{n.body}</OverflowText>}
-                  <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  <p className="mt-0.5 text-xs text-muted-foreground">
                     {fmtTime(n.created_at)}
                   </p>
                 </div>

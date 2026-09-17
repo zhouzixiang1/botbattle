@@ -256,6 +256,21 @@ def create_app(
             raise SourceBuildError(
                 "build_unavailable", "当前实例未配置 Docker 构建通道"
             )
+        # 构建容器（2C/2G）不占 match slot、不进 claim 准入；为守住
+        # “内存维度严格不超卖”，启动前按与 claim 同口径的占用视图做
+        # 准入检查。这是 advisory 闸：与并发 claim 之间仍有小窗口，
+        # 结果是保守拒绝（503 重试）而不是超卖。
+        from bzplat.backend.runtime.limits import (
+            effective_host_resource_budget,
+        )
+
+        budget_mb = effective_host_resource_budget().memory_mb
+        used_mb = store.executions.execution_memory_in_use_mb()
+        if used_mb + BOT_BUILD_PROFILE.memory_mb > budget_mb:
+            raise SourceBuildError(
+                "build_busy",
+                "平台内存资源紧张，源码编译通道繁忙，请稍后重试",
+            )
         command = build_command(recipe)
         token = _uuid.uuid4().hex
         try:
@@ -291,9 +306,11 @@ def create_app(
             raise
         except (DockerSupervisorError, RuntimeError) as exc:
             # PlatformRunnerError / DockerLaunchInvariantError 均 RuntimeError 系：
-            # 统一转用户可读错误，不让源码上传产生 500。
+            # 统一转用户可读错误，不让源码上传产生 500。固定文案——
+            # exc 的 str 可能携带 docker stderr 尾部或内部路径。
+            logger.warning("source build sandbox error: %s", exc)
             raise SourceBuildError(
-                "build_unavailable", f"构建沙箱暂不可用：{exc}"
+                "build_unavailable", "构建沙箱暂不可用，请稍后重试"
             ) from exc
         if exit_code != 0:
             raise SourceBuildError(
@@ -307,12 +324,8 @@ def create_app(
         local_ai_hub=local_ai_service.hub,
     )
     match_mounts_dir = Path(db_path).expanduser().resolve().parent / "match_mounts"
-    if match_mounts_dir.is_dir():
-        # 对局快照属进程生命周期；启动时不存在合法存活的挂载，整体回收崩溃残留。
-        import shutil as _shutil
-
-        for _stale in match_mounts_dir.iterdir():
-            _shutil.rmtree(_stale, ignore_errors=True)
+    # QA 隔离断言先于任何目录副作用：误把 QA 实例指到主运行目录时，
+    # 不能先清掉生产对局快照再报错。
     if qa_instance:
         match_mounts_dir = assert_qa_runtime_path_isolated(
             match_mounts_dir,
@@ -397,6 +410,16 @@ def create_app(
         # untracked running rows be marked orphaned.
         dispatcher_start = await execution_dispatcher.start()
         logger.info("execution dispatcher startup: %s", dispatcher_start["outcome"])
+        # 对局快照属进程生命周期；启动时不存在合法存活的挂载，整体回收
+        # 崩溃残留。必须在 dispatcher 单例锁成功获取之后执行——恢复路径
+        # 会把 running attempt 收敛为 interrupted 并以新 match_id 重排，
+        # 因此这里 wipe 不会切掉任何存活对局的 /mnt/data；反之放在
+        # create_app 阶段（锁之前）会被误启的第二实例清掉生产快照。
+        if match_mounts_dir.is_dir():
+            import shutil as _shutil
+
+            for _stale in match_mounts_dir.iterdir():
+                _shutil.rmtree(_stale, ignore_errors=True)
         # Legacy orphan recovery, rating repair and contest reconciliation are
         # owned by ExecutionDispatcher so startup and delayed pause -> resume
         # cannot drift into different recovery pipelines.

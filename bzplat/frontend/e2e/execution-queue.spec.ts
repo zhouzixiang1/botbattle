@@ -438,6 +438,7 @@ test('two online local Bots create one unrated practice request without horizont
   const challengeForm = page.getByTestId('challenge-form')
   await expect(challengeForm).toBeVisible()
   for (const [seat, agentName] of [[1, /Local Alpha/], [2, /Local Beta/]] as const) {
+    await page.getByTestId(`challenge-advanced-${seat - 1}`).locator('summary').click()
     await page.getByLabel(`玩家 ${seat}运行位置`).click()
     await page.getByRole('option', { name: '本地 Bot（我的电脑）', exact: true }).click()
     await page.getByLabel(`玩家 ${seat}本地 Bot 连接`).click()
@@ -449,7 +450,7 @@ test('two online local Bots create one unrated practice request without horizont
   await expectMobileTouchTargets(challengeForm, 'mobile Challenge form')
   await expect(page.getByText('本地 Bot 练习局，不计平台排行榜。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
-  await expect(page.getByTestId('execution-request-card')).toContainText('本地 Bot 练习，不计平台排行榜')
+  await expect(page.getByTestId('execution-request-card')).toContainText('本地 Bot 练习 · 不计平台排行榜')
   await expect(page.getByRole('heading', { name: '执行请求已受理' })).toBeVisible()
   await expect(page.getByRole('status')).toHaveText('已取消')
   expect(posted).toMatchObject({
@@ -526,6 +527,7 @@ test('local Bot token is shown once and the saved agent list never exposes it', 
   await page.goto('/#/my-bots')
   const myBotsPage = page.locator('[data-page-layout="account-my-bots"]')
   const region = page.getByTestId('local-bot-connections')
+  await page.getByTestId('local-bot-connections-toggle').click()
   await expect(region).toBeVisible()
   await expect(region.getByRole('link', { name: '接入说明', exact: true })).toHaveAttribute('href', '#/wiki?slug=local-ai')
   await expect(region.getByText('对局中显示为', { exact: true })).toBeVisible()
@@ -823,6 +825,7 @@ test('ordinary user can move the owned Bot to either game position without losin
 
   // Make the two sides asymmetric before moving them: the owned side is a
   // remote-local connection, while the opponent keeps a pinned platform version.
+  await page.getByTestId('challenge-advanced-0').locator('summary').click()
   await page.getByLabel('玩家 1运行位置').click()
   await page.getByRole('option', { name: '本地 Bot（我的电脑）', exact: true }).click()
   await page.getByLabel('玩家 1本地 Bot 连接').click()
@@ -854,6 +857,7 @@ test('ordinary user can move the owned Bot to either game position without losin
 
   await page.getByLabel('玩家 1版本').click()
   await page.getByRole('option', { name: /v2 对手 v2/ }).click()
+  await page.getByTestId('challenge-advanced-1').locator('summary').click()
   await page.getByLabel('玩家 2运行位置').click()
   await page.getByRole('option', { name: '本地 Bot（我的电脑）', exact: true }).click()
   await page.getByLabel('玩家 2本地 Bot 连接').click()
@@ -1364,11 +1368,12 @@ test('legacy queue response stays neutral until the idle-only scheduler contract
   }))
 
   await page.goto('/#/leaderboard')
+  await page.getByTestId('execution-queue-summary').click()
   const panel = page.getByTestId('execution-queue-panel')
   const status = panel.getByTestId('auto-scheduler-status')
   await expect(status).toContainText('闲时排位：策略同步中')
   await expect(status).toContainText('当前服务尚未返回闲时排位调度状态')
-  await expect(panel).toContainText('闲时排位策略状态正在同步，以当前队列为准')
+  await expect(panel).toContainText('队列状态刷新中')
   await expect(panel).not.toContainText('用户挑战、人机和赛事始终优先')
   await expect(status).not.toContainText('最多 1 场')
   await expect(status).not.toContainText('安全让路')
@@ -1423,10 +1428,11 @@ test('auto-only ready queue keeps candidates outside foreground numbering', asyn
   }))
 
   await page.goto('/#/leaderboard')
+  await page.getByTestId('execution-queue-summary').click()
   const panel = page.getByTestId('execution-queue-panel')
   await expect(panel.getByTestId('auto-scheduler-status')).toContainText('闲时排位：闲时就绪')
   await expect(panel.getByTestId('auto-scheduler-status')).toContainText(
-    '闲时门禁已满足，仍等待候选、评分与资源安全门',
+    '空闲时段自动开始排位',
   )
   const autoRow = panel.locator('li:visible').filter({ hasText: '等待平台闲时' })
   await expect(autoRow).toContainText('等待平台闲时，不占前台顺位')
@@ -1470,6 +1476,7 @@ test('public queue keeps stale data private and recovers from slow/error/offline
   })
 
   await page.goto('/#/leaderboard')
+  await page.getByTestId('execution-queue-summary').click()
   const panel = page.getByTestId('execution-queue-panel')
   await expect(panel).toBeVisible()
   const details = panel.locator('details')
@@ -1487,7 +1494,7 @@ test('public queue keeps stale data private and recovers from slow/error/offline
     '#/match/auto-yielding-match',
   )
   await expect(panel).toContainText('自动排位')
-  await expect(panel).toContainText('同一所有者，不计平台排行榜')
+  await expect(panel).toContainText('同所有者调试 · 不计平台排行榜')
   await expect(panel.getByTestId('auto-scheduler-status')).toContainText('闲时排位：安全收口中')
   await expect(panel.getByTestId('auto-scheduler-status')).toContainText('自动排位为前台任务让路')
   await expect(panel.getByTestId('auto-scheduler-status')).toContainText('最多 1 场、1 个候选')

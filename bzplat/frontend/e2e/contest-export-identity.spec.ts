@@ -342,8 +342,9 @@ async function createFinishedPublicResultsFixture(
       officialResultsReady: body.contest.official_results_ready,
     }
   }, {
-    timeout: 60_000,
-    intervals: [250, 500, 1_000],
+    // 真实 holdem 计分场需要数分钟完成，60s 固定窗口会因队列竞争偶发超时。
+    timeout: 480_000,
+    intervals: [1_000, 2_000, 5_000],
   }).toEqual({ status: 'finished', officialResultsReady: 1 })
 
   // A finished contest is an immutable audit record by product contract.  The
@@ -683,6 +684,7 @@ test('organizer downloads stable identity exports while non-organizers and non-i
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"results":[]}' })
     })
     await organizer.page.reload()
+    await organizer.page.getByRole('button', { name: '规则说明' }).click()
     await expect(organizer.page.getByText(/公开成绩 CSV 永不包含报名时实名资料/)).toBeVisible()
     const publicResults = organizer.page.getByRole('link', { name: '导出公开成绩 CSV', exact: true })
     await expect(publicResults).toHaveAttribute(
@@ -935,7 +937,7 @@ test('public official results download stays public-only and works in the real b
   baseURL,
   browserName,
 }) => {
-  test.setTimeout(90_000)
+  test.setTimeout(600_000)
   expect(baseURL).toBeTruthy()
   const admin = await loggedInChild(browser, baseURL!, ADMIN)
   let contestId: number | null = null

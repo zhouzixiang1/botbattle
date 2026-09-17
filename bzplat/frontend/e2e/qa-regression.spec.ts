@@ -611,9 +611,9 @@ for (const viewport of VIEWPORTS) {
     const routes = [
       { path: '/', heading: 'Bot 对战', evidence: '上传 Bot，选择游戏和对手，开一场' },
       { path: '/leaderboard', heading: '排行榜', evidence: '每款游戏独立使用 Glicko-2 数值评分' },
-      { path: '/history', heading: '对局历史', evidence: '查看双方用户、Bot 或真人身份以及对局性质' },
+      { path: '/history', heading: '对局历史', evidence: '回看已结束的对局，或进入正在进行的直播' },
       { path: '/contests', heading: '锦标赛', evidence: '浏览报名、排期、对阵与正式结果' },
-      { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },
+      { path: '/wiki', heading: '文档', evidence: '协议规范、Bot 开发指南' },
       { path: '/judges', heading: '裁判源码', evidence: '每款游戏的权威裁判以明文公开' },
       { path: '/challenge', heading: '发起挑战', evidence: '请先' },
       { path: '/my-bots', heading: '我的 Bot', evidence: '请先' },
@@ -666,6 +666,7 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   const monitor = monitorBrowser(page)
   await page.goto('/#/register')
   const phone = page.locator('#reg-phone')
+  await page.getByRole('button', { name: '实名信息（选填）' }).click()
   await phone.fill('abc')
   expect(await phone.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(false)
   await phone.fill('13800138000')
@@ -674,7 +675,7 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
   await expect(page.locator('main [data-slot="summary-strip"]')).toHaveCount(0)
-  await expect(page.locator('main')).toContainText('最大 256 MiB')
+  await expect(page.locator('main')).toContainText('最大 256 MB')
   const name = page.locator('#upload-name')
   for (const invalid of ['a', '1bot', 'a-b']) {
     await name.fill(invalid)
@@ -1545,11 +1546,11 @@ async function chooseBot(
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   if (mineOnly) {
-    await expect(dialog.getByRole('button', { name: '全部 Bot', exact: true })).toHaveCount(0)
+    await expect(dialog.getByRole('tab', { name: '全部 Bot', exact: true })).toHaveCount(0)
   } else if (viaUser) {
     // 公开 Bot 列表已跨分页，「全部 Bot」只过滤当前页，按名搜索不再可靠。
     // 跨用户夹具固定走「按用户搜索」→ owner 过滤列表，不随共享库数据量漂移。
-    await dialog.getByRole('button', { name: '按用户搜索', exact: true }).click()
+    await dialog.getByRole('tab', { name: '按用户搜索', exact: true }).click()
     await dialog.getByPlaceholder('搜索用户名…').fill(viaUser)
     await dialog
       .locator('li')
@@ -1561,7 +1562,7 @@ async function chooseBot(
     return
   } else {
     // 自博弈：owner 过滤的「我的 Bot」列表同样不受公开分页影响。
-    await dialog.getByRole('button', { name: '我的 Bot（自博弈）', exact: true }).click()
+    await dialog.getByRole('tab', { name: '我的 Bot', exact: true }).click()
   }
   const input = dialog.getByPlaceholder(
     mineOnly ? '搜索我的 Bot 名称…' : '搜索 Bot 名称…',
@@ -2093,7 +2094,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   await expect(overview).toContainText('本手底池')
   await expect(overview).toContainText('1,000')
   await expect(overview).toContainText('最近动作')
-  await expect(overview).toContainText('admin（@zzx） · 弃牌 · 座位 1')
+  await expect(overview).toContainText('admin（@zzx） · 弃牌')
   await expect(overview).toContainText('胜手 admin（@zzx） 29 · 测试Bot01（@tester01） 40 · 平分 1')
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('19,500')
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('-2,850')
@@ -2254,12 +2255,12 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(page.getByText('第 2/2 场 · 第 70/70 手', { exact: true })).toBeVisible()
   await expect(overview).toContainText('第 2/2 场 · 当前手 70 / 70')
   await expect(overview).toContainText('70/70 手')
-  await expect(overview).toContainText('physical_alpha（@alpha） · 弃牌 · 座位 1')
+  await expect(overview).toContainText('physical_alpha（@alpha） · 弃牌')
   await expect(overview).toContainText('胜手 physical_alpha（@alpha） 0 · physical_beta（@beta） 70')
   await expect(overview.getByTestId('holdem-seat-state-1')).toContainText('本场净胜-7,000')
   await expect(overview.getByTestId('holdem-seat-state-2')).toContainText('本场净胜+7,000')
   const combined = overview.getByTestId('holdem-duplicate-combined-summary')
-  await expect(combined).toContainText('复式交锋组合计 · 辅助信息')
+  await expect(combined).toContainText('主客两场合计 · 辅助信息')
   await expect(combined).toContainText('总进度 140/140 手')
   await expect(combined).toContainText('净变化 physical_alpha（@alpha） +0 · physical_beta（@beta） +0')
   await expect(combined).toContainText('胜手 physical_alpha（@alpha） 70 · physical_beta（@beta） 70')
@@ -2267,7 +2268,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(overview.getByRole('progressbar', { name: '本场已完成手数' })).toHaveAttribute('aria-valuenow', '70')
   await expect(overview.getByLabel('第 2 场第 70 手，physical_alpha（@alpha） -100')).toBeVisible()
 
-  await expect(page.locator('main')).toContainText('第 2 场 · physical_alpha（@alpha） · 弃牌（座位 1）')
+  await expect(page.locator('main')).toContainText('第 2 场 · physical_alpha（@alpha） · 弃牌')
   await expect(page.locator('main')).toContainText('第 2 场 · 轮到 physical_beta（@beta）')
   await expect(page.locator('main')).toContainText('结束 · 赛果已结算 · 正常结束')
   await expect(page.locator('main')).not.toContainText('结束 · 平局')
@@ -2354,8 +2355,8 @@ test('Holdem duplicate technical terminal stays a one-game decision without a gr
   await expect(resultCard.locator('[data-match-participant][data-participant-state="winner"]')).toHaveCount(0)
   await expect(resultCard.locator('[data-match-participant][data-participant-state="loser"]')).toHaveCount(0)
   await expect(page.getByRole('alert')).toContainText('Bot 技术判负')
-  await expect(page.getByRole('alert')).toContainText('crashed_alpha（@alpha） · 座位 1 发生技术故障。')
-  await expect(page.getByRole('alert')).not.toContainText('healthy_beta（@beta） · 座位 2 获胜')
+  await expect(page.getByRole('alert')).toContainText('crashed_alpha（@alpha） 发生技术故障。')
+  await expect(page.getByRole('alert')).not.toContainText('healthy_beta（@beta） 获胜')
 
   const overview = page.getByTestId('holdem-position-overview')
   await expect(overview).toContainText('第 2/2 场 · 未完成任何一手 · 本场共 70 手')
@@ -2471,7 +2472,7 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
   const matchup = page.getByTestId('human-matchup')
   await expect(overview).toContainText('当前手 70 / 70')
   await expect(overview).toContainText('河牌')
-  await expect(overview).toContainText('tester01 · 加注至 100 · 座位 2')
+  await expect(overview).toContainText('tester01 · 加注至 100')
   await expect(overview).not.toContainText(/6h|5h|Kh|Ts/)
   await expect(matchup).toContainText('admin')
   await expect(matchup).toContainText('tester01')
@@ -3988,7 +3989,7 @@ test('Pencil human canvas exposes legal edges to keyboard and screen-reader user
   await expect(canvas).toHaveAttribute('tabindex', '0')
   await canvas.focus()
   await canvas.press('ArrowRight')
-  await expect(canvas).toHaveAttribute('aria-label', /当前位置 \(0,1\)/)
+  await expect(canvas).toHaveAttribute('aria-label', /已选位置 \(0,1\)/)
   await canvas.press('Enter')
   await expect.poll(() => sentActions.length).toBe(1)
   expect(sentActions[0]).toEqual({ response: { x: 0, y: 1 } })
@@ -4284,7 +4285,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
     await page.setViewportSize(viewport)
     const seatOneScore = page.getByTestId('pencil-seat-score-1')
     await expect(seatOneScore).toContainText('admin_pencil')
-    await expect(seatOneScore).toContainText('先手 · 红 · 座位 1')
+    await expect(seatOneScore).toContainText('先手 · 红')
     await expect(seatOneScore).toContainText('4')
     await expect(timeline.getByRole('button', { name: '展开动作', exact: true })).toBeVisible()
     const bounds = await canvas.boundingBox()
@@ -4658,11 +4659,11 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   const incident = page.getByRole('alert').filter({ hasText: 'Bot 技术判负' })
-  await expect(incident).toContainText('admin（@zzx） · 座位 1')
-  await expect(incident).toContainText('zxx02（@zhouzixiang） · 座位 2 获胜')
-  await expect(incident).toContainText('missing_response')
+  await expect(incident).toContainText('admin（@zzx）')
+  await expect(incident).toContainText('zxx02（@zhouzixiang） 获胜')
+  await expect(incident).toContainText('Bot 响应协议错误')
   await expect(incident).toContainText('第 1 次决策')
-  await expect(incident).toContainText('Bot 响应缺少必填 response 字段')
+  await expect(incident).not.toContainText('Bot 响应缺少必填 response 字段')
   await expect(page.locator('main')).not.toContainText('落后')
   await expect(page.getByText(/\/70 手/)).toHaveCount(0)
   await expect(page.getByRole('button', { name: /回放|重播|跟播/ })).toHaveCount(0)
@@ -4824,7 +4825,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await openBotVersionManager(page, botRow, primaryBot.name)
   const manager = page.getByRole('dialog', { name: `版本管理 ${primaryBot.name}`, exact: true })
   await expect(manager.getByText('版本历史', { exact: true })).toBeVisible()
-  await expect(manager.getByRole('combobox').filter({ hasText: 'Traditional（默认）' })).toBeVisible()
+  await expect(manager.getByRole('combobox').filter({ hasText: '标准对局（默认）' })).toBeVisible()
   await expect(manager.getByText(/每个决策点重启进程并发送完整历史信封/)).toBeVisible()
   await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
   releaseSlow()
@@ -4913,12 +4914,12 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await manager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await currentUploadObserved
-  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端检查中…)$/ })).toBeDisabled()
   await expect(manager.locator('[data-upload-stage]')).toHaveAttribute('data-upload-stage', /^(?:uploading|preflight)$/)
 
   releaseStaleUpload()
   await expect(manager).not.toContainText('stale A upload failure')
-  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端检查中…)$/ })).toBeDisabled()
 
   const currentSuccessResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4936,7 +4937,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
 
   // A real LongRunning upload must pass the backend's strict first-envelope +
   // KEEP_RUNNING preflight; this is intentionally not mocked.
-  await manager.getByRole('combobox').filter({ hasText: 'Traditional（默认）' }).click()
+  await manager.getByRole('combobox').filter({ hasText: '标准对局（默认）' }).click()
   await page.getByRole('option', { name: 'LongRunning（严格长驻）', exact: true }).click()
   await expect(manager.getByText(/首回合响应后必须输出 KEEP_RUNNING 握手/)).toBeVisible()
   await manager.locator('#ver-note').fill('Playwright rollback regression')
@@ -5021,7 +5022,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await nextUploadObserved
-  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端检查中…)$/ })).toBeDisabled()
   await expect(staleManager.locator('[data-upload-stage]')).toHaveAttribute('data-upload-stage', /^(?:uploading|preflight)$/)
 
   const staleRollbackResponse = page.waitForResponse((response) => (
@@ -5031,7 +5032,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   releaseStaleRollback()
   expect((await staleRollbackResponse).status()).toBe(500)
   await expect(staleManager).not.toContainText('stale B rollback failure')
-  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端检查中…)$/ })).toBeDisabled()
 
   const nextUploadResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -5318,8 +5319,8 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
   })
 
   await page.goto(`/#/match/${matchId}`)
-  await expect(page.getByText('不支持的游戏（future_chess）').first()).toBeVisible()
-  await expect(page.getByText('回放不可用：不支持的游戏（future_chess）')).toBeVisible()
+  await expect(page.getByText('暂不支持观看该对局').first()).toBeVisible()
+  await expect(page.getByText('暂不支持观看该对局')).toHaveCount(2)
   await expect(page.getByRole('img', { name: /德州扑克对局画面/ })).toHaveCount(0)
   expect(replayRequests).toBe(0)
   await monitor.expectClean(expectedDetailCancellations())

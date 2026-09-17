@@ -6,7 +6,7 @@ import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/l
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -202,6 +202,8 @@ export default function Contests() {
   const [listLoading, setListLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
+  // 纯展示层折叠：创建面板的分组/来源赛事/逐阶段公平性/实名等默认收起。
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const creatingRef = useRef(false)
   const currentListQueryRef = useRef<ContestListQuery>({ gameId: '', archivedOnly: false, page: 1 })
   const listRequestSeqRef = useRef(0)
@@ -551,6 +553,7 @@ export default function Contests() {
       setSourceContestsHasMore(false)
       await load(currentListQueryRef.current)
       setShowCreate(false)
+      setShowAdvanced(false)
       toast.success('赛事创建成功')
     } catch (err) {
       setFormError(errMsg(err))
@@ -612,7 +615,7 @@ export default function Contests() {
             className="min-h-11 sm:min-h-[var(--control-height)]"
             aria-expanded={showCreate}
             aria-controls="contest-create-panel"
-            onClick={() => { setShowCreate((value) => !value); setFormError('') }}
+            onClick={() => { setShowCreate((value) => { if (value) setShowAdvanced(false); return !value }); setFormError('') }}
           >
             {showCreate ? <X aria-hidden="true" className="size-4" /> : <Plus aria-hidden="true" className="size-4" />}
             {showCreate ? '收起创建区' : '创建赛事'}
@@ -733,6 +736,21 @@ export default function Contests() {
                 </div>
               </fieldset>
             )}
+            <div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="min-h-11 px-2 text-xs sm:min-h-7"
+                aria-expanded={showAdvanced}
+                aria-controls="contest-advanced-settings"
+                onClick={() => setShowAdvanced((value) => !value)}
+              >
+                {showAdvanced ? '收起高级设置' : '高级设置（分组、来源赛事、逐阶段公平性、实名报名）'}
+              </Button>
+            </div>
+            {showAdvanced && (
+            <div id="contest-advanced-settings" className="min-w-0 space-y-3">
             {gamesPerPairConfig && (
               <fieldset className="grid min-w-0 gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-[minmax(12rem,15rem)_minmax(0,1fr)] sm:items-end">
                 <legend className="sr-only">
@@ -804,7 +822,7 @@ export default function Contests() {
                         className="min-h-11 sm:min-h-[var(--control-height)]"
                       />
                       <p id={`contest-${config.stage_key}-group-count-help`} className="text-xs leading-relaxed text-muted-foreground">
-                        发布时至少 {config.min} 组且每组至少 2 人；不满足时拒绝发布，不会静默缩减。抽签只执行一次，组间人数差不超过 1。
+                        至少 {config.min} 组，每组至少 2 人；发布时分组固定，各组人数相差不超过 1。
                       </p>
                     </div>
                   )
@@ -828,7 +846,7 @@ export default function Contests() {
                       aria-describedby="contest-source-search-help"
                     />
                     <p id="contest-source-search-help" className="text-xs leading-relaxed text-muted-foreground">
-                      每次最多返回 {SOURCE_CANDIDATE_LIMIT} 项；结果过多时请缩小关键词。
+                      找不到时请换更精确的标题，或直接输入赛事编号。
                     </p>
                     <Label>{requiresSourceContest ? '保护种子来源模拟赛' : '关联赛事（可选）'}</Label>
                     <Select
@@ -880,11 +898,13 @@ export default function Contests() {
                 )}
               </div>
             )}
-            <div className="grid min-w-0 items-end gap-3 lg:grid-cols-[minmax(15rem,0.8fr)_minmax(0,2fr)_auto]">
               <div className="flex min-w-0 min-h-[var(--control-height)] items-start gap-2 rounded-lg border px-3 py-2">
                 <Switch id="contest-realname" checked={requireRealName} onCheckedChange={setRequireRealName} />
                 <div className="min-w-0"><Label htmlFor="contest-realname" className="cursor-pointer">要求实名报名</Label><p className="mt-0.5 text-xs text-muted-foreground">报名时核验完整实名资料。</p></div>
               </div>
+            </div>
+            )}
+            <div className="grid min-w-0 items-end gap-3 lg:grid-cols-[minmax(0,2fr)_auto]">
               <fieldset className="min-w-0">
                 <legend className="mb-1.5 text-xs font-medium text-muted-foreground">时间编排</legend>
                 <div className="grid min-w-0 gap-2 sm:grid-cols-3">
@@ -908,7 +928,7 @@ export default function Contests() {
 
       <DataRegion
         title="赛事列表"
-        description={`按创建时间排列真实赛事；每页 ${perPage} 项。`}
+        description="按创建时间排列，新的在前。"
       >
             {listError ? (
               <ErrorMsg msg={listError} className="px-4 py-6" />
@@ -933,7 +953,7 @@ export default function Contests() {
                           <StatusBadge status={contest.status} />
                           {contest.archived_at && <Badge variant="secondary">已归档</Badge>}
                           <span className="flex min-w-0 items-center gap-x-2 text-xs text-muted-foreground">
-                            {templateName ? <OverflowText className="max-w-40" tooltip={templateName} tooltipFocusable={false}>{templateName}</OverflowText> : <Identifier>{contest.template_id || '—'}</Identifier>}
+                            {templateName ? <OverflowText className="max-w-40" tooltip={templateName} tooltipFocusable={false}>{templateName}</OverflowText> : <span className="min-w-0 shrink-0">自定义赛制</span>}
                             <span className="shrink-0">{gameLabel(contest.game_id)}</span>
                             <span className="min-w-0">{matchConfigSummary(contest)}</span>
                           </span>

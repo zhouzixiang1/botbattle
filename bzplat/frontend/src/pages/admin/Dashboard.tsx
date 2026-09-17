@@ -12,6 +12,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { useConfirm } from '@/hooks/use-confirm'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
+import { roleLabel } from '@/lib/labels'
 import { fmtTime } from '@/lib/format'
 import { OverflowText } from '@/components/ui/overflow-text'
 
@@ -34,12 +35,6 @@ interface Stats {
 
 interface RuntimeDiagnostics {
   queue: ExecutionQueueSnapshot
-}
-
-const ROLE_LABEL: Record<string, string> = {
-  user: '普通用户',
-  organizer: '组织者',
-  admin: '管理员',
 }
 
 type QueueAction = 'auto' | 'prepare-maintenance' | 'resume' | 'recover' | null
@@ -267,6 +262,7 @@ export default function Dashboard() {
         lastUpdatedAt={lastUpdatedAt}
         onRetry={refreshCurrent}
         maxQueued={4}
+        hidePausedBanner
         compactOnMobile
         className="mt-3 [&_li]:py-1.5"
         action={queue ? (
@@ -297,7 +293,7 @@ export default function Dashboard() {
                     <OverflowText tooltipFocusable={false}>{u.username}</OverflowText>
                   </Link>
                   <span className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:justify-end sm:text-right">
-                    <span className="break-words [overflow-wrap:anywhere]">{ROLE_LABEL[u.role] || u.role}</span>
+                    <span className="break-words [overflow-wrap:anywhere]">{roleLabel(u.role)}</span>
                     <span className="break-words [overflow-wrap:anywhere]">{fmtTime(u.created_at)}</span>
                   </span>
                 </li>
@@ -323,43 +319,51 @@ export default function Dashboard() {
 }
 
 /**
- * 总览指标条：数值与副注同行（页面级紧凑布局，替代 MetricCard 三行堆叠），
- * 保持与 MetricCard 相同的语义 token 与溢出保护。
+ * 总览指标：对局/异常/锦标赛/用户四格为主（数值大、副注拆行），
+ * Bot 与在线会话降级为下方一行次要摘要，避免六个同级数字没有重点。
  */
 function OverviewMetrics({ stats, abnormal }: { stats: Stats; abnormal: number }) {
   const items = [
-    { label: '用户', value: stats.users, hint: `活跃 ${stats.users_active}`, danger: false },
-    { label: 'Bot', value: stats.bots, hint: `活跃 ${stats.bots_active}`, danger: false },
-    { label: '对局', value: stats.matches, hint: `完成 ${stats.matches_completed}`, danger: false },
+    {
+      label: '对局',
+      value: stats.matches,
+      hints: [`完成 ${stats.matches_completed}`, `运行 ${stats.matches_running}`, `排队 ${stats.matches_pending}`],
+      danger: false,
+    },
     {
       label: '异常对局',
       value: abnormal,
-      hint: `已中止 ${stats.matches_aborted} · 运行中 ${stats.matches_running}`,
+      hints: [`已中止 ${stats.matches_aborted}`],
       danger: abnormal > 0,
     },
-    { label: '比赛', value: stats.contests, hint: `进行中 ${stats.contests_running}`, danger: false },
-    { label: '在线会话', value: stats.active_sessions, hint: '', danger: false },
+    { label: '锦标赛', value: stats.contests, hints: [`进行中 ${stats.contests_running}`], danger: false },
+    { label: '用户', value: stats.users, hints: [`活跃 ${stats.users_active}`], danger: false },
   ]
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-      {items.map((item) => (
-        <div key={item.label} className="min-w-0 rounded-lg border bg-card px-2.5 py-2">
-          <OverflowText className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
-            {item.label}
-          </OverflowText>
-          <div className="mt-0.5 flex min-w-0 items-baseline gap-1.5">
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        {items.map((item) => (
+          <div key={item.label} className="min-w-0 rounded-lg border bg-card px-3 py-2.5">
+            <div className="text-xs font-medium text-muted-foreground">{item.label}</div>
             <OverflowText
-              className={`shrink-0 font-mono text-base font-bold tabular-nums ${item.danger ? 'text-destructive' : 'text-foreground'}`}
+              className={`mt-1 block shrink-0 font-mono text-xl font-bold tabular-nums ${item.danger ? 'text-destructive' : 'text-foreground'}`}
               tooltip={String(item.value)}
             >
               {item.value}
             </OverflowText>
-            {item.hint && (
-              <OverflowText className="min-w-0 flex-1 text-[0.6875rem] text-muted-foreground">{item.hint}</OverflowText>
+            {item.hints.length > 0 && (
+              <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                {item.hints.map((hint) => (
+                  <span key={hint} className="whitespace-nowrap">{hint}</span>
+                ))}
+              </div>
             )}
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      <p className="px-1 text-xs text-muted-foreground">
+        Bot 共 {stats.bots} 个（活跃 {stats.bots_active}） · 在线会话 {stats.active_sessions}
+      </p>
     </div>
   )
 }
@@ -440,13 +444,20 @@ function MaintenanceControls({
             {autoStatus.label} · {autoStatus.detail}
           </div>
         </div>
-        <Switch
-          checked={queue.dispatcher.auto_enabled}
-          disabled={busy || requested}
-          onCheckedChange={onToggleAuto}
-          aria-label="闲时自动排位开关"
-          className="relative before:absolute before:-inset-x-3 before:-inset-y-3.5 before:content-['']"
-        />
+        {/* ≥44px 的触控目标由带内边距的 label 容器提供，点击文字或开关都能切换。 */}
+        <label
+          htmlFor="admin-auto-match-switch"
+          data-testid="auto-match-switch-target"
+          className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center"
+        >
+          <Switch
+            id="admin-auto-match-switch"
+            checked={queue.dispatcher.auto_enabled}
+            disabled={busy || requested}
+            onCheckedChange={onToggleAuto}
+            aria-label="闲时自动排位开关"
+          />
+        </label>
       </div>
 
       {faultPaused ? (

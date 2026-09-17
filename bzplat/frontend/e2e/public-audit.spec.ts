@@ -288,12 +288,12 @@ test('home, search, and global search share participant ownership and nature lab
   await expect(latestRow).toContainText('首页 Alice · @home_alice')
   await expect(latestRow).toContainText('首页 Bob · @home_bob')
   await expect(latestRow.locator('[data-match-nature="ladder"]')).toHaveText('自动排位')
-  await expect(latestRow.locator('[data-match-outcome-kind="duplicate"]')).toContainText('复式交锋 · 首页 Alpha 1胜 · 平 0 · 首页 Beta 1胜')
+  await expect(latestRow.locator('[data-match-outcome-kind="duplicate"]').first()).toContainText('主客两场合计 · 首页 Alpha 1胜 · 平 0 · 首页 Beta 1胜')
   const popularIdentity = page.locator('[data-match-participants]').filter({ hasText: '热门 Alpha' })
   await expect(popularIdentity).toContainText('热门 Alice · @popular_alice')
   await expect(popularIdentity).toContainText('热门 Bob · @popular_bob')
   await expect(popularIdentity.locator('..').locator('[data-match-nature="challenge"]')).toHaveText('用户挑战')
-  await expect(popularIdentity.locator('..').locator('[data-match-outcome-kind="duplicate"]')).toContainText('复式交锋 · 热门 Alpha 1胜 · 平 0 · 热门 Beta 1胜')
+  await expect(popularIdentity.locator('..').locator('[data-match-outcome-kind="duplicate"]').first()).toContainText('主客两场合计 · 热门 Alpha 1胜 · 平 0 · 热门 Beta 1胜')
 
   await page.goto('/#/search?q=surface&type=matches')
   const searchTable = page.getByRole('table', { name: '搜索到的对局' })
@@ -301,7 +301,7 @@ test('home, search, and global search share participant ownership and nature lab
   await expect(searchRow).toContainText('搜索 Alice · @search_alice')
   await expect(searchRow).toContainText('搜索 Bob · @search_bob')
   await expect(searchRow.locator('[data-match-nature="contest"]')).toHaveText('锦标赛')
-  await expect(searchRow.locator('[data-match-outcome-kind="duplicate"]')).toContainText('复式交锋 · 搜索 Alpha 1胜 · 平 0 · 搜索 Beta 1胜')
+  await expect(searchRow.locator('[data-match-outcome-kind="duplicate"]').first()).toContainText('主客两场合计 · 搜索 Alpha 1胜 · 平 0 · 搜索 Beta 1胜')
 
   await page.locator('button[aria-label="搜索"]:visible').first().click()
   await page.getByPlaceholder('搜索 Bot、用户、对局…').fill('surface')
@@ -309,7 +309,7 @@ test('home, search, and global search share participant ownership and nature lab
   await expect(commandMatch).toContainText('搜索 Alice · @search_alice')
   await expect(commandMatch).toContainText('搜索 Bob · @search_bob')
   await expect(commandMatch.locator('..').locator('[data-match-nature="contest"]')).toHaveText('锦标赛')
-  await expect(commandMatch.locator('..').locator('[data-match-outcome-kind="duplicate"]')).toContainText('复式交锋 · 搜索 Alpha 1胜 · 平 0 · 搜索 Beta 1胜')
+  await expect(commandMatch.locator('..').locator('[data-match-outcome-kind="duplicate"]').first()).toContainText('主客两场合计 · 搜索 Alpha 1胜 · 平 0 · 搜索 Beta 1胜')
   await monitor.expectClean()
 })
 

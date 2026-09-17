@@ -19,7 +19,10 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { ErrorMsg, Loading } from '@/components/ui/status'
 import { fmtMemoryMiB, fmtTime } from '@/lib/format'
+import { GAME_LABEL } from '@/lib/games'
+import { ratingReasonLabel } from '@/lib/labels'
 import { cn } from '@/lib/utils'
+import { PLATFORM_TERMINAL_REASONS } from '@/games/reasons'
 import {
   RuntimeEnvironmentBadge,
   type ExecutionEnvironment,
@@ -139,14 +142,14 @@ export interface ExecutionRequestSnapshot {
   blocked_reason?: string
 }
 
-const SOURCE_LABEL: Record<ExecutionSource, string> = {
+const SOURCE_LABEL: Record<string, string> = {
   manual: '用户挑战',
   human: '真人对战',
   contest: '锦标赛',
   auto: '自动排位',
 }
 
-const STATUS_LABEL: Record<ExecutionStatus, string> = {
+const STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
   starting: '启动中',
   running: '运行中',
@@ -156,36 +159,25 @@ const STATUS_LABEL: Record<ExecutionStatus, string> = {
   interrupted: '已中断',
 }
 
-const GAME_LABEL: Record<string, string> = {
-  holdem: '德州扑克',
-  gomoku: '五子棋',
-  pencil: '点格棋',
-}
-
-const RATING_REASON_LABEL: Record<string, string> = {
-  contest: '只计赛事成绩，不计平台排行榜',
-  human: '人机对战，不计平台排行榜',
-  self_play: '自博弈，不计平台排行榜',
-  bot_missing: 'Bot 信息不完整，不计平台排行榜',
-  same_owner: '同一所有者，不计平台排行榜',
-  remote_local: '本地 Bot 练习，不计平台排行榜',
-  ranked_bot_not_selected: '至少一方未派遣参榜，不计平台排行榜',
-  eligible: '计入平台排行榜',
-}
-
-const EXECUTION_REASON_LABEL: Record<string, string> = {
-  auto_yield_foreground: '自动排位为前台任务让路',
-  auto_idle_policy_cutover: '自动排位策略升级后收口',
-}
+const sourceLabel = (source: string): string => SOURCE_LABEL[source] || '任务'
+const statusLabel = (status: string): string => STATUS_LABEL[status] || '处理中'
+const gameLabelOf = (gameId: string): string => GAME_LABEL[gameId] || '对局'
 
 const AUTO_SCHEDULER_REASON_LABEL: Record<string, string> = {
   auto_disabled: '管理员已关闭闲时排位',
   foreground_queued_or_active: '等待用户挑战、人机或赛事任务完成',
   contest_guard: '真实赛事运行、休息或临近开赛，暂不启动自动排位',
-  idle_ready: '闲时门禁已满足，仍等待候选、评分与资源安全门',
+  idle_ready: '空闲时段自动开始排位',
   auto_running: '正在执行一场闲时排位',
   auto_yield_foreground: '自动排位为前台任务让路',
-  auto_idle_policy_cutover: '自动排位策略升级后收口',
+  auto_idle_policy_cutover: '自动排位已暂停',
+}
+
+/** 只投影已知平台原因；未知/空原因返回 null，绝不外泄原始码。 */
+function knownReasonLabel(reason: string): string | null {
+  const code = String(reason || '').trim()
+  if (!code) return null
+  return PLATFORM_TERMINAL_REASONS[code]?.label ?? null
 }
 
 export interface AutoSchedulerPresentation {
@@ -211,7 +203,7 @@ export function autoSchedulerPresentation(
   if (!scheduler) {
     return {
       label: '策略同步中',
-      detail: '当前服务尚未返回闲时排位调度状态；正在兼容同步，请以现有队列为准',
+      detail: '当前服务尚未返回闲时排位调度状态；队列状态刷新中',
     }
   }
 
@@ -274,7 +266,7 @@ export function autoSchedulerPresentation(
     case 'ready':
       return {
         label: '闲时就绪',
-        detail: `闲时门禁已满足，仍等待候选、评分与资源安全门；${limits}`,
+        detail: `空闲时段自动开始排位；${limits}`,
       }
     case 'running':
       return {
@@ -409,11 +401,6 @@ function CapacityMeter({ capacity, compact = false }: { capacity: ExecutionCapac
           </div>
         )}
       </dl>
-      {showHostResources && (
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          主机 CPU / 内存按各任务入队时冻结的资源向量记账，并非实时占用；CPU 准入含 ×2 有界超卖（内存严格不超卖），满载时新任务会等待资源释放。
-        </p>
-      )}
     </div>
   )
 }
@@ -428,7 +415,7 @@ function capacityBlockedReason(job: ExecutionQueueJob): string {
 function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }) {
   const active = job.status === 'starting' || job.status === 'running' || job.status === 'settling'
   const blockedReason = capacityBlockedReason(job)
-  const executionReason = EXECUTION_REASON_LABEL[job.reason]
+  const executionReason = knownReasonLabel(job.reason)
   return (
     <li className="min-w-0 rounded-lg border border-border bg-muted/20 px-2.5 py-1.5">
       {/* 桌面单行密度：身份徽章 + 类型/状态 + 容量/计分说明同行排布；窄屏经 flex-wrap 自然折行。 */}
@@ -438,18 +425,18 @@ function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }
             <ListOrdered className="size-3" /> #{position}
           </span>
         )}
-        <Badge variant={active ? 'default' : 'secondary'}>{SOURCE_LABEL[job.source] || job.source}</Badge>
-        <span className="text-muted-foreground">{GAME_LABEL[job.game_id] || job.game_id}</span>
-        <span className="text-muted-foreground">{STATUS_LABEL[job.status] || job.status}</span>
+        <Badge variant={active ? 'default' : 'secondary'}>{sourceLabel(job.source)}</Badge>
+        <span className="text-muted-foreground">{gameLabelOf(job.game_id)}</span>
+        <span className="text-muted-foreground">{statusLabel(job.status)}</span>
         <RuntimeEnvironmentBadge environment={job.bot_a_environment} />
         {job.bot_b_environment !== job.bot_a_environment && (
           <RuntimeEnvironmentBadge environment={job.bot_b_environment} />
         )}
         <span className="text-muted-foreground">
-          {job.sandbox_units === 0 ? '不占用平台运行位' : `占用 ${job.sandbox_units} 个平台 Bot 运行位`}
+          {job.sandbox_units === 0 ? '不占平台运行资源' : `占用 ${job.sandbox_units} 个运行位`}
         </span>
         <span className="text-muted-foreground">
-          {job.rated ? '计入平台排行榜' : RATING_REASON_LABEL[job.rating_reason] || '不计平台排行榜'}
+          {job.rated ? '计入平台排行榜' : ratingReasonLabel(job.rating_reason)}
         </span>
         {job.source === 'auto' && job.status === 'queued' && (
           <span className="text-muted-foreground">等待平台闲时，不占前台顺位</span>
@@ -480,6 +467,7 @@ export function ExecutionQueuePanel({
   loading = false,
   error = '',
   action,
+  hidePausedBanner = false,
   maxQueued,
   className,
   onRetry,
@@ -493,6 +481,8 @@ export function ExecutionQueuePanel({
   loading?: boolean
   error?: string
   action?: ReactNode
+  /** 管理端头部已有暂停告警时置 true，避免同屏双份。 */
+  hidePausedBanner?: boolean
   maxQueued?: number
   className?: string
   onRetry?: () => void
@@ -521,9 +511,9 @@ export function ExecutionQueuePanel({
     <div className="space-y-3 px-3 py-3 sm:px-4">
       <CapacityMeter capacity={snapshot.capacity} compact={compactCapacity} />
 
-      {/* 管理端（action 控制簇存在时）的队列头部已展示“队列异常暂停 + 原因”，
-          这里不再重复渲染同一条红色暂停横幅，避免同一屏双份告警。 */}
-      {paused && !action && (
+      {/* 管理端队列头部已展示“队列异常暂停 + 原因”，经 hidePausedBanner 关闭，
+          避免同一屏双份告警；公共页不传该标记，暂停时仍能看到横幅。 */}
+      {paused && !hidePausedBanner && (
         <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs">
           <PauseCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
           <span className="break-words [overflow-wrap:anywhere]">
@@ -633,8 +623,8 @@ export function ExecutionQueuePanel({
           </div>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
             {snapshot
-              ? `全站当前对局槽上限 ${snapshot.capacity.match_slots.capacity} 场；`
-              : '正在获取全站对局槽容量；'}
+              ? `同时最多 ${snapshot.capacity.match_slots.capacity} 场对局；`
+              : '正在获取全站对局容量；'}
             主机资源不足的任务继续排队。
             {snapshot?.auto_scheduler
               ? '用户挑战、人机和赛事始终优先；闲时排位不计入前台顺位或 ETA。'
@@ -733,12 +723,12 @@ export function ExecutionRequestCard({
         <div>
           <h2 className="text-sm font-semibold">执行请求已受理</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {SOURCE_LABEL[request.source] || request.source} · {STATUS_LABEL[request.status] || request.status}
+            {sourceLabel(request.source)} · {statusLabel(request.status)}
           </p>
         </div>
         <span role="status" aria-live="polite" aria-atomic="true">
           <Badge variant={request.status === 'interrupted' ? 'destructive' : terminal ? 'secondary' : 'default'}>
-            {STATUS_LABEL[request.status] || request.status}
+            {statusLabel(request.status)}
           </Badge>
         </span>
       </div>
@@ -748,7 +738,7 @@ export function ExecutionRequestCard({
         {request.bot_b_environment !== request.bot_a_environment && (
           <RuntimeEnvironmentBadge environment={request.bot_b_environment} />
         )}
-        <span>{request.rated ? '计入平台排行榜' : RATING_REASON_LABEL[request.rating_reason] || '不计平台排行榜'}</span>
+        <span>{request.rated ? '计入平台排行榜' : ratingReasonLabel(request.rating_reason)}</span>
       </div>
 
       <CapacityMeter capacity={capacity} />
@@ -780,13 +770,15 @@ export function ExecutionRequestCard({
       {request.status === 'interrupted' && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs">
           <p className="font-medium">本次执行因平台恢复而中断，不计平台排行榜。</p>
-          <p className="mt-1 text-muted-foreground">{request.reason || '可重新排队，系统不会复活原对局。'}</p>
+          <p className="mt-1 text-muted-foreground">
+            {knownReasonLabel(request.reason) || '可重新排队，系统不会复活原对局。'}
+          </p>
         </div>
       )}
 
       {request.status === 'cancelled' && (
         <p className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 text-xs">
-          {EXECUTION_REASON_LABEL[request.reason] || '请求已取消，相关容量已安全释放。'}
+          {knownReasonLabel(request.reason) || '请求已取消，相关容量已安全释放。'}
         </p>
       )}
 

@@ -52,7 +52,7 @@ _BUILD_COMMANDS: dict[str, str] = {
         "const BotArenaOnline = true\n"
         "GO\n"
         "cd /tmp/src && "
-        "GOCACHE=/tmp/gocache GOPATH=/tmp/gopath "
+        "CGO_ENABLED=0 GOCACHE=/tmp/gocache GOPATH=/tmp/gopath "
         "go build -o /out/bot ."
     ),
 }

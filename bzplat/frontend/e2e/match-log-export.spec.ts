@@ -403,7 +403,7 @@ test('unknown games fail closed without probing match-log capability', async ({ 
 
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${id}`)
-  await expect(page.getByText('不支持的游戏（future-game）', { exact: false }).first()).toBeVisible()
+  await expect(page.getByText('暂不支持观看该对局', { exact: false }).first()).toBeVisible()
   await expect(page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })).toHaveCount(0)
   expect({ logRequests, replayRequests }).toEqual({ logRequests: 0, replayRequests: 0 })
   await monitor.expectClean(optionalGetAborts(`/api/matches/${id}`))

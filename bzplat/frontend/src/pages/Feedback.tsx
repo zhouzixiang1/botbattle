@@ -18,7 +18,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Textarea } from '@/components/ui/textarea'
-import { fmtTime } from '@/lib/format'
+import { OverflowText } from '@/components/ui/overflow-text'
+import { fmtBytes, fmtTime } from '@/lib/format'
 
 const TRACKS_KEY = 'botbattle_feedback_tracking_v1'
 
@@ -40,12 +41,6 @@ function readTracks(): GuestTrack[] {
 function saveTrack(track: GuestTrack) {
   const next = [track, ...readTracks().filter((item) => item.public_id !== track.public_id)].slice(0, 10)
   localStorage.setItem(TRACKS_KEY, JSON.stringify(next))
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 function coarseBrowser(): 'chrome' | 'firefox' | 'safari' | 'edge' | 'other' | 'unknown' {
@@ -507,7 +502,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     <PageFrame width="wide" layout="feedback-center">
       <PageHeader
         title="问题反馈"
-        description="选择问题类型和影响程度即可；平台会自动附带不含隐私的设备与失败接口摘要。"
+        description="描述你遇到的问题即可；平台会自动附上基本的设备信息帮助定位，不含隐私内容。"
         actions={user ? <Button asChild variant="outline" size="sm"><Link to="/messages"><Inbox className="size-4" />查看站内信</Link></Button> : undefined}
       />
       {error && <ErrorMsg msg={error} />}
@@ -533,12 +528,12 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
                 {files.map((file, index) => (
                   <li key={`${file.name}-${file.size}-${index}`} className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-foreground">{file.name}</span>
-                    <span className="shrink-0 font-mono">{formatFileSize(file.size)}</span>
+                    <span className="shrink-0 font-mono">{fmtBytes(file.size)}</span>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="text-xs text-muted-foreground">不用整理日志；平台只打包安全诊断摘要</p>
+              <p className="text-xs text-muted-foreground">不用整理日志；平台只会附上安全的诊断摘要</p>
             )}
           </div>
           {!user && <CaptchaField onChange={setCaptcha} />}
@@ -554,7 +549,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
             {!loaded ? <EmptyState text="选择一条反馈查看处理进度" className="justify-start py-10" /> : <div className="flex min-h-0 flex-col">
               <div className="border-b px-3 py-2.5">
                 <div className="flex flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-words text-sm font-semibold">{loaded.bug_report.title}</h3><Badge>{BUG_STATUS_LABELS[loaded.bug_report.status] || loaded.bug_report.status}</Badge></div>
-                <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{BUG_CATEGORY_LABELS[loaded.bug_report.category]}</span><span>{BUG_IMPACT_LABELS[loaded.bug_report.impact]}</span><span className="font-mono">{loaded.bug_report.public_id}</span></div>
+                <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{BUG_CATEGORY_LABELS[loaded.bug_report.category]}</span><span>{BUG_IMPACT_LABELS[loaded.bug_report.impact]}</span><OverflowText className="max-w-full font-mono" tooltipFocusable={false}>{loaded.bug_report.public_id}</OverflowText></div>
                 <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
                   {loaded.bug_report.attachments.map((attachment) => <Button key={attachment.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(attachment.public_id, attachment.original_name)}><Paperclip className="size-3.5" /><span className="max-w-44 truncate">{attachment.original_name}</span></Button>)}
                   {loaded.bug_report.attachments.length < 5 && <div className="min-w-48 flex-1"><input id="feedback-more-files" className="peer sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={uploading} aria-label="补充截图" onChange={(event) => { const selectedFiles = Array.from(event.target.files || []); event.target.value = ''; void addAttachments(selectedFiles) }} /><Label htmlFor="feedback-more-files" aria-disabled={uploading} className={buttonVariants({ variant: 'outline', size: 'sm', className: 'min-h-11 w-full cursor-pointer peer-disabled:pointer-events-none peer-disabled:opacity-50 peer-focus-visible:ring-[3px] peer-focus-visible:ring-ring/50' })}><Paperclip className="size-4" />{uploading ? '正在上传…' : '选择补充截图'}</Label></div>}

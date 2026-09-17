@@ -63,6 +63,14 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/** 座位是否持有可展示的公开身份；无身份时展示层才回退座位号。 */
+export function participantHasName(participant: ResolvedMatchParticipant): boolean {
+  if (participant.isHuman) {
+    return Boolean(participant.ownerName) || participant.ownerLabel !== '真人用户不可用'
+  }
+  return participant.botLabel !== 'Bot 名称不可用' && participant.botLabel !== 'Bot 已删除'
+}
+
 export function resolveMatchParticipant(
   source: MatchParticipantSource,
   side: 0 | 1,
@@ -128,7 +136,7 @@ export function participantHeaderLabel(participant: ResolvedMatchParticipant): s
   if (participant.isHuman) {
     return participant.ownerName || participant.ownerLabel !== '真人用户不可用'
       ? `${owner}（真人）`
-      : `${participant.seatLabel}（真人信息不可用）`
+      : `${participant.seatLabel}（身份暂缺）`
   }
   if (participant.botLabel === 'Bot 名称不可用' || participant.botLabel === 'Bot 已删除') {
     if (participant.ownerName) return `${participant.seatLabel}（Bot 信息不可用 · ${owner}）`

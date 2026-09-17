@@ -11,11 +11,6 @@ import { eventSeatSubject } from '@/games/seat-display'
 
 const PencilBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
-function displaySeat(value: unknown): string {
-  const seat = Number(value)
-  return Number.isFinite(seat) ? String(seat + 1) : '?'
-}
-
 function displaySeconds(value: unknown): string {
   const seconds = Number(value)
   if (!Number.isFinite(seconds) || seconds < 0) return '未知'
@@ -23,7 +18,7 @@ function displaySeconds(value: unknown): string {
 }
 
 function describePencilEvent(event: RawEvent, seats?: SeatInfo[]): string {
-  const actor = (value: unknown) => eventSeatSubject(seats, value, `座位 ${displaySeat(value)}`)
+  const actor = (value: unknown) => eventSeatSubject(seats, value, 'Bot', 'board')
   const position = (value: unknown) => Number(value) === 0
     ? '先手 / 红'
     : Number(value) === 1 ? '后手 / 蓝' : '位置未知'
@@ -52,7 +47,7 @@ function describePencilEvent(event: RawEvent, seats?: SeatInfo[]): string {
   if (event.type === 'time_used') {
     return `${actor(event.seat)} · 已用 ${displaySeconds(event.used)} · 剩余 ${displaySeconds(event.remaining)} · ${position(event.seat)}`
   }
-  return event.type || '?'
+  return '系统事件'
 }
 
 export const pencilSpec: GameViewSpec = {

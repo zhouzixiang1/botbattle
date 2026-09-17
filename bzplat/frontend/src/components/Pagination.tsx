@@ -13,6 +13,8 @@ interface Props {
   onPageChange: (page: number) => void
   ariaLabel?: string
   disabled?: boolean
+  /** 总数单位，如「名」「场」「条」 */
+  unit?: string
 }
 
 export default function Pagination({
@@ -22,6 +24,7 @@ export default function Pagination({
   onPageChange,
   ariaLabel = '分页导航',
   disabled = false,
+  unit = '条',
 }: Props) {
   const totalPages = Math.max(1, Math.ceil(total / perPage))
   if (totalPages <= 1) return null
@@ -42,7 +45,7 @@ export default function Pagination({
       aria-label={ariaLabel}
       className="flex flex-wrap items-center justify-center gap-2 py-3 text-sm text-muted-foreground"
     >
-      <span className="mr-2 max-sm:mr-0 max-sm:basis-full max-sm:text-center">共 {total} 条</span>
+      <span className="mr-2 max-sm:mr-0 max-sm:basis-full max-sm:text-center">共 {total} {unit}</span>
       <Button
         type="button"
         variant="outline"

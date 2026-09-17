@@ -124,11 +124,11 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
                 <OverflowText tooltip={identity.subject} tooltipFocusable={false} className="min-w-0 flex-1 text-xs font-semibold text-foreground">{identity.subject}</OverflowText>
                 <span className={`ml-auto shrink-0 font-mono text-xl font-bold leading-none ${color}`}>{state.scores[seat]}</span>
               </div>
-              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                 {identity.owner && <OverflowText tooltip={identity.owner} tooltipFocusable={false} className="min-w-0">{identity.owner}</OverflowText>}
                 {identity.owner && <span aria-hidden="true">·</span>}
-                <Badge variant="outline" className={`shrink-0 px-1.5 text-[10px] leading-tight ${color}`}>
-                  {seat === 0 ? '先手 · 红' : '后手 · 蓝'} · {identity.seat}
+                <Badge variant="outline" className={`shrink-0 px-1.5 text-xs leading-tight ${color}`}>
+                  {seat === 0 ? '先手 · 红' : '后手 · 蓝'}
                 </Badge>
               </div>
               <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -183,7 +183,7 @@ export function PencilReplayHud({ vm, seats, liveEdge }: GameAuxiliaryProps) {
                 key={`${rowIndex}-${columnIndex}`}
                 aria-hidden
                 data-owner={owner}
-                className={`grid min-w-0 place-items-center rounded-sm border text-[10px] font-semibold leading-none ${owner === 0
+                className={`grid min-w-0 place-items-center rounded-sm border text-xs font-semibold leading-none ${owner === 0
                   ? 'border-seat-1/30 bg-seat-1/15 text-seat-1'
                   : owner === 1
                     ? 'border-seat-2/35 bg-seat-2/15 text-seat-2'

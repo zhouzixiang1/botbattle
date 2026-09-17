@@ -217,7 +217,7 @@ export default function UserProfile() {
         </div>
       </DataRegion>
 
-      <DataRegion title="公开 Bot" description={`共 ${total || profile.bot_count} 个；当前第 ${page} 页`}>
+      <DataRegion title="公开 Bot" description={`共 ${total || profile.bot_count} 个`}>
         {botsError ? (
           <ErrorMsg msg={botsError} className="px-4 py-5" />
         ) : botsLoading ? (
@@ -248,7 +248,7 @@ export default function UserProfile() {
           </ul>
         )}
       </DataRegion>
-      <Pagination page={page} perPage={PER_PAGE} total={total} onPageChange={setPage} />
+      <Pagination page={page} perPage={PER_PAGE} total={total} onPageChange={setPage} unit="名" />
     </PageFrame>
   )
 }

@@ -22,11 +22,6 @@ import { eventSeatSubject } from '@/games/seat-display'
 
 const GomokuBoardStub = () => null
 
-function displaySeat(value: unknown): string {
-  const seat = Number(value)
-  return Number.isFinite(seat) ? String(seat + 1) : '?'
-}
-
 function actorColor(event: RawEvent): string {
   const explicit = Number(event.color)
   if (explicit === 0 || explicit === 1) return gomokuColorLabel(explicit)
@@ -52,7 +47,7 @@ function displaySeconds(value: unknown): string {
 }
 
 function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
-  const actor = (value: unknown) => eventSeatSubject(seats, value, `座位 ${displaySeat(value)}`)
+  const actor = (value: unknown) => eventSeatSubject(seats, value, 'Bot', 'board')
   if (event.type === 'match_start') {
     if (isCurrentGomokuCompetitionRuleset(event.ruleset)) {
       return '对局开始 · 现行五手二打规则 · 15×15'
@@ -75,7 +70,7 @@ function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
   }
   if (event.type === 'swap') {
     const mapping = Array.isArray(event.seat_colors) && event.seat_colors.length === 2
-      ? ` · 座位 1 执${gomokuColorLabel(event.seat_colors[0])}，座位 2 执${gomokuColorLabel(event.seat_colors[1])}`
+      ? ` · 先手执${gomokuColorLabel(event.seat_colors[0])}，后手执${gomokuColorLabel(event.seat_colors[1])}`
       : ''
     return `${actor(event.player)}${event.swapped ? '选择交换棋色' : '选择不交换棋色'}${mapping}`
   }
@@ -106,7 +101,7 @@ function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
     const outcome = event.winner == null ? '赛果已结算' : `${actor(event.winner)}获胜`
     return `结束 · ${outcome} · ${gomokuTerminalReason(event.reason, 'completed').label}`
   }
-  return event.type || '?'
+  return '系统事件'
 }
 
 function turnLabelForRequest(request: Record<string, unknown> | null): string {
@@ -146,7 +141,7 @@ export const gomokuSpec: GameViewSpec = {
       const state = vm as GomokuViewModel
       if (!isGomokuCompetitionRuleset(state.ruleset)) return null
       const opening = state.openingCode ? `开局 ${state.openingCode}` : '指定开局'
-      return `${opening}${state.n !== null ? ` · ${state.n} 打` : ''} · 座位 1 执${gomokuColorLabel(state.seatColors[0])} / 座位 2 执${gomokuColorLabel(state.seatColors[1])}`
+      return `${opening}${state.n !== null ? ` · ${state.n} 打` : ''} · 先手执${gomokuColorLabel(state.seatColors[0])} / 后手执${gomokuColorLabel(state.seatColors[1])}`
     },
   },
   replay: {

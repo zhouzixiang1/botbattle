@@ -266,6 +266,17 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
                             "type": "string",
                             "default": DEFAULT_RUNTIME_MODE,
                         },
+                        "source_format": {
+                            "type": "string",
+                            "default": "elf",
+                            "enum": ["elf", "c", "cpp", "go", "python"],
+                            "description": "elf=预构建 ELF；其余为源码 zip 直传（平台编译/运行）",
+                        },
+                        "source_entry": {
+                            "type": "string",
+                            "default": "",
+                            "description": "源码 zip 内的入口文件（POSIX 相对路径；空=语言默认入口）",
+                        },
                         "file": _BINARY_FILE_SCHEMA,
                     },
                 }
@@ -292,6 +303,12 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
                     "properties": {
                         "upload_note": {"type": "string", "default": ""},
                         "runtime_mode": {"type": "string", "default": ""},
+                        "source_format": {
+                            "type": "string",
+                            "default": "elf",
+                            "enum": ["elf", "c", "cpp", "go", "python"],
+                        },
+                        "source_entry": {"type": "string", "default": ""},
                         "file": _BINARY_FILE_SCHEMA,
                     },
                 }
@@ -1421,11 +1438,13 @@ async def upload_bot(
                     runtime_mode = _multipart_text(
                         form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
                     )
+                    # 空/缺省显式归一为 elf：限额矩阵与 manager 的
+                    # _classify_upload 必须对同一输入选择同一路线。
                     source_format = (
                         _multipart_text(form, "source_format", default="elf")
                         .strip()
                         .lower()
-                    )
+                    ) or "elf"
                     source_entry = _multipart_text(form, "source_entry")
                     file = _multipart_file(form)
                     await _stream_bot_upload(
@@ -1472,7 +1491,8 @@ async def upload_bot(
         raise _upload_busy_error()
     except SourceBuildError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
-        raise HTTPException(400, detail={"code": e.code, "message": e.message})
+        status = 503 if e.code in ("build_busy", "build_unavailable") else 400
+        raise HTTPException(status, detail={"code": e.code, "message": e.message})
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -1499,11 +1519,13 @@ async def upload_bot_version(
                 async with request.form(max_files=1, max_fields=6) as form:
                     upload_note = _multipart_text(form, "upload_note")
                     runtime_mode = _multipart_text(form, "runtime_mode")
+                    # 空/缺省显式归一为 elf：限额矩阵与 manager 的
+                    # _classify_upload 必须对同一输入选择同一路线。
                     source_format = (
                         _multipart_text(form, "source_format", default="elf")
                         .strip()
                         .lower()
-                    )
+                    ) or "elf"
                     source_entry = _multipart_text(form, "source_entry")
                     file = _multipart_file(form)
                     await _stream_bot_upload(
@@ -1547,13 +1569,16 @@ async def upload_bot_version(
         raise _upload_busy_error()
     except SourceBuildError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
+        status = 503 if e.code in ("build_busy", "build_unavailable") else 400
         raise HTTPException(
-            400, detail={"code": e.code, "message": e.message}
+            status, detail={"code": e.code, "message": e.message}
         )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(
-            409 if e.code == "bot_deleted" else 400,
+            404 if e.code == "not_found"
+            else 409 if e.code == "bot_deleted"
+            else 400,
             detail={"code": e.code, "message": e.message},
         )
     except PlatformRunnerError:
