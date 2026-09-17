@@ -307,12 +307,8 @@ def create_app(
         local_ai_hub=local_ai_service.hub,
     )
     match_mounts_dir = Path(db_path).expanduser().resolve().parent / "match_mounts"
-    if match_mounts_dir.is_dir():
-        # 对局快照属进程生命周期；启动时不存在合法存活的挂载，整体回收崩溃残留。
-        import shutil as _shutil
-
-        for _stale in match_mounts_dir.iterdir():
-            _shutil.rmtree(_stale, ignore_errors=True)
+    # QA 隔离断言先于任何目录副作用：误把 QA 实例指到主运行目录时，
+    # 不能先清掉生产对局快照再报错。
     if qa_instance:
         match_mounts_dir = assert_qa_runtime_path_isolated(
             match_mounts_dir,
@@ -397,6 +393,16 @@ def create_app(
         # untracked running rows be marked orphaned.
         dispatcher_start = await execution_dispatcher.start()
         logger.info("execution dispatcher startup: %s", dispatcher_start["outcome"])
+        # 对局快照属进程生命周期；启动时不存在合法存活的挂载，整体回收
+        # 崩溃残留。必须在 dispatcher 单例锁成功获取之后执行——恢复路径
+        # 会把 running attempt 收敛为 interrupted 并以新 match_id 重排，
+        # 因此这里 wipe 不会切掉任何存活对局的 /mnt/data；反之放在
+        # create_app 阶段（锁之前）会被误启的第二实例清掉生产快照。
+        if match_mounts_dir.is_dir():
+            import shutil as _shutil
+
+            for _stale in match_mounts_dir.iterdir():
+                _shutil.rmtree(_stale, ignore_errors=True)
         # Legacy orphan recovery, rating repair and contest reconciliation are
         # owned by ExecutionDispatcher so startup and delayed pause -> resume
         # cannot drift into different recovery pipelines.
