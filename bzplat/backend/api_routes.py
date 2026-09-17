@@ -7967,11 +7967,12 @@ def admin_logs(
 # ── wiki ──────────────────────────────────────────────────────
 # 站内 Wiki：多页索引 + 按 slug 取正文。wiki/ 目录下每个 .md 一页，
 # slug 为文件名（去 .md）。索引按固定顺序排列，缺失文件自动跳过。
-# 精简为 7 页（核心 = 3 游戏；功能说明统一进 GUIDE）。
+# 当前 9 页（核心 = 3 游戏；功能说明统一进 GUIDE；迁移面向外部平台选手）。
 WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "玩家快速上手、协议与游戏规则导航"},
     {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "请求/响应信封、两种运行模式与动作编码"},
-    {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
+    {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：两种上传形态、样例、编译、上传、调试"},
+    {"slug": "migration", "file": "MIGRATION.md", "title": "迁移指南", "summary": "从其他对战平台搬运程序参赛：语言与库差异、协议对接、云盘权重与报名"},
     {"slug": "local-ai", "file": "LOCAL_AI.md", "title": "本地 Bot 接入", "summary": "在自己的电脑运行 Bot，由平台负责裁判、回放与技术判定"},
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "每个计分场固定 70 手、请求字段与完整示例"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "指定开局、交换、五手二打、禁手与 v2 示例"},
