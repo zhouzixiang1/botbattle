@@ -192,6 +192,10 @@ def create_app(
     auth = AuthManager(store, mailer=mailer, communications=communications)
     captcha = CaptchaStore()
     bot_manager = BotManager(store, upload_root=upload_root)
+    # 启动兜底：清掉上次进程崩溃遗留的 .incoming-* 流式暂存与
+    # .v{N}-* 版本构建暂存（源码构建中断即永久残留）；正常路径由
+    # finally 清理，这里只按 mtime 年龄匹配，不影响活跃上传。
+    bot_manager._purge_stale_staging(min_age_seconds=3600.0)
     from bzplat.backend.user_storage import UserStorageManager
 
     user_storage = UserStorageManager(store, root=user_assets_dir)
