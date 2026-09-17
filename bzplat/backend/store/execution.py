@@ -3006,6 +3006,22 @@ class ExecutionRepository:
             projected["capacity_blocked_reason"] = reason
         return projected
 
+    def execution_memory_in_use_mb(self) -> int:
+        """当前执行占用的保守内存视图（MB）：活跃 job 冻结向量之和
+        + 未跟踪 running Match 按最高赛事档计收。
+
+        与 claim 的 ``_capacity_tx`` 同口径，供非执行沙箱（源码构建容器）
+        在启动前做内存准入；纯只读，不占用任何容量行。CPU 维度不在此
+        限制——构建容器有独立 ``--cpus`` 硬顶，最坏只是变慢。
+        """
+        with self.store._tx() as conn:
+            capacity = self._capacity_tx(
+                conn,
+                max_match_slots=1,
+                max_sandbox_units=1,
+            )
+        return int(capacity["used_host_memory_mb"])
+
     def snapshot(
         self,
         *,
