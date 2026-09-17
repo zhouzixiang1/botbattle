@@ -256,6 +256,21 @@ def create_app(
             raise SourceBuildError(
                 "build_unavailable", "当前实例未配置 Docker 构建通道"
             )
+        # 构建容器（2C/2G）不占 match slot、不进 claim 准入；为守住
+        # “内存维度严格不超卖”，启动前按与 claim 同口径的占用视图做
+        # 准入检查。这是 advisory 闸：与并发 claim 之间仍有小窗口，
+        # 结果是保守拒绝（503 重试）而不是超卖。
+        from bzplat.backend.runtime.limits import (
+            effective_host_resource_budget,
+        )
+
+        budget_mb = effective_host_resource_budget().memory_mb
+        used_mb = store.executions.execution_memory_in_use_mb()
+        if used_mb + BOT_BUILD_PROFILE.memory_mb > budget_mb:
+            raise SourceBuildError(
+                "build_busy",
+                "平台内存资源紧张，源码编译通道繁忙，请稍后重试",
+            )
         command = build_command(recipe)
         token = _uuid.uuid4().hex
         try:
@@ -291,9 +306,11 @@ def create_app(
             raise
         except (DockerSupervisorError, RuntimeError) as exc:
             # PlatformRunnerError / DockerLaunchInvariantError 均 RuntimeError 系：
-            # 统一转用户可读错误，不让源码上传产生 500。
+            # 统一转用户可读错误，不让源码上传产生 500。固定文案——
+            # exc 的 str 可能携带 docker stderr 尾部或内部路径。
+            logger.warning("source build sandbox error: %s", exc)
             raise SourceBuildError(
-                "build_unavailable", f"构建沙箱暂不可用：{exc}"
+                "build_unavailable", "构建沙箱暂不可用，请稍后重试"
             ) from exc
         if exit_code != 0:
             raise SourceBuildError(

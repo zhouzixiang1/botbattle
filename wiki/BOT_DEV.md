@@ -23,6 +23,7 @@ ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF�
 | 打包上限 | zip 不超过 64 MiB、500 个文件，解压后不超过 96 MiB；路径穿越、符号链接与加密成员会被拒绝 |
 | 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。入口不在候选里时，在上传表单显式填写 |
 | C / C++ | 服务端以 `gcc/g++ -O2 -static` 编译，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1`；可用库为 nlohmann/json 与 Eigen（g++ 12.2 / Go 1.19 / Python 3.11 环境） |
+| Go | 以 `CGO_ENABLED=0` 纯 Go 编译（禁 cgo）；产物必须是静态链接 ELF，动态链接产物会被拒绝 |
 | Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行；**仅标准库**，numpy、torch 等第三方库不可用 |
 | 构建时限 | 服务端编译 120 秒超时；源码先编译，再进入与 ELF 相同的上传预检 |
 
