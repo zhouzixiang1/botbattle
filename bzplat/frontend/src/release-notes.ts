@@ -12,6 +12,16 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.4',
+    date: '2026-09-17',
+    title: '云存储升级：独立入口与模型权重',
+    items: [
+      '云存储有了独立页面：侧边栏「云存储」直达，不再藏在设置里；页面支持拖拽上传。',
+      '模型权重文件（.bin、.pt/.pth、.onnx、.safetensors 等）与其他数据文件一样直接上传，无需打包压缩。',
+      '更正说明：云存储文件在对局开始时就会只读挂载到 /mnt/data 与 /app/data，程序内用 data/文件名 即可读取（此前页面提示有误）。',
+    ],
+  },
+  {
     version: 'v1.3',
     date: '2026-09-17',
     title: '源码 Bot 上线：C / C++ / Go / Python',

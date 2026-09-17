@@ -1,13 +1,14 @@
 import {
+  BookOpen,
+  Bot,
+  HardDrive,
+  History as HistoryIcon,
   Home,
+  LifeBuoy,
+  Medal,
+  Shield,
   Swords,
   Trophy,
-  Medal,
-  Bot,
-  BookOpen,
-  Shield,
-  History as HistoryIcon,
-  LifeBuoy,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -29,6 +30,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/history', label: '对局记录', icon: HistoryIcon },
   { to: '/contests', label: '锦标赛', icon: Medal },
   { to: '/my-bots', label: '我的 Bot', icon: Bot },
+  { to: '/storage', label: '云存储', icon: HardDrive },
   { to: '/wiki', label: '文档', icon: BookOpen },
   { to: '/feedback', label: '问题反馈', icon: LifeBuoy },
 ]

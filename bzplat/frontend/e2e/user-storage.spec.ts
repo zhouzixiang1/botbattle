@@ -6,12 +6,11 @@ const USER = process.env.BZ_E2E_USER || 'tester1'
 const FILE_NAME = 'e2e_weights.bin'
 const PAYLOAD = Buffer.from('e2e storage payload')
 
-test('settings storage tab uploads, lists and deletes a file', async ({ page }) => {
+test('storage page uploads, lists and deletes a file', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, USER)
-  await page.goto('/#/settings')
+  await page.goto('/#/storage')
 
-  await page.getByRole('tab', { name: '云存储' }).click()
   const quota = page.locator('[data-storage-quota]')
   await expect(quota).toBeVisible()
   await expect(quota).toContainText('/ 256.0 MB')
@@ -43,8 +42,7 @@ test('settings storage tab uploads, lists and deletes a file', async ({ page }) 
 test('storage upload rejects an empty file without leaving rows', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, USER)
-  await page.goto('/#/settings')
-  await page.getByRole('tab', { name: '云存储' }).click()
+  await page.goto('/#/storage')
   await expect(page.locator('[data-storage-quota]')).toBeVisible()
 
   await page.locator('[data-storage-upload]').click()
@@ -54,4 +52,30 @@ test('storage upload rejects an empty file without leaving rows', async ({ page 
   await expect(page.getByText('不能上传空文件')).toBeVisible()
   await expect(page.locator('[data-storage-file="e2e_empty.bin"]')).toHaveCount(0)
   await monitor.expectClean()
+})
+
+test('storage page and nav entry render across viewports without overflow', async ({ page }) => {
+  await loginThroughUi(page, USER)
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await page.goto('/#/storage')
+    await expect(page.getByRole('heading', { name: '云存储', level: 1 })).toBeVisible()
+    await expect(page.locator('[data-storage-quota]')).toBeVisible()
+    await expect(page.locator('[data-storage-dropzone]')).toBeVisible()
+    // 修正后的挂载说明必须对用户可见（旧文案称“后续版本开放”）。
+    await expect(page.getByText('/mnt/data')).toBeVisible()
+    const overflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    )
+    expect(overflow).toBeLessThanOrEqual(0)
+  }
+  // 侧边栏独立入口（桌面）。
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/storage')
+  await expect(page.getByRole('link', { name: '云存储', exact: true })).toBeVisible()
 })
