@@ -1,5 +1,9 @@
 export type MatchOutcomeSeat = 0 | 1
 
+// games/reasons 只依赖类型（无环），这里复用平台终局原因的唯一中文投影；
+// 相对路径 + .ts 扩展名让 node --test 与 vite 都能解析。
+import { technicalReasonLabel } from '../games/reasons.ts'
+
 export interface PublicMatchOutcomeGame {
   index: number
   winner: MatchOutcomeSeat | null
@@ -58,20 +62,6 @@ export function hasPublicMatchOutcomeField(source: MatchOutcomeSource | null | u
 }
 
 const DEFAULT_SEAT_LABELS = ['座位 1', '座位 2'] as const
-const TECHNICAL_REASON_LABELS: Record<string, string> = {
-  bot_deleted: 'Bot 已删除',
-  contest_bot_unavailable: '赛事 Bot 不可用',
-  crash: 'Bot 崩溃',
-  error: 'Bot 运行异常',
-  illegal: '非法动作',
-  illegal_candidates: '候选点不合法',
-  illegal_opening: '开局响应不合法',
-  illegal_selection: '选择不合法',
-  illegal_swap: '交换响应不合法',
-  protocol_error: '协议错误',
-  technical_loss: '技术判负',
-  timeout: '超时',
-}
 
 function nonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 0
@@ -211,7 +201,7 @@ export function outcomeLabelForSeat(
   const wins = seat === 0 ? outcome.score.wins_a : outcome.score.wins_b
   const losses = seat === 0 ? outcome.score.wins_b : outcome.score.wins_a
   if (outcome.kind === 'duplicate') {
-    return `复式 · ${wins}胜 / ${outcome.score.draws}平 / ${losses}负`
+    return `主客两场合计 · ${wins}胜 / ${outcome.score.draws}平 / ${losses}负`
   }
   const winner = outcome.games[0]?.winner
   if (winner === undefined) return '赛果暂不可用'
@@ -247,7 +237,7 @@ export function describeMatchOutcome(
   const gameLabels = outcome.games.map((game) => gameOutcomeLabel(game, labels))
   const progress = `已完成 ${outcome.completed_games}/${outcome.planned_games} 场计分`
   const delta = options.normalizedUnit
-    ? `${outcome.kind === 'duplicate' ? '交锋组合计分差' : '本场分差'}（${labels[0]}） ${signed(outcome.normalized_delta_a)} ${options.normalizedUnit}`
+    ? `${outcome.kind === 'duplicate' ? '主客两场合计分差' : '本场分差'}（${labels[0]}） ${signed(outcome.normalized_delta_a)} ${options.normalizedUnit}`
     : null
   const technical = outcome.termination.kind === 'technical'
   const technicalLabel = technical
@@ -258,8 +248,7 @@ export function describeMatchOutcome(
   const reasonLabel = technical
     ? outcome.termination.reason === 'technical_loss' || outcome.termination.reason === 'completed'
       ? null
-      : TECHNICAL_REASON_LABELS[outcome.termination.reason]
-        ?? (outcome.termination.reason || null)
+      : technicalReasonLabel(outcome.termination.reason)
     : null
   const secondary = [progress, delta, technicalLabel, reasonLabel && `原因：${reasonLabel}`]
     .filter(Boolean)

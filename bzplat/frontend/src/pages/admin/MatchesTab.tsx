@@ -10,6 +10,7 @@ import { fmtTime } from '@/lib/format'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { findGame, gameLabel, resolveTerminalReason } from '@/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
+import { participantHasName, resolveMatchParticipant } from '@/lib/match-participants'
 import { isPublicMatchOutcome, type MatchOutcomeSource } from '@/lib/match-outcome'
 import { outcomeSeatLabels } from '@/lib/match-seats'
 
@@ -25,7 +26,7 @@ interface Match extends MatchParticipantSource, MatchOutcomeSource {
     deltas?: number[]
     normalized_delta?: number
     technical_incidents_by_seat?: Record<string, number>
-    technical_incident_samples?: Array<{ seat: number; error: string; turn?: number | null }>
+    technical_incident_samples?: Array<{ seat: number; error: string; reason?: string; turn?: number | null }>
   }
   reason: string
   created_at: string
@@ -51,8 +52,20 @@ function technicalIncidentCount(match: Match): number {
     .reduce((sum, value) => sum + Number(value || 0), 0)
 }
 
-function technicalIncidentText(error: string): string {
-  return error || 'Bot 技术故障'
+/**
+ * 故障样本只展示稳定语义：优先走原因码映射；后端公开投影已中文化的说明保留；
+ * 其余原始错误串一律不出屏，兜底为「技术原因」。
+ */
+function technicalIncidentText(sample: { error: string; reason?: string }): string {
+  if (sample.reason) return resolveTerminalReason(sample.reason, 'aborted').label
+  const error = (sample.error || '').trim()
+  return /[\u4e00-\u9fff]/.test(error) ? error : '技术原因'
+}
+
+/** 只有该座位没有任何可用名称（匿名兜底）时才返回展示标签，否则不显示座位。 */
+function anonymousSeatLabel(match: Match, seat: number): string | null {
+  const participant = resolveMatchParticipant(match, seat === 0 ? 0 : 1)
+  return participantHasName(participant) ? null : participant.seatLabel
 }
 
 function progressLabel(match: Match, unit: '步' | '手'): string {
@@ -219,21 +232,27 @@ export default function MatchesTab() {
                     className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 font-sans leading-tight"
                   />
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <span className="whitespace-nowrap">原始分差 {m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</span>
+                    <span className="whitespace-nowrap">分差 {m.result?.normalized_delta ?? 0}</span>
                     {hasTerminalStatus && m.reason && (
                       <span
                         data-testid="terminal-reason"
                         data-tone={terminalReason.tone}
-                        className={`text-[10px] ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
+                        className={`text-xs ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
                       >
                         {terminalReason.label}
                       </span>
                     )}
                   </div>
                   {incidentCount > 0 && (
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-destructive">
-                      <Badge variant="destructive" className="text-[10px]">Bot 技术故障 {incidentCount} 次</Badge>
-                      {sample && <span className="break-words [overflow-wrap:anywhere]">座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</span>}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-destructive">
+                      <Badge variant="destructive" className="text-xs">Bot 技术故障 {incidentCount} 次</Badge>
+                      {sample && (
+                        <span className="break-words [overflow-wrap:anywhere]">
+                          {anonymousSeatLabel(m, sample.seat)?.concat(' · ')}
+                          {technicalIncidentText(sample)}
+                          {sample.turn != null && ` · 回合 ${sample.turn}`}
+                        </span>
+                      )}
                     </div>
                   )}
                 </TableCell>

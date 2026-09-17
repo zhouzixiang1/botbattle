@@ -10,9 +10,9 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import Pagination from '@/components/Pagination'
-import { cn } from '@/lib/utils'
 
 export interface PickBot {
   id: number
@@ -115,12 +115,6 @@ export default function OpponentPickerModal({
     return () => clearTimeout(t)
   }, [q, tab])
 
-  const tabBtn = (t: Tab) =>
-    cn(
-      'rounded-full px-3 py-1 text-xs font-medium transition-colors max-sm:min-h-[44px]',
-      tab === t ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'
-    )
-
   return (
     <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-2xl gap-0 p-0">
@@ -128,7 +122,7 @@ export default function OpponentPickerModal({
           <DialogTitle className="flex items-center gap-2 text-base">
             <BotIcon className="size-4 text-primary" />
             {dialogTitle}
-            <Badge variant="secondary" className="text-[10px]">{gameLabel(gameId)}</Badge>
+            <Badge variant="secondary" className="text-xs">{gameLabel(gameId)}</Badge>
           </DialogTitle>
         </DialogHeader>
 
@@ -144,15 +138,21 @@ export default function OpponentPickerModal({
             placeholder={tab === 'users' ? '搜索用户名…' : searchPlaceholder}
           />
           {!mineOnly && (
-            <div className="mt-2 flex gap-2">
-              {([['all', '全部 Bot'], ['mine', '我的 Bot（自博弈）'], ['users', '按用户搜索']] as [Tab, string][]).map(
-                ([t, label]) => (
-                  <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null); setPage(1) }} className={tabBtn(t)}>
-                    {label}
-                  </button>
-                ),
-              )}
-            </div>
+            <Tabs
+              value={tab}
+              onValueChange={(value) => {
+                setTab(value as Tab)
+                setSelUser(null)
+                setPage(1)
+              }}
+              className="mt-2"
+            >
+              <TabsList>
+                <TabsTrigger value="all">全部 Bot</TabsTrigger>
+                <TabsTrigger value="mine">我的 Bot</TabsTrigger>
+                <TabsTrigger value="users">按用户搜索</TabsTrigger>
+              </TabsList>
+            </Tabs>
           )}
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             排行榜 Bot 与练习 Bot 均可挑战；只有符合平台计分规则的排行榜 Bot 对局才会产生新评分。
@@ -218,8 +218,8 @@ export default function OpponentPickerModal({
                         >
                           <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium text-foreground">
                             <span className="min-w-0 break-words [overflow-wrap:anywhere]">{b.display_name || b.name}</span>
-                            {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
-                            <Badge variant={b.is_ranked ? 'default' : 'outline'} className="text-[10px]">
+                            {tab === 'mine' && <Badge variant="outline" className="ml-2 text-xs">自博弈</Badge>}
+                            <Badge variant={b.is_ranked ? 'default' : 'outline'} className="text-xs">
                               <Trophy className="size-3" aria-hidden="true" />
                               {b.is_ranked ? '排行榜 Bot' : '练习 Bot'}
                             </Badge>

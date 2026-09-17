@@ -77,7 +77,7 @@ export default function History() {
     <PageFrame layout="public-history" width="full">
       <PageHeader
         title="对局历史"
-        description="查看双方用户、Bot 或真人身份以及对局性质，并按状态与游戏定位回放。"
+        description="回看已结束的对局，或进入正在进行的直播。"
       />
 
       <StickyToolbar label="对局历史筛选">
@@ -111,12 +111,11 @@ export default function History() {
             </SelectContent>
           </Select>
         </div>
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
       </StickyToolbar>
 
       <DataRegion
         title={`对局记录 · 共 ${total} 条`}
-        description={gameId || status ? `已应用筛选条件 · 每页 ${PAGE_SIZE} 条` : `按创建时间查看 · 每页 ${PAGE_SIZE} 条`}
+        description={gameId || status ? '已应用筛选条件' : '按创建时间查看'}
       >
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
@@ -147,12 +146,12 @@ export default function History() {
                       >
                         <TableCell className="whitespace-nowrap">
                           <div className="flex min-w-0 flex-nowrap items-center gap-x-2 whitespace-nowrap">
-                            <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">#{(page - 1) * PAGE_SIZE + index + 1}</span>
+                            <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">#{(page - 1) * PAGE_SIZE + index + 1}</span>
                             <time className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</time>
                             <span className="whitespace-nowrap text-xs text-muted-foreground">{gameLabel(match.game_id)}</span>
                             <MatchNatureBadge matchType={match.match_type} source={match} />
                             {match.match_type === 'contest' && match.contest_id != null && (
-                              <Link to={`/contests/${match.contest_id}`} className="whitespace-nowrap text-[11px] font-medium text-primary hover:underline">查看锦标赛</Link>
+                              <Link to={`/contests/${match.contest_id}`} className="whitespace-nowrap text-xs font-medium text-primary hover:underline">查看锦标赛</Link>
                             )}
                           </div>
                         </TableCell>

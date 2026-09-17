@@ -30,7 +30,7 @@ export function MatchOutcome({
 }: MatchOutcomeProps) {
   const description = describeMatchOutcome(source, { seatLabels, normalizedUnit })
   const primary = primaryOnly && description.kind === 'duplicate'
-    ? `复式交锋 · ${description.primary}`
+    ? `主客两场合计 · ${description.primary}`
     : description.primary
   const flowWide = layout === 'flow-wide'
   return (

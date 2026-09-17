@@ -146,7 +146,7 @@ export function gomokuPhaseLabel(value: unknown, candidateCount?: unknown): stri
     const numeral = count === 2 ? '二' : count === 3 ? '三' : count === 4 ? '四' : count === 5 ? '五' : null
     return numeral ? `五手${numeral}打` : GOMOKU_PHASE_LABELS[phase]
   }
-  return GOMOKU_PHASE_LABELS[phase] || phase || '准备中'
+  return GOMOKU_PHASE_LABELS[phase] || '进行中'
 }
 
 export function gomokuForbiddenLabel(value: unknown): string {

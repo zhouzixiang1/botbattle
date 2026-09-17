@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   BookOpen,
+  ChevronDown,
   Copy,
   Download,
   History,
@@ -42,6 +43,7 @@ import {
   type CurrentUser,
 } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
+import { runtimeModeLabel } from '@/lib/labels'
 import { fmtTime } from '@/lib/format'
 import BotVersionManager from '@/components/BotVersionManager'
 import Pagination from '@/components/Pagination'
@@ -250,7 +252,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
     if (bot.is_ranked) {
       const confirmed = await confirm({
         title: '退出排行榜',
-        desc: `确认让 ${botName} 退出${gameName}排行榜？历史已完成评分与对局记录保留；尚未开始的旧计分排队会取消。如有进行中或待结算的计分对局，暂不能退出。`,
+        desc: `确认让 ${botName} 退出${gameName}排行榜？历史已完成评分与对局记录保留；已排队、还没开始的对局会取消。如有进行中或待结算的计分对局，暂不能退出。`,
         confirmText: '确认退出',
         buttonClassName: 'max-sm:min-h-[44px] max-sm:min-w-[44px]',
       })
@@ -403,14 +405,14 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       layout="account-my-bots"
       className="max-sm:[&_[data-slot=button]]:min-h-[44px] max-sm:[&_[data-slot=button]]:min-w-[44px] max-sm:[&_[data-slot=input]]:min-h-[44px] max-sm:[&_[data-slot=select-trigger]]:min-h-[44px]"
     >
-      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护运行状态，并为每款游戏派遣一个排行榜 Bot。" />
+      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护运行状态。" />
 
       {error && <ErrorMsg msg={error} />}
 
-      <LocalBotConnections identityKey={userId} />
+      <LocalBotConnectionsSection identityKey={userId} />
 
       <div className="grid min-w-0 gap-[var(--page-section-gap)] xl:grid-cols-[22rem_minmax(0,1fr)]">
-      <DataRegion title="上传新 Bot" description="上传成功且通过预检后才会发布并激活。" className="self-start">
+      <DataRegion title="上传新 Bot" description="上传成功且通过服务端检查后才会发布并激活。" className="self-start">
           <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
             <div className="grid min-w-0 gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -447,7 +449,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                     ? '上传单个 Linux x86_64 ELF 可执行文件。'
                     : sourceFormat === 'python'
                       ? '上传 zip 包，默认入口 __main__.py（或 main.py）；当前仅支持标准库。'
-                      : '上传 zip 包，默认入口 main.cpp / main.c / main.go；平台以 -O2 静态链接编译并定义 _BOTZONE_ONLINE 宏。'}
+                      : '上传 zip 包，默认入口 main.cpp / main.c / main.go；平台会自动完成编译。'}
                 </p>
                 {sourceFormat !== 'elf' && (
                   <div className="space-y-1.5">
@@ -463,21 +465,27 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label>Botzone 运行模式</Label>
+                <Label>对战流程</Label>
                 <Select value={runtimeMode} onValueChange={setRuntimeMode}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="traditional">Traditional（默认）</SelectItem>
-                    <SelectItem value="longrunning">LongRunning（严格长驻）</SelectItem>
+                    <SelectItem value="traditional">标准对局（默认）</SelectItem>
+                    <SelectItem value="longrunning">长驻对局</SelectItem>
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {runtimeMode === 'longrunning'
-                    ? '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。'
-                    : '平台默认模式；每个决策点重启进程并发送完整历史信封，Bot 须自行重放。'}
-                </p>
+                <details className="group text-xs text-muted-foreground">
+                  <summary className="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 font-medium text-foreground hover:text-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-0">
+                    <ChevronDown aria-hidden="true" className="size-3.5 transition-transform group-open:rotate-180" />
+                    高级说明
+                  </summary>
+                  <span className="mt-1 block leading-relaxed">
+                    {runtimeMode === 'longrunning'
+                      ? '整场对局只启动一次进程；首回合后需要按公开协议声明继续运行，未声明会被拒绝。格式见开发者文档。'
+                      : '默认模式；每个决策点重新启动进程，并下发完整历史，Bot 需自行还原局面。'}
+                  </span>
+                </details>
               </div>
             </div>
             <div className="grid min-w-0 gap-3 sm:grid-cols-2">
@@ -543,7 +551,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               <p className="text-xs text-muted-foreground">
                 {sourceFormat === 'elf'
                     ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
-                    : '源码包内使用 POSIX 相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。云盘文件在对局中只读挂载于 /mnt/data。'}
+                    : '源码包内使用相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。你在平台云盘保存的文件，对局中可直接读取。'}
               </p>
             </div>
             <BotUploadProgress
@@ -559,7 +567,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
             />
             <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <Upload className="size-4" />
-              {uploadStage === 'preflight' ? '服务端预检中…' : busy ? '上传中…' : '上传'}
+              {uploadStage === 'preflight' ? '服务端检查中…' : busy ? '上传中…' : '上传'}
             </Button>
           </form>
       </DataRegion>
@@ -580,7 +588,6 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               ))}
             </SelectContent>
           </Select>
-          <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
       </StickyToolbar>
 
       <DataRegion title="Bot 列表" description="每个账号每款游戏最多派遣一个 Bot；已完成评分保留，切换会取消旧计分排队，进行中或待结算时暂不可操作。">
@@ -614,10 +621,10 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                       <CopyIdentifier value={b.id} />
                       {b.runnable === false && (
                         <span className="max-w-full break-all rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
-                          诊断：{b.format || 'unknown'} / {b.os || 'unknown'}-{b.arch || 'unknown'}
+                          该文件不是受支持的 Linux 程序
                         </span>
                       )}
-                      <Identifier>{b.runtime_mode || 'traditional'}</Identifier>
+                      <Identifier>{runtimeModeLabel(b.runtime_mode)}</Identifier>
                       <span>当前版本 v{b.current_version ?? 0}</span>
                     </div>
                     {b.runnable === false && (
@@ -775,6 +782,35 @@ async function copyText(value: string, success: string) {
   } catch {
     toast.error('复制失败，请手动选择文本复制')
   }
+}
+
+function LocalBotConnectionsSection({ identityKey }: { identityKey: number | null }) {
+  // 默认折叠：上传表单是本页主视觉；展开后才挂载 LocalBotConnections 并开始轮询。
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        data-testid="local-bot-connections-toggle"
+        className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:px-4"
+      >
+        <span className="inline-flex min-w-0 items-center gap-2 font-medium text-foreground">
+          <Laptop className="size-4 shrink-0 text-primary" aria-hidden="true" />
+          本地对战
+          <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
+            用自己的电脑运行 Bot 参加练习对局
+          </span>
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && <div className="min-w-0"><LocalBotConnections identityKey={identityKey} /></div>}
+    </div>
+  )
 }
 
 function LocalBotConnections({ identityKey }: { identityKey: number | null }) {

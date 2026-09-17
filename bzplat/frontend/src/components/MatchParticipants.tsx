@@ -7,6 +7,7 @@ import { matchTypeBadge } from '@/lib/games'
 import {
   isBotSelfPlay,
   matchParticipantEnvironment,
+  participantHasName,
   participantOwnerText,
   resolveMatchParticipant,
   type MatchParticipantSource,
@@ -96,7 +97,7 @@ export function MatchParticipantIdentity({
           className,
         )}
       >
-        <div className="text-[10px] font-medium text-muted-foreground">{participant.seatLabel}</div>
+        <div className="text-xs font-medium text-muted-foreground">{participant.seatLabel}</div>
         <EntityName lines={textLines} tooltip={emptyLabel} tooltipFocusable={false} className="text-sm italic text-muted-foreground">
           {emptyLabel}
         </EntityName>
@@ -164,7 +165,7 @@ export function MatchParticipantIdentity({
             {participant.botLabel}
           </EntityName>
         )}
-        {state === 'winner' && <Badge className="mt-0.5 h-5 shrink-0 px-1 text-[11px]">胜</Badge>}
+        {state === 'winner' && <Badge className="mt-0.5 h-5 shrink-0 px-1 text-xs">胜</Badge>}
       </div>
       {!participant.isHuman && (
         <div className={cn('min-w-0', dense ? 'mt-0' : 'mt-0.5')}>
@@ -183,14 +184,16 @@ export function MatchParticipantIdentity({
           </OverflowText>
         </div>
       )}
-      <div className={cn('flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] font-medium text-muted-foreground', dense ? 'mt-0' : 'mt-0.5')}>
+      {/* 底部元信息合并为一段：座位号只在匿名兜底时出现，全部 ≥text-xs。 */}
+      <div className={cn('flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs font-medium text-muted-foreground', dense ? 'mt-0' : 'mt-0.5')}>
         <span>{participant.isHuman ? '真人' : 'Bot'}</span>
-        <span aria-hidden="true">·</span>
-        <span>{participant.seatLabel}</span>
+        {!participantHasName(participant) && (
+          <><span aria-hidden="true">·</span><span>{participant.seatLabel}</span></>
+        )}
         {seatDetail && <><span aria-hidden="true">·</span><span>{seatDetail}</span></>}
         <RuntimeEnvironmentBadge
           environment={matchParticipantEnvironment(source, side)}
-          className="h-4 px-1 text-[9px]"
+          className="h-4 px-1 text-xs"
         />
       </div>
     </div>
@@ -252,7 +255,7 @@ export function InlineParticipantIdentity({
         data-seat={side + 1}
         className={cn('inline-flex min-w-0 max-w-full items-center gap-1 text-sm italic text-muted-foreground', className)}
       >
-        <span className="text-[10px] font-medium not-italic text-muted-foreground">{participant.seatLabel}</span>
+        <span className="text-xs font-medium not-italic text-muted-foreground">{participant.seatLabel}</span>
         <span className="min-w-0 truncate">{emptyLabel}</span>
       </span>
     )
@@ -305,11 +308,11 @@ export function InlineParticipantIdentity({
           ) : ownerText}
         </OverflowText>
       )}
-      {state === 'winner' && <Badge className="h-5 shrink-0 self-center px-1 text-[11px]">胜</Badge>}
+      {state === 'winner' && <Badge className="h-5 shrink-0 self-center px-1 text-xs">胜</Badge>}
       {showEnvironment && (
         <RuntimeEnvironmentBadge
           environment={matchParticipantEnvironment(source, side)}
-          className="h-5 shrink-0 px-1 text-[11px]"
+          className="h-5 shrink-0 px-1 text-xs"
         />
       )}
     </span>
@@ -332,7 +335,7 @@ export function MatchParticipants({
         className={cn('flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1', className)}
       >
         <InlineParticipantIdentity source={source} side={0} state={states[0]} links={links} />
-        <span aria-hidden="true" className="text-[10px] font-medium text-muted-foreground">vs</span>
+        <span aria-hidden="true" className="text-xs font-medium text-muted-foreground">vs</span>
         <InlineParticipantIdentity
           source={source}
           side={1}
@@ -352,7 +355,7 @@ export function MatchParticipants({
       )}
     >
       <MatchParticipantIdentity source={source} side={0} variant={variant} state={states[0]} links={links} dense={dense} />
-      <span className="self-center text-[10px] font-medium text-muted-foreground">VS</span>
+      <span className="self-center text-xs font-medium text-muted-foreground">vs</span>
       <MatchParticipantIdentity
         source={source}
         side={1}
@@ -381,7 +384,7 @@ export function MatchNatureBadge({
     <Badge
       data-match-nature={selfPlay ? 'self_play' : matchType || 'unknown'}
       variant="outline"
-      className={cn('shrink-0 text-[10px]', nature?.cls, className)}
+      className={cn('shrink-0 text-xs', nature?.cls, className)}
     >
       {selfPlay ? '自博弈' : nature?.label || '性质未知'}
     </Badge>

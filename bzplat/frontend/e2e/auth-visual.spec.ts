@@ -154,7 +154,8 @@ test('login remains aligned and surfaced after switching to dark mode', async ({
   const lightHeading = await visibleBox(heading, 'light-mode login h1')
   const lightCard = await visibleBox(card, 'light-mode login card')
 
-  await page.getByRole('button', { name: /^当前：浅色模式/ }).click()
+  await page.getByRole('button', { name: '切换主题' }).click()
+  await page.getByRole('menuitemradio', { name: '深色' }).click()
   await expect(page.locator('html')).toHaveClass(/dark/)
   await expect(heading).toBeVisible()
   await expect(card).toBeVisible()

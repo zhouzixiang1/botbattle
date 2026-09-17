@@ -105,14 +105,14 @@ export default function Wiki() {
   return (
     <PageFrame width="default" layout="public-wiki">
       <PageHeader
-        eyebrow="开发者文档"
-        title="Wiki"
+        eyebrow="帮助文档"
+        title="文档"
         description="协议规范、Bot 开发指南、游戏规则、样例与安全说明。"
       />
 
       {pages.length > 0 && (
-        <StickyToolbar label="Wiki 文档导航" className="items-stretch">
-          <nav aria-label="Wiki 目录" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+        <StickyToolbar label="文档导航" className="items-stretch">
+          <nav aria-label="文档目录" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
             {pages.map((page) => (
               <Button
                 key={page.slug}

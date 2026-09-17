@@ -1,4 +1,5 @@
 import { Eye, Radio, RefreshCw } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { MatchParticipantIdentity } from '@/components/MatchParticipants'
@@ -16,6 +17,7 @@ import {
   formatScoringCountsLine,
   parseCrossGroupTiebreak,
   parseRankingCoordinates,
+  type CrossGroupTiebreak,
   type RankingCoordinateMode,
 } from '@/lib/contest-format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
@@ -187,7 +189,7 @@ function liveStageCountsLabel({
 
 function signedBb(value: number): string {
   const rounded = Math.round(value * 100) / 100
-  return `${rounded > 0 ? '+' : ''}${rounded}BB`
+  return `${rounded > 0 ? '+' : ''}${rounded}`
 }
 
 /** 冻结的旧版 aggregate 专用；新版 independent 永远不渲染该摘要。 */
@@ -213,9 +215,36 @@ function LegacySeriesScoreline({ pairing }: { pairing: LiveContestPairing }) {
       <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
         本轮交锋 {summary.series_size} 场历史系列对局 · 已完成 {summary.completed_matches}/{summary.series_size}场
         {' · '}小分 {summary.game_points_a ?? 0}–{summary.game_points_b ?? 0}
-        {' · '}净胜 {signedBb(summary.normalized_delta_a)}
+        {' · '}净胜 {signedBb(summary.normalized_delta_a)} 大盲注
       </p>
     </div>
+  )
+}
+
+/** 跨组同分时的比较明细：默认只显示组内名次，其余数值按需展开。 */
+function CrossGroupRankDetail({ crossGroup }: { crossGroup: CrossGroupTiebreak }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <p className="min-w-0 text-xs leading-relaxed text-muted-foreground">
+      组内第 {crossGroup.group_rank} 名
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="ml-1.5 inline-flex min-h-11 items-center px-0.5 font-medium text-primary underline underline-offset-4 [@media(pointer:fine)_and_(min-width:40rem)]:min-h-6"
+      >
+        {open ? '收起明细' : '排名明细'}
+      </button>
+      {open && (
+        <span className="block break-words">
+          积分率 {RANK_RATE.format(crossGroup.points_rate * 100)}% ·
+          {' '}对手强度 {RANK_RATE.format(crossGroup.opponent_strength * 100)}% ·
+          {' '}每局分差 {RANK_RATE.format(crossGroup.normalized_delta_rate)} ·
+          {' '}技术负率 {RANK_RATE.format(crossGroup.technical_loss_rate * 100)}% ·
+          {' '}抽签顺序 {crossGroup.draw_order}
+        </span>
+      )}
+    </p>
   )
 }
 
@@ -522,7 +551,7 @@ export function LiveContestSpectator({
         <p className="mt-0.5 text-xs text-muted-foreground">
           {progressValue.running} 桌进行中 · {progressValue.pending} {legacyAggregate ? '场历史系列对局待赛' : duplicate ? '组待赛' : '场待赛'}
           {(scoringGameCounts?.terminal_unplayed ?? 0) > 0 && (
-            <> · {scoringGameCounts!.terminal_unplayed} 场因技术终局未进行</>
+            <> · 另有 {scoringGameCounts!.terminal_unplayed} 场因对手技术原因未进行</>
           )}
         </p>
         <div
@@ -598,7 +627,7 @@ export function LiveContestSpectator({
           </div>
           {hasGroupedStandings && rankingMode === 'cross_group' && (
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              同时显示总榜与组内名次。跨组依次比较组内名次、每局积分率、标准化对手强度、每局归一化分差、技术负率和冻结抽签序；不跨组使用直接交手。
+              总榜同分时，依次比较组内名次、积分率、对手强度等；点「排名明细」可看具体数值。
             </p>
           )}
           {ranked.length > 0 ? (
@@ -637,15 +666,7 @@ export function LiveContestSpectator({
                           {coordinates.group_id.endsWith('组') ? coordinates.group_id : `${coordinates.group_id}组`} · 第 {coordinates.rank_in_group} 名
                         </p>
                       )}
-                      {crossGroup && (
-                        <p className="text-[11px] leading-relaxed text-muted-foreground">
-                          组内第 {crossGroup.group_rank} 名 · 积分率 {RANK_RATE.format(crossGroup.points_rate * 100)}% ·
-                          {' '}对手强度 {RANK_RATE.format(crossGroup.opponent_strength * 100)}% ·
-                          {' '}每局分差 {RANK_RATE.format(crossGroup.normalized_delta_rate)} ·
-                          {' '}技术负率 {RANK_RATE.format(crossGroup.technical_loss_rate * 100)}% ·
-                          {' '}抽签序 {crossGroup.draw_order}
-                        </p>
-                      )}
+                      {crossGroup && <CrossGroupRankDetail crossGroup={crossGroup} />}
                       <p className="text-xs leading-relaxed text-muted-foreground">
                         {formatScoringCountsLine(row, duplicate, legacyAggregate)}
                         {' · '}{row.wins} 胜 / {row.draws} 平 / {row.losses} 负

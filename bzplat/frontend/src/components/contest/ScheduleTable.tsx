@@ -150,21 +150,21 @@ export default function ScheduleTable({
               data-series-start={isSeriesStart || undefined}
               className={isSeriesStart && (p.series_size ?? 1) > 1 ? 'space-y-2.5 border-t-2 border-primary/20 p-3 first:border-t-0' : 'space-y-2.5 p-3'}
             >
-              <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
-                <span className="font-mono font-semibold text-foreground">
-                  {p.group_id ? `${p.group_id} · ` : ''}R{round}
-                  {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0
-                    ? ` · 决胜组 ${p.tiebreak_group} · 第 ${p.tiebreak_game}/2 场`
-                    : ''}
-                  {p.series_size && p.series_size > 1
-                    ? duplicate
-                      ? ` · 本对 ${p.series_size} 组复式 · 第 ${p.series_index ?? 1}/${p.series_size} 组`
-                      : legacyAggregate
-                        ? ` · 本对 ${p.series_size} 场历史系列对局 · 旧版系列第 ${p.series_index ?? 1}/${p.series_size} 场`
-                      : ` · 本对 ${p.series_size} 场计分 · 第 ${p.series_index ?? 1}/${p.series_size} 场`
-                    : ''}
-                </span>
-                <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
+              <header className="min-w-0 space-y-1 text-xs">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-mono font-semibold text-foreground">
+                    {p.group_id ? `${p.group_id} · ` : ''}第 {round} 轮
+                    {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0
+                      ? ` · 决胜组 ${p.tiebreak_group}`
+                      : ''}
+                  </span>
+                  <span className="ml-auto shrink-0 text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
+                </div>
+                {p.series_size != null && p.series_size > 1 && (
+                  <p className="min-w-0 break-words text-muted-foreground">
+                    本对 {p.series_size} {duplicate ? '组复式' : legacyAggregate ? '场历史系列对局' : '场计分'} · 第 {p.series_index ?? 1}/{p.series_size} {duplicate ? '组' : '场'}
+                  </p>
+                )}
               </header>
               <div data-match-participants="true" className="grid min-w-0 gap-2">
                 <MatchParticipantIdentity source={p} side={0} variant="panel" state={states[0]} textLines={2} />
@@ -214,14 +214,14 @@ export default function ScheduleTable({
                 {/* 仅每轮首行显示轮次徽章，避免重复噪音；列宽充裕时单行，紧张时折行 */}
                 <TableCell className="py-1 font-mono text-xs text-muted-foreground">
                   <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                    {isRoundStart && <span className="shrink-0">R{round}</span>}
+                    {isRoundStart && <span className="shrink-0">第 {round} 轮</span>}
                     {(p.tiebreak_group ?? 0) > 0 && (p.tiebreak_game ?? 0) > 0 && (
-                      <span className="whitespace-nowrap font-medium text-foreground">
+                      <span className="font-medium text-foreground">
                         决胜组 {p.tiebreak_group} · 第 {p.tiebreak_game}/2 场
                       </span>
                     )}
                     {p.series_size && p.series_size > 1 && (
-                      <span className="whitespace-nowrap">
+                      <span>
                         {isSeriesStart
                           ? duplicate
                             ? `本对 ${p.series_size} 组复式 · `

@@ -9,6 +9,7 @@ import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { useConfirm } from '@/hooks/use-confirm'
 import { BotUploadProgress } from '@/components/bot-upload-progress'
+import { fmtBytes, fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 interface StorageFile {
@@ -23,17 +24,6 @@ interface StorageFilesResponse {
   files: StorageFile[]
   usage: { files: number; bytes: number }
   quota: { bytes: number; max_files: number }
-}
-
-function fmtBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GiB`
-}
-
-function fmtTime(iso: string): string {
-  return iso.slice(0, 16).replace('T', ' ')
 }
 
 export function UserStoragePanel() {
@@ -191,7 +181,7 @@ export function UserStoragePanel() {
           <Loading text="正在加载云存储…" />
         ) : !data || data.files.length === 0 ? (
           <EmptyState
-            text="还没有文件。把模型权重等数据文件放进来，后续版本 Bot 就能直接使用。"
+            text="还没有文件；点右上角「上传文件」，把模型权重等数据文件放进来。"
             icon={<HardDrive className="size-5 opacity-50" />}
             className="py-8"
           />

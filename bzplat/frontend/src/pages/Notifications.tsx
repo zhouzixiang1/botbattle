@@ -122,7 +122,6 @@ export default function Notifications() {
             <TabsTrigger value="unread">未读{unread > 0 ? ` ${unread}` : ''}</TabsTrigger>
           </TabsList>
         </Tabs>
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
       </StickyToolbar>
 
       {actionError && <ErrorMsg msg={actionError} />}

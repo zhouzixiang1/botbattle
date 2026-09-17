@@ -336,7 +336,7 @@ test('opponent history paginates all rows and replaces each page without stale c
   await expect(table).toBeVisible()
   await expect(table.locator('tbody tr')).toHaveCount(PER_PAGE)
   await expect(table.getByText('分页对手 01', { exact: true })).toBeVisible()
-  await expect(page.getByText('当前评分池计分交手 · 第 1 页 · 每页 20 个 · 共 45 个对手', { exact: true })).toBeVisible()
+  await expect(page.getByText('已计分交手 · 共 45 个对手', { exact: true })).toBeVisible()
 
   const pagination = page.getByRole('navigation', { name: 'Bot 对手战绩分页' })
   const monitor = monitorBrowser(page)
@@ -451,7 +451,7 @@ test('switching Bot resets opponent pagination and ignores the old delayed page'
   const nextOpponentsTab = page.getByRole('tab', { name: /\u5bf9\u624b\u6218绩/ })
   await expect(nextOpponentsTab).toContainText('1')
   await nextOpponentsTab.click()
-  await expect(page.getByText('当前评分池计分交手 · 第 1 页 · 每页 20 个 · 共 1 个对手', { exact: true })).toBeVisible()
+  await expect(page.getByText('已计分交手 · 共 1 个对手', { exact: true })).toBeVisible()
   await expect(
     page.getByRole('table', { name: 'Bot 对手战绩' })
       .getByRole('link', { name: '新 Bot 第一页对手', exact: true }),

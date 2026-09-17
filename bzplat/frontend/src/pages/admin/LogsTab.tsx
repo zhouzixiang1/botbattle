@@ -14,8 +14,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  inp,
 } from './ui'
+import { Input } from '@/components/ui/input'
 
 interface LogState {
   lines: string[]
@@ -185,21 +185,21 @@ export default function LogsTab() {
             ))}
           </SelectContent>
         </Select>
-        <input
+        <Input
           value={q}
           onChange={(event) => setQ(event.target.value)}
           placeholder="对局 ID / Bot ID / 模块 / IP / 操作"
           aria-label="日志关键字"
-          className={`${inp} mt-0 h-9 px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11`}
+          className="h-9 text-xs [@media(pointer:coarse)]:min-h-11"
         />
-        <input
+        <Input
           type="number"
           min={50}
           max={2000}
           value={limit}
           aria-label="日志行数"
           onChange={(event) => setLimit(Math.min(2000, Math.max(50, Number(event.target.value) || 300)))}
-          className={`${inp} mt-0 h-9 px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11`}
+          className="h-9 text-xs [@media(pointer:coarse)]:min-h-11"
         />
       </div>
 
@@ -221,7 +221,7 @@ export default function LogsTab() {
             {lines.map((line, index) => (
               <div key={`${index}-${line.raw.slice(0, 24)}`} className="grid gap-1 px-3 py-1.5 font-mono text-xs hover:bg-accent/50 lg:grid-cols-[9.5rem_5rem_16rem_minmax(0,1fr)] lg:items-start">
                 <span className="text-muted-foreground">{line.timestamp || '—'}</span>
-                <span><Badge variant={levelVariant(line.level)} className="text-[10px]">{levelLabel(line.level)}</Badge></span>
+                <span><Badge variant={levelVariant(line.level)} className="text-xs">{levelLabel(line.level)}</Badge></span>
                 <span className="break-all text-muted-foreground">{line.module || '未结构化'}</span>
                 <span className="whitespace-pre-wrap break-words text-foreground">{line.message}</span>
               </div>

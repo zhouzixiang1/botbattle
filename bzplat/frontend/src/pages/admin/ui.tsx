@@ -20,3 +20,10 @@ export { Badge } from '@/components/ui/badge'
  */
 export const inp =
   'mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2 appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [&::-webkit-outer-spin-button]:m-0'
+
+/**
+ * 同 `inp` 但不带外边距：供工具栏等紧凑行内布局使用，
+ * 间距由外层容器（gap/space-y）统一控制。
+ */
+export const inpFlush =
+  'block w-full rounded-lg border border-input bg-background px-3 py-2 appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [&::-webkit-outer-spin-button]:m-0'

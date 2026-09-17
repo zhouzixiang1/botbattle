@@ -170,8 +170,8 @@ export function GlobalSearch({
           >
             <Search aria-hidden="true" className="size-4 shrink-0" />
             <span className="truncate">搜索 Bot、用户、对局…</span>
-            <kbd aria-hidden="true" className="ml-2 shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
-              {IS_APPLE ? '⌘K' : 'Ctrl K'}
+            <kbd aria-hidden="true" className="ml-2 shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-xs font-medium">
+              {IS_APPLE ? '⌘K' : 'Ctrl+K'}
             </kbd>
           </button>
         </>
@@ -218,9 +218,9 @@ export function GlobalSearch({
                       source={m}
                       seatLabels={outcomeSeatLabels(m)}
                       primaryOnly
-                      className="mt-1 text-[10px]"
+                      className="mt-1 text-xs"
                     />
-                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                       <span>{gameLabel(m.game_id)}</span>
                       <MatchNatureBadge matchType={m.match_type} source={m} />
                     </div>

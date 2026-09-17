@@ -182,7 +182,7 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
     <PageFrame width="full" layout="messages-mailbox" className="gap-3">
       <PageHeader
         title="站内信"
-        description="平台通知、群发公告与支持回复集中归档；用户不能向其他用户发私信。"
+        description="这里收平台公告与客服回复。"
         actions={(
           <Button asChild size="sm"><Link to="/feedback"><Bug className="size-4" />反馈问题</Link></Button>
         )}
@@ -228,7 +228,7 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
                       {item.unread_count > 0 && <Badge className="ml-auto shrink-0 tabular-nums">{item.unread_count}</Badge>}
                     </span>
                     <span className="mt-0.5 line-clamp-2 break-words text-xs leading-snug text-muted-foreground">{item.latest_body}</span>
-                    <span className="mt-0.5 flex items-center gap-2 text-[0.6875rem] text-muted-foreground">
+                    <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                       <span>{THREAD_KIND_LABELS[item.kind] || '消息'}</span>
                       <time className="ml-auto font-mono tabular-nums">{fmtTime(item.latest_at)}</time>
                     </span>

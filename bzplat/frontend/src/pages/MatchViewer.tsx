@@ -10,7 +10,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, ChevronDown, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download, MessageSquare } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, ChevronDown, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download, MessageSquare, Link2 } from 'lucide-react'
+import { toast } from 'sonner'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
 import { MatchOutcome } from '@/components/MatchOutcome'
@@ -26,11 +27,12 @@ import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiFetch, apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
+import { ratingReasonLabel } from '@/lib/labels'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
 import type { SeatInfo } from '@/games/canvas-types'
-import { describePlatformEvent } from '@/games/reasons'
+import { describePlatformEvent, technicalReasonLabel } from '@/games/reasons'
 import { eventSeatSubject } from '@/games/seat-display'
 import type { RawEvent } from '@/games/base'
 import { parseMatchTimeControl, timeControlDescription, timeControlLabel } from '@/lib/time-controls'
@@ -84,8 +86,8 @@ function describeTimelineEvent(
     const subject = eventSeatSubject(seats, event.seat)
     const turn = Number(event.turn)
     const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
-    const reason = resolveTerminalReason(event.reason, 'completed').label
-    return `${subject} 技术故障${turnText}：${String(event.error || reason)}`
+    // 只展示原因的中文投影；后端原始错误串与内部码不上屏。
+    return `${subject} 技术故障${turnText}：${technicalReasonLabel(event.reason)}`
   }
   const platformDescription = describePlatformEvent(event)
   if (platformDescription) return platformDescription
@@ -98,19 +100,6 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
 }
 
-const RATING_REASON_LABEL: Record<string, string> = {
-  eligible: '计入平台排行榜',
-  same_owner: '同所有者调试 · 不计平台排行榜',
-  self_play: '自博弈调试 · 不计平台排行榜',
-  human: '人机对局 · 不计平台排行榜',
-  contest: '赛事积分 · 不计平台排行榜',
-  bot_missing: '历史 Bot 缺失 · 不计平台排行榜',
-  owner_missing: '历史所有者缺失 · 不计平台排行榜',
-  remote_local: '本地 Bot 练习 · 不计平台排行榜',
-  ranked_bot_not_selected: '未派遣排行榜 Bot · 不计平台排行榜',
-  alternate_time_control: '替代时限练习 · 不计平台排行榜',
-}
-
 function ratingBadge(match: MatchRow): {
   label: string
   variant: 'default' | 'secondary' | 'destructive' | 'outline'
@@ -121,7 +110,7 @@ function ratingBadge(match: MatchRow): {
   if (match.rated !== true) {
     if (match.rated !== false) return null
     return {
-      label: RATING_REASON_LABEL[match.rating_reason || ''] || '不计平台排行榜',
+      label: ratingReasonLabel(match.rating_reason),
       variant: 'secondary',
     }
   }
@@ -539,12 +528,15 @@ export default function MatchViewer() {
     .filter((event) => event.type === 'technical_incident')
     .map((event) => ({
       seat: Number(event.seat),
-      error: String(event.error || resolveTerminalReason(event.reason, 'completed').label),
-      code: event.code == null ? undefined : String(event.code),
-      reason: event.reason == null ? undefined : String(event.reason),
+      label: technicalReasonLabel(event.reason),
       turn: event.turn == null ? null : Number(event.turn),
     }))
-  const technicalIncidents = persistedIncidents.length ? persistedIncidents : eventIncidents
+  const persistedIncidentViews = persistedIncidents.map((incident) => ({
+    seat: Number(incident.seat),
+    label: technicalReasonLabel(incident.reason ?? incident.code),
+    turn: incident.turn == null ? null : Number(incident.turn),
+  }))
+  const technicalIncidents = persistedIncidents.length ? persistedIncidentViews : eventIncidents
   const technicalTerminal = finished && (matchHasTechnicalLoss(match) || technicalIncidents.length > 0)
   // 首决策德扑故障已经有 hand_start，但没有完成一手；只数 settle，避免终局
   // 到达、REST 尚未刷新时短暂显示伪造的“第 1/70 手”。没有 hand_start 的
@@ -692,7 +684,7 @@ export default function MatchViewer() {
   const playbackLabel = playing
     ? '暂停回放'
     : cur >= total - 1
-      ? realtime ? '继续跟播' : '从头重播'
+      ? realtime ? '回到直播' : '从头重播'
       : '继续回放'
   const recordDownload = match?.id === id
     && (match?.status === 'completed' || match?.status === 'aborted')
@@ -716,7 +708,7 @@ export default function MatchViewer() {
         side={seat}
         state={participantStates[seat]}
         seatDetail={visibleSeatDetail(seat)}
-        className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} py-0.5 ${isWinner ? 'rounded-lg bg-primary/5' : ''}`}
+        className={`${seat === 0 ? 'order-1' : 'order-3'} py-0.5 ${isWinner ? 'rounded-lg bg-primary/5' : ''}`}
       />
     )
   }
@@ -767,10 +759,11 @@ export default function MatchViewer() {
         <Card className="gap-0 py-0">
           <CardContent className="px-3 py-2">
             <div className={controlsRowClasses}>
+              {/* 次要的分段导航（上一手/下一手/跳转）在窄屏折叠，保留 播放 / 进度 / 速度。 */}
               {navigation && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="sm" className="px-2" aria-label={`上一${navigation.unitLabel}`} onClick={() => jumpSegment(-1)}>
+                    <Button variant="outline" size="sm" className="hidden px-2 sm:inline-flex" aria-label={`上一${navigation.unitLabel}`} onClick={() => jumpSegment(-1)}>
                       <SkipBack className="size-3.5" />
                     </Button>
                   </TooltipTrigger>
@@ -799,7 +792,7 @@ export default function MatchViewer() {
               {navigation && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="sm" className="px-2" aria-label={`下一${navigation.unitLabel}`} onClick={() => jumpSegment(1)}>
+                    <Button variant="outline" size="sm" className="hidden px-2 sm:inline-flex" aria-label={`下一${navigation.unitLabel}`} onClick={() => jumpSegment(1)}>
                       <SkipForward className="size-3.5" />
                     </Button>
                   </TooltipTrigger>
@@ -807,28 +800,30 @@ export default function MatchViewer() {
                 </Tooltip>
               )}
               {navigation && bounds.length >= 2 && (
-                <Select
-                  value={currentNavigationValue}
-                  onValueChange={(value) => seek(
-                    value === 'terminal'
-                      ? terminalNavigationIndex ?? Math.max(0, total - 1)
-                      : bounds[Number(value)] ?? 0,
-                  )}
-                >
-                  <SelectTrigger size="sm" className="h-8 w-[5.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Array.from({ length: bounds.length - 1 }, (_, segment) => (
-                      <SelectItem key={segment} value={String(segment)}>
-                        {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
-                      </SelectItem>
-                    ))}
-                    {terminalNavigationIndex !== null && (
-                      <SelectItem value="terminal">终局事件</SelectItem>
+                <div className="hidden sm:block">
+                  <Select
+                    value={currentNavigationValue}
+                    onValueChange={(value) => seek(
+                      value === 'terminal'
+                        ? terminalNavigationIndex ?? Math.max(0, total - 1)
+                        : bounds[Number(value)] ?? 0,
                     )}
-                  </SelectContent>
-                </Select>
+                  >
+                    <SelectTrigger size="sm" className="h-8 w-[5.5rem] text-xs" aria-label={`跳转${navigation.unitLabel}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from({ length: bounds.length - 1 }, (_, segment) => (
+                        <SelectItem key={segment} value={String(segment)}>
+                          {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
+                        </SelectItem>
+                      ))}
+                      {terminalNavigationIndex !== null && (
+                        <SelectItem value="terminal">终局事件</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
               )}
               <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
                 <SelectTrigger size="sm" className="h-8 w-[4.5rem] text-xs" aria-label="回放速度">
@@ -839,7 +834,8 @@ export default function MatchViewer() {
                 </SelectContent>
               </Select>
               <div className="flex basis-full items-center gap-3 xl:basis-auto xl:min-w-0 xl:flex-1">
-                <span data-testid="playback-position" className="shrink-0 whitespace-nowrap font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
+                <span data-testid="playback-position" className="shrink-0 whitespace-nowrap font-mono text-xs text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
+                {progressText && <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">{progressText}</span>}
                 <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="min-w-8 flex-1" />
               </div>
             </div>
@@ -872,7 +868,7 @@ export default function MatchViewer() {
                 data-testid="match-action-context-row"
                 className={`flex items-center gap-2 rounded px-2 py-1 ${eventIndex === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}
               >
-                <span className="w-7 shrink-0 font-mono text-[11px] opacity-60">{eventIndex + 1}</span>
+                <span className="w-7 shrink-0 font-mono text-xs opacity-60">{eventIndex + 1}</span>
                 <span className="min-w-0 flex-1 break-words leading-snug [overflow-wrap:anywhere]">
                   {describeTimelineEvent(ev, gameSpec?.describeEvent(ev, seats) ?? String(ev.type || '?'), seats)}
                 </span>
@@ -912,38 +908,17 @@ export default function MatchViewer() {
     </div>
   )
 
-  // 顶部信息带（对局元数据徽标）与结果卡/技术故障卡/debug/错误提示：xl+ 全部并入
-  // 棋盘主列、紧贴棋盘列宽，不再横铺整行；xl 以下保持原有整行堆叠顺序。
+  // 顶部信息带：主行只保留 游戏 · 状态 · 计分（和跳转动作）；性质/时限徽标
+  // 收进次行，对局编号收进「复制链接」，不再常驻挤占标题行。
   const metaRow = (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-        <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{id}</span>
+    <div className="flex min-w-0 flex-col gap-1.5 text-sm">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {match && (
           <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
         )}
-        {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
-        {ratingStateBadge && (
-          <Badge
-            data-testid="rating-state"
-            variant={ratingStateBadge.variant}
-            className="max-w-full whitespace-normal text-[10px]"
-          >
-            {ratingStateBadge.label}
-          </Badge>
-        )}
-        {matchTimeControl && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Badge data-testid="match-time-control" variant="outline" className="max-w-full whitespace-normal text-[10px]">
-                {timeControlLabel(matchTimeControl)}
-              </Badge>
-            </TooltipTrigger>
-            <TooltipContent className="max-w-xs">{timeControlDescription(matchTimeControl)}</TooltipContent>
-          </Tooltip>
-        )}
-        {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
-            回退到本地连接态（connecting/live/match_end/error/replay）。
-            原仅读本地 status 导致已完成的对局刷新后显示「回放」而非「已完成」。 */}
         {(() => {
+          // 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
+          // 回退到本地连接态（connecting/live/match_end/error/replay）。
           const dbStatus = match?.status  // 'completed'|'aborted'|'running'|'pending'（权威）
           const showLive = status === 'live'
           const label = showLive ? '直播中'
@@ -963,7 +938,16 @@ export default function MatchViewer() {
             </Badge>
           )
         })()}
-        {progressText && <Badge variant="outline">{progressText}</Badge>}
+        {/* 计分徽标与状态同容器（对局状态条语义）；其余次要徽标收进次行。 */}
+        {ratingStateBadge && (
+          <Badge
+            data-testid="rating-state"
+            variant={ratingStateBadge.variant}
+            className="max-w-full whitespace-normal text-xs"
+          >
+            {ratingStateBadge.label}
+          </Badge>
+        )}
         {lag > 0 && (
           <Button
             variant="outline"
@@ -987,6 +971,45 @@ export default function MatchViewer() {
             直接查看最终结果
           </Button>
         )}
+        {id && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-11 w-11 px-0 text-muted-foreground sm:h-8"
+                aria-label="复制对局链接"
+                onClick={() => {
+                  const copied = navigator.clipboard?.writeText(window.location.href)
+                  if (copied) {
+                    copied.then(() => toast.success('已复制对局链接')).catch(() => toast.error('复制失败，请手动复制地址栏链接'))
+                  } else {
+                    toast.error('复制失败，请手动复制地址栏链接')
+                  }
+                }}
+              >
+                <Link2 aria-hidden="true" className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>复制对局链接</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
+      {(match || matchTimeControl) && (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
+          {matchTimeControl && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge data-testid="match-time-control" variant="outline" className="max-w-full whitespace-normal text-xs">
+                  {timeControlLabel(matchTimeControl)}
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs">{timeControlDescription(matchTimeControl)}</TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+      )}
     </div>
   )
 
@@ -996,10 +1019,10 @@ export default function MatchViewer() {
       {/* 对阵与结果形成一个稳定层级；身份不再同时散落于标题、摘要和详情链接。 */}
       {match && (
         <Card data-testid="match-result-card" className="mx-auto w-full max-w-4xl gap-0 py-0">
-          <CardContent className="grid grid-cols-2 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.7fr)_minmax(0,1fr)] sm:items-center">
+          <CardContent className="grid grid-cols-1 gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.7fr)_minmax(0,1fr)] sm:items-center">
             {renderSeat(0)}
-            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
-              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+            <div className="order-2 col-span-1 min-w-0 border-t border-border pt-1.5 text-center sm:order-2 sm:border-x sm:border-t-0 sm:px-3 sm:py-0.5">
+              <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 {finished ? '对局结果' : '当前状态'}
               </div>
               {finished ? (
@@ -1038,10 +1061,10 @@ export default function MatchViewer() {
               <span className="shrink-0 font-semibold text-foreground">Bot 技术判负</span>
               <span className="min-w-0 break-words text-muted-foreground">
                 {failedSeat === 0 || failedSeat === 1
-                  ? `${seatHeaderLabel(match, failedSeat)} · 座位 ${failedSeat + 1} 发生技术故障`
+                  ? `${seatHeaderLabel(match, failedSeat)} 发生技术故障`
                   : '对局因 Bot 技术故障终止'}
                 {winnerSeat === 0 || winnerSeat === 1
-                  ? `，${seatHeaderLabel(match, winnerSeat)} · 座位 ${winnerSeat + 1} 获胜。`
+                  ? `，${seatHeaderLabel(match, winnerSeat)} 获胜。`
                   : '。'}
               </span>
               {technicalIncidents.length > 0 ? (
@@ -1051,11 +1074,10 @@ export default function MatchViewer() {
                     className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 break-words text-muted-foreground"
                   >
                     <span className="font-medium text-foreground">
-                      {eventSeatSubject(seats, incident.seat)} · 座位 {Number(incident.seat) + 1}
+                      {eventSeatSubject(seats, incident.seat)}
                       {incident.turn != null ? ` · 第 ${incident.turn} 次决策` : ''}
                     </span>
-                    {incident.code && <Badge variant="outline" className="max-w-full break-all font-mono text-[10px]">{incident.code}</Badge>}
-                    <span className="min-w-0 break-words">{incident.error}</span>
+                    <span className="min-w-0 break-words">{incident.label}</span>
                   </span>
                 ))
               ) : (
@@ -1080,7 +1102,7 @@ export default function MatchViewer() {
       )}
       {error && <ErrorMsg msg={error} />}
       {match && !gameSpec && (
-        <ErrorMsg msg={`无法显示该对局：${unsupportedGameLabel(match.game_id)}`} />
+        <ErrorMsg msg={unsupportedGameLabel(match.game_id)} />
       )}
     </>
   )
@@ -1089,7 +1111,7 @@ export default function MatchViewer() {
     <Loading text="加载中…" />
   ) : match && !gameSpec ? (
     <Card><EmptyState
-      text={`回放不可用：${unsupportedGameLabel(match.game_id)}`}
+      text={unsupportedGameLabel(match.game_id)}
       icon={<TriangleAlert className="size-7 opacity-40" />}
     /></Card>
   ) : visible.length === 0 ? (

@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Upload, History, RotateCcw } from 'lucide-react'
-import { fmtTime } from '@/lib/format'
+import { fmtBytes, fmtTime } from '@/lib/format'
 import { DataRegion } from '@/components/layout'
 import {
   Dialog,
@@ -37,6 +37,7 @@ import {
 } from '@/components/bot-upload-progress'
 import { useConfirm } from '@/hooks/use-confirm'
 import { apiFormWithProgress, apiGet, apiJson, errMsg } from '@/api'
+import { runtimeModeLabel } from '@/lib/labels'
 import { toast } from 'sonner'
 
 export interface BotVersion {
@@ -70,15 +71,9 @@ interface Props {
 }
 
 const RUNTIME_MODES = [
-  { value: 'traditional', label: 'Traditional（默认）', desc: '每个决策点重启进程并发送完整历史信封，Bot 须自行重放。' },
-  { value: 'longrunning', label: 'LongRunning（严格长驻）', desc: '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。' },
+  { value: 'traditional', label: '标准对局（默认）', desc: '每个决策点重新启动进程，并下发完整历史，Bot 需自行还原局面。' },
+  { value: 'longrunning', label: '长驻对局', desc: '整场对局只启动一次进程；首回合后需要按公开协议声明继续运行，未声明会被拒绝。' },
 ]
-
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(2)} MB`
-}
 
 export default function BotVersionManager({
   botId,
@@ -269,7 +264,7 @@ export default function BotVersionManager({
     if (v.version === (curVer ?? currentVersion)) return
     const ok = await confirm({
       title: `回滚到 v${v.version}?`,
-      desc: `将把当前版本切换为 v${v.version}（运行模式: ${v.runtime_mode}）。其他兼容版本仍会保留；已退役协议版本不能恢复。`,
+      desc: `将把当前版本切换为 v${v.version}（对战流程：${runtimeModeLabel(v.runtime_mode)}）。其他兼容版本仍会保留；已退役协议版本不能恢复。`,
       danger: true,
     })
     // 用户确认期间可能已经关掉 A 并打开 B；绝不能把 A 的版本号发给 B。
@@ -311,15 +306,15 @@ export default function BotVersionManager({
             {botName && <EntityName lines={2} tooltip={botName} className="min-w-0 text-sm">{botName}</EntityName>}
           </DialogTitle>
           <DialogDescription>
-            上传新版本、查看历史，并切换到当前协议兼容的版本。已退役协议版本仅保留审计记录，不能恢复。
+            上传新版本、查看历史，并切换到当前协议兼容的版本。过旧版本已不能启用。
           </DialogDescription>
         </DialogHeader>
 
-        <DataRegion title="上传新版本" description="通过预检后发布，并自动切换为当前版本。">
+        <DataRegion title="上传新版本" description="服务端检查通过后发布，并自动切换为当前版本。">
         <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
           <div className="grid min-w-0 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>Botzone 运行模式</Label>
+              <Label>对战流程</Label>
               <Select value={mode} onValueChange={setMode}>
                 <SelectTrigger className="h-9 w-full">
                   <SelectValue />
@@ -416,7 +411,7 @@ export default function BotVersionManager({
           <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
             <Upload className="size-4" />
             {uploadStage === 'preflight'
-              ? sourceFormat === 'elf' ? '服务端预检中…' : '服务端编译校验中…'
+              ? sourceFormat === 'elf' ? '服务端检查中…' : '服务端编译校验中…'
               : busy ? '上传中…' : '上传新版本'}
           </Button>
         </form>
@@ -450,11 +445,11 @@ export default function BotVersionManager({
                       </div>
                       <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span>{fmtTime(v.uploaded_at)}</span>
-                        <span>{fmtSize(v.size_bytes)}</span>
-                        <Identifier>{v.runtime_mode}</Identifier>
+                        <span>{fmtBytes(v.size_bytes)}</span>
+                        <Identifier>{runtimeModeLabel(v.runtime_mode)}</Identifier>
                         {v.runnable === false && (
                           <span className="text-destructive">
-                            诊断：{v.format}/{v.os}-{v.arch}
+                            {v.unsupported_reason || '该文件不是受支持的 Linux 程序'}
                           </span>
                         )}
                       </div>

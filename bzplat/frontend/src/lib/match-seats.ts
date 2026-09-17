@@ -99,8 +99,9 @@ export function resolveWinnerLabel(
   const nameOf = (seat: number) => {
     if (colorLabel) return colorLabel(seat)
     if (m) return seatHeaderLabel(m, seat as 0 | 1)
-    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-    return `座位 ${seat + 1}`
+    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）；缺匹配数据时用通用
+    // 匿名兜底，不显示内部座位号。
+    return seat === 0 ? '玩家一' : '玩家二'
   }
   if (m && isPublicMatchOutcome(m.outcome)) {
     return describeMatchOutcome(

@@ -413,7 +413,7 @@ export default function Settings() {
         </TabsContent>
 
         <TabsContent value="password">
-          <DataRegion title="修改密码" description="修改后后端会撤销全部会话，并跳转至登录页。" contentClassName="px-4 py-3">
+          <DataRegion title="修改密码" description="修改后需重新登录。" contentClassName="px-4 py-3">
             <form onSubmit={changePassword} className="min-w-0 space-y-3">
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">

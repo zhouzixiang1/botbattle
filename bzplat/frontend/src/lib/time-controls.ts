@@ -117,8 +117,8 @@ export function timeControlLabel(control: TimeControlOption): string {
 
 export function timeControlDescription(control: TimeControlOption, human = false): string {
   const scope = human || control.applies_to === 'bot_only'
-    ? '只计 Bot 的完整请求到完整响应；真人沿用防挂机时限'
-    : '双方对称计时，从完整请求交给已就绪 Bot 到完整响应到达'
-  const reset = control.mode === 'per_decision' ? '每次决策重新计时' : '每局分别累计、下一局重置'
-  return `${scope}；${reset}，排队、启动和容器预热不计入。`
+    ? '只计 Bot 用时，超时即判负；真人继续只受页面防挂机时限约束'
+    : '双方共用同一时长，Bot 超时即判负'
+  const reset = control.mode === 'per_decision' ? '每步决策重新计时' : '每方累计计时'
+  return `${scope}；${reset}，排队与启动不计时。`
 }

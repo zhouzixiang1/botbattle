@@ -43,6 +43,20 @@ export function fmtRating(r: number | null | undefined, fallback = '—'): strin
 }
 
 /**
+ * 统一文件大小展示（输入字节，面向用户的 KB/MB/GB 口径，1024 进制）：
+ * `<1 KiB → 512 B`；`<1 MiB → 2.0 KB`；`<1 GiB → 1.5 MB`；更大 → `1.00 GB`。
+ *
+ * 云存储、反馈附件、Bot 版本等所有字节量统一走这里，避免 B/KiB/MiB 混排。
+ */
+export function fmtBytes(bytes: number | null | undefined, fallback = '—'): string {
+  if (bytes == null || Number.isNaN(bytes) || bytes < 0) return fallback
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+/**
  * 统一内存展示（输入 MiB）：<1024 → `512 MiB`；整除 GiB → `16 GiB`；否则一位小数 `61.4 GiB`。
  *
  * 执行队列的主机容量/占用向量以 MiB 下发，分母来自主机探测（如 62874 MiB）通常不能整除

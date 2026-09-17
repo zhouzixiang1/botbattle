@@ -358,7 +358,7 @@ export default function GameCanvas({
   if (!findGame(gameId)) {
     return (
       <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-        无法显示对局：{unsupportedGameLabel(gameId)}
+        {unsupportedGameLabel(gameId)}
       </div>
     )
   }
@@ -368,7 +368,7 @@ export default function GameCanvas({
   )
   const gameName = spec?.label ?? String(gameId ?? '')
   const ariaLabel = keyboardInteractive
-    ? `${gameName}对局画面，方向键选择合法位置，回车提交${keyboardPick ? `，当前位置 (${keyboardPick.x},${keyboardPick.y})` : ''}`
+    ? `${gameName}对局画面，方向键选择合法位置，回车提交${keyboardPick ? `，已选位置 (${keyboardPick.x},${keyboardPick.y})` : ''}`
     : `${gameName}对局画面${interactive && onMove ? '，点击棋盘选择动作' : ''}`
 
   return (

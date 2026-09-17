@@ -263,7 +263,14 @@ export function AppShell() {
 
           {/* 底部用户区/工具（登录态=用户面板+登出；未登录=登录/注册按钮） */}
           <div className="flex flex-col gap-2 border-t border-border p-2">
-            {!sidebarCollapsed && (
+            {sidebarCollapsed ? (
+              isLoggedIn && (
+                // 折叠态保留通知入口：带未读徽标的铃铛直达通知面板。
+                <div className="flex justify-center">
+                  <NotificationBell className="size-[var(--control-height)]" />
+                </div>
+              )
+            ) : (
               <div className="flex items-center justify-end gap-1">
                 <ThemeToggle />
                 {isLoggedIn && (
@@ -305,8 +312,8 @@ export function AppShell() {
                       </TooltipContent>
                     </Tooltip>
                     {user?.role === 'admin' && (
-                      <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-xs font-medium text-destructive">
-                        admin
+                      <span className="rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-secondary-foreground">
+                        管理员
                       </span>
                     )}
                     <Button
@@ -446,16 +453,9 @@ export function AppShell() {
               <BrandMark />
             </Link>
 
-            {/* 右侧操作 */}
+            {/* 右侧操作（<xl 收敛为搜索 + 主题；账户入口在抽屉内，避免窄顶栏拥挤） */}
             <div className="ml-auto flex min-w-0 items-center gap-1">
               {!isAuthPage && <GlobalSearch hotkey touchTarget />}
-              {!isAuthPage && isLoggedIn && (
-                <Button asChild variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="账户">
-                  <Link to="/settings">
-                    <CircleUserRound aria-hidden="true" className="size-[1.15rem]" />
-                  </Link>
-                </Button>
-              )}
               <ThemeToggle className="max-xl:size-11" />
               {isAuthPage && !isLoggedIn && (
                 <Button asChild variant="ghost" size="sm" className="min-h-11 text-muted-foreground">
@@ -512,7 +512,7 @@ export function AppShell() {
         <footer className="border-t border-border">
           <div className="flex w-full min-w-0 flex-col gap-0.5 px-[var(--page-gutter)] py-4 text-xs text-muted-foreground">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>botarena · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
+              <span>botarena · 让你的 Bot 在扑克、五子棋和点格棋里同台竞技</span>
               <button
                 type="button"
                 onClick={openReleaseNotesHistory}

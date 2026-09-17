@@ -64,11 +64,11 @@ function PageHeader({
     >
       <div className="min-w-0 space-y-1">
         {eyebrow && (
-          <div className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+          <div className="text-xs font-semibold tracking-wide text-muted-foreground">
             {eyebrow}
           </div>
         )}
-        <h1 className="page-title text-2xl text-foreground [overflow-wrap:anywhere] sm:text-[1.75rem]">{title}</h1>
+        <h1 className="page-title text-2xl text-foreground [overflow-wrap:break-word] [text-wrap:balance] sm:text-[1.75rem]">{title}</h1>
         {description && (
           <div className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
             {description}

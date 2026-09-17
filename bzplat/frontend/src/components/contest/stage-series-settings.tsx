@@ -76,7 +76,7 @@ export function StageSeriesSettingsEditor({
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
         <Scale aria-hidden="true" className="size-3.5 shrink-0 text-primary" />
         <h3 className="text-sm font-semibold text-foreground">逐阶段公平性</h3>
-        {frozen && <Badge variant="outline" className="text-[10px]">已冻结</Badge>}
+        {frozen && <Badge variant="outline" className="text-xs">已冻结</Badge>}
         <p className="min-w-0 basis-64 text-xs leading-snug text-muted-foreground sm:basis-0 sm:flex-1">
           同组多场会交替座位；瑞士轮额外轮数增加对手覆盖。发布排期后配置冻结。
         </p>
@@ -163,7 +163,7 @@ export function StageSeriesSettingsEditor({
       {!frozen && (
         <p className="flex items-center gap-1.5 border-t px-3 py-1.5 text-xs text-muted-foreground">
           <Swords aria-hidden="true" className="size-3.5 shrink-0" />
-          “对手交锋”是一对选手相遇一次；每场独立按胜 3 / 平 1 / 负 0 计入积分榜，K 场全部终结后再推进。
+          两位选手相遇一次记为一组对手交锋；组内每场按 胜 3 / 平 1 / 负 0 计分，整组打完才推进赛程。
         </p>
       )}
     </div>
