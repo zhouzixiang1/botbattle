@@ -14,7 +14,7 @@ test('settings storage tab uploads, lists and deletes a file', async ({ page }) 
   await page.getByRole('tab', { name: '云存储' }).click()
   const quota = page.locator('[data-storage-quota]')
   await expect(quota).toBeVisible()
-  await expect(quota).toContainText('/ 256.0 MB')
+  await expect(quota).toContainText('/ 256.0 MiB')
 
   // 前次运行的残留先清掉，保证本用例自包含。
   const row = page.locator(`[data-storage-file="${FILE_NAME}"]`)

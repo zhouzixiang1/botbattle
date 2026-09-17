@@ -34,7 +34,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useConfirm } from '@/hooks/use-confirm'
 import { toast } from 'sonner'
 import {
-  ApiError,
   apiFormWithProgress,
   apiGet,
   apiJson,
@@ -52,6 +51,7 @@ import {
   BOT_UPLOAD_MAX_LABEL,
   BotUploadProgress,
   botUploadSizeError,
+  SOURCE_UPLOAD_MAX_LABEL,
   type BotUploadStage,
 } from '@/components/bot-upload-progress'
 import {
@@ -89,20 +89,6 @@ interface Bot {
 interface RankingMutationResponse {
   bot: Bot
   cancelled_queued_jobs?: number
-}
-
-function rankingMutationError(error: unknown, fallback: string): string {
-  if (error instanceof ApiError) {
-    try {
-      const detail = JSON.parse(error.detail) as { message?: unknown }
-      if (typeof detail?.message === 'string' && detail.message.trim()) {
-        return detail.message
-      }
-    } catch {
-      // Plain-string API details already render correctly through errMsg.
-    }
-  }
-  return errMsg(error, fallback)
 }
 
 export default function MyBots() {
@@ -286,7 +272,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
           ? `${botName} 已退出${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
           : `${botName} 已退出${gameName}排行榜`)
       } catch (e) {
-        if (isCurrentIdentity()) setError(rankingMutationError(e, '退出排行榜失败'))
+        if (isCurrentIdentity()) setError(errMsg(e, '退出排行榜失败'))
       } finally {
         if (isCurrentIdentity()) setRankingBusyBotId(null)
       }
@@ -336,7 +322,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
         ? `已将 ${botName} 派遣到${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
         : `已将 ${botName} 派遣到${gameName}排行榜`)
     } catch (e) {
-      if (isCurrentIdentity()) setError(rankingMutationError(e, '派遣排行榜 Bot 失败'))
+      if (isCurrentIdentity()) setError(errMsg(e, '派遣排行榜 Bot 失败'))
     } finally {
       if (isCurrentIdentity()) setRankingBusyBotId(null)
     }
@@ -444,7 +430,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               </div>
               <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => setSourceFormat(v)}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry('') }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -527,7 +513,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : '（zip 源码包，最大 64 MiB）'}</Label>
+              <Label htmlFor="upload-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
               <label
                 htmlFor="upload-file"
                 className="flex min-h-[var(--control-height)] min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50 max-sm:min-h-11"
@@ -560,7 +546,17 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                     : '源码包内使用 POSIX 相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。云盘文件在对局中只读挂载于 /mnt/data。'}
               </p>
             </div>
-            <BotUploadProgress stage={uploadStage} percent={uploadPercent} />
+            <BotUploadProgress
+              stage={uploadStage}
+              percent={uploadPercent}
+              {...(sourceFormat === 'elf'
+                ? {}
+                : {
+                    verifyingLabel: '文件已上传，正在服务端编译校验',
+                    verifyingProgressLabel: '服务端编译校验中',
+                    verifyingHint: '平台正在编译源码并运行标准首回合协议；通过后才会发布版本。',
+                  })}
+            />
             <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <Upload className="size-4" />
               {uploadStage === 'preflight' ? '服务端预检中…' : busy ? '上传中…' : '上传'}

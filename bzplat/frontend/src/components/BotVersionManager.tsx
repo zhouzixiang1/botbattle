@@ -32,6 +32,7 @@ import {
   BOT_UPLOAD_MAX_LABEL,
   BotUploadProgress,
   botUploadSizeError,
+  SOURCE_UPLOAD_MAX_LABEL,
   type BotUploadStage,
 } from '@/components/bot-upload-progress'
 import { useConfirm } from '@/hooks/use-confirm'
@@ -103,6 +104,7 @@ export default function BotVersionManager({
   const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
   const [file, setFile] = useState<File | null>(null)
   const [sourceFormat, setSourceFormat] = useState('elf')
+  const [sourceEntry, setSourceEntry] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
@@ -175,6 +177,8 @@ export default function BotVersionManager({
     setBusy(false)
     setMode(currentRuntimeMode || 'traditional')
     setNote('')
+    setSourceFormat('elf')
+    setSourceEntry('')
     setFile(null)
     setUploadStage('idle')
     setUploadPercent(0)
@@ -215,6 +219,7 @@ export default function BotVersionManager({
         upload_note: note,
         runtime_mode: mode,
         source_format: sourceFormat,
+        ...(sourceFormat !== 'elf' && sourceEntry.trim() ? { source_entry: sourceEntry.trim() } : {}),
         file,
       }, {
         signal: controller.signal,
@@ -339,7 +344,7 @@ export default function BotVersionManager({
           <div className="space-y-1.5">
             <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => setSourceFormat(v)}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry('') }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -351,8 +356,20 @@ export default function BotVersionManager({
                     <SelectItem value="python">Python 源码</SelectItem>
                   </SelectContent>
                 </Select>
+                {sourceFormat !== 'elf' && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="ver-entry">入口文件（可选，默认见下）</Label>
+                    <Input
+                      id="ver-entry"
+                      value={sourceEntry}
+                      onChange={(e) => setSourceEntry(e.target.value)}
+                      placeholder={sourceFormat === 'python' ? '__main__.py' : `main.${sourceFormat === 'go' ? 'go' : sourceFormat === 'c' ? 'c' : 'cpp'}`}
+                      maxLength={200}
+                    />
+                  </div>
+                )}
               </div>
-              <Label htmlFor="ver-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : '（zip 源码包，最大 64 MiB）'}</Label>
+              <Label htmlFor="ver-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
             <label
               htmlFor="ver-file"
               className="flex min-h-[var(--control-height)] min-w-0 max-sm:min-h-11 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
@@ -362,6 +379,7 @@ export default function BotVersionManager({
               <input
                 id="ver-file"
                 type="file"
+                accept={sourceFormat === 'elf' ? undefined : '.zip,application/zip'}
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null
                   const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
@@ -384,10 +402,22 @@ export default function BotVersionManager({
             </p>
           </div>
           {mutationError && <ErrorMsg msg={mutationError} />}
-          <BotUploadProgress stage={uploadStage} percent={uploadPercent} />
+          <BotUploadProgress
+            stage={uploadStage}
+            percent={uploadPercent}
+            {...(sourceFormat === 'elf'
+              ? {}
+              : {
+                  verifyingLabel: '文件已上传，正在服务端编译校验',
+                  verifyingProgressLabel: '服务端编译校验中',
+                  verifyingHint: '平台正在编译源码并运行标准首回合协议；通过后才会发布版本。',
+                })}
+          />
           <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
             <Upload className="size-4" />
-            {uploadStage === 'preflight' ? '服务端预检中…' : busy ? '上传中…' : '上传新版本'}
+            {uploadStage === 'preflight'
+              ? sourceFormat === 'elf' ? '服务端预检中…' : '服务端编译校验中…'
+              : busy ? '上传中…' : '上传新版本'}
           </Button>
         </form>
         </DataRegion>

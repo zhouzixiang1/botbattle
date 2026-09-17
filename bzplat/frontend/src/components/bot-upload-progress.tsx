@@ -21,11 +21,17 @@ export function BotUploadProgress({
   percent,
   className,
   progressLabel = 'Bot 文件上传进度',
+  verifyingLabel = '文件已上传，正在服务端预检',
+  verifyingHint = '平台正在校验 ELF 格式并运行标准首回合协议；通过后才会发布版本。',
+  verifyingProgressLabel = '服务端预检中',
 }: {
   stage: BotUploadStage
   percent: number | null
   className?: string
   progressLabel?: string
+  verifyingLabel?: string
+  verifyingHint?: string
+  verifyingProgressLabel?: string
 }) {
   if (stage === 'idle') return null
   const transferred = stage === 'preflight'
@@ -43,7 +49,7 @@ export function BotUploadProgress({
           {transferred
             ? <CheckCircle2 className="size-3.5 shrink-0 text-success" aria-hidden="true" />
             : <UploadCloud className="size-3.5 shrink-0 text-primary" aria-hidden="true" />}
-          {transferred ? '文件已上传，正在服务端预检' : '正在上传文件'}
+          {transferred ? verifyingLabel : '正在上传文件'}
         </span>
         {!transferred && percent !== null && (
           <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{percent}%</span>
@@ -52,11 +58,11 @@ export function BotUploadProgress({
       <div
         className="h-1.5 overflow-hidden rounded-full bg-muted"
         role="progressbar"
-        aria-label={transferred ? '服务端预检中' : progressLabel}
+        aria-label={transferred ? verifyingProgressLabel : progressLabel}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={width ?? undefined}
-        aria-valuetext={transferred ? '文件传输完成，服务端预检中' : percent === null ? '正在传输' : `${percent}%`}
+        aria-valuetext={transferred ? `文件传输完成，${verifyingProgressLabel}` : percent === null ? '正在传输' : `${percent}%`}
       >
         <div
           className={cn(
@@ -68,7 +74,7 @@ export function BotUploadProgress({
       </div>
       {transferred && (
         <p className="text-xs leading-relaxed text-muted-foreground">
-          平台正在校验 ELF 格式并运行标准首回合协议；通过后才会发布版本。
+          {verifyingHint}
         </p>
       )}
     </div>
