@@ -405,6 +405,9 @@ BUILDER_IMAGE = "botbattle-builder:bookworm-1"
 # v1 复用构建镜像作为 python 运行镜像（已含 python3 标准库）；
 # 科学栈（numpy/torch）镜像受部署机网络限速延后，启用时必须换新 tag。
 PYTHON_RUNTIME_IMAGE = "botbattle-builder:bookworm-1"
+# 运行时按白名单复核 bot_versions.runtime_image：手改 DB 或未来写路径
+# 漂移不得把任意镜像名带进 docker create/pull。
+SEAT_RUNTIME_IMAGE_ALLOWLIST = frozenset({PYTHON_RUNTIME_IMAGE})
 # 用户云存储：每用户总配额与文件数上限；单文件大小不得超过同一配额。
 USER_STORAGE_QUOTA_BYTES = 256 * 1024 * 1024
 USER_STORAGE_MAX_FILES = 500

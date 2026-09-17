@@ -20,6 +20,10 @@ from bzplat.backend.runtime.limits import (
 ZIP_MAGIC = b"PK\x03\x04"
 
 # 每种语言的默认入口与候选序（zip 内以 POSIX 相对路径声明）。
+# 上传与运行共用的源码格式全集；运行时按此白名单 fail-closed 复核
+# 持久化 source_format，未知值不得静默按 elf 处理。
+VALID_SOURCE_FORMATS = frozenset({"elf", "c", "cpp", "go", "python"})
+
 DEFAULT_ENTRIES: dict[str, tuple[str, ...]] = {
     "c": ("main.c",),
     "cpp": ("main.cpp", "main.cc", "main.cxx"),
