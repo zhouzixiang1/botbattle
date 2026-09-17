@@ -16,10 +16,11 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, AsyncIterator, Callable, Iterable
 
 from bzplat.backend.runtime.limits import (
     DockerResourceProfile,
@@ -621,6 +622,89 @@ class DockerSupervisor:
             command,
         ]
 
+    def _settle_failed_build_launch(
+        self,
+        launch_token: str,
+        name: str,
+        *,
+        definitive: bool,
+        uncertain_callback: Callable[[str], None] | None = None,
+    ) -> None:
+        """构建 create 阶段失败后的 journal 收尾（必须在 launch flock 内）。
+
+        definitive=True 表示 docker CLI 已确定性报告 create 未发生、或
+        精确 name 容器已 rm 成功，在 label/name 双零复核后允许同一
+        host boot 清 creating；否则与恢复路径同纪律：created 清 token、
+        boot 变化清 creating、同 boot 零证据抛 manual DockerCreateAmbiguous。
+        任何 DockerSupervisorError 逃逸前先经 uncertain_callback 让唯一
+        dispatcher 进入与 journal 状态匹配的 pause（creating → manual，
+        否则 bounded retry），不允许静默遗留 creating 卡死后续 launch。
+        """
+        try:
+            zero_proven = False
+            for _ in range(4):
+                launch = self._journal_snapshot()
+                if (
+                    launch.get("state") == "idle"
+                    or str(launch.get("launch_token") or "") != launch_token
+                ):
+                    return
+                launch = self._observe_journal_container(launch)
+                ids = sorted(
+                    set(self.list_ids(launch_token=launch_token))
+                    | set(self.list_name_ids(name))
+                )
+                if not ids:
+                    zero_proven = True
+                    break
+                try:
+                    self.remove_names(ids)
+                except DockerSupervisorError as exc:
+                    logger.warning(
+                        "build settle remove failed token=%s error=%s",
+                        launch_token,
+                        exc,
+                    )
+                    break
+                time.sleep(0.05)
+            launch = self._journal_snapshot()
+            if (
+                launch.get("state") == "idle"
+                or str(launch.get("launch_token") or "") != launch_token
+            ):
+                return
+            if launch.get("state") == "created":
+                # created 意味着容器存在过且 rm 未获确认时仍无条件清 journal：
+                # 遗留的是一个 name 唯一、未 start、不占 match slot 的沙箱容器，
+                # 由实例级 namespace 恢复兜底；反之把 created 留在 journal 会让
+                # dispatcher 的 idle 断言陷入无收敛方的 bounded pause 循环。
+                self.launch_journal.clear_docker_launch_created(launch_token)
+                return
+            if launch.get("state") != "creating":
+                return
+            if definitive and zero_proven:
+                self.launch_journal.clear_docker_launch_failed(launch_token)
+                return
+            previous_boot_id = str(launch.get("host_boot_id") or "")
+            if previous_boot_id and previous_boot_id != host_boot_id():
+                self.launch_journal.clear_docker_launch_after_boot_change(
+                    launch_token,
+                    previous_boot_id=previous_boot_id,
+                    current_boot_id=host_boot_id(),
+                )
+                return
+            raise DockerCreateAmbiguous(
+                "manual:同一 host boot 的构建 create 未收敛；"
+                "label/name 复查不能排除迟到容器或删除失败"
+            )
+        except DockerSupervisorError:
+            if uncertain_callback is not None:
+                try:
+                    uncertain_callback("构建容器 create 失败收尾未完全收敛")
+                except Exception:
+                    logger.exception("build uncertainty callback failed")
+            raise
+
     def run_build(
         self,
         *,
@@ -633,12 +717,16 @@ class DockerSupervisor:
         image: str,
         profile: DockerResourceProfile,
         timeout_sec: float,
+        docker_uncertain_callback: Callable[[str], None] | None = None,
     ) -> int:
         """在上传 admission 内同步执行一次源码构建容器并返回退出码。
 
         与执行/预检共用 launch journal：begin(creating) → create →
         mark_created → start + StartedAt 确认 → clear(journal 回 idle) →
         wait（超时则 kill）→ 精确 name 清理。构建容器永不进入 match slot。
+        create 阶段的每条失败路径都必须把 journal 收敛回 idle 或转为
+        可见的 dispatcher pause（docker_uncertain_callback），绝不静默
+        遗留 creating/created 阻断后续对局启动。
         """
         profile = resolve_docker_resource_profile(profile)
         name = identity.container_name(slot)
@@ -677,17 +765,68 @@ class DockerSupervisor:
             try:
                 result = self._run(["create", *options])
             except DockerControlUncertain as exc:
+                logger.warning(
+                    "build container create uncertain token=%s error=%s",
+                    launch_token,
+                    exc,
+                )
+                self._settle_failed_build_launch(
+                    launch_token,
+                    name,
+                    definitive=False,
+                    uncertain_callback=docker_uncertain_callback,
+                )
+                if docker_uncertain_callback is not None:
+                    try:
+                        docker_uncertain_callback(f"构建容器 create 未确认：{exc}")
+                    except Exception:
+                        logger.exception("build uncertainty callback failed")
                 raise DockerCreateAmbiguous(
                     "构建容器 create 未确认"
                 ) from exc
             if result.returncode != 0:
+                logger.warning(
+                    "build container create failed exit=%s stderr=%s",
+                    result.returncode,
+                    (result.stderr or "")[:200],
+                )
+                self._settle_failed_build_launch(
+                    launch_token,
+                    name,
+                    definitive=True,
+                    uncertain_callback=docker_uncertain_callback,
+                )
                 raise DockerCreateAmbiguous(
                     f"构建容器 create 失败（exit {result.returncode}）"
                 )
             try:
                 journal.mark_docker_launch_created(launch_token)
             except Exception as exc:
-                self.remove_names([name])
+                logger.warning(
+                    "build journal mark_created failed token=%s error=%s",
+                    launch_token,
+                    exc,
+                )
+                removed = False
+                try:
+                    self.remove_names([name])
+                    removed = True
+                except DockerSupervisorError as rm_exc:
+                    logger.warning(
+                        "build container remove after journal failure failed: %s",
+                        rm_exc,
+                    )
+                self._settle_failed_build_launch(
+                    launch_token,
+                    name,
+                    definitive=removed,
+                    uncertain_callback=docker_uncertain_callback,
+                )
+                if not removed and docker_uncertain_callback is not None:
+                    try:
+                        docker_uncertain_callback("构建容器 create 后 journal 无法确认")
+                    except Exception:
+                        logger.exception("build uncertainty callback failed")
                 raise DockerControlUncertain(
                     "构建容器 create 后 journal 无法确认"
                 ) from exc
@@ -707,9 +846,25 @@ class DockerSupervisor:
                 # 撞上遗留 creating/created 状态（容器已按精确 name 删除）。
                 try:
                     journal.clear_docker_launch_created(launch_token)
-                except Exception:
-                    pass
-                self.remove_names([name])
+                except Exception as exc:
+                    logger.warning(
+                        "build start-failure journal clear failed token=%s error=%s",
+                        launch_token,
+                        exc,
+                    )
+                    if docker_uncertain_callback is not None:
+                        try:
+                            docker_uncertain_callback("构建容器 start 失败后 journal 未收敛")
+                        except Exception:
+                            logger.exception("build uncertainty callback failed")
+                try:
+                    self.remove_names([name])
+                except DockerSupervisorError as exc:
+                    logger.warning(
+                        "build start-failure remove deferred name=%s error=%s",
+                        name,
+                        exc,
+                    )
                 raise
 
         wait_timed_out = False

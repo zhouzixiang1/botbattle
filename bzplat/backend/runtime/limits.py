@@ -401,8 +401,6 @@ SOURCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 SOURCE_MAX_FILES = 500
 SOURCE_MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
 BOT_BUILD_TIMEOUT_SEC = 120.0
-BOT_BUILD_CONTAINER_CPUS = 2.0
-BOT_BUILD_CONTAINER_MEMORY_MB = 2048
 BUILDER_IMAGE = "botbattle-builder:bookworm-1"
 # v1 复用构建镜像作为 python 运行镜像（已含 python3 标准库）；
 # 科学栈（numpy/torch）镜像受部署机网络限速延后，启用时必须换新 tag。

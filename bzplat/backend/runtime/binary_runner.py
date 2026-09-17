@@ -447,11 +447,6 @@ def _ensure_linux_image_ready_sync(
         logger.info("linux bot image ready image=%s platform=linux/amd64", image)
 
 
-def _invalidate_linux_image_ready_sync(docker_bin: str, image: str) -> None:
-    with _IMAGE_READY_LOCK:
-        _IMAGE_READY_KEYS.discard((docker_bin, image))
-
-
 class BotTechnicalError(RuntimeError):
     """A terminal, attributable Bot fault with safe structured diagnostics.
 
@@ -685,7 +680,18 @@ class BinaryRunner:
             if mode == "docker":
                 # 镜像 inspect/pull 属于平台准备阶段，必须先于 Bot 响应计时；
                 # ``docker run --pull=never`` 再保证计时窗口内不会隐式拉镜像。
-                await self.ensure_runtime_ready()
+                # seat 自定义镜像（源码 Bot 运行镜像）与 prepare_session 同款
+                # 预热：预检/LongRunning 缺镜像时在此显式拉取，而不是把
+                # 确定性的 create 失败升级为全局 Docker 不确定。
+                if session.image and session.image != self._linux_image:
+                    await asyncio.to_thread(
+                        _ensure_linux_image_ready_sync,
+                        self._docker_bin,
+                        session.image,
+                        prepare_timeout=self._image_prepare_timeout,
+                    )
+                else:
+                    await self.ensure_runtime_ready()
             if execution_scope is not None:
                 execution_scope.assert_current()
             if mode == "local":
