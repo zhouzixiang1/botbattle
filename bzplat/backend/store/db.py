@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -4828,6 +4829,29 @@ def _ensure_ranked_bot_selection(
         raise RuntimeError(f"ranked Bot index verification failed: {index_name}")
 
 
+def _execute_script_statements(
+    conn: sqlite3.Connection, script: str
+) -> None:
+    """逐句执行 DDL 脚本并保持调用方的事务边界。
+
+    ``Connection.executescript`` 会先隐式 COMMIT 挂起中的事务，使
+    ``Store.__init__`` 的「建表 + 迁移失败整体回滚」语义名存实亡（实验
+    证实失败路径会留下部分迁移形状）。SQLite 的 DDL 本身可事务化；
+    按行累积、以 ``sqlite3.complete_statement`` 判定完整句后逐句
+    ``execute`` 即可留在同一事务内。
+    """
+    buffer = ""
+    for line in script.splitlines():
+        buffer += line + "\n"
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            buffer = ""
+            if statement:
+                conn.execute(statement)
+    if buffer.strip():
+        raise RuntimeError("schema 脚本存在不完整的 SQL 尾句")
+
+
 def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
     """为已有库补列；必要时重建 contests 以放宽 status CHECK。"""
     tables = {
@@ -4876,7 +4900,16 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='docker_launch_journal'"
     ).fetchone()
-    if journal_check is not None and "build" not in str(journal_check[0] or ""):
+    journal_sql = str(journal_check[0] or "") if journal_check else ""
+    # 精确匹配 owner_kind CHECK 白名单是否包含 'build'：裸子串匹配会被
+    # 任何含 "build" 字样的未来注释/列名误触发（跳过必要的重建）。
+    _owner_kind_match = re.search(
+        r"owner_kind[^()]*IN \(([^)]*)\)", journal_sql
+    )
+    _journal_supports_build_owner = bool(_owner_kind_match) and "build" in (
+        _owner_kind_match.group(1).replace("'", "").replace('"', "")
+    )
+    if journal_check is not None and not _journal_supports_build_owner:
         # 源码构建通道新增 owner_kind='build'。journal 是单行瞬态表，
         # 仅在 idle 时原位重建；非 idle 属启动期异常状态，fail closed。
         state = conn.execute(
@@ -4884,10 +4917,19 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         ).fetchone()
         if state is not None and state[0] != "idle":
             raise RuntimeError(
-                "docker launch journal 非 idle，拒绝重建 CHECK 约束"
+                "docker launch journal 非 idle，拒绝重建 CHECK 约束。"
+                "该状态意味着上一次 release 在 Docker launch 中途崩溃且未经"
+                "旧代码收敛；请先用旧 release 正常启动一次（其 dispatcher "
+                "启动对账会把 journal 收回 idle），或在确认本主机无平台容器"
+                "后人工执行："
+                "UPDATE docker_launch_journal SET state='idle',launch_token="
+                "NULL,instance_key=NULL,owner_kind=NULL,job_public_id=NULL,"
+                "attempt_no=NULL,slot=NULL,container_name=NULL,host_boot_id="
+                "NULL,updated_at=CURRENT_TIMESTAMP WHERE singleton=1; "
+                "再重启本服务。恢复步骤见 doc/RUNTIME.md。"
             )
         conn.execute("DROP TABLE docker_launch_journal")
-        conn.executescript(DOCKER_LAUNCH_JOURNAL_TABLE_SQL)
+        _execute_script_statements(conn, DOCKER_LAUNCH_JOURNAL_TABLE_SQL)
         conn.execute(
             "INSERT OR IGNORE INTO docker_launch_journal(singleton,state,"
             "updated_at) VALUES(1,'idle',?)",
@@ -6787,14 +6829,18 @@ class Store:
             "AND name NOT LIKE 'sqlite_%' LIMIT 1"
         ).fetchone() is None
         with self._tx() as conn:
-            conn.executescript(SCHEMA)
+            # 逐句 execute 而非 executescript：后者会先隐式 COMMIT 挂起中的
+            # 事务，使 Store.__init__ 的"建表+迁移失败整体回滚"名存实亡。
+            _execute_script_statements(conn, SCHEMA)
             if fresh_schema:
                 # SCHEMA 内联 journal 定义不含完整形状约束（历史原因）；
                 # fresh 库补跑完整 DDL 确保 CHECK 与重建形态一致。
                 conn.execute(
                     "DROP TABLE IF EXISTS docker_launch_journal"
                 )
-                conn.executescript(DOCKER_LAUNCH_JOURNAL_TABLE_SQL)
+                _execute_script_statements(
+                    conn, DOCKER_LAUNCH_JOURNAL_TABLE_SQL
+                )
                 conn.execute(
                     "INSERT OR IGNORE INTO docker_launch_journal(singleton,"
                     "state,updated_at) VALUES(1,'idle',?)",
