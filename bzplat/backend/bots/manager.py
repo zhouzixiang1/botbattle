@@ -153,21 +153,50 @@ class BotManager:
         return _staged_new(self.upload_root)
 
     def _purge_stale_staging(self, *, min_age_seconds: float = 86400.0) -> None:
-        """清掉上次进程崩溃可能遗留的 `.incoming-*` 暂存目录。
+        """清掉上次进程崩溃可能遗留的上传/构建暂存目录。
 
-        只按目录名前缀与 mtime 年龄匹配，best-effort；正常路径的清理
-        由端点与 _write_version 的 finally 负责，这里只是崩溃兜底。
+        覆盖两层：canonical 上传根的 ``.incoming-*`` 流式暂存，以及每个
+        bot 目录内 ``.v{N}-*`` 的版本构建暂存（源码构建最长 120s+，进程
+        中途被杀即永久残留、只增不减）。只按目录名前缀与 mtime 年龄
+        匹配，best-effort；正常路径的清理由端点与 _write_version 的
+        finally 负责，这里只是崩溃兜底，由 create_app 启动时接线。
         """
+        import re as _re
+
+        cutoff = time.time() - min_age_seconds
+        version_staging = _re.compile(r"^\.v\d+-")
+        roots: list[Path] = []
         try:
-            cutoff = time.time() - min_age_seconds
-            for entry in self.upload_root.glob(".incoming-*"):
+            roots = [self.upload_root]
+        except OSError:
+            return
+        try:
+            for entry in self.upload_root.iterdir():
                 try:
-                    if entry.is_dir() and entry.stat().st_mtime < cutoff:
-                        shutil.rmtree(entry, ignore_errors=True)
+                    if entry.is_dir() and entry.name.isdigit():
+                        roots.append(entry)
                 except OSError:
                     continue
         except OSError:
-            return
+            pass
+        for root in roots:
+            try:
+                for entry in root.iterdir():
+                    try:
+                        if not entry.is_dir():
+                            continue
+                        in_root = root is self.upload_root
+                        matches = (
+                            entry.name.startswith(".incoming-")
+                            if in_root
+                            else bool(version_staging.match(entry.name))
+                        )
+                        if matches and entry.stat().st_mtime < cutoff:
+                            shutil.rmtree(entry, ignore_errors=True)
+                    except OSError:
+                        continue
+            except OSError:
+                continue
 
     @contextmanager
     def _bot_version_lock(self, bot_id: int) -> Iterator[None]:

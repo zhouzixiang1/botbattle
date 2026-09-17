@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 STORAGE_ROOT = Path("user_assets")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # 文件名：不允许路径分隔符与控制字符；长度 1..200；显式排除 '.'/'..'。
-_NAME_RE = re.compile(r"^[^/\x00-\x1f\x7f]{1,200}$")
+# Unicode 双向/隔离格式控制符（LRM/RLM、LRE–RLO/PDF、LRI/RLI/FSI/PDI）
+# 会在展示层做视觉伪装（如把 "txt.exe" 排成 "exe.txt"），一并拒绝。
+_NAME_RE = re.compile(
+    "^[^/\\x00-\\x1f\\x7f"
+    "\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]{1,200}$"
+)
 _FORBIDDEN_NAMES = {".", ".."}
 
 
