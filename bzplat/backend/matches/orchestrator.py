@@ -52,8 +52,10 @@ from bzplat.backend.runtime.binary_runner import (
 )
 from bzplat.backend.runtime.limits import (
     LEGACY_EXECUTION_RESOURCE_PROFILE_VERSION,
+    SEAT_RUNTIME_IMAGE_ALLOWLIST,
     execution_resource_snapshot,
 )
+from bzplat.backend.bots.source_build import VALID_SOURCE_FORMATS
 from bzplat.backend.store import Store
 from bzplat.backend.store.public_contract import (
     canonical_public_completed_reason,
@@ -650,7 +652,11 @@ class MatchOrchestrator:
                     bot_id=bot_id, version_id=None, seat=seat
                 )
             runtime = bot
+            # legacy 镜像行不是版本行：seat 扩展必须显式走空集，而不是
+            # 依赖「bots 表恰好没有 source_format 列」这一列名巧合。
+            legacy_mirror = True
         else:
+            legacy_mirror = False
             version = self.store.get_bot_version(version_id)
             if not version or version.get("bot_id") != bot_id:
                 raise BotVersionUnavailableError(
@@ -685,7 +691,7 @@ class MatchOrchestrator:
             version_id=version_id,
             seat=seat,
         )
-        return path, mode, runtime
+        return path, mode, None if legacy_mirror else runtime
 
     def _seat_runtime_extras(self, bot: dict, version_row: dict | None) -> dict:
         """版本声明的运行扩展：python 镜像 + 版本源码只读卷 + 脚本豁免。
@@ -695,9 +701,21 @@ class MatchOrchestrator:
         if not version_row:
             return {}
         source_format = str(version_row.get("source_format") or "elf")
+        if source_format not in VALID_SOURCE_FORMATS:
+            raise BotVersionContractError(
+                f"Bot 版本 source_format 非白名单值：{source_format!r}"
+            )
         extras: dict = {}
         image = str(version_row.get("runtime_image") or "")
+        if source_format == "python" and not image:
+            raise BotVersionContractError(
+                "python 源码 Bot 版本缺少运行镜像声明"
+            )
         if image:
+            if image not in SEAT_RUNTIME_IMAGE_ALLOWLIST:
+                raise BotVersionContractError(
+                    "Bot 版本运行镜像不在平台白名单内"
+                )
             extras["image"] = image
         if source_format != "elf":
             src_dir = (
@@ -724,9 +742,26 @@ class MatchOrchestrator:
         files = self.store.list_user_storage_files(owner_id)
         if not files:
             return None
+        from bzplat.backend.user_storage import (
+            UserStorageError,
+            validate_storage_name,
+        )
+
         root = self.mount_root / str(match_id) / f"seat{seat}"
         root.mkdir(parents=True, exist_ok=True)
         for entry in files:
+            # 清单行的名字合法性由上传 API 保证；快照侧独立复核一次，
+            # 手改 DB 的带路径名字不得借硬链接逃逸 seat 目录。
+            try:
+                validate_storage_name(entry["name"])
+            except UserStorageError as exc:
+                logger.error(
+                    "user drive snapshot invalid name match=%s owner=%s",
+                    match_id, owner_id,
+                )
+                raise BotVersionContractError(
+                    "用户云盘清单包含非法文件名，不能开赛"
+                ) from exc
             blob = self.user_storage.blob_path(owner_id, str(entry["sha256"]))
             if not blob.is_file():
                 logger.error(
