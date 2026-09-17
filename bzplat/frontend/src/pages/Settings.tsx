@@ -11,7 +11,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { UserStoragePanel } from '@/components/UserStoragePanel'
 import { Switch } from '@/components/ui/switch'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
@@ -307,7 +306,6 @@ export default function Settings() {
             <TabsTrigger value="password">密码</TabsTrigger>
             <TabsTrigger value="notifications">通知偏好</TabsTrigger>
             <TabsTrigger value="favorites">我的收藏</TabsTrigger>
-            <TabsTrigger value="storage">云存储</TabsTrigger>
           </TabsList>
         </StickyToolbar>
 
@@ -472,10 +470,6 @@ export default function Settings() {
               </div>
             )}
           </DataRegion>
-        </TabsContent>
-
-        <TabsContent value="storage">
-          <UserStoragePanel />
         </TabsContent>
 
         <TabsContent value="favorites">

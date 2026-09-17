@@ -1,3 +1,4 @@
+import type { DragEvent as ReactDragEvent } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CloudUpload, HardDrive, Loader2, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -34,6 +35,7 @@ export function UserStoragePanel() {
   const [uploadPercent, setUploadPercent] = useState<number | null>(null)
   const [uploading, setUploading] = useState(false)
   const [deletingName, setDeletingName] = useState<string | null>(null)
+  const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
@@ -88,6 +90,13 @@ export function UserStoragePanel() {
     }
   }
 
+  const onDrop = async (event: ReactDragEvent) => {
+    event.preventDefault()
+    setDragActive(false)
+    const file = event.dataTransfer.files?.[0]
+    if (file) await onUpload(file)
+  }
+
   const onDelete = async (file: StorageFile) => {
     if (deletingName) return
     const ok = await confirm({
@@ -111,7 +120,7 @@ export function UserStoragePanel() {
   return (
     <DataRegion
       title="云存储"
-      description="存放模型权重等数据文件；同名上传覆盖旧文件。Bot 对局读取能力将在后续版本开放。"
+      description="存放模型权重等数据文件（如 .bin、.pt/.pth、.onnx、.safetensors）；可点右上角上传或把文件拖进下面的区域。同名上传覆盖旧文件。"
       actions={
         <>
           <input
@@ -138,7 +147,19 @@ export function UserStoragePanel() {
         </>
       }
     >
-      <div className="space-y-3 px-3 py-3">
+      <div
+        className={cn(
+          'space-y-3 px-3 py-3 rounded-lg transition-colors',
+          dragActive && 'bg-primary/5 ring-1 ring-inset ring-primary/40',
+        )}
+        data-storage-dropzone
+        onDragOver={(event) => {
+          event.preventDefault()
+          if (!uploading) setDragActive(true)
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={(event) => void onDrop(event)}
+      >
         <div
           className="rounded-lg border border-border bg-muted/20 px-3 py-2.5"
           data-storage-quota
@@ -181,7 +202,7 @@ export function UserStoragePanel() {
           <Loading text="正在加载云存储…" />
         ) : !data || data.files.length === 0 ? (
           <EmptyState
-            text="还没有文件；点右上角「上传文件」，把模型权重等数据文件放进来。"
+            text="还没有文件。把模型权重等数据文件拖到这里，或点右上角「上传文件」。"
             icon={<HardDrive className="size-5 opacity-50" />}
             className="py-8"
           />
