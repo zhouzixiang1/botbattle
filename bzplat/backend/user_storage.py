@@ -81,12 +81,16 @@ class UserStorageManager:
     def promote_staged(
         self, staged_file: Path, user_id: int, sha256: str
     ) -> Path:
-        """把暂存文件原子晋升为该用户的内容寻址 blob（幂等）。"""
+        """把暂存文件原子晋升为该用户的内容寻址 blob（幂等）。
+
+        无条件 replace 而不是复用旧实体：同指纹即同内容，覆盖无害，而
+        rename 刷新的 mtime 正是延迟回收的“最近晋升”空闲证据——复用旧
+        实体会让删除后再次上传同内容的 blob 保留陈旧 mtime，在宽限期
+        判定上被误当作长期无引用。已建立的对局硬链接持有旧 inode，
+        不受目录项替换影响。
+        """
         target = self.blob_path(user_id, sha256)
         target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        if target.exists():
-            # 内容寻址：同指纹即同内容，保留既有实体即可。
-            return target
         staged_file.replace(target)
         return target
 
@@ -99,9 +103,12 @@ class UserStorageManager:
     def sweep_unreferenced(self, *, min_age_seconds: float = 3600.0) -> dict:
         """回收无清单引用且文件空闲超过宽限期的实体与暂存残留。
 
-        清单是唯一权威：任何在途上传在提交后必有清单行，因此只要实体
-        空闲时间超过宽限期仍无引用，就不可能再获得引用（内容寻址不变）。
-        同时清掉崩溃遗留的 ``.incoming-*``。返回 {blobs, staging, bytes}。
+        清单是唯一权威：任何在途上传在提交后必有清单行。两道防线保证
+        周期执行（与并发上传交错）时的安全：其一，promote 的原子 replace
+        会刷新 mtime，引用恢复的 blob 必然重新进入宽限期；其二，unlink
+        前按 ``(user_id, sha)`` 单事务复核引用计数，覆盖快照与删除之间的
+        窗口。同时清掉崩溃遗留的 ``.incoming-*``。返回
+        {blobs, staging, bytes}。
         """
         import time as _time
 
@@ -134,6 +141,12 @@ class UserStorageManager:
                     except OSError:
                         continue
                     if blob.name in keep or stat.st_mtime >= cutoff:
+                        continue
+                    # 快照读与 unlink 之间可能恰有并发上传提交了引用该
+                    # 内容的清单行；删除前按权威清单单事务复核。
+                    if self.store.count_user_storage_sha_references(
+                        user_id, blob.name
+                    ):
                         continue
                     try:
                         blob.unlink()

@@ -35,6 +35,12 @@ FULL_RR_MAX_N: int | None = None
 BOT_UPLOAD_ADMISSION_SLOTS = 1
 BOT_UPLOAD_ADMISSION_WAIT_SEC = 1.0
 
+# 用户云盘 blob 的延迟回收周期。回收安全由两道防线保证（promote 的原子
+# replace 刷新 mtime + unlink 前引用计数复核），因此周期执行不会误删；
+# 只在启动时清一次会让运行期“配额拒绝保留 + DELETE 只删清单行”产生的
+# 无引用实体在长驻进程内无限堆积（磁盘配额语义失效）。
+USER_STORAGE_SWEEP_INTERVAL_SEC = 1800.0
+
 # 公共观赛 SSE 是匿名长连接。单个订阅队列为突发高速 Bot 事件保留 2000
 # 帧，因此必须同时限制单 IP、单局和单进程的活跃队列数量。限制只覆盖
 # `/api/matches/{id}/events`；人类对战 WebSocket 与编排器内部订阅不占该额度。
