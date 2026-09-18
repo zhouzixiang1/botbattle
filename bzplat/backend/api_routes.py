@@ -6634,7 +6634,7 @@ class AdminUserPatch(BaseModel):
 @router.patch("/api/admin/users/{user_id}")
 async def admin_patch_user(
     user_id: int, body: AdminUserPatch, request: Request, response: Response,
-    _admin=Depends(require_admin),
+    admin=Depends(require_admin),
 ):
     _set_admin_private_headers(response)
     fields: dict[str, Any] = {}
@@ -6644,14 +6644,22 @@ async def admin_patch_user(
         fields["email_verified"] = 1 if body.email_verified else 0
     if body.role is not None:
         if body.role not in ("user", "organizer", "admin"):
+            audit_log(request, "admin_patch_user", result="fail", user=admin.get("username"), target=user_id, detail="bad_role")
             raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
         fields["role"] = body.role
     if not fields:
+        audit_log(request, "admin_patch_user", result="fail", user=admin.get("username"), target=user_id, detail="no_fields")
         raise HTTPException(400, "无更新字段", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, **fields)
     if not u:
+        audit_log(request, "admin_patch_user", result="fail", user=admin.get("username"), target=user_id, detail="not_found")
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
     await _revoke_committed_local_ai_transports(request, u)
+    audit_log(
+        request, "admin_patch_user",
+        user=admin.get("username"), target=user_id,
+        detail=",".join(f"{k}={v}" for k, v in fields.items()),
+    )
     return {"user": _admin_user_for_api(u)}
 
 
@@ -6691,10 +6699,11 @@ def admin_user_sessions(
 @router.delete("/api/admin/users/{user_id}/sessions")
 def admin_revoke_sessions(
     user_id: int, request: Request, response: Response,
-    _admin=Depends(require_admin),
+    admin=Depends(require_admin),
 ):
     _set_admin_private_headers(response)
     n = _store(request).delete_sessions_for_user(user_id)
+    audit_log(request, "admin_revoke_sessions", user=admin.get("username"), target=user_id, detail=f"revoked={n}")
     return {"ok": True, "revoked": n}
 
 
@@ -6853,7 +6862,7 @@ def admin_bots(
 
 @router.patch("/api/admin/bots/{bot_id}")
 async def admin_patch_bot(
-    bot_id: int, body: dict, request: Request, _admin=Depends(require_admin)
+    bot_id: int, body: dict, request: Request, admin=Depends(require_admin)
 ):
     allowed = {"is_active", "is_builtin", "display_name", "description"}
     unknown = set(body).difference(allowed)
@@ -6872,6 +6881,7 @@ async def admin_patch_bot(
     if "description" in body:
         fields["description"] = str(body["description"])[:2000]
     if not fields:
+        audit_log(request, "admin_patch_bot", result="fail", user=admin.get("username"), target=bot_id, detail="no_fields")
         raise HTTPException(400, "无可更新字段")
     try:
         bot = _bots(request).patch_admin(bot_id, **fields)
@@ -6879,10 +6889,16 @@ async def admin_patch_bot(
         status = 404 if exc.code == "not_found" else 409 if exc.code in {
             "unsupported_binary", "version_unavailable", "bot_deleted",
         } else 400
+        audit_log(request, "admin_patch_bot", result="fail", user=admin.get("username"), target=bot_id, detail=exc.code)
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
     await _revoke_committed_local_ai_transports(request, bot)
+    audit_log(
+        request, "admin_patch_bot",
+        user=admin.get("username"), target=bot_id,
+        detail=",".join(sorted(fields)),
+    )
     return {
         "bot": _with_bot_runnable(bot, include_owner_deleted_at=True)
     }
@@ -7841,20 +7857,27 @@ class SiteSettingsPatch(BaseModel):
 
 @router.patch("/api/admin/settings/site")
 def admin_patch_site(
-    body: SiteSettingsPatch, request: Request, _admin=Depends(require_admin)
+    body: SiteSettingsPatch, request: Request, admin=Depends(require_admin)
 ):
     from bzplat.backend.store.schema import (
         SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     )
     store = _store(request)
+    changed: list[str] = []
     if body.name is not None:
         store.set_setting(SETTING_SITE_NAME, body.name)
+        changed.append("name")
     if body.logo is not None:
         store.set_setting(SETTING_SITE_LOGO, body.logo)
+        changed.append("logo")
     if body.announcement is not None:
         store.set_setting(SETTING_SITE_ANNOUNCEMENT, body.announcement)
+        changed.append("announcement")
     if body.about is not None:
         store.set_setting(SETTING_SITE_ABOUT, body.about)
+        changed.append("about")
+    # 只记变更键名：公告/简介正文可能很长，值不进审计日志。
+    audit_log(request, "admin_patch_site", user=admin.get("username"), detail=",".join(changed) or "noop")
     s = store.get_settings([
         SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     ])
