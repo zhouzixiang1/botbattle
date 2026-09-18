@@ -261,6 +261,81 @@ def maintenance(
     typer.echo(json.dumps(status, ensure_ascii=False))
 
 
+@app.command("auto-match")
+def auto_match(
+    action: str = typer.Argument(..., help="on | off | status"),
+    db: str = typer.Option(
+        None, "--db", help="目标数据库（默认 BZ_DB_PATH/.env，再退回 botzone.db）"
+    ),
+):
+    """自动排位总开关（与 admin HTTP「PUT /api/admin/auto-match」同事务语义）。
+
+    供本机运维使用：与 maintenance/platform-ctl 同一信任层，不经 HTTP 认证。
+    走 Store.set_auto_match_enabled 正式路径（含维护期冲突拒绝），操作向
+    数据库邻接的 <db>.control-cli.log 追加一行审计。运行中的 dispatcher
+    在下一轮调度周期（秒级）感知开关变化，无需重启。
+    """
+    from bzplat.backend.store.execution import ExecutionMaintenanceConflict
+
+    _load_dotenv()
+    database = db or os.environ.get("BZ_DB_PATH") or "botzone.db"
+    candidate = Path(database).expanduser()
+    if not candidate.is_file():
+        raise typer.BadParameter(f"数据库不存在（拒绝新建）: {database}")
+    action = action.strip().lower()
+    if action not in {"on", "off", "status"}:
+        raise typer.BadParameter("action 必须是 on/off/status")
+    if action == "on" and os.environ.get("BZ_QA_INSTANCE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        # 与线上 dispatcher 的 capability guard 同一先例：QA 隔离实例
+        # 永不开启自动排位。
+        typer.echo("auto-match on failed: qa_capability_guard", err=True)
+        raise typer.Exit(code=3)
+
+    store = Store(str(candidate))
+    try:
+        if action == "status":
+            control = store.executions.control()
+            payload = {
+                "dispatcher_state": control["dispatcher_state"],
+                "accepting": bool(control["accepting"]),
+                "auto_enabled": bool(control["auto_enabled"]),
+                "maintenance_requested": bool(
+                    control["deployment_drain_requested"]
+                ),
+            }
+        else:
+            enabled = action == "on"
+            previous = store.get_auto_match_enabled()
+            store.set_auto_match_enabled(enabled)
+            control = store.executions.control()
+            payload = {
+                "auto_enabled": bool(control["auto_enabled"]),
+                "previous": previous,
+            }
+    except ExecutionMaintenanceConflict as exc:
+        typer.echo(f"auto-match {action} failed: {exc.code}: {exc.message}", err=True)
+        raise typer.Exit(code=3) from exc
+    finally:
+        store.close()
+    if action != "status":
+        audit_path = candidate.parent / f"{candidate.name}.control-cli.log"
+        try:
+            with open(audit_path, "a", encoding="utf-8") as fh:
+                fh.write(
+                    f"{_now_iso()} action={action} "
+                    f"auto_enabled={int(payload['auto_enabled'])} "
+                    f"previous={int(payload['previous'])}\n"
+                )
+        except OSError as exc:
+            typer.echo(f"auto-match audit write failed: {exc}", err=True)
+    typer.echo(f"db={candidate.resolve()}")
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
 def _validated_cold_backup(database: Path, backup_raw: str | None) -> Path:
     if not backup_raw:
         raise typer.BadParameter("dry-run/apply 必须提供 --backup 的冷备绝对路径")

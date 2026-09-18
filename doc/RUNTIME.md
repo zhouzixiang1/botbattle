@@ -208,6 +208,12 @@ durable 语义：幂等 begin、paused 拒绝、ready CAS end、auto 保持关�
 `end` 因此必须显式 `--confirm-service-restarted` 确认目标服务已同版本重启，旧进程仍在运行时
 以 admin HTTP 端点为准。
 
+自动排位总开关同款本地入口：`botzone auto-match on|off|status`（与 admin HTTP
+`PUT /api/admin/auto-match` 共享 `Store.set_auto_match_enabled` 事务语义：维护期拒绝开启、
+QA 隔离实例 capability guard 拒绝 `on`、缺库拒绝新建；操作向 `<db>.control-cli.log` 追加
+审计）。与 HTTP 的差异：不做 dispatcher `wake()`——运行中的调度器在下一轮调度周期（秒级）
+重读 `auto_enabled`，无需重启；开启只授权闲时生产，不等于立即开局。
+
 排空不会停止 dispatcher loop：当前 `starting/running/settling` 继续完成、取消、评分结算与精确
 Docker 清理，但不再 claim 或补充自动任务。赛事 scheduler/reconcile 在检查 Bot 可用性、绑定 Match、
 写赛事运行态或技术结果之前检查同一 admission gate；维护期间只保留 pending pairing，恢复后再派发。
