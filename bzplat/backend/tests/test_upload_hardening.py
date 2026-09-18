@@ -194,6 +194,79 @@ def test_build_busy_admission_and_api_503(tmp_path: Path, monkeypatch) -> None:
     store.close()
 
 
+def test_source_runtime_http_wiring_and_fail_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """source_runtime 的 HTTP multipart 接线：ml 冻结 ML 镜像；非法值 4xx。
+
+    manager 层已测变体映射；本例钉住 api_routes 的字段名与 kwarg 传递
+    （拼错字段名会静默落标准库镜像、只有预检 import 失败才暴露）。
+    """
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    # 成功路径触发预检：用本机 runner（launcher 即 python3 脚本）。
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+    app = create_app(db_path=str(tmp_path / "sr.db"))
+    store = app.state.store
+    user = store.create_user("sru", "sru@e.com", hash_password("pw123456"))
+    store.update_user(user["id"], email_verified=1)
+    _, token = app.state.auth.authenticate("sru", "pw123456")
+
+    zp = tmp_path / "mlsrc.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr("__main__.py", "import json,sys\nprint(json.dumps({'response':0}))\n")
+
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {token}"}
+    ok = client.post(
+        "/api/bots",
+        headers=headers,
+        data={
+            "name": "mlhttp",
+            "game_id": "holdem",
+            "runtime_mode": "traditional",
+            "source_format": "python",
+            "source_runtime": "ml",
+        },
+        files={"file": ("src.zip", zp.read_bytes(), "application/zip")},
+    )
+    assert ok.status_code == 200, ok.text
+    version = store.get_latest_bot_version(ok.json()["bot"]["id"])
+    assert version["runtime_image"] == "botbattle-ml-py3:bookworm-1"
+
+    for bad in ("cuda", "ML!"):
+        rejected = client.post(
+            "/api/bots",
+            headers=headers,
+            data={
+                "name": f"bad{bad[:2]}",
+                "game_id": "holdem",
+                "source_format": "python",
+                "source_runtime": bad,
+            },
+            files={"file": ("src.zip", zp.read_bytes(), "application/zip")},
+        )
+        assert rejected.status_code == 400, rejected.text
+        assert rejected.json()["detail"]["code"] == "invalid_source_runtime"
+
+    cpp_ml = client.post(
+        "/api/bots",
+        headers=headers,
+        data={
+            "name": "cppml",
+            "game_id": "holdem",
+            "source_format": "cpp",
+            "source_runtime": "ml",
+        },
+        files={"file": ("src.zip", zp.read_bytes(), "application/zip")},
+    )
+    assert cpp_ml.status_code == 400
+    assert cpp_ml.json()["detail"]["code"] == "invalid_source_runtime"
+    store.close()
+
+
 def test_version_upload_not_found_returns_404(tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 

@@ -74,6 +74,24 @@ npm install
 
 ## 2. 构建与运行
 
+### 2.0 沙箱镜像（builder / python 运行 / ML 运行库）
+
+- `botbattle-builder:bookworm-1`：构建与 python 标准库运行镜像（g++/go/python3 + nlohmann-json/eigen），须在部署机预构建并长期缓存。
+- `botbattle-ml-py3:bookworm-1`：ML 运行库镜像（numpy/scipy/onnxruntime/torch CPU），Python 源码 Bot 的可选运行库变体。Dockerfile 在 `images/ml-py3/`，构建内含 import RSS 门禁自检（torch 栈 ≤ 400 MiB，超标准构建失败）：
+
+```bash
+cd images/ml-py3 && docker build -t botbattle-ml-py3:bookworm-1 .
+```
+
+- 两个镜像的 tag 都是追加式：内容一经发布不得改动，升级库版本必须换新 tag 并同步 `runtime/limits.py` 白名单与发布说明。
+- 大镜像首次拉取/构建在部署窗**之前**完成（可无限重试、不影响生产）；部署窗内用下面的命令断言镜像已在本机且为 linux/amd64：
+
+```bash
+docker image inspect --format '{{.Os}}/{{.Architecture}} {{.RepoTags}}' \
+  botbattle-builder:bookworm-1 botbattle-ml-py3:bookworm-1
+```
+
+
 ### 2.1 安全启停
 
 生产 `.env` 应为该实例固定一个不会与 QA/worktree 复用的 namespace：

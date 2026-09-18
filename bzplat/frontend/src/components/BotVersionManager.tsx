@@ -108,6 +108,7 @@ export default function BotVersionManager({
   const [file, setFile] = useState<File | null>(null)
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
+  const [sourceRuntime, setSourceRuntime] = useState('')
   // 源码类型的上传方式（文件 / 在线编辑）与编辑器代码；ELF 恒为文件上传。
   const [sourceUploadMode, setSourceUploadMode] = useState<SourceUploadMode>('file')
   const [sourceCode, setSourceCode] = useState('')
@@ -245,6 +246,7 @@ export default function BotVersionManager({
         runtime_mode: mode,
         source_format: sourceFormat,
         ...(sourceFormat !== 'elf' && sourceEntry.trim() ? { source_entry: sourceEntry.trim() } : {}),
+        ...(sourceFormat === 'python' && sourceRuntime ? { source_runtime: sourceRuntime } : {}),
         file,
       }, {
         signal: controller.signal,
@@ -370,7 +372,7 @@ export default function BotVersionManager({
           <div className="space-y-1.5">
             <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceUploadMode('file'); setFile(null) }}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceRuntime(''); setSourceUploadMode('file'); setFile(null) }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -392,6 +394,25 @@ export default function BotVersionManager({
                       placeholder={sourceFormat === 'python' ? '__main__.py' : `main.${sourceFormat === 'go' ? 'go' : sourceFormat === 'c' ? 'c' : 'cpp'}`}
                       maxLength={200}
                     />
+                  </div>
+                )}
+                {sourceFormat === 'python' && (
+                  <div className="space-y-1.5">
+                    <Label>运行库</Label>
+                    <Select value={sourceRuntime || 'std'} onValueChange={(v) => setSourceRuntime(v === 'ml' ? 'ml' : '')}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="std">标准库（默认）</SelectItem>
+                        <SelectItem value="ml">ML 库（numpy · scipy · onnxruntime · torch CPU）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {sourceRuntime === 'ml'
+                        ? '模型权重请转存为 npz/onnx 上传到云存储，对局中从 data/ 读取；沙箱内存 512 MiB，模型不宜过大。'
+                        : '只需标准库时选默认；需要 numpy/torch 等科学计算库时选 ML 库。'}
+                    </p>
                   </div>
                 )}
               </div>

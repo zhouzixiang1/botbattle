@@ -409,12 +409,17 @@ SOURCE_MAX_FILES = 500
 SOURCE_MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
 BOT_BUILD_TIMEOUT_SEC = 120.0
 BUILDER_IMAGE = "botbattle-builder:bookworm-1"
-# v1 复用构建镜像作为 python 运行镜像（已含 python3 标准库）；
-# 科学栈（numpy/torch）镜像受部署机网络限速延后，启用时必须换新 tag。
+# v1 复用构建镜像作为 python 运行镜像（已含 python3 标准库）。
 PYTHON_RUNTIME_IMAGE = "botbattle-builder:bookworm-1"
+# ML 运行库镜像（numpy/scipy/onnxruntime/torch CPU，构建产物含 import RSS
+# 门禁自检）：Python 源码 Bot 的可选运行库变体。tag 追加式——内容一经
+# 发布不得改动，升级库版本必须换新 tag（images/ml-py3/Dockerfile）。
+ML_PY_RUNTIME_IMAGE = "botbattle-ml-py3:bookworm-1"
 # 运行时按白名单复核 bot_versions.runtime_image：手改 DB 或未来写路径
 # 漂移不得把任意镜像名带进 docker create/pull。
-SEAT_RUNTIME_IMAGE_ALLOWLIST = frozenset({PYTHON_RUNTIME_IMAGE})
+SEAT_RUNTIME_IMAGE_ALLOWLIST = frozenset(
+    {PYTHON_RUNTIME_IMAGE, ML_PY_RUNTIME_IMAGE}
+)
 # 用户云存储：每用户总配额与文件数上限；单文件大小不得超过同一配额。
 USER_STORAGE_QUOTA_BYTES = 256 * 1024 * 1024
 USER_STORAGE_MAX_FILES = 500

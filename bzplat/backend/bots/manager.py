@@ -29,6 +29,7 @@ from ..store import (
     Store,
 )
 from ..runtime.limits import (
+    ML_PY_RUNTIME_IMAGE,
     MAX_BOT_UPLOAD_BYTES,
     PYTHON_RUNTIME_IMAGE,
     SOURCE_UPLOAD_MAX_BYTES,
@@ -161,6 +162,24 @@ def _classify_upload(raw: "bytes | StagedBotUpload", *, source_format: str = "el
         raise BotError("unsupported_binary", str(exc)) from exc
 
 
+def _normalize_source_runtime(source_runtime: str, source_format: str) -> str:
+    """python 源码 Bot 的可选运行库变体：""=标准库（默认），"ml"=ML 镜像。
+
+    只在这两个上传入口归一校验一次；未知值与「非 python 却带变体」都
+    fail closed 为 4xx，不落到默认猜测。
+    """
+    variant = (source_runtime or "").strip().lower()
+    if variant not in ("", "ml"):
+        raise BotError(
+            "invalid_source_runtime", "source_runtime 只支持空（标准库）或 ml"
+        )
+    if variant and source_format != "python":
+        raise BotError(
+            "invalid_source_runtime", "运行库变体仅支持 python 源码 Bot"
+        )
+    return variant
+
+
 def _hashing_copy(source: Path, dest: Path, *, chunk: int = 1024 * 1024) -> tuple[str, int]:
     """单遍流式拷贝并计算 sha256；进程内存只占单个 chunk。"""
     digest = hashlib.sha256()
@@ -273,9 +292,11 @@ class BotManager:
         binary_runner=None,
         source_format: str = "elf",
         source_entry: str = "",
+        source_runtime: str = "",
         source_builder=None,
         source_filename: str = "",
     ) -> dict:
+        source_runtime = _normalize_source_runtime(source_runtime, source_format)
         if not _NAME_RE.match(name or ""):
             raise BotError(
                 "invalid_name", "bot 名须字母开头，2-32 位字母数字下划线"
@@ -327,6 +348,7 @@ class BotManager:
                 binary_runner=binary_runner,
                 source_format=source_format,
                 source_entry=source_entry,
+                source_runtime=source_runtime,
                 source_builder=source_builder,
             )
             return self.store.publish_uploaded_bot(owner_id, bot["id"])
@@ -361,8 +383,10 @@ class BotManager:
         self, bot_id: int, owner_id: int, raw: "bytes | StagedBotUpload", *,
         upload_note: str = "", runtime_mode: str | None = None, binary_runner=None,
         source_format: str = "elf", source_entry: str = "",
-        source_builder=None, source_filename: str = "",
+        source_runtime: str = "", source_builder=None, source_filename: str = "",
+
     ) -> dict:
+        source_runtime = _normalize_source_runtime(source_runtime, source_format)
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
@@ -402,6 +426,7 @@ class BotManager:
                 binary_runner=binary_runner,
                 source_format=source_format,
                 source_entry=source_entry,
+                source_runtime=source_runtime,
                 source_builder=source_builder,
             )
 
@@ -488,7 +513,8 @@ class BotManager:
         *,
         source_format: str,
         source_entry: str,
-        source_builder,
+        source_runtime: str = "",
+        source_builder=None,
     ) -> tuple[str, int, str, str]:
         """源码上传的暂存处理：校验 zip → 构建/打包 → 产物就位 temp_dest。
 
@@ -502,6 +528,12 @@ class BotManager:
         import json as _json
         import zipfile as _zipfile
 
+        if source_runtime not in ("", "ml"):
+            # 调用方入口均已归一；此处自守，防未来新调用方漏校验静默落
+            # 标准库镜像。
+            raise BotError(
+                "invalid_source_runtime", "source_runtime 只支持空（标准库）或 ml"
+            )
         zip_path = temp_dir / "source.zip"
         if isinstance(raw, StagedBotUpload):
             shutil.copyfile(raw.path, zip_path)
@@ -555,7 +587,12 @@ class BotManager:
             temp_dest.write_text(launcher)
             temp_dest.chmod(0o755)
             checksum = hashlib.sha256(temp_dest.read_bytes()).hexdigest()
-            return checksum, temp_dest.stat().st_size, PYTHON_RUNTIME_IMAGE, _json.dumps(
+            runtime_image = (
+                ML_PY_RUNTIME_IMAGE
+                if source_runtime == "ml"
+                else PYTHON_RUNTIME_IMAGE
+            )
+            return checksum, temp_dest.stat().st_size, runtime_image, _json.dumps(
                 recipe, ensure_ascii=False, sort_keys=True
             )
 
@@ -621,6 +658,7 @@ class BotManager:
         binary_runner=None,
         source_format: str = "elf",
         source_entry: str = "",
+        source_runtime: str = "",
         source_builder=None,
     ) -> dict:
         with self._bot_version_lock(bot_id):
@@ -660,6 +698,7 @@ class BotManager:
                         temp_dest,
                         source_format=source_format,
                         source_entry=source_entry,
+                        source_runtime=source_runtime,
                         source_builder=source_builder,
                     )
                 elif isinstance(raw, StagedBotUpload):

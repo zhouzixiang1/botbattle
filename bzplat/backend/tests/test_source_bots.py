@@ -226,3 +226,80 @@ def test_compiled_source_build_sees_readable_tree_and_drops_out(tmp_path):
     assert runtime_image == ""  # 编译产物不声明运行镜像
     assert checksum and size
     store.close()
+
+
+def test_source_runtime_variant_selects_image(tmp_path):
+    """source_runtime=ml 的 python 版本声明 ML 镜像；非法值/错语言 fail closed。"""
+    import os
+    import tempfile as _tempfile
+
+    import pytest
+
+    from bzplat.backend.bots.manager import BotManager, BotError
+    from bzplat.backend.runtime.limits import (
+        ML_PY_RUNTIME_IMAGE,
+        PYTHON_RUNTIME_IMAGE,
+    )
+    from bzplat.backend.store.db import Store
+
+    store = Store(str(tmp_path / "variant.db"))
+    manager = BotManager(store, upload_root=tmp_path / "up")
+    zp = _make_zip(tmp_path / "v.zip", {"__main__.py": "print(1)\n"})
+    temp_dir = Path(_tempfile.mkdtemp(prefix=".v1-", dir=tmp_path))
+
+    _, _, image, _ = manager._prepare_source_version(
+        zp.read_bytes(), temp_dir, temp_dir / "bot.bin",
+        source_format="python", source_entry="", source_runtime="ml",
+    )
+    assert image == ML_PY_RUNTIME_IMAGE
+
+    temp_dir2 = Path(_tempfile.mkdtemp(prefix=".v2-", dir=tmp_path))
+    _, _, image2, _ = manager._prepare_source_version(
+        zp.read_bytes(), temp_dir2, temp_dir2 / "bot.bin",
+        source_format="python", source_entry="", source_runtime="",
+    )
+    assert image2 == PYTHON_RUNTIME_IMAGE
+
+    with pytest.raises(BotError) as e:
+        manager.create_from_upload(
+            1, "xbot", zp.read_bytes(), game_id="holdem",
+            source_format="python", source_runtime="cuda",
+        )
+    assert e.value.code == "invalid_source_runtime"
+    with pytest.raises(BotError) as e:
+        manager.create_from_upload(
+            1, "xbot", zp.read_bytes(), game_id="holdem",
+            source_format="cpp", source_runtime="ml",
+        )
+    assert e.value.code == "invalid_source_runtime"
+    store.close()
+
+
+def test_python_source_upload_ml_variant_freezes_runtime_image(tmp_path):
+    """端到端：ml 变体上传冻结 bot_versions.runtime_image=ML 镜像。"""
+    import shutil
+
+    app = create_app(db_path=str(tmp_path / "ml.db"))
+    store = app.state.store
+    user = store.create_user("mlu", "mlu@e.com", hash_password("pw123456"))
+    store.update_user(user["id"], email_verified=1)
+    zp = _make_zip(
+        tmp_path / "mlsrc.zip",
+        {"__main__.py": (
+            "import json,sys\n"
+            "j=json.loads(sys.stdin.readline())\n"
+            'print(json.dumps({"response":0}))\n'
+            "sys.stdout.flush()\n"
+        )},
+    )
+    staged = app.state.bot_manager.new_staged_upload()
+    shutil.copyfile(zp, staged.path)
+    staged.size = zp.stat().st_size
+    bot = app.state.bot_manager.create_from_upload(
+        user["id"], "mlbot", staged, game_id="holdem",
+        runtime_mode="traditional", source_format="python",
+        source_runtime="ml", binary_runner=None,
+    )
+    version = store.get_latest_bot_version(bot["id"])
+    assert version["runtime_image"] == "botbattle-ml-py3:bookworm-1"
+    store.close()

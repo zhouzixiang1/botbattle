@@ -284,6 +284,12 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
                                 "显式填写须等于该规范名，否则 400"
                             ),
                         },
+                        "source_runtime": {
+                            "type": "string",
+                            "default": "",
+                            "enum": ["", "ml"],
+                            "description": "python 源码 Bot 的运行库变体：空=标准库；ml=ML 镜像（numpy/scipy/onnxruntime/torch CPU）",
+                        },
                         "file": _BINARY_FILE_SCHEMA,
                     },
                 }
@@ -326,6 +332,12 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
                                 "源码 zip 内的入口文件；空=语言默认入口。"
                                 "单文件直传入口固定为规范名，显式填写须等于该名"
                             ),
+                        },
+                        "source_runtime": {
+                            "type": "string",
+                            "default": "",
+                            "enum": ["", "ml"],
+                            "description": "python 源码 Bot 的运行库变体：空=标准库；ml=ML 镜像",
                         },
                         "file": _BINARY_FILE_SCHEMA,
                     },
@@ -1464,6 +1476,7 @@ async def upload_bot(
                         .lower()
                     ) or "elf"
                     source_entry = _multipart_text(form, "source_entry")
+                    source_runtime = _multipart_text(form, "source_runtime")
                     file = _multipart_file(form)
                     await _stream_bot_upload(
                         staged, file, max_bytes=_source_upload_limit(source_format)
@@ -1485,6 +1498,7 @@ async def upload_bot(
                         binary_runner=_new_preflight_runner(request),
                         source_format=source_format,
                         source_entry=source_entry,
+                        source_runtime=source_runtime,
                         source_builder=_new_source_builder(request),
                         source_filename=file.filename or "",
                     )
@@ -1549,6 +1563,7 @@ async def upload_bot_version(
                         .lower()
                     ) or "elf"
                     source_entry = _multipart_text(form, "source_entry")
+                    source_runtime = _multipart_text(form, "source_runtime")
                     file = _multipart_file(form)
                     await _stream_bot_upload(
                         staged, file, max_bytes=_source_upload_limit(source_format)
@@ -1567,6 +1582,7 @@ async def upload_bot_version(
                         binary_runner=_new_preflight_runner(request),
                         source_format=source_format,
                         source_entry=source_entry,
+                        source_runtime=source_runtime,
                         source_builder=_new_source_builder(request),
                         source_filename=file.filename or "",
                     )

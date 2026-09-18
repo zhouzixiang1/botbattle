@@ -47,7 +47,7 @@ test('online editor creates a runnable python source bot', async ({ page }) => {
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
 
-  const uniqueName = `editor_py_${Date.now().toString(36)}`
+  const uniqueName = `a_editor_${Date.now().toString(36)}`
   await page.locator('#upload-name').fill(uniqueName)
   await chooseProgramType(page, 'Python 源码')
 
@@ -70,7 +70,7 @@ test('single .py file uploads directly without zipping', async ({ page }) => {
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
 
-  const uniqueName = `single_py_${Date.now().toString(36)}`
+  const uniqueName = `a_single_${Date.now().toString(36)}`
   await page.locator('#upload-name').fill(uniqueName)
   await chooseProgramType(page, 'Python 源码')
 
@@ -93,7 +93,7 @@ test('online editor caps pasted code at 2 MB client-side', async ({ page }) => {
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
 
-  await page.locator('#upload-name').fill(`big_py_${Date.now().toString(36)}`)
+  await page.locator('#upload-name').fill(`a_big_${Date.now().toString(36)}`)
   await chooseProgramType(page, 'Python 源码')
   await page.locator('[data-testid="upload-mode-editor"]').click()
 
@@ -143,7 +143,7 @@ test('version manager uploads v2 through the online editor', async ({ page }) =>
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
 
-  const uniqueName = `ver_py_${Date.now().toString(36)}`
+  const uniqueName = `a_ver_${Date.now().toString(36)}`
   await page.locator('#upload-name').fill(uniqueName)
   await chooseProgramType(page, 'Python 源码')
   await page.locator('[data-testid="upload-mode-editor"]').click()
