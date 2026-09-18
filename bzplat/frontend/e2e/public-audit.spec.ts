@@ -65,6 +65,11 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
   await page.goto(`/#/search?q=${encodeURIComponent(USER)}&type=users`)
   await expect(page.locator(`a[href="#/user/${USER}"]`).first()).toBeVisible()
   await page.getByRole('tab', { name: 'Bot', exact: true }).click()
+  // 三分区常驻：Tab 是锚点导航——URL 带 type=bots 且 Bot 分区高亮定位，
+  // 用户结果保持可见（不再是单 type 过滤）。
+  await expect(page).toHaveURL(/type=bots/)
+  await expect(page.locator('#search-section-bots')).toHaveAttribute('data-anchored', 'true')
+  await expect(page.locator(`a[href="#/user/${USER}"]`).first()).toBeVisible()
   await expect(page.locator(`a[href="#/bot/${publicBotId}"]`).first()).toBeVisible()
 
   await page.goto('/#/history')
