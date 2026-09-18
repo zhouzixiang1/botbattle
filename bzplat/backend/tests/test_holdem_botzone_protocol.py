@@ -206,8 +206,8 @@ _BOTS = {
 
 
 @pytest.fixture(autouse=True)
-def _local_bot():
-    os.environ["BZ_BOT_LOCAL"] = "1"
+def _local_bot(monkeypatch):
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
 
 
 @pytest.mark.parametrize("botname", list(_BOTS.keys()))

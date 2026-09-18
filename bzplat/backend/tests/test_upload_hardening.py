@@ -142,8 +142,9 @@ def test_build_busy_admission_and_api_503(tmp_path: Path, monkeypatch) -> None:
     """内存不足时构建通道保守拒绝（build_busy），API 映射 503。"""
     from bzplat.backend.runtime import limits as limits_module
 
-    # 套件里有旧测试直写 os.environ["BZ_BOT_LOCAL"]="1" 且不清理；
-    # 本用例需要 docker 模式的 shared_supervisor 才能到达内存准入。
+    # 本用例需要 docker 模式的 shared_supervisor 才能到达内存准入；
+    # 套件中部分旧测试以 setdefault 方式注入 BZ_BOT_LOCAL 且不清理
+    # （条件性泄漏，见 PR 说明的已知债务），此处显式声明环境。
     monkeypatch.delenv("BZ_BOT_LOCAL", raising=False)
     app = create_app(db_path=str(tmp_path / "busy.db"))
     store = app.state.store

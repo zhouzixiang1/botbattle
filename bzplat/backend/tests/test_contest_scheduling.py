@@ -22,6 +22,13 @@ from bzplat.backend.contests.scheduler import ContestScheduler
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
 
+
+@pytest.fixture(autouse=True)
+def _local_bot_test_env(monkeypatch):
+    """本文件全部用例跑在本地 Bot 测试模式；monkeypatch 保证用例结束后
+    环境复原，不向同进程后续测试泄漏（曾导致 docker 模式用例误判）。"""
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 
 
@@ -80,7 +87,6 @@ class _CapacityFakeOrch(_CreatingFakeOrch):
 def setup(tmp_path, monkeypatch):
     """建临时 Store + 2 个 holdem bot + manager/scheduler。"""
     monkeypatch.chdir(tmp_path)
-    os.environ["BZ_BOT_LOCAL"] = "1"
     store = Store(str(tmp_path / "t.db"))
     store.create_user("user01", "u1@e.com", "hx")
     store.create_user("user02", "u2@e.com", "hx")
