@@ -868,6 +868,37 @@ export default function Challenge() {
       )
   const submissionReady = ready && timeControlReady && !timeControlsLoading && !timeControlsError
 
+  // 桌面（≥1280px）保持既有单屏双列表单；窄屏走三步向导（对局 → 座位 → 确认）。
+  // 断点状态与 HumanPlay 的 desktopRail 同一模式：SSR 安全的惰性初值 + 变化监听。
+  const [desktopLayout, setDesktopLayout] = useState(
+    () => window.matchMedia('(min-width: 1280px)').matches,
+  )
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1280px)')
+    const syncBreakpoint = () => setDesktopLayout(media.matches)
+    syncBreakpoint()
+    media.addEventListener('change', syncBreakpoint)
+    return () => media.removeEventListener('change', syncBreakpoint)
+  }, [])
+  // 提交只发生在第 3 步，因此从执行请求返回表单时停留在第 3 步：
+  // 与游戏/时限/座位选择一样属于「可立即重发」的恢复点，是预期行为。
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1)
+  // 分区保持挂载、仅 CSS 隐藏：游戏/时限选择器不因分步重挂载（避免重复拉取
+  // /api/games），display:none 同时把隐藏分区移出 Tab 顺序与可访问树。
+  const stepClassName = (step: 1 | 2 | 3) =>
+    !desktopLayout && wizardStep !== step ? 'hidden' : undefined
+  // 下一步按钮在进入第 3 步时卸载；把焦点移到「上一步」，键盘/读屏
+  // 用户不丢失位置（否则焦点跌落到 body）。
+  const prevButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!desktopLayout && wizardStep === 3) prevButtonRef.current?.focus()
+  }, [desktopLayout, wizardStep])
+  const wizardSteps = [
+    { step: 1 as const, label: '对局' },
+    { step: 2 as const, label: '座位' },
+    { step: 3 as const, label: '确认' },
+  ]
+
   return (
     <PageStub title="发起挑战" subtitle="选择双方如何运行；日常测试使用节能沙箱或自己的电脑。">
       {!storageChecked || (pendingPublicId && !execution) ? (
@@ -938,8 +969,66 @@ export default function Challenge() {
       >
         <Card density="compact">
           <CardContent className="grid gap-3 sm:gap-2 xl:grid-cols-[minmax(15rem,18rem)_minmax(0,1fr)]">
+            {/* 窄屏分步导航：桌面单屏表单不渲染 */}
+            {!desktopLayout && (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 sm:gap-3"
+                data-testid="challenge-wizard-nav"
+              >
+                <ol className="flex min-w-0 items-center gap-1.5 text-xs" aria-label="配置步骤">
+                  {wizardSteps.map(({ step, label }, index) => (
+                    <li
+                      key={step}
+                      aria-current={wizardStep === step ? 'step' : undefined}
+                      className={cn(
+                        'flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 font-medium',
+                        wizardStep === step
+                          ? 'bg-primary/10 text-primary'
+                          : wizardStep > step
+                            ? 'text-muted-foreground'
+                            : 'text-muted-foreground/60',
+                      )}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          'flex size-4 shrink-0 items-center justify-center rounded-full border text-[10px] leading-none',
+                          wizardStep >= step ? 'border-primary text-primary' : 'border-input',
+                        )}
+                      >
+                        {index + 1}
+                      </span>
+                      <span className="truncate">{label}</span>
+                    </li>
+                  ))}
+                </ol>
+                <div className="flex gap-2">
+                  <Button
+                    ref={prevButtonRef}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={wizardStep === 1}
+                    onClick={() => setWizardStep((s) => (s === 3 ? 2 : 1))}
+                    data-testid="challenge-prev"
+                  >
+                    上一步
+                  </Button>
+                  {wizardStep < 3 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => setWizardStep((s) => (s === 1 ? 2 : 3))}
+                      data-testid="challenge-next"
+                    >
+                      下一步
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
             {/* 左列：对局配置（游戏 / 时限）。切换游戏会重置两座位（不同游戏的 bot 不互通） */}
-            <div className="min-w-0 space-y-3 sm:space-y-2 xl:border-r xl:border-border xl:pr-4">
+            <div className={cn('min-w-0 space-y-3 sm:space-y-2 xl:border-r xl:border-border xl:pr-4', stepClassName(1))}>
               <div className="space-y-1.5">
                 <Label>游戏</Label>
                 <Select
@@ -1004,7 +1093,7 @@ export default function Challenge() {
             </div>
 
             {/* 右列：双方座位选择（自博弈徽标 + 我的位置切换 + 双列座位） */}
-            <div className="min-w-0 space-y-3 sm:space-y-2">
+            <div className={cn('min-w-0 space-y-3 sm:space-y-2', stepClassName(2))}>
               {selfPlay && (
                 <Badge variant="secondary" className="gap-1">
                   <BotIcon className="size-3" />
@@ -1116,7 +1205,7 @@ export default function Challenge() {
             </div>
 
             {/* 底部通栏：运行提示 / 错误 / 开始按钮（跨左右两列） */}
-            <div className="min-w-0 space-y-2 xl:col-span-2 xl:border-t xl:border-border xl:pt-3">
+            <div className={cn('min-w-0 space-y-2 xl:col-span-2 xl:border-t xl:border-border xl:pt-3', stepClassName(3))}>
               {usesLocalBot && (
                 <div className="flex min-w-0 items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs" role="status">
                   <Laptop className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
