@@ -11,6 +11,15 @@ import json
 import sqlite3
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _local_bot_test_env(monkeypatch):
+    """本文件全部用例跑在本地 Bot 测试模式；monkeypatch 保证用例结束后
+    环境复原，不向同进程后续测试泄漏（曾导致 docker 模式用例误判）。"""
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+    monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+
 from fastapi.testclient import TestClient
 
 from bzplat.backend.contests.manager import ContestManager
@@ -18,6 +27,7 @@ from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
+
     EXECUTION_SOURCE_CONTEST,
     TYPE_CONTEST,
 )
@@ -219,8 +229,6 @@ def test_converge_rejects_terminal_showcase_and_contrast_with_finish(tmp_path):
 def test_converge_endpoint_permissions_and_audit(tmp_path):
     from bzplat.backend.main import create_app
     import os
-    os.environ["BZ_BOT_LOCAL"] = "1"
-    os.environ["BZ_SKIP_CAPTCHA"] = "1"
     app = create_app(db_path=str(tmp_path / "converge-api.db"))
     store = app.state.store
     organizer = store.create_user("apiorg", "a@e.com", hash_password("pw123456"))

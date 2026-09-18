@@ -26,13 +26,19 @@ from bzplat.backend.bots.manager import BotError
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
 
+
+@pytest.fixture(autouse=True)
+def _local_bot_test_env(monkeypatch):
+    """本文件全部用例跑在本地 Bot 测试模式；monkeypatch 保证用例结束后
+    环境复原，不向同进程后续测试泄漏（曾导致 docker 模式用例误判）。"""
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+    monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 
 
 def _app(tmp_path):
     from bzplat.backend.main import create_app
-    os.environ["BZ_BOT_LOCAL"] = "1"
-    os.environ["BZ_SKIP_CAPTCHA"] = "1"
     return create_app(db_path=str(tmp_path / "mv.db"))
 
 
