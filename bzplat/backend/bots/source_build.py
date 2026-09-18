@@ -118,7 +118,8 @@ def single_file_entry(language: str, filename: object) -> str:
     return SINGLE_FILE_ENTRIES[lang]
 
 
-_FIXED_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+# 单成员 zip 的固定时间戳/属性：staged 与 bytes 两条 wrap 路径共用，保证确定性。
+FIXED_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 def build_single_file_zip(data: bytes, entry: str) -> bytes:
@@ -131,7 +132,7 @@ def build_single_file_zip(data: bytes, entry: str) -> bytes:
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        info = zipfile.ZipInfo(entry, date_time=_FIXED_ZIP_DATE)
+        info = zipfile.ZipInfo(entry, date_time=FIXED_ZIP_DATE)
         info.external_attr = 0o644 << 16
         z.writestr(info, data)
     return buf.getvalue()

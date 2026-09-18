@@ -588,6 +588,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                         }
                         setFileError('')
                         setFile(f)
+                        // 单文件直传入口固定为规范名；用户为 zip 填的显式
+                        // 入口不再适用，避免提交时被 400 拒绝。
+                        if (f && !f.name.toLowerCase().endsWith('.zip')) setSourceEntry('')
                       }}
                       required
                       className="sr-only"

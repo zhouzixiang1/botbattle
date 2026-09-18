@@ -428,6 +428,9 @@ export default function BotVersionManager({
                           return
                         }
                         setFile(f)
+                        // 单文件直传入口固定为规范名；清掉为 zip 填的显式
+                        // 入口，避免提交时被 400 拒绝。
+                        if (f && !f.name.toLowerCase().endsWith('.zip')) setSourceEntry('')
                       }}
                       required
                       className="sr-only"

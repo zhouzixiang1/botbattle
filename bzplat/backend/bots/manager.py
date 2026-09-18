@@ -35,6 +35,7 @@ from ..runtime.limits import (
 )
 from .classify import program_header_has_dynamic_interpreter
 from .source_build import (
+    FIXED_ZIP_DATE,
     SourceBuildError,
     ZIP_MAGIC,
     build_recipe,
@@ -110,9 +111,14 @@ def _normalize_source_payload(
     entry = single_file_entry(source_format, source_filename)
     if isinstance(raw, StagedBotUpload):
         zipped = raw.path.with_name(raw.path.name + ".zip")
+        info = zipfile.ZipInfo(entry, date_time=FIXED_ZIP_DATE)
+        info.external_attr = 0o644 << 16
         try:
+            # ZipFile.open 流式写入：内存与文件大小解耦，且与 bytes 路径
+            # 共用固定时间戳/属性，同一输入恒产生同一 zip。
             with zipfile.ZipFile(zipped, "w", zipfile.ZIP_DEFLATED) as z:
-                z.write(raw.path, arcname=entry)
+                with z.open(info, "w") as dst, Path(raw.path).open("rb") as src:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
             os.replace(zipped, raw.path)
         finally:
             if zipped.exists():

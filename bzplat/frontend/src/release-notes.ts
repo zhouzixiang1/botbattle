@@ -12,6 +12,15 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.6',
+    date: '2026-09-18',
+    title: '源码上传更简单：单文件直传与在线编辑器',
+    items: [
+      '上传源码 Bot 不再必须打 zip：选择对应语言后，直接上传单个 .py / .c / .cpp / .go 文件即可，平台自动按标准入口处理。',
+      '上传表单新增「在线编辑器」：不用在本地建文件，粘贴代码就能上传（单次粘贴不超过 2 MB，更大的代码仍用文件或 zip 上传）。',
+    ],
+  },
+  {
     version: 'v1.5',
     date: '2026-09-18',
     title: '修复：Python 源码 Bot 与云盘对局读取',

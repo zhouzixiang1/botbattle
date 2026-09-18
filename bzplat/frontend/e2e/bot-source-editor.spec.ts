@@ -115,6 +115,29 @@ test('online editor caps pasted code at 2 MB client-side', async ({ page }) => {
   await monitor.expectClean()
 })
 
+test('switching upload mode resets stale selections', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, USER)
+  await page.goto('/#/my-bots')
+  await page.locator('#upload-name').fill(`reset_py_${Date.now().toString(36)}`)
+  await chooseProgramType(page, 'Python 源码')
+
+  // 编辑器输入后切回文件模式：编辑器与入口隐藏，提交前必须重新选文件。
+  await page.locator('[data-testid="upload-mode-editor"]').click()
+  await page.locator('#upload-source').fill(await callbotSource())
+  await page.locator('[data-testid="upload-mode-file"]').click()
+  await expect(page.locator('#upload-source')).toHaveCount(0)
+  await expect(page.locator('#upload-file')).toBeVisible()
+  await expect(page.getByText('未选择文件', { exact: true })).toBeVisible()
+
+  // 编辑器模式下入口输入框不可见（入口固定为规范名）。
+  await page.locator('[data-testid="upload-mode-editor"]').click()
+  await expect(page.locator('#upload-entry')).toHaveCount(0)
+  await expect(page.locator('#upload-source')).toBeVisible()
+
+  await monitor.expectClean()
+})
+
 test('version manager uploads v2 through the online editor', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, USER)
