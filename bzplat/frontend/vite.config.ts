@@ -20,6 +20,11 @@ export default defineConfig({
     },
   },
   server: {
+    watch: {
+      // Playwright 运行时会向这两个目录写失败产物；不忽略会让 dev server
+      // 广播整页 reload，把并行跑的其它用例页面刷掉，造成失败级联。
+      ignored: ['**/playwright-report/**', '**/test-results/**'],
+    },
     proxy: {
       // /api 同时承载 REST/SSE 与人类对战 WebSocket；显式开启 ws，
       // 否则开发服务器只代理 HTTP，请求 /play 时会在 Vite 端反复断线。
