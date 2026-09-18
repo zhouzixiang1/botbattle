@@ -24,8 +24,8 @@
 | B6 | 折叠区焦点管理 | P3 | 4 | 否 | 待开工 |
 | C7 | 主 venv 缺 pytest-xdist | P2 | 2 | 安装需确认 | 待开工 |
 | C8 | 接入 GitHub CI checks | P2 | 3 | 决策项 | 待开工 |
-| D9 | 四份文档容量数字未同步（6/12 → 8/16） | P1 | 2 | 否 | 待开工 |
-| D10 | wiki 残留 "PR-N" 标注 | P2 | 2 | 否 | 待开工 |
+| D9 | 多份文档容量数字仍写 6/12（现行 8/16） | P1 | 2 | 否 | 待开工 |
+| D10 | SUMMARY.md 的 wiki PR-N 教训登记已过时 | P2 | 2 | 否 | 待开工 |
 | D11 | Gomoku/Pencil 机器可读契约缺失 | P2 | 3 | 否 | 待开工 |
 | E12 | SMTP 凭据已在 git 历史 | P1 | 3 | 需用户操作 | 待开工 |
 | E13 | 清理盘点快照过期，待裁决项成堆 | P2 | 2 | 逐项裁决 | 待开工 |
@@ -36,7 +36,7 @@
 
 ### A1 单文件源码上传 + 代码编辑器 UI（P0）
 
-- 现状：源码上传只收 zip。后端非 ELF 一律校验 zip 魔数（`bzplat/backend/bots/manager.py:100`）；前端文件选择器 `accept=".zip"` 且文案明说裸 `.py` 不支持（`MyBots.tsx:536`、`BotVersionManager.tsx:377`）；全库无粘贴代码 UI。上传端点为 `POST /api/bots` 与 `POST /api/bots/{id}/versions`（`api_routes.py:1415` 起），`source_build.py` 已有各语言默认入口约定（`DEFAULT_ENTRIES`：c→main.c、cpp→main.cpp、go→main.go、python→`__main__.py`）。
+- 现状：源码上传只收 zip。后端非 ELF 一律校验 zip 魔数（`bzplat/backend/bots/manager.py:100`）；前端文件选择器 `accept=".zip"` 且文案明说裸 `.py` 不支持（`MyBots.tsx:536`、`BotVersionManager.tsx:377`）；全库无粘贴代码 UI。上传端点为 `POST /api/bots` 与 `POST /api/bots/{id}/versions`（`api_routes.py:1416` 起），`source_build.py` 已有各语言默认入口约定（`DEFAULT_ENTRIES`：c→main.c、cpp→main.cpp、go→main.go、python→`__main__.py`）。
 - 影响：用户要本地打 zip 才能传源码，与「在线平台」体验不符；用户已明确要求改为单文件 + 编辑器。
 - 方案：后端在上传 admission 内把单源文件合成为标准 zip（按 `DEFAULT_ENTRIES` 命名，语言由扩展名白名单映射），之后完全复用既有 zip 校验、构建、版本冻结链，不新增第二套解析路径；前端 MyBots 与 BotVersionManager 两处表单增加「粘贴代码」输入方式（语言联动入口名、有界文本域、大小预检），与文件上传二选一。
 - 验证：单测覆盖合成 zip 进既有管线、扩展名白名单、超限拒绝；e2e 上传链路；上传预检回归。
@@ -102,18 +102,18 @@
 
 ### D9 容量数字跨文档未同步（P1）
 
-- 现状：现行代码硬顶为 8 match slots / 16 sandbox units（`runtime/config.py` `MAX_CONCURRENT_MATCHES = 8`，`doc/DESIGN.md:56` 一致）；但 `doc/SUMMARY.md:62`、`doc/TESTING.md:52`、`doc/RUNTIME.md:123`、`doc/LOADTEST.md:133` 仍写 6 slots / 12 units（并发 1–6）。
+- 现状：现行代码硬顶为 8 match slots / 16 sandbox units（`runtime/config.py` `MAX_CONCURRENT_MATCHES = 8`，`doc/DESIGN.md:56` 一致）；多份文档仍按旧值 6/12 记载：`doc/SUMMARY.md:62`、`doc/TESTING.md:52`、`doc/RUNTIME.md:123`、`doc/LOADTEST.md:134`。以上为举例、非穷尽（`doc/TESTING.md:61/313`、`doc/RUNTIME.md:163` 等也有旧值），执行时以全库 rg 复查为准。
 - 影响：参数已扩容而运维/交付文档未跟进，误导部署与压测判断。
 - 方案：逐处判断该数字是「现行参数」还是「历史压测记录」——现行参数改为 8/16 并与 `DESIGN.md` 措辞一致；确属历史记录的加时点标注，不改写史实。同步核对引用这些数字的守护测试（如 `test_runtime.py`）。
 - 验证：定向 pytest（test_runtime、test_qa_script_artifacts、test_canonical_protocol_docs）+ 全库 rg 复查无残留旧值当作现行值。
 - 前置：无。
 
-### D10 wiki 残留 "PR-N" 标注（P2）
+### D10 过时的 wiki PR-N 教训登记（P2）
 
-- 现状：`doc/SUMMARY.md` §5 登记「wiki 残留 PR-N 标注，应在交付前统一清理」，至今未清。
-- 影响：对外文档出现内部 PR 编号，玩家无从理解。
-- 方案：rg `PR-[0-9]` wiki/ 逐处改为稳定表述（正式功能/规则名），不丢语义。
-- 验证：rg 清零 + wiki 守护测试（test_canonical_protocol_docs）。
+- 现状：wiki 已无 PR-N 残留（`rg 'PR-[0-9]' wiki/` 零命中，2026-09-18 复核）；过时的是 `doc/SUMMARY.md:108` 经验教训表——该行仍登记「wiki 残留 PR-N 标注，应在交付前统一清理」，实际早已清完而登记未回写。
+- 影响：后续执行者按登记重复排查，做一轮空清理；交付文档与事实不符。
+- 方案：更新 `SUMMARY.md:108` 该行（改述为「wiki 曾残留 PR-N 标注，已清理」一类与事实一致的表述），保留「文档随 PR 写易留痕」的经验本体。
+- 验证：rg 复核 wiki 持续零命中；SUMMARY 措辞与事实一致。
 - 前置：无。
 
 ### D11 Gomoku/Pencil 机器可读契约缺失（P2）
@@ -176,5 +176,5 @@
 - **多 worker 部署**：内存限流与 SSE/WS 配额只承诺单进程（DESIGN/RUNTIME/SECURITY 一致），扩 worker 前必须先建共享后端，未立项。
 - **admin 日志历史轮转分页**：接口只读当前轮转末 8000 行，是登记过的边界，暂不扩展。
 - **Bot 名称墓碑复用**：`UNIQUE(owner_id,name)` 覆盖墓碑行，暂不开放复用。
-- **对局数据导出**：已下线能力，不重新承诺。
+- **对局数据导出（matchpacks）**：已下线的整包导出能力不重新承诺；现行按游戏的单场棋谱导出（`/api/matches/{id}/record`）不受影响。
 - **git 历史改写**（E12 第二步）：不与任何其他工作捆绑，必须独立授权立项。
