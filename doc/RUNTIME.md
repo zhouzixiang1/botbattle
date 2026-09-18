@@ -40,7 +40,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 | `--memory=<档位>`、`--memory-swap=<档位>` | 节能沙箱均为 512m，赛事沙箱均为 2048m；内存与 swap 合计不超过所选档位 |
 | `--network=none` | 完全断网 |
 | `--read-only` | 根文件系统只读 |
-| `--tmpfs /tmp:rw,exec,nosuid,nodev,size=64m` | /tmp 有界可写且可执行；禁 suid 与设备节点，根 fs 仍只读 |
+| `--tmpfs /tmp:rw,exec,nosuid,nodev,size=256m` | /tmp 有界可写且可执行；禁 suid 与设备节点，根 fs 仍只读。容量常量在 `runtime/limits.py`（`SANDBOX_TMPFS_SIZE_MB`）；tmpfs 页计入容器 memory 档位，不构成额外内存预算 |
 | `--cap-drop=ALL` | 丢弃全部 Linux capabilities |
 | `--security-opt no-new-privileges` | 禁止提权 |
 | `--user 65534:65534` | 以 nobody 身份运行 |

@@ -12,6 +12,16 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.5',
+    date: '2026-09-18',
+    title: '修复：Python 源码 Bot 与云盘对局读取',
+    items: [
+      '修复 Python 源码 Bot 一直无法通过上传预检的问题；此前所有 Python 源码 zip 都会失败，现在可以正常创建与参赛。',
+      '修复云存储文件在对局内不可读的问题；现在 Bot 可以按此前说明从 /mnt/data 与 /app/data 读取权重与数据文件。',
+      '沙箱临时目录 /tmp 从 64 MB 扩大到 256 MB（仍计入 512 MB 内存上限），运行时解压依赖的程序更不容易启动失败。',
+    ],
+  },
+  {
     version: 'v1.4',
     date: '2026-09-17',
     title: '云存储升级：独立入口与模型权重',

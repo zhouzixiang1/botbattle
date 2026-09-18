@@ -56,6 +56,13 @@ BOT_BUILD_PROFILE = DockerResourceProfile(
     cpus=2,
     memory_mb=2048,
 )
+# 沙箱 /tmp tmpfs 上限（MB）：只读根文件系统下唯一可写空间，随进程档位
+# 统一生效（不进 DockerResourceProfile，避免给历史档位隐式加规格）。
+# session/预检 256 MB 覆盖 PyInstaller onefile 等运行期解压场景；tmpfs 页
+# 计入容器 memory cgroup，不构成额外内存预算。构建容器 512 MB 供编译
+# 中间产物。
+SANDBOX_TMPFS_SIZE_MB = 256
+BUILD_TMPFS_SIZE_MB = 512
 _EXECUTION_RESOURCE_PROFILE_V0: Mapping[str, DockerResourceProfile] = (
     MappingProxyType(
         {_LEGACY_PLATFORM_LOW_PROFILE.name: _LEGACY_PLATFORM_LOW_PROFILE}
