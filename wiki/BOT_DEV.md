@@ -310,6 +310,7 @@ docker run --rm -i --platform linux/amd64 \
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
 | 依赖网络或持久磁盘 | 沙箱内失败 | 只读 stdin、写 stdout，状态放内存 |
 | PyInstaller onefile 解压失败（`PYI-... Failed to extract`） | 启动即退出，预检失败 | 运行期解压体积需控制在 /tmp 容量内（见下节），精简捆绑依赖或改用「源码 zip 直传」 |
+| 捆绑 PyTorch 等大型 ML 库 | 解压/加载即超沙箱资源，预检失败 | 节能沙箱 /tmp 256 MB、内存 512 MiB 跑不动此类包；改用轻量推理或纯算法实现（预检失败详情会附 Bot stderr 末尾，可据此定位） |
 
 ## 12. 沙箱与时限
 

@@ -449,4 +449,23 @@ class GameRegistry:
         return out
 
 
+
+def bot_crash_detail(exc: BaseException) -> str:
+    """预检崩溃 detail：附加 Bot 自己的 stderr 末尾。
+
+    只用于上传预检（调用方就是 Bot owner）；对局失败原因对对手可见，
+    绝不拼接 stderr——Bot 内部输出不得跨用户泄漏。stderr 为 4 KiB 环形
+    缓冲，这里再压平控制字符/换行并截断，保证单行可展示。
+    """
+    detail = f"Bot 进程异常退出: {exc}"
+    tail = getattr(exc, "stderr_tail", "") or ""
+    if isinstance(tail, str) and tail:
+        # str.split() 只切 Unicode 空白；再滤掉 ANSI 转义等非打印控制字符，
+        # 保证 detail 单行、可展示且不携带终端控制序列。
+        printable = "".join(ch for ch in tail if ch.isprintable())
+        flattened = " ".join(printable.split())[:300]
+        if flattened:
+            detail += f"；Bot stderr 末尾：{flattened}"
+    return detail
+
 # 全局单例（games/__init__.py 实例化并注册三款游戏）

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec, bot_crash_detail
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.pencil.engine import DEFAULT_N, PencilSession
 from bzplat.backend.games.pencil.pencil_judge import max_timed_decisions
@@ -102,7 +102,7 @@ async def _preflight_check(
     except PlatformRunnerError:
         raise
     except BotCrashedError as exc:
-        return False, f"Bot 进程异常退出: {exc}"
+        return False, bot_crash_detail(exc)
     except asyncio.TimeoutError:
         return False, (
             f"ELF 已在沙箱中启动，但 {timeout}s 内没有按 Botzone JSON 首回合协议响应。"
