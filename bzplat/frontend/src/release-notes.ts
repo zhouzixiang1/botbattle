@@ -12,6 +12,16 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.6',
+    date: '2026-09-18',
+    title: 'Python 源码 Bot 支持 ML 运行库',
+    items: [
+      'Python 源码上传时可选择「ML 库」运行库：numpy、scipy、onnxruntime 与 torch（CPU 版）由平台直接提供，不再需要打进程序包。',
+      '推荐配合云存储使用：训练好的权重转存为 npz/onnx 上传，对局中从 data/ 目录读取；沙箱内存 512 MiB，模型不宜过大。',
+      '上传预检失败时，错误详情现在会附上程序自身输出的末尾，方便定位启动失败的原因。',
+    ],
+  },
+  {
     version: 'v1.5',
     date: '2026-09-18',
     title: '修复：Python 源码 Bot 与云盘对局读取',
