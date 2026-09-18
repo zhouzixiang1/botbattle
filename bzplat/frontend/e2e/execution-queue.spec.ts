@@ -437,6 +437,8 @@ test('two online local Bots create one unrated practice request without horizont
   await page.goto('/#/challenge')
   const challengeForm = page.getByTestId('challenge-form')
   await expect(challengeForm).toBeVisible()
+  // 窄屏三步向导：座位配置在第 2 步。
+  await challengeForm.getByTestId('challenge-next').click()
   for (const [seat, agentName] of [[1, /Local Alpha/], [2, /Local Beta/]] as const) {
     await page.getByTestId(`challenge-advanced-${seat - 1}`).locator('summary').click()
     await page.getByLabel(`玩家 ${seat}运行位置`).click()
@@ -448,6 +450,8 @@ test('two online local Bots create one unrated practice request without horizont
     .getByRole('button', { name: '我的 Bot 设为玩家 2', exact: true })
     .click()
   await expectMobileTouchTargets(challengeForm, 'mobile Challenge form')
+  // 向导第 3 步（确认/提交）才能看到练习局提示与开始按钮。
+  await challengeForm.getByTestId('challenge-next').click()
   await expect(page.getByText('本地 Bot 练习局，不计平台排行榜。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
   await expect(page.getByTestId('execution-request-card')).toContainText('本地 Bot 练习 · 不计平台排行榜')
@@ -799,6 +803,8 @@ test('ordinary user can move the owned Bot to either game position without losin
   const position = page.getByTestId('challenge-my-seat')
   const playerOnePosition = position.getByRole('button', { name: '我的 Bot 设为玩家 1', exact: true })
   const playerTwoPosition = position.getByRole('button', { name: '我的 Bot 设为玩家 2', exact: true })
+  // 窄屏向导：先进入第 2 步（座位）。
+  await form.getByTestId('challenge-next').click()
   await expect(playerOnePosition)
     .toHaveAttribute('aria-pressed', 'true')
   await expect(playerTwoPosition)
@@ -865,6 +871,8 @@ test('ordinary user can move the owned Bot to either game position without losin
 
   await expectMobileTouchTargets(form, 'mobile Challenge seat selection')
   expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  // 向导第 3 步（确认/提交）。
+  await form.getByTestId('challenge-next').click()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
   expect(posted).toMatchObject({
     my_bot_id: ownBot.id,
@@ -1040,6 +1048,8 @@ test('202 challenge request survives refresh, retries, and cancels exactly once'
   await page.goto('/#/challenge')
   const botToggle = page.getByRole('button', { name: '选 Bot', exact: true })
   const humanToggle = page.getByRole('button', { name: '我亲自上场', exact: true })
+  // 窄屏向导：座位类型切换在第 2 步。
+  await page.getByTestId('challenge-next').click()
   await expect(botToggle).toHaveAttribute('aria-pressed', 'true')
   await expect(humanToggle).toHaveAttribute('aria-pressed', 'false')
   for (const control of [botToggle, humanToggle]) {
@@ -1051,6 +1061,8 @@ test('202 challenge request survives refresh, retries, and cancels exactly once'
   await page.getByRole('dialog').getByRole('button', { name: /Alpha Bot/ }).click()
   await page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: /Beta Bot/ }).click()
+  // 向导第 3 步（确认/提交）。
+  await page.getByTestId('challenge-next').click()
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
 
   const card = page.getByTestId('execution-request-card')

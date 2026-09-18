@@ -507,6 +507,8 @@ test('Challenge keeps ranked and practice Bots selectable and marks both kinds',
   })
 
   await page.goto('/#/challenge')
+  // 窄屏三步向导：选 Bot 入口在第 2 步（座位）。
+  await page.getByTestId('challenge-form').getByTestId('challenge-next').click()
   await page.getByRole('button', { name: '选择我的 Bot', exact: true }).click()
   let picker = page.getByRole('dialog', { name: /^选择我的 Bot/ })
   await expect(picker).toContainText('只有排行榜 Bot 对局会产生新评分')

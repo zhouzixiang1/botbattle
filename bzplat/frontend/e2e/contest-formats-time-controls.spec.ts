@@ -569,7 +569,11 @@ test('challenge shows alternate-unrated and human Bot-only timing at 390px', asy
   await form.getByRole('combobox', { name: '对局时限' }).click()
   await page.getByRole('option', { name: '每步最多 1 秒 · 练习' }).click()
   await expect(form.getByText('替代时限属于练习模式，本局不计平台排行榜。')).toBeVisible()
+  // 窄屏三步向导：「我亲自上场」在第 2 步（座位）。
+  await form.getByTestId('challenge-next').click()
   await form.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  // 非对称提示渲染在第 1 步的时限块：返回对局步再断言。
+  await form.getByTestId('challenge-prev').click()
   await expect(form.getByText('非对称练习：所选时限只约束 Bot；你仍使用页面的防挂机时限。')).toBeVisible()
   await expect(form.getByText(/只计 Bot 用时/)).toBeVisible()
   expect((await form.getByRole('combobox', { name: '对局时限' }).boundingBox())?.height).toBeGreaterThanOrEqual(44)
