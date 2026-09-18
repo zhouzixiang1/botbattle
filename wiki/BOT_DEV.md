@@ -1,8 +1,8 @@
 # Bot 开发指南
 
-本页面向准备上传 Bot 的玩家。平台支持两种上传形态：**源码 zip 直传**（C / C++ / Go / Python 3，平台在服务端编译或直接运行）和 **Linux x86_64 ELF**（必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件）。两条路线的功能、赛事与云盘能力完全一致；源码直传不需要本地装编译器，推荐优先使用。
+本页面向准备上传 Bot 的玩家。平台支持两种上传形态：**源码上传**（C / C++ / Go / Python 3，平台在服务端编译或直接运行）和 **Linux x86_64 ELF**（必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件）。源码上传有两种给法：把整个源码目录打成 zip 上传，或只传与所选语言匹配的**单个源文件**（也可以在表单的在线编辑器里直接粘贴代码，单文件代码建议不超过 2 MB）。两条路线的功能、赛事与云盘能力完全一致；源码上传不需要本地装编译器，推荐优先使用。
 
-ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF，也不接受 `.py` 源文件、Shell 脚本或未打包的源码目录。文件叫什么名字并不重要，平台按文件内容校验格式与架构；即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建，最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
+ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF，也不接受 Shell 脚本或未打包的源码目录——裸源码请走上一段的单文件或 zip 路线。ELF 文件叫什么名字并不重要，平台按文件内容校验格式与架构；即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建，最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
 开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则；先复制一份完整示例跑通，再替换其中的决策函数，通常是最快的上手方式。如果暂时不想上传构建产物，可以按[本地 Bot 接入](#/wiki?slug=local-ai)让程序留在自己的电脑上完成练习对局。**运行环境**决定程序在哪里运行，下面的 **Traditional / LongRunning 交互模式**决定进程怎样收发消息，两者不是同一个设置；本地接入当前只支持 Traditional。从其他对战平台迁移程序请先读[迁移指南](#/wiki?slug=migration)。
 
@@ -13,21 +13,24 @@ ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF�
 
 两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封；LongRunning 未完成精确握手会直接协议判负，不会回退成 Traditional。Traditional Bot 可以只读取一行完整信封、输出一行响应后退出，也可以像下方示例一样保持读取循环，由平台在取得该回合响应后结束进程；LongRunning Bot 必须保持进程运行并持续读取增量信封。
 
-## 2. 源码 zip 直传（推荐）
+## 2. 源码上传（推荐：单文件或 zip）
 
-把整个源码目录打成 zip 上传，平台在服务端编译或运行，本地不需要任何构建工具。
+把源码交给平台有两种方式，服务端都会编译或直接运行，本地不需要任何构建工具：
+
+- **单文件直传**：只传一个与所选语言匹配的源文件（Python `.py`、C `.c`、C++ `.cpp` / `.cc` / `.cxx`、Go `.go`），文件名随意，平台自动按规范入口（`main.py` / `main.c` / `main.cpp` / `main.go`）处理。上传表单也提供在线编辑器，可直接粘贴代码，不用先在本地建文件。
+- **zip 包**：整个源码目录打成 zip 上传，适合多文件工程（`#include` 子模块、Go 多文件 package 等）。
 
 | 项 | 约定 |
 |----|------|
 | 支持语言 | C、C++、Go、Python 3 |
-| 打包上限 | zip 不超过 64 MiB、500 个文件，解压后不超过 96 MiB；路径穿越、符号链接与加密成员会被拒绝 |
-| 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。入口不在候选里时，在上传表单显式填写 |
+| 打包上限 | zip 不超过 64 MiB、500 个文件，解压后不超过 96 MiB；单文件同样计入 64 MiB 上限；在线编辑粘贴建议不超过 2 MB。路径穿越、符号链接与加密成员会被拒绝 |
+| 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。单文件直传不需要填入口；zip 入口不在候选里时，在上传表单显式填写 |
 | C / C++ | 服务端以 `gcc/g++ -O2 -static` 编译，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1`；可用库为 nlohmann/json 与 Eigen（g++ 12.2 / Go 1.19 / Python 3.11 环境） |
 | Go | 以 `CGO_ENABLED=0` 纯 Go 编译（禁 cgo）；产物必须是静态链接 ELF，动态链接产物会被拒绝 |
 | Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行；**仅标准库**，numpy、torch 等第三方库不可用 |
 | 构建时限 | 服务端编译 120 秒超时；源码先编译，再进入与 ELF 相同的上传预检 |
 
-本章之后的示例源码（`bot.c` / `bot.py`）两条路线通用：源码直传直接把它们打进 zip；ELF 路线按后续章节在本地构建。
+本章之后的示例源码（`bot.c` / `bot.py`）两条路线通用：源码上传可以直接把单个示例文件传上去，或打进 zip；ELF 路线按后续章节在本地构建。
 
 ## 3. 完整可复制的 C 最小 Bot
 
@@ -309,7 +312,7 @@ docker run --rm -i --platform linux/amd64 \
 | Holdem 把正数当目标总额 | 游戏动作错误 | 正数是本次额外投入筹码 |
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
 | 依赖网络或持久磁盘 | 沙箱内失败 | 只读 stdin、写 stdout，状态放内存 |
-| PyInstaller onefile 解压失败（`PYI-... Failed to extract`） | 启动即退出，预检失败 | 运行期解压体积需控制在 /tmp 容量内（见下节），精简捆绑依赖或改用「源码 zip 直传」 |
+| PyInstaller onefile 解压失败（`PYI-... Failed to extract`） | 启动即退出，预检失败 | 运行期解压体积需控制在 /tmp 容量内（见下节），精简捆绑依赖或改用「源码上传」 |
 | 捆绑 PyTorch 等大型 ML 库 | 解压/加载即超沙箱资源，预检失败 | 节能沙箱 /tmp 256 MB、内存 512 MiB 跑不动此类包；改用轻量推理或纯算法实现（预检失败详情会附 Bot stderr 末尾，可据此定位） |
 
 ## 12. 沙箱与时限

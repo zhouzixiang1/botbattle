@@ -31,6 +31,22 @@ DEFAULT_ENTRIES: dict[str, tuple[str, ...]] = {
     "python": ("__main__.py", "main.py"),
 }
 
+# 单文件直传：每种语言接受的源文件扩展名与打包后的规范入口名。
+# 前端文件直传与在线编辑器共用该映射；后端在 zip 魔数校验前把合法
+# 单文件载荷重写为单成员 zip，后续校验/构建/冻结管线零改动。
+SINGLE_FILE_EXTENSIONS: dict[str, frozenset[str]] = {
+    "c": frozenset({".c"}),
+    "cpp": frozenset({".cpp", ".cc", ".cxx"}),
+    "go": frozenset({".go"}),
+    "python": frozenset({".py"}),
+}
+SINGLE_FILE_ENTRIES: dict[str, str] = {
+    "c": "main.c",
+    "cpp": "main.cpp",
+    "go": "main.go",
+    "python": "main.py",
+}
+
 # 构建命令模板：/src 只读挂载源码，/out 收产物；网络禁用由容器统一保证。
 # C/C++ 静态链接避免运行镜像与构建镜像的 glibc 版本漂移。
 _BUILD_COMMANDS: dict[str, str] = {
@@ -81,6 +97,44 @@ def validate_source_language(language: object) -> str:
             "源码语言仅支持 c / cpp / go / python",
         )
     return lang
+
+
+def single_file_entry(language: str, filename: object) -> str:
+    """校验单文件直传的文件名扩展名并返回打包后的规范入口名。
+
+    只取 basename（原始文件名可能带客户端路径噪声）；入口名恒为
+    SINGLE_FILE_ENTRIES 的规范值，不回用客户端文件名。
+    """
+    lang = validate_source_language(language)
+    base = posixpath.basename(str(filename or "").strip().replace("\\", "/"))
+    ext = posixpath.splitext(base)[1].lower()
+    allowed = SINGLE_FILE_EXTENSIONS[lang]
+    if not base or ext not in allowed:
+        hint = "/".join(sorted(allowed))
+        raise SourceBuildError(
+            "invalid_source_file",
+            f"单文件上传须为 {hint} 源文件（与所选语言匹配），多文件请打 zip 上传",
+        )
+    return SINGLE_FILE_ENTRIES[lang]
+
+
+_FIXED_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+
+
+def build_single_file_zip(data: bytes, entry: str) -> bytes:
+    """把单个源文件字节打包为确定性单成员 zip（bytes 载荷与测试路径）。
+
+    固定时间戳与 0644 属性：同一输入恒产生同一 zip，便于断言与审计。
+    暂存载荷的大文件路径由 manager 用 ZipFile.write 流式重写，不走本函数。
+    """
+    import io
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        info = zipfile.ZipInfo(entry, date_time=_FIXED_ZIP_DATE)
+        info.external_attr = 0o644 << 16
+        z.writestr(info, data)
+    return buf.getvalue()
 
 
 def _safe_member_name(name: str) -> bool:

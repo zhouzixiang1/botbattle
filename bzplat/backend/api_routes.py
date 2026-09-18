@@ -270,12 +270,15 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
                             "type": "string",
                             "default": "elf",
                             "enum": ["elf", "c", "cpp", "go", "python"],
-                            "description": "elf=预构建 ELF；其余为源码 zip 直传（平台编译/运行）",
+                            "description": (
+                                "elf=预构建 ELF；其余为源码上传——zip 包或"
+                                "与语言匹配的单个源文件（.c/.cpp/.cc/.cxx/.go/.py）"
+                            ),
                         },
                         "source_entry": {
                             "type": "string",
                             "default": "",
-                            "description": "源码 zip 内的入口文件（POSIX 相对路径；空=语言默认入口）",
+                            "description": "源码 zip 内的入口文件（POSIX 相对路径；空=语言默认入口；单文件直传忽略）",
                         },
                         "file": _BINARY_FILE_SCHEMA,
                     },
@@ -307,6 +310,10 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
                             "type": "string",
                             "default": "elf",
                             "enum": ["elf", "c", "cpp", "go", "python"],
+                            "description": (
+                                "源码上传——zip 包或与语言匹配的单个源文件"
+                                "（.c/.cpp/.cc/.cxx/.go/.py）"
+                            ),
                         },
                         "source_entry": {"type": "string", "default": ""},
                         "file": _BINARY_FILE_SCHEMA,
@@ -1465,6 +1472,7 @@ async def upload_bot(
                         source_format=source_format,
                         source_entry=source_entry,
                         source_builder=_new_source_builder(request),
+                        source_filename=file.filename or "",
                     )
                 )
             finally:
@@ -1543,6 +1551,7 @@ async def upload_bot_version(
                         source_format=source_format,
                         source_entry=source_entry,
                         source_builder=_new_source_builder(request),
+                        source_filename=file.filename or "",
                     )
                 )
             finally:

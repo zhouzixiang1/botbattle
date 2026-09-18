@@ -14,10 +14,11 @@
 
 想在上传前直接用自己电脑运行程序，可使用[本地 Bot 接入](#/wiki?slug=local-ai)。它由用户电脑主动连接，适合练习和调试，不计平台排行榜，也不能代替正式赛事版本。
 
-平台支持两种上传形态：**源码 zip 直传**（C / C++ / Go / Python 3，服务端编译，
-不需要本地构建工具）和 **Linux x86_64 ELF**。ELF 路线在 Windows、Linux 和 macOS
-都可以使用开发指南中的 Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py`
-源文件不能作为 ELF 上传。已在其他对战平台写过程序的选手请先读
+平台支持两种上传形态：**源码上传**（C / C++ / Go / Python 3，服务端编译，
+不需要本地构建工具；可传单个源文件、在在线编辑器粘贴代码，或打 zip）和
+**Linux x86_64 ELF**。ELF 路线在 Windows、Linux 和 macOS
+都可以使用开发指南中的 Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 不能作为
+ELF 上传，裸源码请走源码上传路线。已在其他对战平台写过程序的选手请先读
 [迁移指南](#/wiki?slug=migration)。
 
 ## 协议速查

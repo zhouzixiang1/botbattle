@@ -35,6 +35,14 @@ import {
   SOURCE_UPLOAD_MAX_LABEL,
   type BotUploadStage,
 } from '@/components/bot-upload-progress'
+import {
+  buildEditorSourceFile,
+  SourceEditorField,
+  sourceEditorSizeError,
+  sourceFileAccept,
+  SourceUploadModeToggle,
+  type SourceUploadMode,
+} from '@/components/source-upload-fields'
 import { useConfirm } from '@/hooks/use-confirm'
 import { apiFormWithProgress, apiGet, apiJson, errMsg } from '@/api'
 import { runtimeModeLabel } from '@/lib/labels'
@@ -100,6 +108,9 @@ export default function BotVersionManager({
   const [file, setFile] = useState<File | null>(null)
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
+  // 源码类型的上传方式（文件 / 在线编辑）与编辑器代码；ELF 恒为文件上传。
+  const [sourceUploadMode, setSourceUploadMode] = useState<SourceUploadMode>('file')
+  const [sourceCode, setSourceCode] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
@@ -174,6 +185,8 @@ export default function BotVersionManager({
     setNote('')
     setSourceFormat('elf')
     setSourceEntry('')
+    setSourceUploadMode('file')
+    setSourceCode('')
     setFile(null)
     setUploadStage('idle')
     setUploadPercent(0)
@@ -188,10 +201,27 @@ export default function BotVersionManager({
     }
   }, [botId, currentRuntimeMode, identityKey, load])
 
+  // 两种上传方式互斥：切换时丢弃旧选择（含编辑器构造的单文件），入口回到默认。
+  const onUploadModeChange = (mode: SourceUploadMode) => {
+    setSourceUploadMode(mode)
+    setFile(null)
+    if (mode === 'editor') setSourceEntry('')
+  }
+
+  // 在线编辑模式：把代码实时构造成规范入口名的单文件进入既有 file 状态，
+  // FormData 提交链与 BotUploadProgress 保持零改动。
+  useEffect(() => {
+    if (sourceFormat === 'elf' || sourceUploadMode !== 'editor') return
+    setFile(buildEditorSourceFile(sourceFormat, sourceCode))
+  }, [sourceFormat, sourceUploadMode, sourceCode])
+
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
-    if (botId === null || !file) {
-      setMutationError('请选择 Linux x86_64 ELF 程序文件')
+    const editorActive = sourceFormat !== 'elf' && sourceUploadMode === 'editor'
+    // 超限错误已由编辑器内联展示，这里只负责阻止提交。
+    if (editorActive && sourceEditorSizeError(sourceCode)) return
+    if (botId === null || (editorActive ? !sourceCode.trim() : !file)) {
+      setMutationError(editorActive ? '请输入在线编辑代码，或改用文件上传' : '请选择 Linux x86_64 ELF 程序文件')
       return
     }
     const targetBotId = botId
@@ -231,6 +261,7 @@ export default function BotVersionManager({
       toast.success(`已上传新版本`)
       setNote('')
       setFile(null)
+      setSourceCode('')
       await load()
       if (!isCurrentUpload()) return
       onChanged?.()
@@ -339,7 +370,7 @@ export default function BotVersionManager({
           <div className="space-y-1.5">
             <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry('') }}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceUploadMode('file'); setFile(null) }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -351,7 +382,7 @@ export default function BotVersionManager({
                     <SelectItem value="python">Python 源码</SelectItem>
                   </SelectContent>
                 </Select>
-                {sourceFormat !== 'elf' && (
+                {sourceFormat !== 'elf' && sourceUploadMode === 'file' && (
                   <div className="space-y-1.5">
                     <Label htmlFor="ver-entry">入口文件（可选，默认见下）</Label>
                     <Input
@@ -364,38 +395,52 @@ export default function BotVersionManager({
                   </div>
                 )}
               </div>
-              <Label htmlFor="ver-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
-            <label
-              htmlFor="ver-file"
-              className="flex min-h-[var(--control-height)] min-w-0 max-sm:min-h-11 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
-            >
-              <span className="shrink-0 font-medium text-foreground">选择文件</span>
-              <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
-              <input
-                id="ver-file"
-                type="file"
-                accept={sourceFormat === 'elf' ? undefined : '.zip,application/zip'}
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null
-                  const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
-                  if (f && sizeError) {
-                    toast.error(sizeError)
-                    setFile(null)
-                    e.target.value = ''
-                    return
-                  }
-                  setFile(f)
-                }}
-                required
-                className="sr-only"
-              />
-            </label>
+              {sourceFormat !== 'elf' && (
+                <SourceUploadModeToggle mode={sourceUploadMode} onModeChange={onUploadModeChange} />
+              )}
+              {sourceFormat !== 'elf' && sourceUploadMode === 'editor' ? (
+                <SourceEditorField
+                  id="ver-source"
+                  sourceFormat={sourceFormat}
+                  code={sourceCode}
+                  onCodeChange={setSourceCode}
+                />
+              ) : (
+                <>
+                  <Label htmlFor="ver-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包或单个源文件，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
+                  <label
+                    htmlFor="ver-file"
+                    className="flex min-h-[var(--control-height)] min-w-0 max-sm:min-h-11 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
+                  >
+                    <span className="shrink-0 font-medium text-foreground">选择文件</span>
+                    <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
+                    <input
+                      id="ver-file"
+                      type="file"
+                      accept={sourceFileAccept(sourceFormat)}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] ?? null
+                        const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
+                        if (f && sizeError) {
+                          toast.error(sizeError)
+                          setFile(null)
+                          e.target.value = ''
+                          return
+                        }
+                        setFile(f)
+                      }}
+                      required
+                      className="sr-only"
+                    />
+                  </label>
+                </>
+              )}
             <p className="text-xs text-muted-foreground">
               {sourceFormat === 'elf'
-                  ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
+                  ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe 和 macOS 程序不支持。`
                   : sourceFormat === 'python'
-                    ? '平台直接运行；默认入口 __main__.py（或 main.py），当前仅支持标准库。'
-                    : '平台自动完成编译；默认入口 main.cpp / main.c / main.go。'}
+                    ? '支持 zip 源码包或单个 .py 文件，也可在在线编辑器中直接粘贴代码；平台直接运行，当前仅支持标准库。'
+                    : '支持 zip 源码包或与语言匹配的单个源文件，也可在在线编辑器中直接粘贴代码；平台自动完成编译。'}
             </p>
           </div>
           {mutationError && <ErrorMsg msg={mutationError} />}
