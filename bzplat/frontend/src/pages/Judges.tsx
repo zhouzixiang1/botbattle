@@ -52,7 +52,7 @@ export default function Judges() {
   }, [])
 
   return (
-    <PageFrame width="default" layout="public-judges">
+    <PageFrame width="default" layout="public-judges" className="sm:gap-2">
       <PageHeader
         eyebrow="公开源码"
         title="裁判源码"
@@ -85,7 +85,7 @@ export default function Judges() {
       ) : games.length === 0 ? (
         <DataRegion title="裁判目录"><EmptyState text="暂无公开裁判" icon={<Scale className="size-5 opacity-50" />} className="py-8" /></DataRegion>
       ) : (
-        <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)]">
+        <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)] sm:gap-2">
           {games.map((game) => <JudgeRegion key={game.game_id} game={game} />)}
         </div>
       )}

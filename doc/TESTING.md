@@ -142,6 +142,19 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 `playwright.config.ts` 显式声明 `chromium`、`firefox` 与 `webkit` 三个 project；完整矩阵直接运行上述不带 `--browser` 的命令，单浏览器使用 `--project=chromium|firefox|webkit`。Chromium/Firefox 固定为 `reducedMotion: 'no-preference'`，继续覆盖正常动画；WebKit 专属 `reducedMotion: 'reduce'`，使用现有 `prefers-reduced-motion` 样式避开已由内核日志证明的 WPE compositor 原生崩溃。显式 project 下 Playwright 会拒绝旧 `--browser=all`，不得用该参数覆盖 project 专属运行环境。
 
+### 3.1.1 三浏览器并行运行（`scripts/e2e-parallel.sh`）
+
+套件因共享队列、每用户配额与同名夹具必须保持 `workers=1`；跨浏览器并行是安全的提速路径：每个 project 使用独立 QA 栈（独立 DB 副本 + 独立后端端口，浏览器直连后端静态托管的 dist），三个 project 同时运行，约 45 分钟的串行全量可压缩到 15 分钟左右。
+
+```bash
+bash scripts/e2e-parallel.sh                      # 默认占用 50384-50386
+BASE_PORT=50390 FRESH_DB=1 bash scripts/e2e-parallel.sh
+```
+
+- 脚本会拒绝 50380-50383 与被占用端口；从 `BZ_E2E_REF_DB`（默认仓库根 `botzone.db`）用 SQLite backup API 复制各项目专属 DB，幂等灌入种子账号，并把 `BZ_PUBLIC_ORIGIN` 设为各栈自身 origin（浏览器直连后端）。
+- 前端 dist 只构建一次、三栈共享；任一 project 失败整体退出码非零，后端进程由 trap 统一回收。
+- 迭代开发建议仅跑 `--project=chromium`（配合单一隔离栈）快速反馈；发布候选仍以三浏览器完整矩阵为准。
+
 ### 3.2 角色、视口与观察面
 
 - 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。

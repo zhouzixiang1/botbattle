@@ -937,9 +937,9 @@ export default function Challenge() {
         data-testid="challenge-form"
       >
         <Card density="compact">
-          <CardContent className="grid gap-3 xl:grid-cols-[minmax(15rem,18rem)_minmax(0,1fr)]">
+          <CardContent className="grid gap-3 sm:gap-2 xl:grid-cols-[minmax(15rem,18rem)_minmax(0,1fr)]">
             {/* 左列：对局配置（游戏 / 时限）。切换游戏会重置两座位（不同游戏的 bot 不互通） */}
-            <div className="min-w-0 space-y-3 xl:border-r xl:border-border xl:pr-4">
+            <div className="min-w-0 space-y-3 sm:space-y-2 xl:border-r xl:border-border xl:pr-4">
               <div className="space-y-1.5">
                 <Label>游戏</Label>
                 <Select
@@ -1004,7 +1004,7 @@ export default function Challenge() {
             </div>
 
             {/* 右列：双方座位选择（自博弈徽标 + 我的位置切换 + 双列座位） */}
-            <div className="min-w-0 space-y-3">
+            <div className="min-w-0 space-y-3 sm:space-y-2">
               {selfPlay && (
                 <Badge variant="secondary" className="gap-1">
                   <BotIcon className="size-3" />
@@ -1053,7 +1053,7 @@ export default function Challenge() {
                   </div>
                 </div>
               )}
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-2 sm:gap-2">
                 {/* 物理座位 0 固定为 Bot；Bot-vs-Bot 时可成为“我的位置”或对手位置。 */}
                 {renderBotSeat('s1')}
 
@@ -1111,7 +1111,7 @@ export default function Challenge() {
               <p className="text-xs text-muted-foreground">
                 {seat2Kind === 'human'
                   ? `${playerLabels[0]}使用节能沙箱，${playerLabels[1]}由你亲自上场；本局不计平台排行榜。`
-                  : '对局默认在平台节能沙箱运行；如需用自己的电脑运行 Bot，展开「高级：运行位置」选择本地连接。'}
+                  : '默认平台运行；用本机请展开「高级：运行位置」。'}
               </p>
             </div>
 
@@ -1137,6 +1137,7 @@ export default function Challenge() {
               <Button
                 type="submit"
                 disabled={busy || !submissionReady}
+                aria-busy={busy || undefined}
                 className="w-full gap-1.5"
               >
                 <Play className="size-4" />

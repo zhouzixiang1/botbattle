@@ -155,7 +155,7 @@ export default function OpponentPickerModal({
             </Tabs>
           )}
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            排行榜 Bot 与练习 Bot 均可挑战；只有符合平台计分规则的排行榜 Bot 对局才会产生新评分。
+            只有排行榜 Bot 对局会产生新评分。
           </p>
         </div>
 

@@ -222,7 +222,7 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   const gomoku = row('五子棋 Alpha')
   const inactive = row('点格棋未启用')
 
-  await expect(page.locator('main')).toContainText('切换会取消旧计分排队，进行中或待结算时暂不可操作')
+  await expect(page.locator('main')).toContainText('每个账号每款游戏最多派遣 1 个 Bot 计分')
   await expect(alpha.getByText('排行榜 Bot', { exact: true })).toBeVisible()
   await expect(beta.getByText('未参榜', { exact: true })).toBeVisible()
   await expect(gomoku.getByText('排行榜 Bot', { exact: true })).toBeVisible()
@@ -239,7 +239,7 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   await page.keyboard.press('Enter')
   const switchDialog = page.getByRole('dialog', { name: '切换排行榜 Bot' })
   await expect(switchDialog).toContainText('历史已完成评分保留')
-  await expect(switchDialog).toContainText('尚未开始的旧计分排队会取消')
+  await expect(switchDialog).toContainText('已排队、还没开始的对局会取消')
   await expect(switchDialog).toContainText('进行中或待结算的计分对局，暂不能切换')
   await expectTouchTarget(switchDialog.getByRole('button', { name: '取消', exact: true }), 'mobile cancel confirmation')
   await expectTouchTarget(switchDialog.getByRole('button', { name: '确认切换', exact: true }), 'mobile switch confirmation')
@@ -255,7 +255,7 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   await expect(beta.getByText('排行榜 Bot', { exact: true })).toBeVisible()
   await expect(alpha.getByText('未参榜', { exact: true })).toBeVisible()
   await expect(gomoku.getByText('排行榜 Bot', { exact: true })).toBeVisible()
-  await expect(page.getByText('已将 德州 Beta 派遣到德州扑克排行榜；已取消 2 个旧计分排队', { exact: true })).toBeVisible()
+  await expect(page.getByText('已将 德州 Beta 派遣到德州扑克排行榜；已取消 2 个已排队、还没开始的对局', { exact: true })).toBeVisible()
   expect(calls).toEqual([{ method: 'PUT', botId: 102 }])
 
   await beta.getByRole('button', { name: '退出排名', exact: true }).click()
@@ -265,7 +265,7 @@ test('My Bots switches and exits the one ranked Bot per game with accessible con
   await expect(exitDialog).toContainText('进行中或待结算的计分对局，暂不能退出')
   await exitDialog.getByRole('button', { name: '确认退出', exact: true }).click()
   await expect(beta.getByText('未参榜', { exact: true })).toBeVisible()
-  await expect(page.getByText('德州 Beta 已退出德州扑克排行榜；已取消 1 个旧计分排队', { exact: true })).toBeVisible()
+  await expect(page.getByText('德州 Beta 已退出德州扑克排行榜；已取消 1 个已排队、还没开始的对局', { exact: true })).toBeVisible()
   await expect(exitDialog).toBeHidden()
   expect(calls).toEqual([
     { method: 'PUT', botId: 102 },
@@ -509,7 +509,7 @@ test('Challenge keeps ranked and practice Bots selectable and marks both kinds',
   await page.goto('/#/challenge')
   await page.getByRole('button', { name: '选择我的 Bot', exact: true }).click()
   let picker = page.getByRole('dialog', { name: /^选择我的 Bot/ })
-  await expect(picker).toContainText('排行榜 Bot 与练习 Bot 均可挑战')
+  await expect(picker).toContainText('只有排行榜 Bot 对局会产生新评分')
   const practiceChoice = picker.getByRole('button', { name: /练习甲.*练习 Bot/ })
   const rankedChoice = picker.getByRole('button', { name: /参榜甲.*排行榜 Bot/ })
   await expect(practiceChoice).toBeEnabled()

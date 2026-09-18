@@ -227,13 +227,13 @@ for (const fixture of terminalFixtures) {
     const monitor = monitorBrowser(page)
 
     await page.goto(`/#/match/${fixture.id}`)
-    const logLink = page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })
+    const logLink = page.getByRole('link', { name: '导出对局记录', exact: true })
     await expect(logLink).toBeVisible()
     await expect(logLink).toHaveAttribute('href', `/api/matches/${fixture.id}/log`)
     await expect(logLink).toHaveAttribute('download', '')
     expect(counters.log).toBe(0)
 
-    const recordLink = page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })
+    const recordLink = page.getByRole('link', { name: '导出棋谱文件', exact: true })
     if (fixture.gameId === 'gomoku') {
       await expect(recordLink).toBeVisible()
       await expect(recordLink).toHaveAttribute('href', `/api/matches/${fixture.id}/record`)
@@ -352,14 +352,14 @@ test('live match hides partial exports and a stale terminal response cannot rest
   await terminalObserved
   await page.goto(`/#/match/${live.id}`)
   await expect(page.getByRole('heading', { name: '实时观赛', exact: true })).toBeVisible()
-  await expect(page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出对局记录', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出棋谱文件', exact: true })).toHaveCount(0)
 
   releaseTerminal()
   await page.waitForTimeout(150)
   await expect(page.getByRole('heading', { name: '实时观赛', exact: true })).toBeVisible()
-  await expect(page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出对局记录', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出棋谱文件', exact: true })).toHaveCount(0)
   expect(counters).toEqual({ log: 0, record: 0 })
 
   await monitor.expectClean(expectedTerminalCancellations())
@@ -404,7 +404,7 @@ test('unknown games fail closed without probing match-log capability', async ({ 
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${id}`)
   await expect(page.getByText('暂不支持观看该对局', { exact: false }).first()).toBeVisible()
-  await expect(page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出对局记录', exact: true })).toHaveCount(0)
   expect({ logRequests, replayRequests }).toEqual({ logRequests: 0, replayRequests: 0 })
   await monitor.expectClean(optionalGetAborts(`/api/matches/${id}`))
 })
@@ -417,8 +417,8 @@ test('Gomoku export actions are touch-safe, keyboard ordered, and download the e
   const monitor = monitorBrowser(page)
 
   await page.goto(`/#/match/${fixture.id}`)
-  const logLink = page.getByRole('link', { name: '导出对局日志（JSON）', exact: true })
-  const recordLink = page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })
+  const logLink = page.getByRole('link', { name: '导出对局记录', exact: true })
+  const recordLink = page.getByRole('link', { name: '导出棋谱文件', exact: true })
   await expect(logLink).toBeVisible()
   await expect(recordLink).toBeVisible()
 

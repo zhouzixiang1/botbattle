@@ -150,7 +150,7 @@ export const gomokuSpec: GameViewSpec = {
     Hud: GomokuReplayHud,
     Summary: GomokuReplaySummary,
     recordDownload: {
-      label: '导出棋谱（JSON）',
+      label: '导出棋谱文件',
     },
   },
 }

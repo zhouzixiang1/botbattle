@@ -44,7 +44,7 @@ const STATUSES = [
 const QUALITY_FILTERS = [
   { value: '', label: '全部诊断结果' },
   { value: 'true', label: '含 Bot 技术故障' },
-  { value: 'false', label: '不含 Bot 技术故障' },
+  { value: 'false', label: '不含技术故障' },
 ]
 
 function technicalIncidentCount(match: Match): number {
@@ -201,7 +201,7 @@ export default function MatchesTab() {
               const hasTerminalStatus = m.status === 'completed' || m.status === 'aborted'
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                <TableCell className="w-[5.5rem] px-2 py-1 font-mono text-[11px] text-muted-foreground">
+                <TableCell className="w-[5.5rem] px-2 py-1 font-mono text-xs text-muted-foreground">
                   <OverflowText tooltip={m.id} tooltipFocusable={false}>{`${m.id.slice(0, 12)}…`}</OverflowText>
                 </TableCell>
                 {/* min-w-40 防止 auto 表格布局在窄视口把对阵列压缩到只剩省略号；
@@ -256,7 +256,7 @@ export default function MatchesTab() {
                     </div>
                   )}
                 </TableCell>
-                <TableCell className="2xl:w-32 whitespace-nowrap px-2 py-1 text-[11px] text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
+                <TableCell className="2xl:w-32 whitespace-nowrap px-2 py-1 text-xs text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
                 <TableCell className="w-16 whitespace-nowrap px-2 py-1">
                   <div className="flex items-center gap-1 whitespace-nowrap">
                     <Button asChild variant="outline" size="sm" className="max-lg:min-h-11 px-2.5"><Link to={`/match/${m.id}`}>查看</Link></Button>

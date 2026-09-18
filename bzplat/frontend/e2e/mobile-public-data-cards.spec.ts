@@ -177,7 +177,7 @@ test('mobile Bot history shows both identities, owners, nature and result withou
   await expect(card).toContainText('移动端 Beta Bot')
   await expect(card).toContainText('Beta 所有者')
   await expect(card.locator('[data-match-nature="challenge"]')).toHaveText('用户挑战')
-  await expect(card.getByText('复式 · 1胜 / 0平 / 1负', { exact: true })).toBeVisible()
+  await expect(card.getByText('主客两场合计 · 1胜 / 0平 / 1负', { exact: true })).toBeVisible()
   await expect(card.locator('[data-participant-state="winner"]')).toHaveCount(0)
   await expect(card.locator('[data-participant-state="loser"]')).toHaveCount(0)
   const replay = card.getByRole('link', { name: '查看对局回放' })

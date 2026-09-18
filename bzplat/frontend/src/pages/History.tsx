@@ -80,7 +80,9 @@ export default function History() {
         description="回看已结束的对局，或进入正在进行的直播。"
       />
 
-      <StickyToolbar label="对局历史筛选">
+      {/* 筛选栏与记录表共用一个更紧的纵向节奏组（sm+ 0.5rem；窄屏保持页面默认间距）。 */}
+      <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)] sm:gap-2">
+      <StickyToolbar label="对局历史筛选" className="md:flex-nowrap">
         <div className="flex min-w-0 items-center gap-2">
           <ListFilter aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
           <span className="shrink-0 text-xs font-medium text-muted-foreground">状态</span>
@@ -122,7 +124,23 @@ export default function History() {
         ) : loading ? (
           <Loading text="正在加载对局…" />
         ) : matches.length === 0 ? (
-          <EmptyState text="当前条件下暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+          <div className="flex flex-col items-center gap-2 py-8">
+            <EmptyState text="当前条件下暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-0" />
+            {(status || gameId) && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-11 sm:min-h-8"
+                onClick={() => {
+                  setStatus('')
+                  setGameId('')
+                  setPage(1)
+                }}
+              >
+                清除筛选
+              </Button>
+            )}
+          </div>
         ) : (
           <>
             <div className="hidden md:block">
@@ -220,6 +238,7 @@ export default function History() {
           </>
         )}
       </DataRegion>
+      </div>
 
       <Pagination page={page} perPage={PAGE_SIZE} total={total} onPageChange={setPage} />
     </PageFrame>

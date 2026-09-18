@@ -1218,8 +1218,9 @@ test('contest detail changes its primary content and actions with lifecycle stag
   await expect(page.getByRole('tab', { name: /正式名次/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('cell', { name: 'winner_bot', exact: true })).toBeVisible()
   await expect(page.getByText('冠军', { exact: true })).toBeVisible()
-  await expect(page.getByText(/对手分（去掉最高） 4/).first()).toBeVisible()
-  await expect(page.getByText(/对手分（去掉最高） 2/).first()).toBeVisible()
+  // 桌面单元格可见；移动端收纳触发器（md:hidden）同文本但隐藏，需过滤。
+  await expect(page.getByText(/对手分（去掉最高） 4/).filter({ visible: true }).first()).toBeVisible()
+  await expect(page.getByText(/对手分（去掉最高） 2/).filter({ visible: true }).first()).toBeVisible()
   const preliminaryRow = page.getByRole('row').filter({ hasText: 'preliminary_bot' })
   await expect(preliminaryRow.getByText('瑞士轮', { exact: true })).toBeVisible()
   await expect(preliminaryRow.getByText('瑞士轮内名次已确定', { exact: true })).toBeVisible()

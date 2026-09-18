@@ -119,13 +119,20 @@ export default function Home() {
         </Button>
       </StickyToolbar>
 
+      {/* xl+ 双栏并列：最新对局（表格较宽）占 3fr，热门对局占 2fr；窄屏保持纵向堆叠。 */}
+      <div className="grid min-w-0 gap-[var(--page-section-gap)] xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] xl:items-start">
       <DataRegion title="最新对局">
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
         ) : loading ? (
           <Loading text="正在加载最新对局…" />
         ) : matches.length === 0 ? (
-          <EmptyState text="当前游戏暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+          <div className="flex flex-col items-center gap-2 py-8">
+            <EmptyState text="当前游戏暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-0" />
+            <Button asChild variant="outline" size="sm" className="min-h-11 sm:min-h-8">
+              <Link to="/challenge">去发起一场挑战</Link>
+            </Button>
+          </div>
         ) : (
           <>
             <div className="hidden md:block">
@@ -213,6 +220,7 @@ export default function Home() {
       </DataRegion>
 
       <LikedTopMatches />
+      </div>
     </PageFrame>
   )
 }
@@ -238,7 +246,7 @@ function LikedTopMatches() {
       ) : matches.length === 0 ? (
         <EmptyState text="暂无热门对局" icon={<Heart className="size-5 opacity-50" />} className="py-7" />
       ) : (
-        <ul className="grid min-w-0 gap-px bg-border xl:grid-cols-2">
+        <ul className="grid min-w-0 gap-px bg-border 2xl:grid-cols-2">
           {matches.map((match, index) => (
             <li key={match.id} className="grid min-w-0 gap-2 bg-card px-3 py-1.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
               <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>

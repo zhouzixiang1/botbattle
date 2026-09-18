@@ -627,14 +627,16 @@ export default function Contests() {
         <DataRegion
           id="contest-create-panel"
           title="创建赛事"
-          description="新赛事统一使用赛事沙箱，每个 Bot 2 核 / 2 GiB；只计赛事成绩，不计平台排行榜。"
+          description="使用赛事沙箱（每个 Bot 2 核 / 2 GiB），成绩不计平台排行榜。"
+          density="compact"
         >
           <form onSubmit={(event) => void onCreate(event)} className="min-w-0 space-y-3 p-3">
             {formError && <ErrorMsg msg={formError} />}
             {selectedTemplate && !templateCapabilitiesReady && (
               <ErrorMsg msg="当前赛制的分组或来源能力格式无效；已停止创建。" />
             )}
-            <div className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[9rem_minmax(15rem,1.3fr)_minmax(13rem,1fr)_minmax(14rem,1fr)_minmax(14rem,1fr)]">
+            {/* 基础设置：sm 起两两并排（窄屏保持单列），xl+ 收成一行五列。 */}
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-[9rem_minmax(15rem,1.3fr)_minmax(13rem,1fr)_minmax(14rem,1fr)_minmax(14rem,1fr)]">
               <div className="min-w-0 space-y-1.5">
                 <Label>游戏</Label>
                 <Select value={formGameId} onValueChange={onFormGameChange}>
@@ -929,6 +931,7 @@ export default function Contests() {
       <DataRegion
         title="赛事列表"
         description="按创建时间排列，新的在前。"
+        density="compact"
       >
             {listError ? (
               <ErrorMsg msg={listError} className="px-4 py-6" />

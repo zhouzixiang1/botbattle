@@ -672,11 +672,12 @@ test('Swiss bye points stay separate from actual wins in stage and official stan
   const stagePanel = main
     .getByRole('heading', { name: '阶段排名与晋级', exact: true })
     .locator('xpath=ancestor::*[@data-slot="data-region"][1]')
-  await stagePanel.getByText('计分明细').first().hover()
-  await expect(page.getByText(/1 胜 \/ 0 平 \/ 1 负 · 轮空 1/)).toBeVisible()
+  // 悬停「测01」所在行的计分明细触发器（每行都有同名触发器，不能取 first）。
+  await stagePanel.getByRole('row').filter({ hasText: '测01' }).getByText('计分明细').filter({ visible: true }).first().hover()
+  await expect(page.getByText(/2 场计分 · 1 胜 \/ 0 平 \/ 1 负 · 轮空 1/).filter({ visible: true }).first()).toBeVisible()
   await expect(stagePanel).not.toContainText('名次不可用')
   await expect(stagePanel.getByRole('row').filter({ hasText: '测01' }).getByRole('cell').first()).toHaveText('2')
-  await expect(stagePanel).toContainText('2 场计分')
+  // 行内计分构成已收纳进「计分明细」Tooltip（上行悬停断言已覆盖 1 胜 / 0 平 / 1 负 · 轮空 1）。
 
   await expect(main.getByText('德扑友谊赛2', { exact: true })).toBeVisible()
   await assertNoRootOverflow(page)

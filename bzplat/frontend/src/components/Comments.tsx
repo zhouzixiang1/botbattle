@@ -34,6 +34,8 @@ export default function Comments({
   const [comments, setComments] = useState<Comment[]>([])
   const [body, setBody] = useState('')
   const [error, setError] = useState('')
+  // 发表提交中：防双击重复发表。
+  const [submitting, setSubmitting] = useState(false)
   const [liked, setLiked] = useState(false)
   const [likeCount, setLikeCount] = useState(0)
   // 分页（评论为密集列表，每页 20 条）
@@ -67,20 +69,24 @@ export default function Comments({
     load()
   }, [load])
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!body.trim()) return
-    apiPost('/api/comments', 'POST', { target_type: targetType, target_id: targetId, body: body.trim() })
-      .then(() => {
-        setBody('')
-        // 回第1页并强制刷新列表——仅 setPage(1) 在已是第1页时不触发 effect（审计 P1）
-        if (page !== 1) {
-          setPage(1)  // page 变化会触发 load
-        } else {
-          void load()  // 已在第1页，显式重载
-        }
-      })
-      .catch((e) => setError(errMsg(e)))
+    if (!body.trim() || submitting) return
+    setSubmitting(true)
+    try {
+      await apiPost('/api/comments', 'POST', { target_type: targetType, target_id: targetId, body: body.trim() })
+      setBody('')
+      // 回第1页并强制刷新列表——仅 setPage(1) 在已是第1页时不触发 effect（审计 P1）
+      if (page !== 1) {
+        setPage(1)  // page 变化会触发 load
+      } else {
+        load()  // 已在第1页，显式重载
+      }
+    } catch (err) {
+      setError(errMsg(err))
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function toggleLike() {
@@ -107,7 +113,7 @@ export default function Comments({
   }
 
   return (
-    <Card data-testid="comments-card" className="mt-4 gap-0 py-0">
+    <Card data-testid="comments-card" className="mt-4 gap-0 py-0 sm:mt-2">
       <CardHeader className="border-b px-4 py-3">
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2 text-base">
@@ -128,10 +134,10 @@ export default function Comments({
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="space-y-3 px-4 py-3">
+      <CardContent className="space-y-3 px-4 py-3 sm:space-y-2">
         {error && <ErrorMsg msg={error} className="text-xs" />}
         {user && (
-          <form onSubmit={submit} className="flex gap-2">
+          <form onSubmit={(e) => void submit(e)} className="flex gap-2">
             <Input
               value={body}
               onChange={(e) => setBody(e.target.value)}
@@ -139,7 +145,7 @@ export default function Comments({
               maxLength={2000}
               className="min-w-0 flex-1"
             />
-            <Button type="submit" size="sm">发表</Button>
+            <Button type="submit" size="sm" disabled={submitting} aria-busy={submitting}>{submitting ? '发表中…' : '发表'}</Button>
           </form>
         )}
         {comments.length === 0 ? (
