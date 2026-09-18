@@ -6654,12 +6654,13 @@ async def admin_patch_user(
     if not u:
         audit_log(request, "admin_patch_user", result="fail", user=admin.get("username"), target=user_id, detail="not_found")
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
-    await _revoke_committed_local_ai_transports(request, u)
+    # 审计紧跟写成功：随后的 transport 收敛若抛错，已提交的写不缺审计。
     audit_log(
         request, "admin_patch_user",
         user=admin.get("username"), target=user_id,
         detail=",".join(f"{k}={v}" for k, v in fields.items()),
     )
+    await _revoke_committed_local_ai_transports(request, u)
     return {"user": _admin_user_for_api(u)}
 
 
@@ -6867,9 +6868,11 @@ async def admin_patch_bot(
     allowed = {"is_active", "is_builtin", "display_name", "description"}
     unknown = set(body).difference(allowed)
     if unknown:
+        audit_log(request, "admin_patch_bot", result="fail", user=admin.get("username"), target=bot_id, detail="unknown_fields")
         raise HTTPException(422, f"不支持的字段：{', '.join(sorted(unknown))}")
     for key in ("is_active", "is_builtin"):
         if key in body and not isinstance(body[key], bool):
+            audit_log(request, "admin_patch_bot", result="fail", user=admin.get("username"), target=bot_id, detail=f"bad_type_{key}")
             raise HTTPException(422, f"{key} 必须是布尔值")
     fields: dict[str, Any] = {}
     if "is_active" in body:
@@ -6893,12 +6896,16 @@ async def admin_patch_bot(
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
-    await _revoke_committed_local_ai_transports(request, bot)
+    # 布尔字段记 k=v（启用/停用方向是审计重点）；自由文本仅记键名。
     audit_log(
         request, "admin_patch_bot",
         user=admin.get("username"), target=bot_id,
-        detail=",".join(sorted(fields)),
+        detail=",".join(
+            f"{k}={v}" if k in ("is_active", "is_builtin") else k
+            for k, v in sorted(fields.items())
+        ),
     )
+    await _revoke_committed_local_ai_transports(request, bot)
     return {
         "bot": _with_bot_runnable(bot, include_owner_deleted_at=True)
     }

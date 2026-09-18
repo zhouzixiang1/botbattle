@@ -98,19 +98,33 @@ def test_admin_patch_bot_audits_ok_and_fail(tmp_path, monkeypatch):
 
     ok = client.patch(
         f"/api/admin/bots/{bot['id']}",
-        headers=headers, json={"is_active": False},
+        headers=headers, json={"is_active": False, "description": "文本值不进审计"},
     )
     assert ok.status_code == 200, ok.text
     hit = [c for c in calls if c["action"] == "admin_patch_bot"]
     assert len(hit) == 1
-    assert hit[0]["detail"] == "is_active"
+    # 布尔记 k=v（启停方向），自由文本仅记键名。
+    assert hit[0]["detail"] == "description,is_active=0"
+    assert "文本值不进审计" not in hit[0]["detail"]
 
     missing = client.patch(
         "/api/admin/bots/999999", headers=headers, json={"is_active": True},
     )
     assert missing.status_code == 404
+    nofields = client.patch(
+        f"/api/admin/bots/{bot['id']}", headers=headers, json={},
+    )
+    assert nofields.status_code == 400
+    badtype = client.patch(
+        f"/api/admin/bots/{bot['id']}", headers=headers, json={"is_active": "yes"},
+    )
+    assert badtype.status_code == 422
+    unknown = client.patch(
+        f"/api/admin/bots/{bot['id']}", headers=headers, json={"owner_id": 5},
+    )
+    assert unknown.status_code == 422
     fails = [c for c in calls if c["action"] == "admin_patch_bot" and c["result"] == "fail"]
-    assert [f["detail"] for f in fails] == ["not_found"]
+    assert [f["detail"] for f in fails] == ["not_found", "no_fields", "bad_type_is_active", "unknown_fields"]
 
 
 def test_admin_patch_site_audits_changed_keys_only(tmp_path, monkeypatch):
