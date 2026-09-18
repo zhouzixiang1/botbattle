@@ -297,16 +297,16 @@ export default function BotVersionManager({
       <DialogContent
         data-scroll-region="bot-version-dialog"
         data-overflow-allowed="y"
-        className="max-h-[85dvh] overflow-y-auto overscroll-contain sm:max-w-xl"
+        className="max-h-[85dvh] overflow-y-auto overscroll-contain sm:max-w-xl lg:max-w-3xl lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] lg:items-start lg:gap-4"
       >
-        <DialogHeader>
+        <DialogHeader className="min-w-0 lg:col-span-2">
           <DialogTitle className="flex min-w-0 items-start gap-2">
             <History className="size-4" />
             <span className="shrink-0">版本管理</span>
             {botName && <EntityName lines={2} tooltip={botName} className="min-w-0 text-sm">{botName}</EntityName>}
           </DialogTitle>
           <DialogDescription>
-            上传新版本、查看历史，并切换到当前协议兼容的版本。过旧版本已不能启用。
+            上传新版本、查看历史，并切换到当前协议兼容的版本。过旧的版本已不能启用。
           </DialogDescription>
         </DialogHeader>
 
@@ -344,7 +344,7 @@ export default function BotVersionManager({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="elf">编译好的 ELF（默认）</SelectItem>
+                    <SelectItem value="elf">ELF 程序</SelectItem>
                     <SelectItem value="cpp">C / C++ 源码</SelectItem>
                     <SelectItem value="c">C 源码</SelectItem>
                     <SelectItem value="go">Go 源码</SelectItem>
@@ -393,7 +393,9 @@ export default function BotVersionManager({
             <p className="text-xs text-muted-foreground">
               {sourceFormat === 'elf'
                   ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
-                  : '源码 zip 包（默认入口 main.cpp / main.c / main.go / __main__.py）；平台编译并定义 _BOTZONE_ONLINE 宏。'}
+                  : sourceFormat === 'python'
+                    ? '平台直接运行；默认入口 __main__.py（或 main.py），当前仅支持标准库。'
+                    : '平台自动完成编译；默认入口 main.cpp / main.c / main.go。'}
             </p>
           </div>
           {mutationError && <ErrorMsg msg={mutationError} />}

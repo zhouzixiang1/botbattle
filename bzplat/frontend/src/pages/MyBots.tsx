@@ -118,6 +118,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [runtimeMode, setRuntimeMode] = useState('traditional')
   const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  // 选错文件类型/大小等文件字段级错误就近显示在文件选择框下方，不占用页面级 error。
+  const [fileError, setFileError] = useState('')
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
@@ -164,7 +166,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
-      setError('请选择 Linux x86_64 ELF 程序文件')
+      setFileError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
     uploadControllerRef.current?.abort()
@@ -180,6 +182,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
     setUploadStage('uploading')
     setUploadPercent(0)
     setError('')
+    setFileError('')
     try {
       await apiFormWithProgress('/api/bots', {
         name,
@@ -271,7 +274,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
         )))
         const cancelled = Math.max(0, Number(result.cancelled_queued_jobs || 0))
         toast.success(cancelled > 0
-          ? `${botName} 已退出${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
+          ? `${botName} 已退出${gameName}排行榜；已取消 ${cancelled} 个已排队、还没开始的对局`
           : `${botName} 已退出${gameName}排行榜`)
       } catch (e) {
         if (isCurrentIdentity()) setError(errMsg(e, '退出排行榜失败'))
@@ -297,8 +300,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
     const confirmed = await confirm({
       title: currentRanked ? '切换排行榜 Bot' : '派遣排行榜 Bot',
       desc: currentRanked
-        ? `确认由 ${botName} 替换 ${currentRanked.display_name || currentRanked.name}？历史已完成评分保留，尚未开始的旧计分排队会取消；如有进行中或待结算的计分对局，暂不能切换。`
-        : `确认派遣 ${botName} 参加${gameName}排行榜？每个账号每款游戏只能派遣一个 Bot；当前参榜 Bot（如有）的历史已完成评分保留，尚未开始的旧计分排队会取消。如有进行中或待结算的计分对局，暂不能切换。`,
+        ? `确认由 ${botName} 替换 ${currentRanked.display_name || currentRanked.name}？历史已完成评分保留，已排队、还没开始的对局会取消；如有进行中或待结算的计分对局，暂不能切换。`
+        : `确认派遣 ${botName} 参加${gameName}排行榜？每个账号每款游戏只能派遣一个 Bot；当前排行榜 Bot（如有）的历史已完成评分保留，已排队、还没开始的对局会取消。如有进行中或待结算的计分对局，暂不能切换。`,
       confirmText: currentRanked ? '确认切换' : '确认派遣',
       buttonClassName: 'max-sm:min-h-[44px] max-sm:min-w-[44px]',
     })
@@ -321,7 +324,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       }))
       const cancelled = Math.max(0, Number(result.cancelled_queued_jobs || 0))
       toast.success(cancelled > 0
-        ? `已将 ${botName} 派遣到${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
+        ? `已将 ${botName} 派遣到${gameName}排行榜；已取消 ${cancelled} 个已排队、还没开始的对局`
         : `已将 ${botName} 派遣到${gameName}排行榜`)
     } catch (e) {
       if (isCurrentIdentity()) setError(errMsg(e, '派遣排行榜 Bot 失败'))
@@ -437,32 +440,20 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="elf">编译好的 ELF（默认）</SelectItem>
-                    <SelectItem value="cpp">C / C++ 源码（平台编译）</SelectItem>
-                    <SelectItem value="c">C 源码（平台编译）</SelectItem>
-                    <SelectItem value="go">Go 源码（平台编译）</SelectItem>
-                    <SelectItem value="python">Python 源码（直接运行）</SelectItem>
+                    <SelectItem value="elf">ELF 程序</SelectItem>
+                    <SelectItem value="cpp">C / C++ 源码</SelectItem>
+                    <SelectItem value="c">C 源码</SelectItem>
+                    <SelectItem value="go">Go 源码</SelectItem>
+                    <SelectItem value="python">Python 源码</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {sourceFormat === 'elf'
-                    ? '上传单个 Linux x86_64 ELF 可执行文件。'
+                    ? '默认类型；上传单个 Linux x86_64 ELF 可执行文件。'
                     : sourceFormat === 'python'
-                      ? '上传 zip 包，默认入口 __main__.py（或 main.py）；当前仅支持标准库。'
-                      : '上传 zip 包，默认入口 main.cpp / main.c / main.go；平台会自动完成编译。'}
+                      ? '平台直接运行；默认入口 __main__.py（或 main.py），当前仅支持标准库。'
+                      : '平台自动完成编译；默认入口 main.cpp / main.c / main.go。'}
                 </p>
-                {sourceFormat !== 'elf' && (
-                  <div className="space-y-1.5">
-                    <Label htmlFor="upload-entry">入口文件（可选，默认见上）</Label>
-                    <Input
-                      id="upload-entry"
-                      value={sourceEntry}
-                      onChange={(e) => setSourceEntry(e.target.value)}
-                      placeholder={sourceFormat === 'python' ? '__main__.py' : `main.${sourceFormat === 'go' ? 'go' : sourceFormat === 'c' ? 'c' : 'cpp'}`}
-                      maxLength={200}
-                    />
-                  </div>
-                )}
               </div>
               <div className="space-y-1.5">
                 <Label>对战流程</Label>
@@ -487,6 +478,18 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                   </span>
                 </details>
               </div>
+              {sourceFormat !== 'elf' && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="upload-entry">入口文件（可选，默认见上）</Label>
+                  <Input
+                    id="upload-entry"
+                    value={sourceEntry}
+                    onChange={(e) => setSourceEntry(e.target.value)}
+                    placeholder={sourceFormat === 'python' ? '__main__.py' : `main.${sourceFormat === 'go' ? 'go' : sourceFormat === 'c' ? 'c' : 'cpp'}`}
+                    maxLength={200}
+                  />
+                </div>
+              )}
             </div>
             <div className="grid min-w-0 gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -536,12 +539,12 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                     const f = e.target.files?.[0] ?? null
                     const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
                     if (f && sizeError) {
-                      setError(sizeError)
+                      setFileError(sizeError)
                       setFile(null)
                       e.target.value = ''
                       return
                     }
-                    setError('')
+                    setFileError('')
                     setFile(f)
                   }}
                   required
@@ -551,8 +554,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               <p className="text-xs text-muted-foreground">
                 {sourceFormat === 'elf'
                     ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
-                    : '源码包内使用相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。你在平台云盘保存的文件，对局中可直接读取。'}
+                    : '源码包内使用相对路径。路径穿越、符号链接与超过 500 个文件会被拒绝。你在平台云盘保存的文件，对局中可直接读取。'}
               </p>
+              {fileError && <p className="text-xs text-destructive">{fileError}</p>}
             </div>
             <BotUploadProgress
               stage={uploadStage}
@@ -590,11 +594,14 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
           </Select>
       </StickyToolbar>
 
-      <DataRegion title="Bot 列表" description="每个账号每款游戏最多派遣一个 Bot；已完成评分保留，切换会取消旧计分排队，进行中或待结算时暂不可操作。">
+      <DataRegion title="Bot 列表" description="每个账号每款游戏最多派遣 1 个 Bot 计分。">
+        <p className="px-3 pb-1 pt-1 text-xs text-muted-foreground">
+          已完成的评分与对局记录保留；切换或退出排行榜时，已排队、还没开始的对局会取消。有进行中或待结算的计分对局时，暂不能切换或退出。
+        </p>
         {loading ? (
           <Loading text="正在加载 Bot…" />
         ) : bots.length === 0 ? (
-          <EmptyState text="暂无 Bot，请先上传" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
+          <EmptyState text="暂无 Bot，请先上传" icon={<BotIcon className="size-5 opacity-50" />} className="py-8 lg:py-4" />
         ) : (
           <ul className="divide-y divide-border">
             {bots.map((b, index) => (
@@ -793,6 +800,7 @@ function LocalBotConnectionsSection({ identityKey }: { identityKey: number | nul
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
+        aria-controls="local-bot-connections-panel"
         data-testid="local-bot-connections-toggle"
         className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:px-4"
       >
@@ -800,7 +808,7 @@ function LocalBotConnectionsSection({ identityKey }: { identityKey: number | nul
           <Laptop className="size-4 shrink-0 text-primary" aria-hidden="true" />
           本地对战
           <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
-            用自己的电脑运行 Bot 参加练习对局
+            用本机程序练对局，不计排行榜
           </span>
         </span>
         <ChevronDown
@@ -808,7 +816,7 @@ function LocalBotConnectionsSection({ identityKey }: { identityKey: number | nul
           className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
         />
       </button>
-      {open && <div className="min-w-0"><LocalBotConnections identityKey={identityKey} /></div>}
+      {open && <div id="local-bot-connections-panel" className="min-w-0"><LocalBotConnections identityKey={identityKey} /></div>}
     </div>
   )
 }
@@ -933,7 +941,7 @@ function LocalBotConnections({ identityKey }: { identityKey: number | null }) {
   return (
     <DataRegion
       title="本地 Bot 连接"
-      description="先用一个已启用 Bot 作为对局身份；本机程序可运行尚未上传的新代码。本地对局不计平台排行榜。"
+      description="先用一个已启用 Bot 作为对局身份；本机程序可运行尚未上传的新代码。"
       actions={(
         <>
           <Button asChild size="sm" variant="outline">
@@ -968,7 +976,7 @@ function LocalBotConnections({ identityKey }: { identityKey: number | null }) {
           <Label htmlFor="local-agent-label">连接名称</Label>
           <Input id="local-agent-label" value={label} onChange={(event) => setLabel(event.target.value)} maxLength={32} required />
         </div>
-        <Button type="submit" size="sm" disabled={!effectiveBotId || !label.trim() || busy === 'create'}>
+        <Button type="submit" size="sm" disabled={!effectiveBotId || !label.trim() || busy === 'create'} aria-busy={busy === 'create'}>
           <Laptop className="size-4" />{busy === 'create' ? '建立中…' : '建立连接'}
         </Button>
       </form>

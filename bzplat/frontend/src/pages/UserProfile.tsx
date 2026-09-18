@@ -187,6 +187,8 @@ export default function UserProfile() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
+      {/* 资料头与公开 Bot 列表共用一个更紧的纵向节奏组（sm+ 0.5rem；窄屏保持页面默认间距）。 */}
+      <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)] sm:gap-2">
       <DataRegion title="用户资料" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="px-4 py-3">
         <div className="grid min-w-0 gap-3 sm:grid-cols-[4rem_minmax(0,1fr)] sm:items-start">
           <Avatar className="size-16 border">
@@ -249,6 +251,7 @@ export default function UserProfile() {
         )}
       </DataRegion>
       <Pagination page={page} perPage={PER_PAGE} total={total} onPageChange={setPage} unit="名" />
+      </div>
     </PageFrame>
   )
 }

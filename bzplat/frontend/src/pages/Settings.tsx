@@ -83,6 +83,9 @@ export default function Settings() {
   const [favsError, setFavsError] = useState('')
   const [avatarFileName, setAvatarFileName] = useState('')
   const [avatarVer, setAvatarVer] = useState(0)
+  // 提交中状态：防止双击重复提交，并给按钮 disabled + aria-busy。
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [savingPassword, setSavingPassword] = useState(false)
 
   useEffect(() => {
     if (!user) return
@@ -164,18 +167,22 @@ export default function Settings() {
     )
   }
 
-  function saveProfile(e: React.FormEvent) {
+  async function saveProfile(e: React.FormEvent) {
     e.preventDefault()
     setError(''); setMsg('')
-    apiJson('/api/auth/profile', 'PUT', {
-      display_name: displayName, bio,
-      real_name: realName, phone, school, student_id: studentId,
-    })
-      .then(() => {
-        if (refresh) refresh()
-        setMsg('资料已保存')
+    setSavingProfile(true)
+    try {
+      await apiJson('/api/auth/profile', 'PUT', {
+        display_name: displayName, bio,
+        real_name: realName, phone, school, student_id: studentId,
       })
-      .catch((e) => setError(errMsg(e)))
+      if (refresh) refresh()
+      setMsg('资料已保存')
+    } catch (err) {
+      setError(errMsg(err))
+    } finally {
+      setSavingProfile(false)
+    }
   }
 
   function uploadAvatar(e: React.ChangeEvent<HTMLInputElement>) {
@@ -194,18 +201,22 @@ export default function Settings() {
       .catch((e) => setError(errMsg(e)))
   }
 
-  function changePassword(e: React.FormEvent) {
+  async function changePassword(e: React.FormEvent) {
     e.preventDefault()
     setError(''); setMsg('')
-    apiJson('/api/auth/change-password', 'POST', { old_password: oldPw, new_password: newPw })
-      .then(() => {
-        // 2xx 已确认后端清除了全部会话；此时才提交本地登出投影并通知其他标签页。
-        setMsg('密码已修改，正在跳转登录…')
-        setOldPw(''); setNewPw('')
-        confirmServerInvalidatedSession()
-        navigate('/login', { replace: true })
-      })
-      .catch((e) => setError(errMsg(e)))
+    setSavingPassword(true)
+    try {
+      await apiJson('/api/auth/change-password', 'POST', { old_password: oldPw, new_password: newPw })
+      // 2xx 已确认后端清除了全部会话；此时才提交本地登出投影并通知其他标签页。
+      setMsg('密码已修改，正在跳转登录…')
+      setOldPw(''); setNewPw('')
+      confirmServerInvalidatedSession()
+      navigate('/login', { replace: true })
+    } catch (err) {
+      setError(errMsg(err))
+    } finally {
+      setSavingPassword(false)
+    }
   }
 
   function applyPrefValue(key: keyof Prefs, value: boolean) {
@@ -314,7 +325,7 @@ export default function Settings() {
 
         <TabsContent value="profile">
           <DataRegion title="公开资料与实名信息" description="实名字段仅在需要实名报名的赛事中供组织者使用，不会公开展示。" contentClassName="px-4 py-3">
-            <form onSubmit={saveProfile} className="grid min-w-0 gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
+            <form onSubmit={(e) => void saveProfile(e)} className="grid min-w-0 gap-4 md:gap-3 lg:grid-cols-[16rem_minmax(0,1fr)]">
               <div className="min-w-0 space-y-3">
                 <Label>头像</Label>
                 <div className="flex min-w-0 items-center gap-3 lg:flex-col lg:items-start">
@@ -404,7 +415,7 @@ export default function Settings() {
                     </div>
                   </fieldset>
                 </div>
-                <Button type="submit">保存资料</Button>
+                <Button type="submit" disabled={savingProfile} aria-busy={savingProfile}>{savingProfile ? '保存中…' : '保存资料'}</Button>
               </div>
             </form>
           </DataRegion>
@@ -412,7 +423,7 @@ export default function Settings() {
 
         <TabsContent value="password">
           <DataRegion title="修改密码" description="修改后需重新登录。" contentClassName="px-4 py-3">
-            <form onSubmit={changePassword} className="min-w-0 space-y-3">
+            <form onSubmit={(e) => void changePassword(e)} className="min-w-0 space-y-3">
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="settings-oldpw">当前密码</Label>
@@ -438,7 +449,7 @@ export default function Settings() {
                   />
                 </div>
               </div>
-              <Button type="submit">修改密码并退出</Button>
+              <Button type="submit" disabled={savingPassword} aria-busy={savingPassword}>{savingPassword ? '提交中…' : '修改密码并退出'}</Button>
             </form>
           </DataRegion>
         </TabsContent>

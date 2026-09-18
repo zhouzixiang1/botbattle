@@ -670,11 +670,11 @@ export default function HumanPlay() {
           {ultra3zone ? (
             <>
               {/* 2xl 三区：左栏对阵卡（身份/我的位置），棋盘尺寸断言不变。 */}
-              <div className="flex min-w-0 flex-col gap-3">{matchupNode}</div>
-              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
+              <div className="flex min-w-0 flex-col gap-2.5">{matchupNode}</div>
+              <div className="min-w-0 w-full justify-self-center space-y-2.5 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
                 {renderSurface(true)}
               </div>
-              <div className="flex min-w-0 flex-col gap-3">
+              <div className="flex min-w-0 flex-col gap-2.5">
                 {ReplayHud && currentVm !== null && (
                   <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
                 )}
@@ -685,11 +685,11 @@ export default function HumanPlay() {
             </>
           ) : desktopRail ? (
             <>
-              <div className="min-w-0 w-full justify-self-center space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
+              <div className="min-w-0 w-full justify-self-center space-y-2.5 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]">
                 {matchupNode}
                 {renderSurface(true)}
               </div>
-              <div className="flex min-w-0 flex-col gap-3">
+              <div className="flex min-w-0 flex-col gap-2.5">
                 {ReplayHud && currentVm !== null && (
                   <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
                 )}
@@ -718,15 +718,15 @@ export default function HumanPlay() {
 
       {gameSpec?.humanPlay.layout === 'canvas-controls-log' && (
         <div className={desktopRail
-          ? 'grid min-w-0 gap-3 grid-cols-[minmax(0,1fr)_22rem]'
+          ? 'grid min-w-0 gap-2.5 grid-cols-[minmax(0,1fr)_22rem]'
           : 'grid min-w-0 items-start gap-3'}>
           {desktopRail ? (
             <>
-              <div className="min-w-0 space-y-3 justify-self-center w-full xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]">
+              <div className="min-w-0 space-y-2.5 justify-self-center w-full xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]">
                 {matchupNode}
                 {renderSurface(false)}
               </div>
-              <div className="flex min-w-0 flex-col gap-3">
+              <div className="flex min-w-0 flex-col gap-2.5">
                 {ReplayHud && currentVm !== null && (
                   <ReplayHud vm={currentVm} seats={seats} liveEdge={match?.status === 'running'} />
                 )}

@@ -147,7 +147,7 @@ export default function Search() {
             <Input
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="输入用户名或 Bot 名称"
+              placeholder="搜索用户、Bot 或对局"
               aria-label="搜索关键词"
               className="w-full pl-9"
               autoFocus
@@ -207,7 +207,12 @@ export default function Search() {
 
 function UserResults({ users }: { users: UserRow[] }) {
   if (users.length === 0) {
-    return <EmptyState text="无匹配用户" icon={<UserIcon className="size-5 opacity-50" />} className="py-8" />
+    return (
+      <div className="flex flex-col items-center gap-1 py-8">
+        <EmptyState text="无匹配用户" icon={<UserIcon className="size-5 opacity-50" />} className="py-0" />
+        <p className="text-xs text-muted-foreground">换个关键词或检查拼写</p>
+      </div>
+    )
   }
   return (
     <ul className="divide-y divide-border">
@@ -232,7 +237,12 @@ function UserResults({ users }: { users: UserRow[] }) {
 
 function BotResults({ bots }: { bots: BotRow[] }) {
   if (bots.length === 0) {
-    return <EmptyState text="无匹配 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
+    return (
+      <div className="flex flex-col items-center gap-1 py-8">
+        <EmptyState text="无匹配 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-0" />
+        <p className="text-xs text-muted-foreground">换个关键词或检查拼写</p>
+      </div>
+    )
   }
   return (
     <ul className="grid min-w-0 gap-px bg-border sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
@@ -259,7 +269,12 @@ function BotResults({ bots }: { bots: BotRow[] }) {
 
 function MatchResults({ matches }: { matches: MatchRow[] }) {
   if (matches.length === 0) {
-    return <EmptyState text="无匹配对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+    return (
+      <div className="flex flex-col items-center gap-1 py-8">
+        <EmptyState text="无匹配对局" icon={<Swords className="size-5 opacity-50" />} className="py-0" />
+        <p className="text-xs text-muted-foreground">换个关键词或检查拼写</p>
+      </div>
+    )
   }
 
   return (

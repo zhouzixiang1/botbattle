@@ -283,7 +283,7 @@ test('terminal Gomoku record downloads through an accessible touch-safe link', a
   const expectedRecord = await mockRecordDownload(page, id, match, events)
 
   await page.goto(`/#/match/${id}`)
-  const recordLink = page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })
+  const recordLink = page.getByRole('link', { name: '导出棋谱文件', exact: true })
   await expect(recordLink).toBeVisible()
   await expect(recordLink).toHaveAttribute('href', `/api/matches/${id}/record`)
   await expect(recordLink).toHaveAttribute('download', '')
@@ -392,7 +392,7 @@ test('live Gomoku match does not expose a partial record download', async ({ pag
   await page.goto(`/#/match/${id}`)
   await expect(page.getByRole('heading', { name: '实时观赛', exact: true })).toBeVisible()
   await expect(page.getByText('对局进行中', { exact: true })).toBeVisible()
-  await expect(page.getByRole('link', { name: '导出棋谱（JSON）', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '导出棋谱文件', exact: true })).toHaveCount(0)
   expect(recordRequests).toBe(0)
   await monitor.expectClean(optionalStrictModeReplayAbort(id))
 })

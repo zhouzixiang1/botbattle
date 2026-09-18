@@ -328,10 +328,22 @@ function CommentsBar({ targetId }: { targetId: string }) {
   )
 }
 
+/** 对局历史空态：场景化文案 + 挑战入口。 */
+function NoMatchesHint() {
+  return (
+    <div className="flex flex-col items-center gap-2 py-8 lg:py-4">
+      <EmptyState text="该 Bot 还没有对局记录" icon={<Swords className="size-5 opacity-50" />} className="py-0" />
+      <Button asChild variant="outline" size="sm" className="min-h-11 sm:min-h-8">
+        <Link to="/challenge">去挑战榜上 Bot</Link>
+      </Button>
+    </div>
+  )
+}
+
 /* ── 评分曲线（recharts，浅/暗双主题） ────────────────── */
 function RatingChart({ points }: { points: RatingPoint[] }) {
   if (points.length < 2) {
-    return <EmptyState text="评分数据不足，至少需 2 个数据点" icon={<Target className="size-5 opacity-50" />} className="py-8" />
+    return <EmptyState text="评分数据不足，至少需要 2 场已计分对局" icon={<Target className="size-5 opacity-50" />} className="py-8 lg:py-4" />
   }
   const data = points.map((p, idx) => ({
     idx: idx + 1,
@@ -572,7 +584,7 @@ export default function BotDetail() {
       <PageFrame width="narrow" layout="public-bot-detail-error">
         <PageHeader title="Bot 详情" description="无法显示该 Bot 的公开资料。" />
         <DataRegion title="加载失败" contentClassName="space-y-3 px-4 py-5">
-          <ErrorMsg msg={profileError || 'Bot 不存在'} />
+          <ErrorMsg msg={profileError || '该 Bot 不存在或已删除'} />
           <Button variant="outline" size="sm" onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}>
             <ArrowLeft className="size-4" />返回
           </Button>
@@ -666,7 +678,7 @@ export default function BotDetail() {
                     ? '历史评分保留'
                     : profile.rank == null
                       ? `${ratedMatches}/${profile.ranking_min_matches} 场`
-                    : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}% 的参榜 Bot`}
+                    : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}% 的排行榜 Bot`}
                 </span>
               </dd>
             </div>
@@ -720,7 +732,7 @@ export default function BotDetail() {
                 <>
                   <div className="divide-y md:hidden" aria-label="Bot 对局历史移动视图">
                     {matches.length === 0 ? (
-                      <EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+                      <NoMatchesHint />
                     ) : matches.map((match) => <MobileMatchCard key={match.id} match={match} botId={botId} />)}
                   </div>
                   <div className="hidden md:block">
@@ -738,7 +750,7 @@ export default function BotDetail() {
                 </TableHeader>
                 <TableBody>
                   {matches.length === 0 ? (
-                    <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
+                    <TableRow><TableCell colSpan={5}><NoMatchesHint /></TableCell></TableRow>
                   ) : (
                     matches.map((m) => {
                       const states = participantStates(m)

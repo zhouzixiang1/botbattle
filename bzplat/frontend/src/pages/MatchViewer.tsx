@@ -696,7 +696,7 @@ export default function MatchViewer() {
     && id
     ? {
         href: `/api/matches/${encodeURIComponent(id)}/log`,
-        label: '导出对局日志（JSON）',
+        label: '导出对局记录',
       }
     : undefined
   const renderSeat = (seat: 0 | 1) => {
@@ -730,15 +730,15 @@ export default function MatchViewer() {
   // - holdem：信息带与 16:9 牌桌列同宽，完全紧贴（宽屏允许少量必要滚动，
   //   次级信息带不把牌桌挤小）。
   const introZoneClasses = viewportFitCanvas
-    ? 'min-w-0 w-full space-y-3 xl:max-w-[min(100%,42rem)]'
+    ? 'min-w-0 w-full space-y-2.5 xl:max-w-[min(100%,42rem)]'
     : ReplayHud
-      ? 'min-w-0 w-full space-y-3 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
-      : 'min-w-0 w-full space-y-3'
+      ? 'min-w-0 w-full space-y-2.5 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
+      : 'min-w-0 w-full space-y-2.5'
   const boardZoneClasses = viewportFitCanvas
-    ? 'min-w-0 w-full space-y-3 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]'
+    ? 'min-w-0 w-full space-y-2.5 xl:max-w-[max(24rem,min(68rem,calc(100dvh-22rem)))]'
     : ReplayHud
-      ? 'min-w-0 w-full space-y-3 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
-      : 'min-w-0 w-full space-y-3'
+      ? 'min-w-0 w-full space-y-2.5 xl:max-w-[max(28rem,min(100%,calc((100dvh-16rem)*1.7)))]'
+      : 'min-w-0 w-full space-y-2.5'
   // 控制条单行化：宽主列（holdem）xl 起一行；方形棋盘列受 dvh 钳制较窄，
   // 2xl 起才收成一行，xl–2xl 保持换行但仍然贴棋盘列宽。
   const controlsRowClasses = viewportFitCanvas
@@ -1157,21 +1157,21 @@ export default function MatchViewer() {
         // 2xl 超宽三区：棋盘仍是主内容且尺寸断言不变（min(68rem,100dvh-22rem)），
         // 信息带（元数据/结果卡/技术告警/debug/错误）填左栏死角，右栏保留
         // 局面概览 + 动作上下文。中宽 1280–1535 与 <1280 分支不变。
-        <div className="grid grid-cols-[22rem_minmax(0,1fr)_20rem] items-start gap-3">
-          <div className="flex min-w-0 flex-col gap-3">{introBlocks}</div>
+        <div className="grid grid-cols-[22rem_minmax(0,1fr)_20rem] items-start gap-2.5">
+          <div className="flex min-w-0 flex-col gap-2.5">{introBlocks}</div>
           <div className={`${boardZoneClasses} justify-self-center`}>{mainColumn}</div>
-          <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex min-w-0 flex-col gap-2.5">
             {hudNode}
             {timelineCard}
           </div>
         </div>
       ) : replayReady && desktopRail ? (
-        <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-3">
-          <div className="flex min-w-0 flex-col items-center gap-3">
+        <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-2.5">
+          <div className="flex min-w-0 flex-col items-center gap-2.5">
             <div className={introZoneClasses}>{introBlocks}</div>
             <div className={boardZoneClasses}>{mainColumn}</div>
           </div>
-          <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex min-w-0 flex-col gap-2.5">
             {hudNode}
             {timelineCard}
           </div>

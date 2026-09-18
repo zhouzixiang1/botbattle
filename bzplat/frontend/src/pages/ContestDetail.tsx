@@ -1696,7 +1696,7 @@ export default function ContestDetail() {
       ? '部分赛制信息暂缺，仅展示已有内容，不作推测。'
       : null,
     isDuplicate
-      ? '复式交锋每组包含两场同牌换座的独立计分场，两场分别记胜、平、负。'
+      ? '复式交锋每组包含两场同牌换座（主客两场）的独立计分场，成绩按两场合计、分别记胜平负。'
       : null,
     hasLegacyAggregateStage
       ? '历史阶段标注为“旧版系列结算”，继续按完整系列一次性结算，不会改写为新版独立计分场。'
@@ -1713,7 +1713,7 @@ export default function ContestDetail() {
   ].filter(Boolean).join(' ')
 
   return (
-    <PageFrame width="full" layout="public-contest-detail">
+    <PageFrame width="full" layout="public-contest-detail" className="sm:gap-2">
       <PageHeader
         title="锦标赛详情"
         description="查看赛程、选手和比赛结果。"
@@ -1918,7 +1918,27 @@ export default function ContestDetail() {
           ) : undefined}
           contentClassName="min-w-0"
         >
-          {showFairnessDetails ? (
+          {/* 单一触发器：按钮常驻，文案随展开状态切换；完整设置面板在其下条件渲染。 */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-sm text-muted-foreground">
+            {!showFairnessDetails && (
+              <span className="min-w-0 break-words">
+                {projectedEstimate?.eta_seconds != null
+                  ? `预计耗时${formatContestDuration(projectedEstimate.eta_seconds)}；赛制设置与规模估算已收起。`
+                  : '预计耗时以发布排期核定为准；赛制设置与规模估算已收起。'}
+              </span>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="min-h-11 sm:min-h-8"
+              aria-expanded={showFairnessDetails}
+              onClick={() => setShowFairnessDetails((value) => !value)}
+            >
+              {showFairnessDetails ? '收起完整设置' : '查看完整设置'}
+            </Button>
+          </div>
+          {showFairnessDetails && (
             <>
           <TemplateGuidancePanel
             template={selectedTemplateGuidance}
@@ -1927,7 +1947,7 @@ export default function ContestDetail() {
             estimate={projectedEstimate}
             unboundedTiebreak={hasUnboundedTiebreak}
             frozen={!['draft', 'open'].includes(contest.status)}
-            className="px-3 py-2"
+            className="border-t px-3 py-2"
           />
           {displayStageSeriesConfigs.length > 0 && (
             <div className="border-t">
@@ -1994,37 +2014,7 @@ export default function ContestDetail() {
               ))}
             </div>
           )}
-              <div className="border-t px-3 py-1.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="min-h-11 px-2 text-xs sm:min-h-7"
-                  aria-expanded
-                  onClick={() => setShowFairnessDetails(false)}
-                >
-                  收起完整设置
-                </Button>
-              </div>
             </>
-          ) : (
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-sm text-muted-foreground">
-              <span className="min-w-0 break-words">
-                {projectedEstimate?.eta_seconds != null
-                  ? `预计耗时${formatContestDuration(projectedEstimate.eta_seconds)}；赛制设置与规模估算已收起。`
-                  : '预计耗时以发布排期核定为准；赛制设置与规模估算已收起。'}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="min-h-11 sm:min-h-8"
-                aria-expanded={false}
-                onClick={() => setShowFairnessDetails(true)}
-              >
-                查看完整设置
-              </Button>
-            </div>
           )}
         </DataRegion>
       )}
@@ -2198,7 +2188,7 @@ export default function ContestDetail() {
         </StickyToolbar>
 
         {/* Tab「对阵」：阶段切换(S4) + 阶段配置 + 对阵视图(S6a) + 正式名次(finished) */}
-        <TabsContent value="matchups" className="mt-2 space-y-3">
+        <TabsContent value="matchups" className="mt-2 space-y-3 sm:mt-1">
           {stages.length > 0 && (
             <div className="min-w-0 space-y-1.5 rounded-xl border bg-card p-2">
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -2329,7 +2319,7 @@ export default function ContestDetail() {
         </TabsContent>
 
         {/* Tab「选手」：报名列表（非实名组织者/admin 可批量指派；实名赛仅 admin 可审计代报名） */}
-        <TabsContent value="entries" className="mt-2">
+        <TabsContent value="entries" className="mt-2 sm:mt-1">
           <DataRegion
             title={`报名选手（${entriesTotal}）`}
             description={rosterDescription}
@@ -2445,7 +2435,7 @@ export default function ContestDetail() {
         </TabsContent>
 
         {/* Tab「排行」：积分榜（客户端分页，per_page=30） */}
-        <TabsContent value="standings" className="mt-2">
+        <TabsContent value="standings" className="mt-2 sm:mt-1">
           <DataRegion
             title="阶段积分"
             description={currentStageContractAvailable
@@ -2525,7 +2515,7 @@ export default function ContestDetail() {
         </TabsContent>
 
         {/* 完赛后的权威、已固化名次；与赛中动态积分明确分开。 */}
-        <TabsContent value="official" className="mt-2">
+        <TabsContent value="official" className="mt-2 sm:mt-1">
           <DataRegion
             title="正式名次"
             description={officialShortDescription}
@@ -2736,7 +2726,13 @@ function StageStandingPanel({
       ) : undefined}
     >
       {!summary || summary.rows.length === 0 ? (
-        <EmptyState text="本阶段暂无排名" className="py-8" />
+        <div className="flex flex-col items-center gap-1 py-8">
+          <EmptyState text="本阶段暂无排名" className="py-0" />
+          {/* 仅未开赛阶段（未排期/已发布待开赛）补充预期说明；开赛后不猜测。 */}
+          {summary && (summary.status === 'pending' || summary.status === 'published') && (
+            <p className="text-xs text-muted-foreground">比赛开始后此处显示排名</p>
+          )}
+        </div>
       ) : (
         <DataTable
           className="rounded-none border-0"

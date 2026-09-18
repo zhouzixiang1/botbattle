@@ -18,7 +18,6 @@ import {
 } from '@/components/execution-queue'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -351,8 +350,15 @@ export default function Leaderboard() {
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
   const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
-  // 队列详情默认折叠为一行摘要；展开后才挂载面板并继续轮询（面板组件本身不变）。
-  const [queueOpen, setQueueOpen] = useState(false)
+  // 折叠摘要是否已拿到首份数据：拿到后折叠态不再轮询。
+  const [queueLoadedOnce, setQueueLoadedOnce] = useState(false)
+  const [queueOpen, setQueueOpen] = useState(() => {
+    try {
+      return localStorage.getItem('lb.queueOpen') === '1'
+    } catch {
+      return false
+    }
+  })
   // 每页 14 行配合堆叠事实行高与固定队列面板，控制首屏总高；翻页语义不变。
   const perPage = 14
 
@@ -400,17 +406,30 @@ export default function Leaderboard() {
     setQueueLastUpdatedAt(Date.now())
   }, [])
 
+  // 展开状态写回 localStorage；存储不可用（如隐私模式）时静默跳过。
+  useEffect(() => {
+    try {
+      localStorage.setItem('lb.queueOpen', queueOpen ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [queueOpen])
+
+  // 队列摘要只需挂载后一次成功拉取即可展示「当前 N 场进行中」；只有面板展开时才持续轮询。
+  // 首次拉取失败会保留退避重试，拿到首份数据后折叠态不再发请求。
   const {
     refresh: refreshQueue,
     polling: queuePolling,
     offline: queueOffline,
   } = useSingleFlightPolling({
     task: pollQueue,
+    enabled: queueOpen || !queueLoadedOnce,
     intervalMs: 3_000,
     maxIntervalMs: 24_000,
     onSuccess: () => {
       setQueueError('')
       setQueueLoading(false)
+      setQueueLoadedOnce(true)
     },
     onError: (reason) => {
       setQueueError(errMsg(reason, '全局执行队列加载失败'))
@@ -437,7 +456,7 @@ export default function Leaderboard() {
     <PageFrame layout="public-leaderboard" width="full">
       <PageHeader
         title="排行榜"
-        description="每款游戏独立使用 Glicko-2 数值评分；每个账号每款游戏最多派遣一个 Bot，公开名次与计分样本分区展示。"
+        description="每款游戏独立使用 Glicko-2 数值评分，公开名次与计分样本分区展示。每个账号每款游戏最多派遣一个 Bot。"
       />
 
       <StickyToolbar label="排行榜游戏选择">
@@ -458,49 +477,45 @@ export default function Leaderboard() {
 
       {error && <ErrorMsg msg={error} />}
 
-      {queueOpen ? (
-        <ExecutionQueuePanel
-          snapshot={queue}
-          loading={queueLoading || (!queue && queuePolling)}
-          error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
-          stale={!!queue && (queueOffline || !!queueError)}
-          lastUpdatedAt={queueLastUpdatedAt}
-          onRetry={refreshQueue}
-          // 排队展示上限收紧到 2：等待列表只保留前 2 条 + 条数溢出提示，
-          // 正在执行列表不受影响；压掉长队列下首屏的队列高度。
-          maxQueued={2}
-          compactOnMobile
-          compactCapacity
-          dense
-          action={(
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="min-h-11 sm:min-h-0"
-              onClick={() => setQueueOpen(false)}
-            >
-              收起队列
-            </Button>
-          )}
-        />
-      ) : (
-        <button
-          type="button"
-          data-testid="execution-queue-summary"
-          aria-expanded={false}
-          onClick={() => setQueueOpen(true)}
-          className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-        >
-          <span className="inline-flex min-w-0 items-center gap-2 font-medium text-foreground">
-            <Bot className="size-4 shrink-0 text-primary" aria-hidden="true" />
-            对局执行
-            <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
-              {queue ? `当前 ${queue.capacity.running_matches} 场进行中` : '正在获取对局执行情况…'}
-            </span>
+      {/* 摘要行、队列面板与明细表共用一个更紧的纵向节奏组（sm+ 0.5rem；窄屏保持页面默认间距）。 */}
+      <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)] sm:gap-2">
+      <button
+        type="button"
+        data-testid="execution-queue-summary"
+        aria-expanded={queueOpen}
+        onClick={() => setQueueOpen((value) => !value)}
+        className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <span className="inline-flex min-w-0 items-center gap-2 font-medium text-foreground">
+          <Bot className="size-4 shrink-0 text-primary" aria-hidden="true" />
+          对局执行
+          <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
+            {queue ? `当前 ${queue.capacity.running_matches} 场进行中` : '正在获取对局执行情况…'}
           </span>
-          <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-        </button>
+        </span>
+        <ChevronRight
+          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', queueOpen && 'rotate-90')}
+          aria-hidden="true"
+        />
+      </button>
+      {/* 展开时 effect 重建会立即拉取一次；折叠后 enabled=false 停止轮询，摘要保留最后一次数据。 */}
+      {queueOpen && (
+        <div>
+          <ExecutionQueuePanel
+            snapshot={queue}
+            loading={queueLoading || (!queue && queuePolling)}
+            error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
+            stale={!!queue && (queueOffline || !!queueError)}
+            lastUpdatedAt={queueLastUpdatedAt}
+            onRetry={refreshQueue}
+            // 排队展示上限收紧到 2：等待列表只保留前 2 条 + 条数溢出提示，
+            // 正在执行列表不受影响；压掉长队列下首屏的队列高度。
+            maxQueued={2}
+            compactOnMobile
+            compactCapacity
+            dense
+          />
+        </div>
       )}
 
       <DataRegion
@@ -544,6 +559,7 @@ export default function Leaderboard() {
           </>
         )}
       </DataRegion>
+      </div>
     </PageFrame>
   )
 }

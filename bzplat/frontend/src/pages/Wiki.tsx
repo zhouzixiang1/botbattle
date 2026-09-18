@@ -103,7 +103,7 @@ export default function Wiki() {
   const current = pages.find((page) => page.slug === slug)
 
   return (
-    <PageFrame width="default" layout="public-wiki">
+    <PageFrame width="default" layout="public-wiki" className="sm:gap-2">
       <PageHeader
         eyebrow="帮助文档"
         title="文档"

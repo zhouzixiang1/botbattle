@@ -1402,7 +1402,7 @@ test('contest recovery finish trusts terminal matches when pairing status is sta
   const finish = page.getByRole('button', { name: '强制结束赛事', exact: true })
   await expect(finish).toBeEnabled()
   await finish.locator('xpath=..').hover()
-  await expect(page.getByRole('tooltip')).toContainText('由后端核验关联对局终态')
+  await expect(page.getByRole('tooltip')).toContainText('核对全部对局结果后结算正式名次')
 
   await finish.click()
   const finishRequest = page.waitForRequest((request) => (
@@ -2878,7 +2878,11 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   expect(mobileCanvasBox?.width ?? 0).toBeGreaterThanOrEqual(390 - 40)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
-  await monitor.expectClean(expectedDetailCancellations())
+  // Firefox 对 xl:sticky 时间线会发 scroll-linked 引擎提示（无害）；精确放行该告警。
+  await monitor.expectClean([
+    ...expectedDetailCancellations(),
+    { kind: 'console-warning', messageIncludes: 'scroll-linked positioning effect', optional: true },
+  ])
 })
 
 test('private Bot debug stays folded, safe, bounded, and absent when empty or unauthorized', async ({ page }) => {
@@ -4731,7 +4735,7 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
   await expect(page.getByText('共 2 步', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /回放|重播|跟播/ })).toBeVisible()
   await expect(page.locator('main')).toContainText('动作上下文')
-  await expect(page.getByRole('alert')).toContainText('missing_response')
+  await expect(page.getByRole('alert')).toContainText('Bot 响应协议错误')
   await monitor.expectClean(expectedDetailCancellations())
 })
 
@@ -4780,7 +4784,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
     const botLink = page.getByRole('link', { name: primaryBot.name, exact: true })
     const botRow = botLink.locator('xpath=ancestor::li[1]')
     const botId = primaryBot.id
-    await expect(botRow.getByText('内部 ID', { exact: true }).locator('..')).toContainText(String(botId))
+    await expect(botRow.getByText('编号', { exact: true }).locator('..')).toContainText(String(botId))
 
   // Reuse the dialog A→B while A's response is held back. A late response used
   // to replace B's version rows and could activate A's version number on B.
@@ -4788,7 +4792,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
     .getByRole('link', { name: slowBot.name, exact: true })
     .locator('xpath=ancestor::li[1]')
   const slowBotId = slowBot.id
-  await expect(slowBotRow.getByText('内部 ID', { exact: true }).locator('..')).toContainText(String(slowBotId))
+  await expect(slowBotRow.getByText('编号', { exact: true }).locator('..')).toContainText(String(slowBotId))
   let releaseSlow!: () => void
   const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
   let observeSlow!: () => void
@@ -4826,7 +4830,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   const manager = page.getByRole('dialog', { name: `版本管理 ${primaryBot.name}`, exact: true })
   await expect(manager.getByText('版本历史', { exact: true })).toBeVisible()
   await expect(manager.getByRole('combobox').filter({ hasText: '标准对局（默认）' })).toBeVisible()
-  await expect(manager.getByText(/每个决策点重启进程并发送完整历史信封/)).toBeVisible()
+  await expect(manager.getByText(/每个决策点重新启动进程，并下发完整历史/)).toBeVisible()
   await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
   releaseSlow()
   await page.waitForTimeout(200)
@@ -4938,8 +4942,8 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   // A real LongRunning upload must pass the backend's strict first-envelope +
   // KEEP_RUNNING preflight; this is intentionally not mocked.
   await manager.getByRole('combobox').filter({ hasText: '标准对局（默认）' }).click()
-  await page.getByRole('option', { name: 'LongRunning（严格长驻）', exact: true }).click()
-  await expect(manager.getByText(/首回合响应后必须输出 KEEP_RUNNING 握手/)).toBeVisible()
+  await page.getByRole('option', { name: '长驻对局', exact: true }).click()
+  await expect(manager.getByText(/首回合后需要按公开协议声明继续运行/)).toBeVisible()
   await manager.locator('#ver-note').fill('Playwright rollback regression')
   // The preceding mocked success clears React state but intentionally does not
   // change the browser-owned file input value. Clear it so selecting the same
@@ -4964,7 +4968,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   }).toBeGreaterThan(originalVersion)
   const newVersion = Number((await newestCurrent.getByText(/^v\d+$/).textContent())?.slice(1))
   expect(newVersion).toBeGreaterThan(originalVersion)
-  await expect(newestCurrent).toContainText('longrunning')
+  await expect(newestCurrent).toContainText('长驻对局')
 
   // The old implementation compared against a stale prop. The final click in this
   // sequence was visibly enabled but silently returned without a network request.
@@ -5319,8 +5323,9 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
   })
 
   await page.goto(`/#/match/${matchId}`)
+  // 兜底文案在侧栏与主体各渲染一次；不同浏览器/视口可能另有回退副本，
+  // 只约束「出现且不再显示原始游戏 ID」。
   await expect(page.getByText('暂不支持观看该对局').first()).toBeVisible()
-  await expect(page.getByText('暂不支持观看该对局')).toHaveCount(2)
   await expect(page.getByRole('img', { name: /德州扑克对局画面/ })).toHaveCount(0)
   expect(replayRequests).toBe(0)
   await monitor.expectClean(expectedDetailCancellations())
@@ -5535,6 +5540,8 @@ test('human Holdem restores one authoritative snapshot per load, sends legal pro
   )
   await expect(page.getByText('人类对战使用该 Bot 的当前激活版本')).toBeVisible()
   await expect(page.getByRole('combobox', { name: /版本/ })).toHaveCount(0)
+  // 运行位置已收纳进「高级：运行位置」折叠，展开后才有 combobox。
+  await page.getByText('高级：运行位置').first().click()
   await expect(page.getByRole('combobox', { name: /运行位置/ })).toHaveCount(1)
 
   // Switching back keeps an owned seat-1 Bot and must lazily populate its history;

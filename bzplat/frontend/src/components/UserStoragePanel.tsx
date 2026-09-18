@@ -149,7 +149,7 @@ export function UserStoragePanel() {
     >
       <div
         className={cn(
-          'space-y-3 px-3 py-3 rounded-lg transition-colors',
+          'space-y-3 px-3 py-3 sm:space-y-2 sm:py-2.5 rounded-lg transition-colors',
           dragActive && 'bg-primary/5 ring-1 ring-inset ring-primary/40',
         )}
         data-storage-dropzone
@@ -174,7 +174,7 @@ export function UserStoragePanel() {
             </span>
           </div>
           <div
-            className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"
+            className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted sm:mt-1.5"
             role="progressbar"
             aria-label="云存储空间用量"
             aria-valuemin={0}

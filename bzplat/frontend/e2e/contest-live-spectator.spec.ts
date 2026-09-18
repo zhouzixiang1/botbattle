@@ -473,7 +473,7 @@ test('malformed frozen stage stays readable when the live series contract is una
   await page.goto('/#/contests/42/live')
 
   await expect(page.getByRole('heading', { name: '秋季德州扑克联赛' })).toBeVisible()
-  await expect(page.getByText('赛制配置暂不可用，仅展示已有内容。', { exact: true })).toBeVisible()
+  await expect(page.getByText('赛制配置暂不可用', { exact: true })).toBeVisible()
   await expect(page.getByText('赛果暂不可用', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   await monitor.expectClean()
