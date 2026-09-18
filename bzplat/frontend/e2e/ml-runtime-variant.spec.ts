@@ -3,10 +3,12 @@
 // 完整 ml 变体上传→预检→对局链路由发布候选的真实 docker 探针覆盖。
 import { expect, test } from '@playwright/test'
 
-import { USER, loginThroughUi } from './helpers'
+import { PASSWORD, loginThroughUi } from './helpers'
+
+const USER = process.env.BZ_E2E_USER || 'tester1'
 
 test('runtime variant selector only shows for python source and offers std/ml', async ({ page }) => {
-  await loginThroughUi(page, USER)
+  await loginThroughUi(page, USER, PASSWORD)
   await page.goto('/mybots')
   await expect(page.getByText('上传新 Bot')).toBeVisible()
 

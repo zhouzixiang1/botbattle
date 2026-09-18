@@ -10496,6 +10496,10 @@ def test_revoked_remote_identity_is_interrupted_without_blocking(queue_store):
 
 
 def test_docker_commands_are_local_deterministic_and_hardened(monkeypatch, tmp_path):
+    # create_app 会经 _load_dotenv 把主 checkout 生产 .env 的键 setdefault 进
+    # 进程环境；instance_namespace 优先读 BZ_INSTANCE_KEY，前导用例跑过
+    # create_app 后两个 tmp 路径会得到同一 namespace（分布相关的 flaky）。
+    monkeypatch.delenv("BZ_INSTANCE_KEY", raising=False)
     monkeypatch.delenv("BZ_DOCKER_HOST", raising=False)
     monkeypatch.delenv("DOCKER_HOST", raising=False)
     monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
