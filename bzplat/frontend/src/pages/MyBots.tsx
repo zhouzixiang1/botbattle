@@ -122,6 +122,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [fileError, setFileError] = useState('')
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
+  const [sourceRuntime, setSourceRuntime] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   const uploadControllerRef = useRef<AbortController | null>(null)
@@ -192,6 +193,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
         runtime_mode: runtimeMode,
         source_format: sourceFormat,
         ...(sourceFormat !== 'elf' && sourceEntry.trim() ? { source_entry: sourceEntry.trim() } : {}),
+        ...(sourceFormat === 'python' && sourceRuntime ? { source_runtime: sourceRuntime } : {}),
         file,
       }, {
         signal: controller.signal,
@@ -435,7 +437,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               </div>
               <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry('') }}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceRuntime('') }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -451,10 +453,31 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                   {sourceFormat === 'elf'
                     ? '默认类型；上传单个 Linux x86_64 ELF 可执行文件。'
                     : sourceFormat === 'python'
-                      ? '平台直接运行；默认入口 __main__.py（或 main.py），当前仅支持标准库。'
+                      ? sourceRuntime === 'ml'
+                        ? '平台直接运行；默认入口 __main__.py（或 main.py），提供 numpy/scipy/onnxruntime/torch（CPU）。'
+                        : '平台直接运行；默认入口 __main__.py（或 main.py），仅标准库。'
                       : '平台自动完成编译；默认入口 main.cpp / main.c / main.go。'}
                 </p>
               </div>
+              {sourceFormat === 'python' && (
+                <div className="space-y-1.5">
+                  <Label>运行库</Label>
+                  <Select value={sourceRuntime || 'std'} onValueChange={(v) => setSourceRuntime(v === 'ml' ? 'ml' : '')}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="std">标准库（默认）</SelectItem>
+                      <SelectItem value="ml">ML 库（numpy · scipy · onnxruntime · torch CPU）</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {sourceRuntime === 'ml'
+                      ? '模型权重请转存为 npz/onnx 上传到云存储，对局中从 data/ 读取；沙箱内存 512 MiB，模型不宜过大。'
+                      : '只需标准库时选默认；需要 numpy/torch 等科学计算库时选 ML 库。'}
+                  </p>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label>对战流程</Label>
                 <Select value={runtimeMode} onValueChange={setRuntimeMode}>

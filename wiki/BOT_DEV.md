@@ -24,7 +24,7 @@ ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF�
 | 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。入口不在候选里时，在上传表单显式填写 |
 | C / C++ | 服务端以 `gcc/g++ -O2 -static` 编译，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1`；可用库为 nlohmann/json 与 Eigen（g++ 12.2 / Go 1.19 / Python 3.11 环境） |
 | Go | 以 `CGO_ENABLED=0` 纯 Go 编译（禁 cgo）；产物必须是静态链接 ELF，动态链接产物会被拒绝 |
-| Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行；**仅标准库**，numpy、torch 等第三方库不可用 |
+| Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行。默认**仅标准库**；上传时「运行库」选 **ML 库** 可用 numpy/scipy/onnxruntime 与 torch 2.1.2（CPU 版），import 后内存占用约 220 MiB（沙箱总内存 512 MiB），模型权重请转存为 npz/onnx 上传云存储、对局中从 `data/` 读取 |
 | 构建时限 | 服务端编译 120 秒超时；源码先编译，再进入与 ELF 相同的上传预检 |
 
 本章之后的示例源码（`bot.c` / `bot.py`）两条路线通用：源码直传直接把它们打进 zip；ELF 路线按后续章节在本地构建。
@@ -310,7 +310,7 @@ docker run --rm -i --platform linux/amd64 \
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
 | 依赖网络或持久磁盘 | 沙箱内失败 | 只读 stdin、写 stdout，状态放内存 |
 | PyInstaller onefile 解压失败（`PYI-... Failed to extract`） | 启动即退出，预检失败 | 运行期解压体积需控制在 /tmp 容量内（见下节），精简捆绑依赖或改用「源码 zip 直传」 |
-| 捆绑 PyTorch 等大型 ML 库 | 解压/加载即超沙箱资源，预检失败 | 节能沙箱 /tmp 256 MB、内存 512 MiB 跑不动此类包；改用轻量推理或纯算法实现（预检失败详情会附 Bot stderr 末尾，可据此定位） |
+| 捆绑 PyTorch 等大型 ML 库（PyInstaller 单文件） | 解压/加载即超沙箱资源，预检失败 | 不要把库打进包：改用「源码 zip 直传 + 运行库选 ML 库」，库由平台镜像提供，权重转 npz/onnx 放云存储（预检失败详情会附 Bot stderr 末尾，可据此定位） |
 
 ## 12. 沙箱与时限
 
@@ -318,6 +318,7 @@ docker run --rm -i --platform linux/amd64 \
 
 - 日常挑战、自动排位、人机 Bot 侧与上传预检使用节能沙箱：每个 Bot 1 核、512 MiB、无网络、只读根文件系统，仅 `/tmp` 可写。
 - `/tmp` 是 256 MB tmpfs、可执行，且计入 512 MiB 内存上限（不是额外预算）。PyInstaller onefile 等运行期解压捆绑库的程序，解压后总体积超过它就会启动失败。
+- Python 源码 Bot 选「ML 库」运行库时，numpy/scipy/onnxruntime/torch 由平台镜像提供，无需打包；import torch 后约占 220 MiB，剩余内存与 /tmp 需容纳你的模型与推理。
 - 锦标赛统一使用赛事沙箱：每个 Bot 2 核、2 GiB；参赛者不能在日常挑战中选择该档位，主机资源不足时赛事会等待，不会自动降档。
 - 本地 Bot 在用户自己的电脑运行，不占平台 Docker 资源；平台只负责裁判、排队、回放与技术判定。本地 Bot 对局不计排行榜，也不能参加锦标赛。
 - Holdem 使用单步 60 秒；Gomoku 可选每方累计 900/300 秒；Pencil 可选每方累计 900 秒或单步 1 秒。普通挑战只有游戏默认档计入 Rating，替代档属于不计分练习。
