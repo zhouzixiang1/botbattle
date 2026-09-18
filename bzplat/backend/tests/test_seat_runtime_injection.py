@@ -237,6 +237,41 @@ def test_seat_runtime_extras_whitelist_fail_closed(tmp_path):
     store.close()
 
 
+def test_seat_runtime_image_allowlist_is_deliberate():
+    """白名单只含已知运行镜像：新增必须连镜像 Dockerfile 与文档一起评审。"""
+    from bzplat.backend.runtime.limits import (
+        ML_PY_RUNTIME_IMAGE,
+        PYTHON_RUNTIME_IMAGE,
+        SEAT_RUNTIME_IMAGE_ALLOWLIST,
+    )
+
+    assert PYTHON_RUNTIME_IMAGE == "botbattle-builder:bookworm-1"
+    assert ML_PY_RUNTIME_IMAGE == "botbattle-ml-py3:bookworm-1"
+    assert SEAT_RUNTIME_IMAGE_ALLOWLIST == frozenset(
+        {PYTHON_RUNTIME_IMAGE, ML_PY_RUNTIME_IMAGE}
+    )
+
+
+def test_seat_runtime_extras_accepts_ml_image(tmp_path):
+    """ML 运行库镜像在白名单内：python 版本声明后 seat 注入其镜像。"""
+    store = Store(str(tmp_path / "ml.db"))
+    orch = MatchOrchestrator(store, runner=None, max_concurrent=1)
+    src_dir = tmp_path / "v1" / "src"
+    src_dir.mkdir(parents=True)
+    extras = orch._seat_runtime_extras(
+        {},
+        {
+            "source_format": "python",
+            "runtime_image": "botbattle-ml-py3:bookworm-1",
+            "binary_path": str(tmp_path / "v1" / "bot"),
+        },
+    )
+    assert extras["image"] == "botbattle-ml-py3:bookworm-1"
+    assert extras["allow_script_entry"] is True
+    assert extras["extra_volumes"] == ((str(src_dir), "/app/src"),)
+    store.close()
+
+
 def test_runtime_for_bot_version_legacy_mirror_returns_none(tmp_path):
     """legacy bots 行经全部校验后，第三元素必须是 None 而不是 bot 行。"""
     from bzplat.backend.crypto import hash_password
