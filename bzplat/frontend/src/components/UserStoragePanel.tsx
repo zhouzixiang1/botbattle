@@ -207,35 +207,35 @@ export function UserStoragePanel() {
             className="py-8"
           />
         ) : (
-          <ul className="divide-y divide-border border-t border-b border-border">
+          <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {data.files.map((file) => (
               <li
                 key={file.name}
-                className="flex min-h-[44px] items-center gap-3 py-1.5"
+                className="flex min-w-0 flex-col justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2.5"
                 data-storage-file={file.name}
               >
-                <div className="min-w-0 flex-1">
-                  <OverflowText className="text-sm font-medium text-foreground" tooltipFocusable>
-                    {file.name}
-                  </OverflowText>
-                  <span className="text-xs text-muted-foreground">
+                <OverflowText className="text-sm font-medium text-foreground" tooltipFocusable>
+                  {file.name}
+                </OverflowText>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 text-xs text-muted-foreground">
                     {fmtBytes(file.size_bytes)} · 更新于 {fmtTime(file.updated_at)}
                   </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-11 min-w-11 shrink-0 px-3 text-destructive hover:text-destructive"
+                    onClick={() => void onDelete(file)}
+                    disabled={deletingName === file.name || uploading}
+                    aria-label={`删除文件 ${file.name}`}
+                    data-storage-delete={file.name}
+                  >
+                    {deletingName === file.name
+                      ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      : <Trash2 className="size-4" aria-hidden="true" />}
+                    删除
+                  </Button>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-11 px-3 text-destructive hover:text-destructive"
-                  onClick={() => void onDelete(file)}
-                  disabled={deletingName === file.name || uploading}
-                  aria-label={`删除文件 ${file.name}`}
-                  data-storage-delete={file.name}
-                >
-                  {deletingName === file.name
-                    ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    : <Trash2 className="size-4" aria-hidden="true" />}
-                  删除
-                </Button>
               </li>
             ))}
           </ul>
