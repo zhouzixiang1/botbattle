@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec, TimeControlSpec, bot_crash_detail
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
@@ -138,7 +138,7 @@ async def _preflight_check(
     except PlatformRunnerError:
         raise
     except BotCrashedError as exc:
-        return False, f"Bot 进程异常退出: {exc}"
+        return False, bot_crash_detail(exc)
     except asyncio.TimeoutError:
         return False, f"Bot {timeout}s 内未响应"
     except Exception as e:

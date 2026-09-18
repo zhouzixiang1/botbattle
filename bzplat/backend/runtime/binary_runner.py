@@ -279,6 +279,9 @@ class BotCrashedError(RuntimeError):
 
     def __init__(self, *args: object, crashed_seat: int | None = None) -> None:
         super().__init__(*args)
+        # Bot 自身 stderr 末尾（4 KiB 环形缓冲），由 runner 在崩溃分类时
+        # 附加；仅 owner 侧预检 detail 消费，绝不进异常消息（对对手可见）。
+        self.stderr_tail: str = ""
         # 崩溃方座位号（0=bot_a, 1=bot_b）；None=未知（如 start_session 阶段未注解）。
         # 由 runner 在 start_session 失败时注解，供 orchestrator 判技术判负的胜方。
         self.crashed_seat = crashed_seat
@@ -1064,9 +1067,13 @@ class BinaryRunner:
         # ``docker start -a`` forwards the container's exit status; even 125 is
         # therefore Bot-attributable and must not pause the platform or evade a
         # rated result.
-        return BotCrashedError(
+        error = BotCrashedError(
             f"bot {session.session_id} {context}（进程退出码={returncode}）"
         )
+        # stderr 尾部只随异常属性走：上传预检（owner 本人）会拼进 detail，
+        # 对局失败原因等对对手可见的路径只消费消息本身，不触碰该属性。
+        error.stderr_tail = tail
+        return error
 
     async def read_extra_line(self, session_id: str, *,
                               timeout: float = 1.0) -> str | None:

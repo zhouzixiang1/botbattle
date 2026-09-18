@@ -243,6 +243,18 @@ def test_started_container_exit_125_is_bot_crash(tmp_path, monkeypatch):
     with pytest.raises(BotCrashedError, match="stdout EOF.*进程退出码=0"):
         asyncio.run(clean_exit_without_response.send("silent-clean-exit", "{}"))
 
+    # 崩溃分类错误必须携带 Bot stderr 末尾——owner 预检 detail 的定位线索，
+    # 丢掉 runner 里那一行赋值此断言即红。
+    tail_session = BotSession(
+        "crash-with-stderr", info, path, proc=FakeProc(255), mode="docker",
+    )
+    tail_session._stderr_tail.extend(b"[PYI-1:ERROR] torch extract failed")
+    bot_tail = BinaryRunner(prefer_local=False)
+    bot_tail._sessions["crash-with-stderr"] = tail_session
+    with pytest.raises(BotCrashedError, match="进程退出码=255") as raised:
+        asyncio.run(bot_tail.send("crash-with-stderr", "{}"))
+    assert raised.value.stderr_tail == "[PYI-1:ERROR] torch extract failed"
+
 
 def test_decision_timeout_log_does_not_expose_bot_stderr_paths(tmp_path, caplog):
     class FakeStdin:
