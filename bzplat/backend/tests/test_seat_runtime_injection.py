@@ -355,3 +355,43 @@ def test_user_drive_snapshot_survives_concurrent_replace_and_delete(tmp_path):
     assert linked.stat().st_ino == inode_before
     assert linked.read_bytes() == b"v1"
     store.close()
+
+
+def test_user_drive_snapshot_modes_under_production_umask(tmp_path):
+    """umask 0077 下 seat 快照目录必须 0755、内部硬链接 0644（65534 容器可读）。"""
+    import os
+    import stat
+    from bzplat.backend.crypto import hash_password
+
+    store = Store(str(tmp_path / "perm.db"))
+    user = store.create_user("pmu", "pmu@e.com", hash_password("pw123456"))
+    storage = UserStorageManager(store, root=tmp_path / "assets")
+    orch = MatchOrchestrator(
+        store,
+        runner=None,
+        max_concurrent=1,
+        mount_root=tmp_path / "mounts",
+        user_storage=storage,
+    )
+    payload = b"perm-payload"
+    sha = hashlib.sha256(payload).hexdigest()
+    old_umask = os.umask(0o077)
+    try:
+        staging = Path(storage.new_staging()) / "f"
+        staging.write_bytes(payload)
+        storage.promote_staged(staging, user["id"], sha)
+        store.replace_user_storage_file(
+            user["id"], "w.bin", sha256=sha, size_bytes=len(payload)
+        )
+        root = orch._user_drive_snapshot("m-perm", 0, user["id"])
+    finally:
+        os.umask(old_umask)
+    assert root is not None
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+    # 硬链接与 blob 同 inode：blob 已在 promote 时归一 0644。
+    assert stat.S_IMODE((root / "w.bin").stat().st_mode) == 0o644
+    # 安全边界钉住：只有 seatN 叶子放宽，match_mounts 根与 <match_id>/
+    # 父目录维持 0700（docker daemon 以 root 解析路径，容器不需要穿越）。
+    assert stat.S_IMODE((tmp_path / "mounts").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "mounts" / "m-perm").stat().st_mode) == 0o700
+    store.close()

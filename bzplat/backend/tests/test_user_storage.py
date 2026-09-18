@@ -441,3 +441,55 @@ def test_lifespan_starts_periodic_storage_sweep(tmp_path):
         assert task is not None and not task.done()
         assert task.get_name() == "user-storage-sweep"
     assert app.state._user_storage_sweep_task.done()
+
+
+def test_promote_blob_mode_0644_under_production_umask(tmp_path):
+    """生产 umask 0077 姿态下 promote 后 blob 必须归一为 0644（容器可读）。"""
+    import os
+    import stat
+
+    app, _store, user, _other, _token, _ = _app(tmp_path)
+    storage = app.state.user_storage
+    payload = b"umask-payload"
+    sha = hashlib.sha256(payload).hexdigest()
+    old_umask = os.umask(0o077)
+    try:
+        staging = Path(storage.new_staging()) / "f"
+        staging.write_bytes(payload)
+        blob = storage.promote_staged(staging, user["id"], sha)
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(blob.stat().st_mode) == 0o644
+
+
+def test_sweep_heals_referenced_0600_blob_and_keeps_gc(tmp_path):
+    """sweep 先于引用/宽限跳过归一 0600 存量 blob，且不破坏无引用回收。"""
+    import stat
+
+    app, _store, user, _other, token, _ = _app(tmp_path)
+    client = TestClient(app)
+    root = _blob_root(app)
+    assert (
+        client.post(
+            "/api/storage/files",
+            headers=_auth(token),
+            files={"file": ("w.bin", b"AAAA", "application/octet-stream")},
+        ).status_code
+        == 200
+    )
+    sha = hashlib.sha256(b"AAAA").hexdigest()
+    blob = root / str(user["id"]) / sha
+    # 手动降权，模拟历史/异常路径遗留的 0600 存量实体。
+    blob.chmod(0o600)
+    # 无引用且超宽限的 0600 孤儿：回收语义不得被归一步骤破坏。
+    orphan = root / str(user["id"]) / ("e" * 64)
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"orphan")
+    orphan.chmod(0o600)
+
+    result = app.state.user_storage.sweep_unreferenced(min_age_seconds=0)
+
+    assert stat.S_IMODE(blob.stat().st_mode) == 0o644
+    assert blob.is_file(), "被引用 blob 只治愈权限，绝不删除"
+    assert not orphan.exists()
+    assert result["blobs"] == 1

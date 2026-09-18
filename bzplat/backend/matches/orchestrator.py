@@ -749,6 +749,9 @@ class MatchOrchestrator:
 
         root = self.mount_root / str(match_id) / f"seat{seat}"
         root.mkdir(parents=True, exist_ok=True)
+        # seat 快照目录会被目录 bind mount 进 65534 容器；mkdir 的 mode 会被
+        # 进程 umask 0077 掩码，必须显式 chmod 放宽到 0755（父目录维持 0700）。
+        root.chmod(0o755)
         for entry in files:
             # 清单行的名字合法性由上传 API 保证；快照侧独立复核一次，
             # 手改 DB 的带路径名字不得借硬链接逃逸 seat 目录。
