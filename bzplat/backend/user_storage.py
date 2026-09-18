@@ -97,6 +97,12 @@ class UserStorageManager:
         target = self.blob_path(user_id, sha256)
         target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         staged_file.replace(target)
+        # 容器以非特权用户（65534）只读挂载 blob：统一 0644，避免 umask 0077
+        # 下的 0600 让对局内 /mnt/data 不可读。失败仅告警，sweep 会幂等治愈。
+        try:
+            target.chmod(0o644)
+        except OSError:
+            logger.warning("user storage blob chmod failed path=%s", target)
         return target
 
     @staticmethod
@@ -141,6 +147,19 @@ class UserStorageManager:
                     continue
                 keep = referenced.get(user_id, set())
                 for blob in entry.iterdir():
+                    try:
+                        if blob.is_file():
+                            # 历史/异常路径的 0600 blob 归一为 0644（容器只读
+                            # 挂载需要）；必须先于引用与宽限跳过执行，被引用
+                            # blob 也要治愈。chmod 不改 mtime，宽限期语义不变。
+                            blob.chmod(0o644)
+                    except OSError as exc:
+                        # 系统性失败（如只读文件系统）会让存量 blob 停留 0600、
+                        # 对局挂载不可读；留可检索日志而非静默。
+                        logger.warning(
+                            "user storage sweep chmod failed path=%s error=%s",
+                            blob, exc,
+                        )
                     try:
                         stat = blob.stat()
                     except OSError:
