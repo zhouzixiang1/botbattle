@@ -26,6 +26,14 @@ pytest --collect-only -q
 pytest
 ```
 
+并行加速（可选）：套件以等待型负载为主（16 核本机串行约 15–19 分钟，user 时间仅约一半），装好 dev 依赖后可用 pytest-xdist 并行迭代：
+
+```bash
+pytest -n 8 --basetemp=/tmp/bz-parallel/basetemp   # 8 worker 实测约 6 分钟
+```
+
+约束：与其它 pytest 进程同时运行时必须给每个进程独立 `TMPDIR` 或 `--basetemp`（默认 `/tmp/pytest-of-<user>` 的编号目录会被并发进程抢占）；发布门禁的权威数字仍以串行全量为准，并行只作迭代加速。并行分发会暴露依赖执行顺序或环境泄漏的用例——此类失败按顺序依赖修复（给该用例显式 `monkeypatch` fixture），不得用跳过或标记绕过（先例：`test_no_private_bot` 靠别的文件泄漏的 `BZ_BOT_LOCAL` 才通过，已改为自带 fixture）。
+
 主要守护面：
 
 | 类别 | 代表性测试 |
