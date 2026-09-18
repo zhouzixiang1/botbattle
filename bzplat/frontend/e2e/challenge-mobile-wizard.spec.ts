@@ -44,6 +44,8 @@ test('challenge form becomes a three-step wizard below 1280px', async ({ page })
   await expect(submit).toBeDisabled()
   await expect(form.getByText('请为双方选择 Bot')).toBeVisible()
 
+  // 进入第 3 步时「下一步」卸载，焦点移到「上一步」。
+  await expect(form.getByTestId('challenge-prev')).toBeFocused()
   await form.getByTestId('challenge-prev').click()
   await expect(form.getByTestId('challenge-my-seat')).toBeVisible()
   await form.getByTestId('challenge-prev').click()

@@ -880,11 +880,19 @@ export default function Challenge() {
     media.addEventListener('change', syncBreakpoint)
     return () => media.removeEventListener('change', syncBreakpoint)
   }, [])
+  // 提交只发生在第 3 步，因此从执行请求返回表单时停留在第 3 步：
+  // 与游戏/时限/座位选择一样属于「可立即重发」的恢复点，是预期行为。
   const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1)
   // 分区保持挂载、仅 CSS 隐藏：游戏/时限选择器不因分步重挂载（避免重复拉取
   // /api/games），display:none 同时把隐藏分区移出 Tab 顺序与可访问树。
   const stepClassName = (step: 1 | 2 | 3) =>
     !desktopLayout && wizardStep !== step ? 'hidden' : undefined
+  // 下一步按钮在进入第 3 步时卸载；把焦点移到「上一步」，键盘/读屏
+  // 用户不丢失位置（否则焦点跌落到 body）。
+  const prevButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!desktopLayout && wizardStep === 3) prevButtonRef.current?.focus()
+  }, [desktopLayout, wizardStep])
   const wizardSteps = [
     { step: 1 as const, label: '对局' },
     { step: 2 as const, label: '座位' },
@@ -964,7 +972,7 @@ export default function Challenge() {
             {/* 窄屏分步导航：桌面单屏表单不渲染 */}
             {!desktopLayout && (
               <div
-                className="flex flex-wrap items-center justify-between gap-2 sm:gap-3 xl:col-span-2"
+                className="flex flex-wrap items-center justify-between gap-2 sm:gap-3"
                 data-testid="challenge-wizard-nav"
               >
                 <ol className="flex min-w-0 items-center gap-1.5 text-xs" aria-label="配置步骤">
@@ -996,6 +1004,7 @@ export default function Challenge() {
                 </ol>
                 <div className="flex gap-2">
                   <Button
+                    ref={prevButtonRef}
                     type="button"
                     variant="outline"
                     size="sm"
