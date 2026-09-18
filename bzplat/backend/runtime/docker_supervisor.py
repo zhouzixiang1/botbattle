@@ -23,8 +23,10 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Iterable
 
 from bzplat.backend.runtime.limits import (
+    BUILD_TMPFS_SIZE_MB,
     DockerResourceProfile,
     PLATFORM_LOW_PROFILE,
+    SANDBOX_TMPFS_SIZE_MB,
     resolve_docker_resource_profile,
 )
 
@@ -265,7 +267,7 @@ class DockerSupervisor:
             "--network=none",
             "--read-only",
             "--tmpfs",
-            "/tmp:rw,exec,nosuid,nodev,size=64m",
+            f"/tmp:rw,exec,nosuid,nodev,size={SANDBOX_TMPFS_SIZE_MB}m",
             "--cap-drop=ALL",
             "--security-opt",
             "no-new-privileges",
@@ -592,7 +594,7 @@ class DockerSupervisor:
             "--network=none",
             "--read-only",
             "--tmpfs",
-            "/tmp:rw,exec,nosuid,nodev,size=512m",
+            f"/tmp:rw,exec,nosuid,nodev,size={BUILD_TMPFS_SIZE_MB}m",
             "--cap-drop=ALL",
             "--security-opt",
             "no-new-privileges",

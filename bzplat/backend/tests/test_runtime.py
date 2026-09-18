@@ -17,6 +17,7 @@ from bzplat.backend.bots.classify import (
 )
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.games.holdem import protocol as proto
+from bzplat.backend.runtime.limits import SANDBOX_TMPFS_SIZE_MB
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
@@ -396,7 +397,12 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path):
     assert "--pids-limit=64" in args
     assert "--log-driver=none" in args
     tmpfs = args[args.index("--tmpfs") + 1]
-    assert tmpfs == "/tmp:rw,exec,nosuid,nodev,size=64m"
+    assert tmpfs == (
+        f"/tmp:rw,exec,nosuid,nodev,size={SANDBOX_TMPFS_SIZE_MB}m"
+    )
+    # 上面的断言与被测值同源常量，钉住数值本身：doc/RUNTIME.md 参数表与
+    # wiki/BOT_DEV.md §12 都以 256m 记载，改值必须同步两处文档。
+    assert SANDBOX_TMPFS_SIZE_MB == 256
     assert ("--platform", "linux/amd64") == (
         args[args.index("--platform")], args[args.index("--platform") + 1]
     )
