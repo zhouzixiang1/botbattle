@@ -22,14 +22,14 @@
 
 ## 3. 上传程序
 
-### 路线 A：源码 zip 直传（推荐）
+### 路线 A：源码上传（推荐）
 
-与 Botzone 提交源码的习惯一致，平台在服务端编译运行，本地不需要编译器。
+与 Botzone 提交源码的习惯一致，平台在服务端编译运行，本地不需要编译器。单文件可直接上传或在线粘贴；多文件工程打成 zip。
 
 | 项 | 约定 |
 |----|------|
 | 支持语言 | C、C++、Go、Python 3。Botzone 上的 Java、JavaScript、C#、Pascal 程序需要先改写成这四种语言 |
-| 打包 | 整个源码目录打成 zip：不超过 64 MiB、500 个文件，解压后不超过 96 MiB |
+| 打包 | 单个源文件直接上传，或整个源码目录打成 zip：不超过 64 MiB、500 个文件，解压后不超过 96 MiB |
 | 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`，与 Botzone 的 Python 打包约定相同。入口不在候选里时，在上传表单显式填写 |
 | C/C++ 编译 | `gcc/g++ -O2 -static`，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1` |
 | C++ 可用库 | nlohmann/json 与 Eigen。Botzone 上的 TensorFlow、libtorch、Boost 等没有，用到就无法直接迁移 |

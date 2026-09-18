@@ -57,6 +57,14 @@ import {
   type BotUploadStage,
 } from '@/components/bot-upload-progress'
 import {
+  buildEditorSourceFile,
+  SourceEditorField,
+  sourceEditorSizeError,
+  sourceFileAccept,
+  SourceUploadModeToggle,
+  type SourceUploadMode,
+} from '@/components/source-upload-fields'
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -123,6 +131,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
   const [sourceRuntime, setSourceRuntime] = useState('')
+  // 源码类型的上传方式（文件 / 在线编辑）与编辑器代码；ELF 恒为文件上传。
+  const [sourceUploadMode, setSourceUploadMode] = useState<SourceUploadMode>('file')
+  const [sourceCode, setSourceCode] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   const uploadControllerRef = useRef<AbortController | null>(null)
@@ -164,10 +175,28 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
     uploadControllerRef.current = null
   }, [])
 
+  // 两种上传方式互斥：切换时丢弃旧选择（含编辑器构造的单文件），入口回到默认。
+  const onUploadModeChange = (mode: SourceUploadMode) => {
+    setSourceUploadMode(mode)
+    setFile(null)
+    setFileError('')
+    if (mode === 'editor') setSourceEntry('')
+  }
+
+  // 在线编辑模式：把代码实时构造成规范入口名的单文件进入既有 file 状态，
+  // FormData 提交链与 BotUploadProgress 保持零改动。
+  useEffect(() => {
+    if (sourceFormat === 'elf' || sourceUploadMode !== 'editor') return
+    setFile(buildEditorSourceFile(sourceFormat, sourceCode))
+  }, [sourceFormat, sourceUploadMode, sourceCode])
+
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
-    if (!file) {
-      setFileError('请选择 Linux x86_64 ELF 程序文件')
+    const editorActive = sourceFormat !== 'elf' && sourceUploadMode === 'editor'
+    // 超限错误已由编辑器内联展示，这里只负责阻止提交。
+    if (editorActive && sourceEditorSizeError(sourceCode)) return
+    if (editorActive ? !sourceCode.trim() : !file) {
+      setFileError(editorActive ? '请输入在线编辑代码，或改用文件上传' : '请选择 Linux x86_64 ELF 程序文件')
       return
     }
     uploadControllerRef.current?.abort()
@@ -211,6 +240,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       setDisplayName('')
       setDescription('')
       setFile(null)
+      setSourceCode('')
       await load()
       if (!isCurrentUpload()) return
       toast.success('Bot 上传成功')
@@ -410,7 +440,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       layout="account-my-bots"
       className="max-sm:[&_[data-slot=button]]:min-h-[44px] max-sm:[&_[data-slot=button]]:min-w-[44px] max-sm:[&_[data-slot=input]]:min-h-[44px] max-sm:[&_[data-slot=select-trigger]]:min-h-[44px]"
     >
-      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护运行状态。" />
+      <PageHeader title="我的 Bot" description="上传源码或 Linux x86_64 ELF，维护运行状态。" />
 
       {error && <ErrorMsg msg={error} />}
 
@@ -437,7 +467,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               </div>
               <div className="space-y-1.5">
                 <Label>程序类型</Label>
-                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceRuntime('') }}>
+                <Select value={sourceFormat} onValueChange={(v) => { setSourceFormat(v); setSourceEntry(''); setSourceRuntime(''); setSourceUploadMode('file'); setFile(null); setFileError('') }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -501,7 +531,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                   </span>
                 </details>
               </div>
-              {sourceFormat !== 'elf' && (
+              {sourceFormat !== 'elf' && sourceUploadMode === 'file' && (
                 <div className="space-y-1.5">
                   <Label htmlFor="upload-entry">入口文件（可选，默认见上）</Label>
                   <Input
@@ -547,38 +577,55 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
-              <label
-                htmlFor="upload-file"
-                className="flex min-h-[var(--control-height)] min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50 max-sm:min-h-11"
-              >
-                <span className="shrink-0 font-medium text-foreground">选择文件</span>
-                <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
-                <input
-                  id="upload-file"
- accept={sourceFormat === 'elf' ? undefined : '.zip,application/zip'}
-                  type="file"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null
-                    const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
-                    if (f && sizeError) {
-                      setFileError(sizeError)
-                      setFile(null)
-                      e.target.value = ''
-                      return
-                    }
-                    setFileError('')
-                    setFile(f)
-                  }}
-                  required
-                  className="sr-only"
+              {sourceFormat !== 'elf' && (
+                <SourceUploadModeToggle mode={sourceUploadMode} onModeChange={onUploadModeChange} />
+              )}
+              {sourceFormat !== 'elf' && sourceUploadMode === 'editor' ? (
+                <SourceEditorField
+                  id="upload-source"
+                  sourceFormat={sourceFormat}
+                  code={sourceCode}
+                  onCodeChange={setSourceCode}
                 />
-              </label>
-              <p className="text-xs text-muted-foreground">
-                {sourceFormat === 'elf'
-                    ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。`
-                    : '源码包内使用相对路径。路径穿越、符号链接与超过 500 个文件会被拒绝。你在平台云盘保存的文件，对局中可直接读取。'}
-              </p>
+              ) : (
+                <>
+                  <Label htmlFor="upload-file">程序文件{sourceFormat === 'elf' ? '（Linux x86_64 ELF）' : `（zip 源码包或单个源文件，最大 ${SOURCE_UPLOAD_MAX_LABEL}）`}</Label>
+                  <label
+                    htmlFor="upload-file"
+                    className="flex min-h-[var(--control-height)] min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50 max-sm:min-h-11"
+                  >
+                    <span className="shrink-0 font-medium text-foreground">选择文件</span>
+                    <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
+                    <input
+                      id="upload-file"
+                      accept={sourceFileAccept(sourceFormat)}
+                      type="file"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] ?? null
+                        const sizeError = f ? botUploadSizeError(f, sourceFormat) : null
+                        if (f && sizeError) {
+                          setFileError(sizeError)
+                          setFile(null)
+                          e.target.value = ''
+                          return
+                        }
+                        setFileError('')
+                        setFile(f)
+                        // 单文件直传入口固定为规范名；用户为 zip 填的显式
+                        // 入口不再适用，避免提交时被 400 拒绝。
+                        if (f && !f.name.toLowerCase().endsWith('.zip')) setSourceEntry('')
+                      }}
+                      required
+                      className="sr-only"
+                    />
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    {sourceFormat === 'elf'
+                      ? `仅接受 Linux x86_64 ELF，最大 ${BOT_UPLOAD_MAX_LABEL}；Windows .exe 和 macOS 程序不支持。`
+                      : '支持 zip 源码包，或与所选语言匹配的单个源文件；也可在在线编辑器中直接粘贴代码。源码包内使用相对路径；路径穿越、符号链接与超过 500 个文件会被拒绝。你在平台云盘保存的文件，对局中可直接读取。'}
+                  </p>
+                </>
+              )}
               {fileError && <p className="text-xs text-destructive">{fileError}</p>}
             </div>
             <BotUploadProgress

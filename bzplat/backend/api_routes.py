@@ -270,12 +270,19 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
                             "type": "string",
                             "default": "elf",
                             "enum": ["elf", "c", "cpp", "go", "python"],
-                            "description": "elf=预构建 ELF；其余为源码 zip 直传（平台编译/运行）",
+                            "description": (
+                                "elf=预构建 ELF；其余为源码上传——zip 包或"
+                                "与语言匹配的单个源文件（.c/.cpp/.cc/.cxx/.go/.py）"
+                            ),
                         },
                         "source_entry": {
                             "type": "string",
                             "default": "",
-                            "description": "源码 zip 内的入口文件（POSIX 相对路径；空=语言默认入口）",
+                            "description": (
+                                "源码 zip 内的入口文件（POSIX 相对路径；空=语言默认入口）。"
+                                "单文件直传入口固定为 main.c/main.cpp/main.go/main.py："
+                                "显式填写须等于该规范名，否则 400"
+                            ),
                         },
                         "source_runtime": {
                             "type": "string",
@@ -313,8 +320,19 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
                             "type": "string",
                             "default": "elf",
                             "enum": ["elf", "c", "cpp", "go", "python"],
+                            "description": (
+                                "源码上传——zip 包或与语言匹配的单个源文件"
+                                "（.c/.cpp/.cc/.cxx/.go/.py）"
+                            ),
                         },
-                        "source_entry": {"type": "string", "default": ""},
+                        "source_entry": {
+                            "type": "string",
+                            "default": "",
+                            "description": (
+                                "源码 zip 内的入口文件；空=语言默认入口。"
+                                "单文件直传入口固定为规范名，显式填写须等于该名"
+                            ),
+                        },
                         "source_runtime": {
                             "type": "string",
                             "default": "",
@@ -1463,6 +1481,9 @@ async def upload_bot(
                     await _stream_bot_upload(
                         staged, file, max_bytes=_source_upload_limit(source_format)
                     )
+                # 单文件直传会被 manager 归一化重写为 zip；审计记录用户
+                # 实际上传的原始大小，而不是包装后的 staged 尺寸。
+                uploaded_size = staged.size
                 bot = await _finish_upload_step_before_cancel(
                     asyncio.to_thread(
                         _bots(request).create_from_upload,
@@ -1479,6 +1500,7 @@ async def upload_bot(
                         source_entry=source_entry,
                         source_runtime=source_runtime,
                         source_builder=_new_source_builder(request),
+                        source_filename=file.filename or "",
                     )
                 )
             finally:
@@ -1513,7 +1535,7 @@ async def upload_bot(
     except PlatformRunnerError:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
-    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={staged.size}")
+    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={uploaded_size}")
     return {"bot": _with_bot_runnable(bot)}
 
 
@@ -1546,6 +1568,9 @@ async def upload_bot_version(
                     await _stream_bot_upload(
                         staged, file, max_bytes=_source_upload_limit(source_format)
                     )
+                # 同 bot_upload：审计记录用户上传的原始大小（单文件会被
+                # manager 重写为 zip，staged.size 此后不再是原始值）。
+                uploaded_size = staged.size
                 bot = await _finish_upload_step_before_cancel(
                     asyncio.to_thread(
                         _bots(request).upload_version,
@@ -1559,6 +1584,7 @@ async def upload_bot_version(
                         source_entry=source_entry,
                         source_runtime=source_runtime,
                         source_builder=_new_source_builder(request),
+                        source_filename=file.filename or "",
                     )
                 )
             finally:
@@ -1600,7 +1626,7 @@ async def upload_bot_version(
     except PlatformRunnerError:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
-    audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={staged.size}")
+    audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={uploaded_size}")
     return {"bot": _with_bot_runnable(bot)}
 
 

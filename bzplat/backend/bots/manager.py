@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 import time
+import zipfile
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from threading import Lock, RLock
@@ -35,10 +36,13 @@ from ..runtime.limits import (
 )
 from .classify import program_header_has_dynamic_interpreter
 from .source_build import (
+    FIXED_ZIP_DATE,
     SourceBuildError,
     ZIP_MAGIC,
     build_recipe,
     inspect_source_zip,
+    single_file_entry,
+    build_single_file_zip,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,46 @@ def _payload_size(raw: "bytes | StagedBotUpload") -> int:
     return len(raw)
 
 
+def _normalize_source_payload(
+    raw: "bytes | StagedBotUpload", *, source_format: str, source_filename: str
+):
+    """单文件直传归一化：非 zip 载荷在扩展名校验后包成单成员 zip。
+
+    ELF 路线与已是 zip 的载荷原样返回；暂存载荷在同一暂存目录内
+    流式重写（ZipFile.write 分块读写，进程内存仍与文件大小解耦），
+    随后调用方按 zip 尺寸复跑大小上限检查。
+    """
+    if source_format == "elf":
+        return raw
+    if _payload_size(raw) == 0:
+        raise BotError("invalid_size", "上传文件不能为空")
+    if isinstance(raw, StagedBotUpload):
+        with Path(raw.path).open("rb") as f:
+            head = f.read(4)
+    else:
+        head = bytes(raw[:4])
+    if head == ZIP_MAGIC:
+        return raw
+    entry = single_file_entry(source_format, source_filename)
+    if isinstance(raw, StagedBotUpload):
+        zipped = raw.path.with_name(raw.path.name + ".zip")
+        info = zipfile.ZipInfo(entry, date_time=FIXED_ZIP_DATE)
+        info.external_attr = 0o644 << 16
+        try:
+            # ZipFile.open 流式写入：内存与文件大小解耦，且与 bytes 路径
+            # 共用固定时间戳/属性，同一输入恒产生同一 zip。
+            with zipfile.ZipFile(zipped, "w", zipfile.ZIP_DEFLATED) as z:
+                with z.open(info, "w") as dst, Path(raw.path).open("rb") as src:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+            os.replace(zipped, raw.path)
+        finally:
+            if zipped.exists():
+                zipped.unlink()
+        raw.size = Path(raw.path).stat().st_size
+        return raw
+    return build_single_file_zip(bytes(raw), entry)
+
+
 def _classify_upload(raw: "bytes | StagedBotUpload", *, source_format: str = "elf"):
     """Classify once at the upload boundary and expose a stable API error.
 
@@ -102,7 +146,7 @@ def _classify_upload(raw: "bytes | StagedBotUpload", *, source_format: str = "el
             if head != ZIP_MAGIC:
                 raise BotError(
                     "invalid_source_zip",
-                    "源码上传必须是 zip 包（入口文件在包内）",
+                    "源码上传须为 zip 包，或与所选语言匹配的单个源文件",
                 )
             # 占位元数据：bots.format/os/arch 恒为 elf/linux/amd64（真实产物
             # 在 _prepare_source_version 中分类），语义列不承载源码信息。
@@ -250,6 +294,7 @@ class BotManager:
         source_entry: str = "",
         source_runtime: str = "",
         source_builder=None,
+        source_filename: str = "",
     ) -> dict:
         source_runtime = _normalize_source_runtime(source_runtime, source_format)
         if not _NAME_RE.match(name or ""):
@@ -265,6 +310,9 @@ class BotManager:
         rmode = (runtime_mode or DEFAULT_RUNTIME_MODE).strip().lower()
         if rmode not in VALID_RUNTIME_MODES:
             raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
+        raw = _normalize_source_payload(
+            raw, source_format=source_format, source_filename=source_filename
+        )
         size = _payload_size(raw)
         limit = (
             MAX_BYTES if source_format == "elf" else SOURCE_UPLOAD_MAX_BYTES
@@ -335,7 +383,8 @@ class BotManager:
         self, bot_id: int, owner_id: int, raw: "bytes | StagedBotUpload", *,
         upload_note: str = "", runtime_mode: str | None = None, binary_runner=None,
         source_format: str = "elf", source_entry: str = "",
-        source_runtime: str = "", source_builder=None,
+        source_runtime: str = "", source_builder=None, source_filename: str = "",
+
     ) -> dict:
         source_runtime = _normalize_source_runtime(source_runtime, source_format)
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
@@ -343,6 +392,9 @@ class BotManager:
         if not bot or bot["owner_id"] != owner_id:
             raise BotError("not_found", "bot 不存在")
         self._require_owner_live(bot)
+        raw = _normalize_source_payload(
+            raw, source_format=source_format, source_filename=source_filename
+        )
         size = _payload_size(raw)
         limit = (
             MAX_BYTES if source_format == "elf" else SOURCE_UPLOAD_MAX_BYTES
