@@ -443,6 +443,8 @@ class BotManager:
 
         返回 (checksum, size, runtime_image, build_recipe_json)。编译型语言
         产物必须是静态 ELF；python 持久化 src/ 目录并生成 launcher 脚本。
+        解压树统一归一为目录 0755/文件 0644（容器以 65534 运行，/app/src
+        是目录 bind mount，进程 umask 0077 下的 0700/0600 不可读）。
         temp_dir 内的所有内容（bot.bin、src/、source.zip）随后随版本目录
         原子晋升，匹配期的源码卷即 <版本目录>/src。
         """
@@ -478,6 +480,20 @@ class BotManager:
                 "invalid_source_zip", "源码包损坏或校验失败，请重新打包上传"
             ) from exc
 
+        # python 预检（temp_dir/src）与对局挂载（<版本目录>/src）都是目录
+        # bind mount 进非特权容器（65534）：umask 0077/mkdtemp 下的
+        # 0700/0600 解压树必须先归一，python 与编译语言共用。
+        src_dir.chmod(0o755)
+        for child in src_dir.rglob("*"):
+            try:
+                child.chmod(0o644 if child.is_file() else 0o755)
+            except OSError as exc:
+                # 归一失败会让预检以 Permission denied 失败（fail-closed），
+                # 但留下可检索的运维线索优于静默。
+                logger.warning(
+                    "source tree chmod failed path=%s error=%s", child, exc
+                )
+
         if spec.language == "python":
             import shlex as _shlex
 
@@ -498,14 +514,9 @@ class BotManager:
             )
         out_dir = temp_dir / "out"
         out_dir.mkdir()
-        # 构建容器以非特权用户（65534）运行：源码目录可读、产物目录可写。
-        src_dir.chmod(0o755)
+        # 构建容器同为非特权用户（65534）：产物目录需要可写（源码树已在
+        # 解压后统一归一为可读）。
         out_dir.chmod(0o777)
-        for child in src_dir.rglob("*"):
-            try:
-                child.chmod(0o644 if child.is_file() else 0o755)
-            except OSError:
-                pass
         source_builder(src_dir, out_dir, recipe)
         artifact = out_dir / "bot"
         if not artifact.is_file() or artifact.stat().st_size < 4:
@@ -531,6 +542,9 @@ class BotManager:
             )
         artifact.replace(temp_dest)
         temp_dest.chmod(0o755)
+        # 构建工作目录不随版本晋升：0777 的 out/ 留在版本目录里既是
+        # 冗余也是 world-writable 残留。
+        shutil.rmtree(out_dir, ignore_errors=True)
         digest = hashlib.sha256()
         total = 0
         with temp_dest.open("rb") as f:
