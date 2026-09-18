@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
@@ -25,7 +26,12 @@ def test_bots_table_has_no_is_public_column(tmp_path):
     assert "is_public" not in cols, "bots 表不应再有 is_public 列"
 
 
-def test_upload_bot_succeeds_without_is_public(tmp_path):
+def test_upload_bot_succeeds_without_is_public(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # 上传会触发预检：显式启用本机 runner，不依赖其它测试文件泄漏的
+    # BZ_BOT_LOCAL（并行/独立运行该文件时原先会失败）。
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
     db = str(tmp_path / "app.db")
     app = create_app(db_path=db)
     store = app.state.store
