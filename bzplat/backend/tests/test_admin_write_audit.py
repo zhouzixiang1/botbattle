@@ -28,7 +28,8 @@ def _setup(tmp_path, monkeypatch):
     orig = api_routes.audit_log
 
     def capture(request, action, **kwargs):
-        calls.append({"action": action, "result": "ok", **kwargs})
+        # 不默认补 result=ok：调用方漏传时测试能发现（ok 路径要求显式）。
+        calls.append({"action": action, **kwargs})
         # 不落盘：只验证调用契约，不依赖日志文件系统状态。
         return orig(request, action, **kwargs)
 
@@ -148,3 +149,155 @@ def test_admin_patch_site_audits_changed_keys_only(tmp_path, monkeypatch):
     assert noop.status_code == 200
     hits = [c for c in calls if c["action"] == "admin_patch_site"]
     assert hits[-1]["detail"] == "noop"
+
+
+def test_admin_comment_delete_audits_only_admin_force_path(tmp_path, monkeypatch):
+    """admin 强删他人评论必须留痕；作者自删/非 admin 403 不产生 admin 审计。"""
+    import bzplat.backend.main as main_mod
+
+    app = create_app(db_path=str(tmp_path / "audit.db"))
+    store = app.state.store
+    admin = store.create_user(
+        "audit-admin", "audit-admin@example.com",
+        hash_password("pw123456"), role="admin",
+    )
+    store.update_user(admin["id"], email_verified=1)
+    author = store.create_user(
+        "c-author", "c-author@example.com", hash_password("pw123456")
+    )
+    store.update_user(author["id"], email_verified=1)
+    stranger = store.create_user(
+        "c-stranger", "c-stranger@example.com", hash_password("pw123456")
+    )
+    store.update_user(stranger["id"], email_verified=1)
+    _, token = app.state.auth.authenticate("audit-admin", "pw123456")
+    _, author_token = app.state.auth.authenticate("c-author", "pw123456")
+    _, stranger_token = app.state.auth.authenticate("c-stranger", "pw123456")
+
+    from pathlib import Path as _P
+
+    bin_path = str(tmp_path / "cmt-bot.elf")
+    _P(bin_path).write_bytes(b"fixture")
+    bot_a = store.create_bot(author["id"], "cmta", binary_path=bin_path,
+                             format="elf", game_id="holdem")
+    bot_b = store.create_bot(author["id"], "cmtb", binary_path=bin_path,
+                             format="elf", game_id="holdem")
+    match = store.create_match("holdem", bot_a_id=bot_a["id"], bot_b_id=bot_b["id"])
+    comment = store.add_comment(
+        author["id"], "match", match["id"], "内容"
+    )
+
+    calls: list[dict] = []
+    import bzplat.backend.api_routes as api_routes_mod
+
+    orig = api_routes_mod.audit_log
+
+    def capture(request, action, **kwargs):
+        calls.append({"action": action, **kwargs})
+        return orig(request, action, **kwargs)
+
+    monkeypatch.setattr(api_routes_mod, "audit_log", capture)
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    admin_h = {"Authorization": f"Bearer {token}"}
+    author_h = {"Authorization": f"Bearer {author_token}"}
+
+    # 作者自删自己的一条新评论：200，无 admin 审计。
+    own = store.add_comment(author["id"], "match", match["id"], "自己的")
+    r = client.delete(f"/api/comments/{own['id']}", headers=author_h)
+    assert r.status_code == 200
+    assert all(c["action"] != "admin_comment_delete" for c in calls)
+
+    # 非 admin 删他人评论：403，无审计。
+    r = client.delete(f"/api/comments/{comment['id']}",
+                      headers={"Authorization": f"Bearer {stranger_token}"})
+    assert r.status_code == 403
+    assert all(c["action"] != "admin_comment_delete" for c in calls)
+
+    # admin 强删：审计 ok。
+    r = client.delete(f"/api/comments/{comment['id']}", headers=admin_h)
+    assert r.status_code == 200, r.text
+    hit = [c for c in calls if c["action"] == "admin_comment_delete"]
+    assert len(hit) == 1
+    assert hit[0].get("result") == "ok"
+    store.close()
+
+
+def test_admin_rejection_paths_leave_fail_audit(tmp_path, monkeypatch):
+    """set_role/delete_user/delete_bot 的 400/404/409 拒绝路径同样留痕。"""
+    store, client, headers, admin, victim, calls = _setup(tmp_path, monkeypatch)
+
+    r = client.post(f"/api/admin/users/{victim['id']}/role?role=superuser",
+                    headers=headers)
+    assert r.status_code == 400
+    r = client.post("/api/admin/users/999999/role?role=user", headers=headers)
+    assert r.status_code == 404
+    r = client.delete(f"/api/admin/users/{admin['id']}", headers=headers)
+    assert r.status_code == 400
+    r = client.delete("/api/admin/users/999999", headers=headers)
+    assert r.status_code == 404
+    r = client.delete("/api/admin/bots/999999", headers=headers)
+    assert r.status_code == 404
+
+    def fails(action):
+        return [c for c in calls if c["action"] == action and c.get("result") == "fail"]
+
+    assert len(fails("admin_set_role")) == 2
+    assert {c["detail"] for c in fails("admin_set_role")} == {"invalid_role", "not_found"}
+    assert len(fails("admin_delete_user")) == 2
+    assert {c["detail"] for c in fails("admin_delete_user")} == {"self_delete", "not_found"}
+    assert len(fails("admin_delete_bot")) == 1
+    assert fails("admin_delete_bot")[0]["detail"] == "not_found"
+
+
+def test_admin_patch_site_partial_commit_audits_fail(tmp_path, monkeypatch):
+    """set_setting 中途失败：已提交键的 partial 审计必须留痕。"""
+    store, client, headers, admin, victim, calls = _setup(tmp_path, monkeypatch)
+
+    real_set = store.set_setting
+    state = {"n": 0}
+
+    def flaky(key, value):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise RuntimeError("simulated mid-commit failure")
+        return real_set(key, value)
+
+    from fastapi.testclient import TestClient as _TC
+
+    quiet = _TC(client.app, raise_server_exceptions=False)
+    store.set_setting = flaky  # 实例级影子，仅影响本测试
+    try:
+        r = quiet.patch("/api/admin/settings/site", headers=headers,
+                        json={"name": "新名字", "announcement": "公告"})
+        assert r.status_code == 500
+    finally:
+        del store.set_setting  # 移除实例影子
+    hit = [c for c in calls if c["action"] == "admin_patch_site"]
+    assert len(hit) == 1
+    assert hit[0]["result"] == "fail"
+    assert hit[0]["detail"] == "partial:name"
+
+
+def test_admin_validation_rejected_422_is_audited(tmp_path, monkeypatch):
+    """Pydantic 层 422（handler 前）：/api/admin/* 写方法留痕，无 input 回显。"""
+    import bzplat.backend.security as security_mod
+
+    store, client, headers, admin, victim, calls = _setup(tmp_path, monkeypatch)
+    orig = security_mod.audit_log
+
+    def capture(request, action, **kwargs):
+        calls.append({"action": action, **kwargs})
+        return orig(request, action, **kwargs)
+
+    monkeypatch.setattr(security_mod, "audit_log", capture)
+
+    r = client.patch(f"/api/admin/users/{victim['id']}",
+                     headers=headers, json={"is_active": "maybe"})
+    assert r.status_code == 422
+    hit = [c for c in calls if c["action"] == "admin_validation_rejected"]
+    assert len(hit) == 1
+    assert hit[0]["result"] == "fail"
+    assert hit[0]["target"] == f"/api/admin/users/{victim['id']}"
+    assert "detail" not in hit[0]  # 不回显任何请求内容

@@ -527,6 +527,16 @@ def create_app(
         # failure. ASCII JSON escaping is lossless and always UTF-8 encodable.
         errors = exc.errors()
         path = request.url.path
+        if (
+            path.startswith("/api/admin/")
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        ):
+            # Pydantic 层 422 发生在路由 handler 之前，端点内的审计不可达；
+            # 特权写端点的请求形状被拒同样需要留痕。不回显任何 input。
+            from bzplat.backend.security import audit_log
+
+            audit_log(request, "admin_validation_rejected",
+                      result="fail", target=path)
         if path == "/api/auth" or path.startswith("/api/auth/"):
             # Authentication bodies contain passwords, verification codes and
             # personal identifiers. Pydantic's diagnostic-only ``input``,
