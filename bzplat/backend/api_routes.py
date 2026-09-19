@@ -3615,17 +3615,28 @@ def delete_comment(comment_id: int, request: Request, user=Depends(require_user)
     # 存在但非作者→admin 可强删 / 非 admin 403。用只读 exists 区分（不破坏性删除）。
     exists = store.comment_exists(comment_id)
     if not exists:
+        if user.get("role") == "admin":
+            # admin 对不存在目标的特权写尝试同样留痕（普通用户的 404 不审计）。
+            audit_log(request, "admin_comment_delete", result="fail",
+                      user=user.get("username"), target=comment_id,
+                      detail="not_found")
         raise HTTPException(404, "评论不存在")
     if user.get("role") != "admin":
         raise HTTPException(403, "无权删除该评论")
     # admin 强删（无视作者）。这是隐藏在非 /api/admin 前缀下的特权破坏性写，
-    # 与其余 admin 写端点同标准：成功与失败都审计。
+    # 与其余 admin 写端点同标准：成功与失败都审计。exists 与删除之间的
+    # 竞态（返回 False）同样落 fail 审计，绝不记与事实相反的 ok。
     try:
-        store.delete_comment_admin(comment_id)
+        deleted = store.delete_comment_admin(comment_id)
     except Exception:
         audit_log(request, "admin_comment_delete", result="fail",
                   user=user.get("username"), target=comment_id)
         raise
+    if not deleted:
+        audit_log(request, "admin_comment_delete", result="fail",
+                  user=user.get("username"), target=comment_id,
+                  detail="not_found")
+        raise HTTPException(404, "评论不存在")
     audit_log(request, "admin_comment_delete", result="ok",
               user=user.get("username"), target=comment_id)
     return {"ok": True}

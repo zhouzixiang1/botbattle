@@ -29,9 +29,10 @@ def _setup(tmp_path, monkeypatch):
 
     def capture(request, action, **kwargs):
         # 不默认补 result=ok：调用方漏传时测试能发现（ok 路径要求显式）。
+        # 不透传 orig：本文件全部断言只依赖 calls，且不向真实 logs/audit.log
+        # 写入测试数据（隔离测试不应污染运行环境日志）。
         calls.append({"action": action, **kwargs})
-        # 不落盘：只验证调用契约，不依赖日志文件系统状态。
-        return orig(request, action, **kwargs)
+        return None
 
     monkeypatch.setattr(api_routes, "audit_log", capture)
     from fastapi.testclient import TestClient
@@ -194,7 +195,7 @@ def test_admin_comment_delete_audits_only_admin_force_path(tmp_path, monkeypatch
 
     def capture(request, action, **kwargs):
         calls.append({"action": action, **kwargs})
-        return orig(request, action, **kwargs)
+        return None
 
     monkeypatch.setattr(api_routes_mod, "audit_log", capture)
     from fastapi.testclient import TestClient
@@ -221,6 +222,15 @@ def test_admin_comment_delete_audits_only_admin_force_path(tmp_path, monkeypatch
     hit = [c for c in calls if c["action"] == "admin_comment_delete"]
     assert len(hit) == 1
     assert hit[0].get("result") == "ok"
+
+    # admin 删不存在的评论：404 且留 not_found fail 审计（覆盖 exists 与
+    # 删除之间的竞态——返回 False 绝不记 ok）。
+    r = client.delete("/api/comments/999999", headers=admin_h)
+    assert r.status_code == 404
+    hit2 = [c for c in calls if c["action"] == "admin_comment_delete"]
+    assert len(hit2) == 2
+    assert hit2[1].get("result") == "fail"
+    assert hit2[1]["detail"] == "not_found"
     store.close()
 
 
@@ -289,7 +299,7 @@ def test_admin_validation_rejected_422_is_audited(tmp_path, monkeypatch):
 
     def capture(request, action, **kwargs):
         calls.append({"action": action, **kwargs})
-        return orig(request, action, **kwargs)
+        return None
 
     monkeypatch.setattr(security_mod, "audit_log", capture)
 

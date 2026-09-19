@@ -528,15 +528,25 @@ def create_app(
         errors = exc.errors()
         path = request.url.path
         if (
-            path.startswith("/api/admin/")
+            (path == "/api/admin" or path.startswith("/api/admin/"))
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
         ):
             # Pydantic 层 422 发生在路由 handler 之前，端点内的审计不可达；
             # 特权写端点的请求形状被拒同样需要留痕。不回显任何 input。
-            from bzplat.backend.security import audit_log
+            # 字段/path/query 类校验失败发生在 require_admin 之后（请求者已
+            # 认证），但 handler 内拿不到解析后的身份对象，审计行只有
+            # ip+path；json_invalid 类未认证可达，本就无身份。审计自身
+            # fail-open：绝不能让日志故障把 422 降级成 500（auth 脱敏
+            # 分支也在后面，不能被波及）。
+            try:
+                from bzplat.backend.security import audit_log
 
-            audit_log(request, "admin_validation_rejected",
-                      result="fail", target=path)
+                audit_log(request, "admin_validation_rejected",
+                          result="fail", target=path)
+            except Exception:
+                logger.warning(
+                    "admin 422 audit failed path=%s", path, exc_info=True
+                )
         if path == "/api/auth" or path.startswith("/api/auth/"):
             # Authentication bodies contain passwords, verification codes and
             # personal identifiers. Pydantic's diagnostic-only ``input``,
