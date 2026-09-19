@@ -84,6 +84,8 @@ class ExecutionDispatcher:
             if max_sandbox_units is None
             else int(max_sandbox_units)
         )
+        # claim 空转原因的翻转 memo：同原因不重复记，拿下一单即复位。
+        self._last_claim_denial: str | None = None
         self.max_sandbox_units = max(
             1,
             min(
@@ -555,6 +557,41 @@ class ExecutionDispatcher:
             except ValueError:
                 logger.info("cancel converged elsewhere match=%s", match_id)
 
+    @staticmethod
+    def _claim_wait_seconds(job: dict) -> int:
+        """claimed_at - created_at（秒）；解析失败返回 -1 供排障辨认。"""
+        from datetime import datetime as _dt
+
+        try:
+            created = _dt.fromisoformat(str(job.get("created_at") or ""))
+            claimed = _dt.fromisoformat(str(job.get("claimed_at") or ""))
+        except ValueError:
+            return -1
+        return max(0, int((claimed - created).total_seconds()))
+
+    def _log_claim(self, job: dict, claim_class: str) -> None:
+        # 入队→领起的等待时长与 frozen source/match 关联键：回答
+        # 「我的比赛为何还没跑」的日志侧基准事件。
+        logger.info(
+            "execution claimed public_id=%s source=%s match=%s attempt=%s "
+            "waited=%ss class=%s",
+            job.get("public_id"), job.get("source"),
+            job.get("current_match_id"), job.get("attempt_count"),
+            self._claim_wait_seconds(job), claim_class,
+        )
+        self._last_claim_denial = None
+
+    def _note_claim_denial(self, claim_class: str) -> None:
+        reason = getattr(self.repo, "last_claim_denial", None)
+        key = f"{claim_class}:{reason}"
+        if key == self._last_claim_denial:
+            return
+        self._last_claim_denial = key
+        logger.info(
+            "execution claim idle class=%s reason=%s",
+            claim_class, reason or "unknown",
+        )
+
     async def run_once(self) -> dict:
         if self._recovering_application_state:
             return {"outcome": "recovering"}
@@ -632,7 +669,10 @@ class ExecutionDispatcher:
                     job["public_id"],
                 )
                 break
+            self._log_claim(job, "foreground")
             claimed += 1
+        if claimed == 0:
+            self._note_claim_denial("foreground")
         refill: dict = {"outcome": "capability_disabled", "inserted": 0}
         if self.auto_capability_enabled:
             refill = self.repo.refill_auto(
@@ -670,7 +710,10 @@ class ExecutionDispatcher:
                         auto_job["public_id"],
                     )
                 else:
+                    self._log_claim(auto_job, "auto")
                     claimed += 1
+            else:
+                self._note_claim_denial("auto")
         return {
             "outcome": "ok",
             "claimed": claimed,
