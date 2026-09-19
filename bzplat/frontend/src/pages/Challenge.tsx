@@ -588,6 +588,39 @@ export default function Challenge() {
     )
   }, [execution, forgetExecution, nav])
 
+  // 桌面（≥1280px）保持既有单屏双列表单；窄屏走三步向导（对局 → 座位 → 确认）。
+  // 断点状态与 HumanPlay 的 desktopRail 同一模式：SSR 安全的惰性初值 + 变化监听。
+  // 注意：这些 hook 必须位于下方 `if (!isLoggedIn)` 提前返回之前——会话在挂载中
+  // 过期（轮询 401 → setUser(null)）会翻转 isLoggedIn 重渲染，提前返回会跳过
+  // hook 导致 React 抛错白屏（仓库无 ErrorBoundary 兜底）。
+  const [desktopLayout, setDesktopLayout] = useState(
+    () => window.matchMedia('(min-width: 1280px)').matches,
+  )
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1280px)')
+    const syncBreakpoint = () => setDesktopLayout(media.matches)
+    syncBreakpoint()
+    media.addEventListener('change', syncBreakpoint)
+    return () => media.removeEventListener('change', syncBreakpoint)
+  }, [])
+  // 提交只发生在第 3 步，因此从执行请求返回表单时停留在第 3 步：
+  // 与游戏/时限/座位选择一样属于「可立即重发」的恢复点，是预期行为。
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1)
+  // 下一步按钮在进入第 3 步时卸载；把焦点移到「上一步」，键盘/读屏
+  // 用户不丢失位置（否则焦点跌落到 body）。
+  const prevButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!desktopLayout && wizardStep === 3) {
+      // 只在焦点已跌落到 body（按钮卸载）或仍在本表单内时接住；
+      // 桌面→窄屏 resize 不抢用户落在向导之外的焦点。
+      const active = document.activeElement
+      const form = prevButtonRef.current?.closest('form')
+      if (active === document.body || (form && form.contains(active))) {
+        prevButtonRef.current?.focus()
+      }
+    }
+  }, [desktopLayout, wizardStep])
+
   const cancelExecution = async () => {
     if (!execution || executionAction || execution.request.cancel_requested) return
     if (!await confirm({
@@ -868,31 +901,11 @@ export default function Challenge() {
       )
   const submissionReady = ready && timeControlReady && !timeControlsLoading && !timeControlsError
 
-  // 桌面（≥1280px）保持既有单屏双列表单；窄屏走三步向导（对局 → 座位 → 确认）。
-  // 断点状态与 HumanPlay 的 desktopRail 同一模式：SSR 安全的惰性初值 + 变化监听。
-  const [desktopLayout, setDesktopLayout] = useState(
-    () => window.matchMedia('(min-width: 1280px)').matches,
-  )
-  useEffect(() => {
-    const media = window.matchMedia('(min-width: 1280px)')
-    const syncBreakpoint = () => setDesktopLayout(media.matches)
-    syncBreakpoint()
-    media.addEventListener('change', syncBreakpoint)
-    return () => media.removeEventListener('change', syncBreakpoint)
-  }, [])
-  // 提交只发生在第 3 步，因此从执行请求返回表单时停留在第 3 步：
-  // 与游戏/时限/座位选择一样属于「可立即重发」的恢复点，是预期行为。
-  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1)
   // 分区保持挂载、仅 CSS 隐藏：游戏/时限选择器不因分步重挂载（避免重复拉取
   // /api/games），display:none 同时把隐藏分区移出 Tab 顺序与可访问树。
+  // （向导状态 hook 与断点监听在组件顶部声明，见 isLoggedIn 提前返回之前。）
   const stepClassName = (step: 1 | 2 | 3) =>
     !desktopLayout && wizardStep !== step ? 'hidden' : undefined
-  // 下一步按钮在进入第 3 步时卸载；把焦点移到「上一步」，键盘/读屏
-  // 用户不丢失位置（否则焦点跌落到 body）。
-  const prevButtonRef = useRef<HTMLButtonElement | null>(null)
-  useEffect(() => {
-    if (!desktopLayout && wizardStep === 3) prevButtonRef.current?.focus()
-  }, [desktopLayout, wizardStep])
   const wizardSteps = [
     { step: 1 as const, label: '对局' },
     { step: 2 as const, label: '座位' },
@@ -975,6 +988,11 @@ export default function Challenge() {
                 className="flex flex-wrap items-center justify-between gap-2 sm:gap-3"
                 data-testid="challenge-wizard-nav"
               >
+                {/* 步骤切换对读屏可感知：aria-current 属性变化多数读屏不播报，
+                    用视觉隐藏 live 区域播报当前步骤。 */}
+                <p className="sr-only" aria-live="polite">
+                  {`第 ${wizardStep} 步，共 3 步：${wizardSteps[wizardStep - 1].label}`}
+                </p>
                 <ol className="flex min-w-0 items-center gap-1.5 text-xs" aria-label="配置步骤">
                   {wizardSteps.map(({ step, label }, index) => (
                     <li
@@ -1204,7 +1222,21 @@ export default function Challenge() {
               </p>
             </div>
 
-            {/* 底部通栏：运行提示 / 错误 / 开始按钮（跨左右两列） */}
+            {/* 错误/连接问题常驻可见：第 1/2 步触发的错误若渲染在隐藏的
+                第 3 步分区里，窄屏用户看不到任何解释（分区 display:none
+                同时移出可访问树，role=alert 也不播报）。 */}
+            {(agentError || error) && (
+              <div className="min-w-0 space-y-2 xl:col-span-2">
+                {agentError && <ErrorMsg msg={agentError} />}
+                {error && (
+                  <div ref={errorAlertRef} role="alert" tabIndex={-1}>
+                    <ErrorMsg msg={error} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 底部通栏：运行提示 / 开始按钮（跨左右两列，仅第 3 步可见） */}
             <div className={cn('min-w-0 space-y-2 xl:col-span-2 xl:border-t xl:border-border xl:pt-3', stepClassName(3))}>
               {usesLocalBot && (
                 <div className="flex min-w-0 items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs" role="status">
@@ -1216,13 +1248,6 @@ export default function Challenge() {
                 </div>
               )}
 
-              {agentError && <ErrorMsg msg={agentError} />}
-
-              {error && (
-                <div ref={errorAlertRef} role="alert" tabIndex={-1}>
-                  <ErrorMsg msg={error} />
-                </div>
-              )}
               <Button
                 type="submit"
                 disabled={busy || !submissionReady}
