@@ -438,7 +438,13 @@ async def reset_password(req: ResetPasswordReq, request: Request) -> dict:
             req.email_or_username, req.code, req.new_password
         )
     except AuthError as exc:
-        audit_log(request, "reset_password", result="fail", target=req.email_or_username, detail=exc.code)
+        audit_log(
+            request, "reset_password", result="fail",
+            # target 用已解析的账号名；no_user 或解析不到时不落原始输入
+            # （用户可能提交的是邮箱，属于 PII）。
+            target=getattr(exc, "username", "") or None,
+            detail=exc.code,
+        )
         raise _err(exc) from exc
     audit_log(request, "reset_password", result="ok", user=user.get("username"))
     return {

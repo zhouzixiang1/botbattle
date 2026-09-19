@@ -92,11 +92,32 @@ class _ResponseScopeCleanupStreamingResponse(StreamingResponse):
             self._cleanup()
 
 
+def _ws_peer_ip(websocket: WebSocket) -> str:
+    client = getattr(websocket, "client", None)
+    host = getattr(client, "host", "") if client else ""
+    host = str(host or "").strip()
+    return host[:64] if host else "unknown"
+
+
+def _ws_origin_field(websocket: WebSocket) -> str:
+    """Origin 头是公开的站点声明：归一化截断后可入日志（区分配置错 vs 恶意）。"""
+    origin = str(websocket.headers.get("origin") or "").strip()
+    return origin[:128] if origin else "-"
+
+
 async def _deny_local_ai_websocket(
-    websocket: WebSocket, *, reason: str = "invalid_credentials"
+    websocket: WebSocket, *, reason: str = "invalid_credentials",
+    stage: str = "",
 ) -> None:
     """Reject a connector during HTTP upgrade without exposing credentials."""
 
+    # 拒绝归因：此前六个 deny 点完全静默（连「被拒」都不可见）。reason 是
+    # 稳定协议码、stage 是调用点标签；绝不记 token/query 内容。
+    logger.warning(
+        "ws local-ai denied stage=%s reason=%s ip=%s origin=%s",
+        stage or "unknown", reason, _ws_peer_ip(websocket),
+        _ws_origin_field(websocket),
+    )
     # Keep the rejection on the baseline ASGI WebSocket contract.  Uvicorn's
     # SansIO backend can emit duplicate HTTP entity headers and leave its
     # handshake state incomplete after ``websocket.http.response`` denial
@@ -105,9 +126,16 @@ async def _deny_local_ai_websocket(
     await websocket.close(code=1008, reason=reason)
 
 
-async def _deny_human_play_websocket(websocket: WebSocket) -> None:
+async def _deny_human_play_websocket(
+    websocket: WebSocket, *, match_id: str = "", stage: str = "",
+) -> None:
     """Return one existence-independent browser handshake rejection."""
 
+    logger.warning(
+        "ws play denied stage=%s match=%s ip=%s origin=%s",
+        stage or "unknown", match_id or "-", _ws_peer_ip(websocket),
+        _ws_origin_field(websocket),
+    )
     await websocket.accept()
     await websocket.send_json({
         "type": "reject",
@@ -2487,7 +2515,9 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         "token" in websocket.query_params
         or not websocket_origin_allowed(websocket.headers.get("origin"))
     ):
-        await _deny_human_play_websocket(websocket)
+        await _deny_human_play_websocket(
+            websocket, match_id=str(match_id), stage="origin_or_token"
+        )
         return
 
     # A trusted-peer gate precedes cookie/session parsing and every SQLite
@@ -2496,7 +2526,9 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     # ceiling. Origin/query-token rejection intentionally remains even earlier.
     gate = getattr(websocket.app.state, "human_play_handshake_gate", None)
     if gate is None:
-        await _deny_human_play_websocket(websocket)
+        await _deny_human_play_websocket(
+            websocket, match_id=str(match_id), stage="handshake_gate_missing"
+        )
         return
     trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
         "1", "true", "yes", "on",
@@ -2522,7 +2554,9 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     else:
         peer_ip = peer_ip.strip()
     if not await gate.begin(peer_ip):
-        await _deny_human_play_websocket(websocket)
+        await _deny_human_play_websocket(
+            websocket, match_id=str(match_id), stage="handshake_rate_limited"
+        )
         return
     authorized = False
     token: str | None = None
@@ -2546,7 +2580,9 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     if not authorized:
         # Network writes are outside the scarce pre-auth reservation. A peer
         # that stops reading its denial cannot hold an SQLite admission slot.
-        await _deny_human_play_websocket(websocket)
+        await _deny_human_play_websocket(
+            websocket, match_id=str(match_id), stage="not_authorized"
+        )
         return
 
     await websocket.accept()
@@ -2732,7 +2768,7 @@ async def local_ai_websocket(websocket: WebSocket):
 
     service = getattr(websocket.app.state, "local_ai_service", None)
     if service is None:
-        await _deny_local_ai_websocket(websocket)
+        await _deny_local_ai_websocket(websocket, stage="service_unavailable")
         return
 
     trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
@@ -2751,7 +2787,7 @@ async def local_ai_websocket(websocket: WebSocket):
         ),
     )
     if not await service.handshake_gate.begin(peer_ip):
-        await _deny_local_ai_websocket(websocket)
+        await _deny_local_ai_websocket(websocket, stage="handshake_rate_limited")
         return
 
     agent = None
@@ -2767,13 +2803,13 @@ async def local_ai_websocket(websocket: WebSocket):
             "token" in websocket.query_params
             or websocket.headers.get("origin") is not None
         ):
-            await _deny_local_ai_websocket(websocket)
+            await _deny_local_ai_websocket(websocket, stage="origin_or_token")
             return
         agent = service.authenticate(token)
         if agent is None:
             # Closing before accept produces an HTTP 403 handshake denial; bad
             # credentials never consume a long-lived WebSocket.
-            await _deny_local_ai_websocket(websocket)
+            await _deny_local_ai_websocket(websocket, stage="invalid_credentials")
             return
         offered_subprotocols = {
             item.strip()
@@ -2787,7 +2823,8 @@ async def local_ai_websocket(websocket: WebSocket):
             # an older connector can never look runnable and then lose a Match
             # merely because it does not understand the two-phase clock.
             await _deny_local_ai_websocket(
-                websocket, reason="client_protocol_upgrade_required"
+                websocket, reason="client_protocol_upgrade_required",
+                stage="client_protocol_required",
             )
             return
     finally:
@@ -2799,7 +2836,7 @@ async def local_ai_websocket(websocket: WebSocket):
     try:
         connection, generation = await service.connect(agent)
     except (LocalAIConnectionError, RuntimeError, ValueError):
-        await _deny_local_ai_websocket(websocket)
+        await _deny_local_ai_websocket(websocket, stage="connect_conflict")
         return
 
     public_id = str(agent["public_id"])

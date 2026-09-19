@@ -833,6 +833,21 @@ class BotManager:
                                 drive_root.parent, ignore_errors=True
                             )
                     if not ok:
+                        # 预检拒绝归因（AGHX 排障实况：bot session started 与
+                        # stderr 尾部都不带身份字段，只能按秒跨日志对猜）：
+                        # detail 已是压平文本，日志再截 300 防超长。
+                        flattened = " ".join(
+                            "".join(
+                                ch if (ch.isprintable() or ch.isspace()) else " "
+                                for ch in str(detail)
+                            ).split()
+                        )[:300]
+                        logger.warning(
+                            "bot preflight rejected bot=%s game=%s mode=%s "
+                            "source_format=%s detail=%s",
+                            bot_id, effective_game_id, runtime_mode,
+                            source_format or "elf", flattened,
+                        )
                         raise BotError(
                             "preflight_failed", f"Bot 预检失败：{detail}"
                         )
