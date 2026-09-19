@@ -75,5 +75,43 @@ test('challenge form stays single-screen at desktop width', async ({ page }) => 
   await expect(form.getByTestId('challenge-my-seat')).toBeVisible()
   await expect(form.getByRole('button', { name: '开始对局', exact: true })).toBeVisible()
 
-  await monitor.expectClean()
+  await monitor.expectClean([
+    { kind: 'http', method: 'GET', status: 401, pathname: '/api/local-ai/agents' },
+  ])
+})
+
+// 会话在挂载中过期（跨页 auth epoch 广播 → 清空投影 + /api/auth/me 对账，
+// 不重定向）：页面必须停留在 /#/challenge 渲染未登录桩且无任何 pageerror。
+// 该路径同时钉住向导状态 hook 的位置——它们曾位于 isLoggedIn 提前返回
+// 之后，属 Rules of Hooks 违规：React 19 对「hook 变少」不再当场抛错，
+// 但会在 fiber 上留下陈旧 hook 链，后续任何变多方向的重渲染都会崩；
+// 本用例保证翻转渲染干净完成。
+test('session expiring while challenge page is mounted does not crash the page', async ({ page, context }) => {
+  const monitor = monitorBrowser(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await loginThroughUi(page, USER)
+  await page.goto('/#/challenge')
+  await expect(page.getByTestId('challenge-form')).toBeVisible()
+
+  // 对账探测按过期会话处理：身份清空、停留在当前路由（不跳登录页）。
+  await page.route('**/api/auth/me', (route) =>
+    route.fulfill({ status: 401, contentType: 'application/json', body: '{"detail":"unauthorized"}' }),
+  )
+  const page2 = await context.newPage()
+  await page2.goto(page.url())
+  await page2.evaluate(() =>
+    localStorage.setItem('bzplat_auth_epoch', `e2e-flip-${Math.random()}`),
+  )
+  await page2.close()
+
+  // 翻转后停留在挑战页并显示未登录提示；任何 pageerror（含
+  // “Rendered fewer hooks than expected”）都会被 monitor 捕获失败。
+  await expect(
+    page.getByText('请先登录', { exact: false }).first(),
+  ).toBeVisible({ timeout: 15_000 })
+  await expect(page).toHaveURL(/#\/challenge/)
+
+  await monitor.expectClean([
+    { kind: 'http', method: 'GET', status: 401, pathname: '/api/auth/me' },
+  ])
 })
