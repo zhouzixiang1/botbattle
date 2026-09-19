@@ -92,3 +92,30 @@ def test_qa_database_guard_runs_before_store_open(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="unsafe primary DB"):
         main_module.create_app(db_path=str(target))
     assert not target.exists()
+
+
+def test_spa_fallback_404s_unknown_top_level_paths(tmp_path):
+    """未知顶层路径 404：HashRouter 下 SPA 只需「/」；已知路由段书签兼容。
+    扫描器探测 /wp-login.php、/.env、/blog 不再收到 200+HTML。"""
+    import bzplat.backend.main as main_mod
+    from fastapi.testclient import TestClient
+
+    dist = (
+        main_mod.Path(main_mod.__file__).resolve().parents[1]
+        / "frontend" / "dist"
+    )
+    if not dist.is_dir():
+        import pytest
+
+        pytest.skip("source tree has no frontend/dist; e2e covers behavior")
+    app = main_mod.create_app(db_path=str(tmp_path / "spa404.db"))
+    client = TestClient(app)
+    assert client.get("/wp-login.php").status_code == 404
+    assert client.get("/.env").status_code == 404
+    assert client.get("/blog").status_code == 404
+    assert client.get("/wp-json/batch/v1").status_code == 404
+    # 已知路由段（历史书签）与真实静态文件照常。
+    assert client.get("/arena").status_code == 200
+    assert client.get("/match/20260919-x").status_code == 200
+    assert client.get("/login").status_code == 200
+    assert client.get("/favicon.svg").status_code == 200
