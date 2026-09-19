@@ -116,6 +116,9 @@ class ExecutionScope:
     attempt_check: Callable[[], None]
     recovery_mark: Callable[[str], None] | None = None
     cleanup_mark: Callable[[], None] | None = None
+    # 冻结来源（manual/human/contest/auto）：仅用于运维日志关联，不参与
+    # 任何调度决策。
+    source: str = ""
     _next_slot: int = 0
     _slot_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

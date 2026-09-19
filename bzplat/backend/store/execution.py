@@ -9,11 +9,14 @@ or filesystem path in its public projections.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 from bzplat.backend.runtime.binary_integrity import (
     BinaryIntegrityCacheKey,
@@ -542,6 +545,8 @@ class ExecutionRepository:
         # cheap synchronous availability snapshot; absence fails remote jobs
         # closed while ordinary Docker work keeps flowing.
         self._local_agent_available = local_agent_available
+        # 最近一次 claim_next 的 None 原因（仅诊断投影，不参与持久化决策）。
+        self.last_claim_denial: str | None = None
         # Claim/refill run inside one SQLite write transaction.  Re-hashing up
         # to 100 MiB per candidate on every dispatcher tick would extend that
         # lock by seconds or gigabytes of I/O.  The helper's cache identity
@@ -2342,7 +2347,18 @@ class ExecutionRepository:
                     )
                 if not is_showcase:
                     self._yield_auto_to_foreground_tx(conn)
-            return inserted
+        # 事务已在 with 出口提交；入队成功是排障基准事件（public_id 是
+        # 用户侧与日志侧的唯一关联键），不记任何 Bot 配置内容。
+        logger.info(
+            "execution enqueued public_id=%s source=%s owner=%s game=%s "
+            "match_type=%s contest=%s env=%s/%s units=%s",
+            inserted["public_id"], source, inserted["owner_user_id"],
+            inserted["game_id"], inserted["match_type"],
+            inserted["contest_id"] or "-",
+            inserted["bot_a_environment"], inserted["bot_b_environment"],
+            inserted["sandbox_units"],
+        )
+        return inserted
 
     @staticmethod
     def _assert_idempotent_match(
@@ -3323,6 +3339,9 @@ class ExecutionRepository:
         max_host_memory_mb: int | None = None,
         inherited_contest_cutoff: str | None = None,
     ) -> dict | None:
+        # 最近一次 claim 返回 None 的原因（仅供调度器状态翻转日志与排障，
+        # 不参与任何持久化决策；线程语义与调用方一致，单 dispatcher 串行）。
+        self.last_claim_denial = None
         if inherited_contest_cutoff is not None and (
             not isinstance(inherited_contest_cutoff, str)
             or not inherited_contest_cutoff.strip()
@@ -3340,8 +3359,11 @@ class ExecutionRepository:
                 control is None
                 or control["dispatcher_state"] != "running"
                 or int(control["accepting"] or 0) != 1
-                or launch["state"] != "idle"
             ):
+                self.last_claim_denial = "dispatcher_not_accepting"
+                return None
+            if launch["state"] != "idle":
+                self.last_claim_denial = "launch_journal_busy"
                 return None
             if claim_class not in {"foreground", "auto"}:
                 raise ValueError(f"unknown execution claim class: {claim_class}")
@@ -3352,6 +3374,7 @@ class ExecutionRepository:
                     or int(scheduler["active_count"])
                     >= EXECUTION_AUTO_ACTIVE_LIMIT
                 ):
+                    self.last_claim_denial = "auto_gate"
                     return None
             capacity = self._capacity_tx(
                 conn,
@@ -3364,6 +3387,7 @@ class ExecutionRepository:
                 capacity["occupied_match_slots"] >= capacity["max_match_slots"]
                 or capacity["running_matches"] >= capacity["max_match_slots"]
             ):
+                self.last_claim_denial = "match_slots_full"
                 return None
             if claim_class == "auto" and (
                 capacity["max_match_slots"] < 2
@@ -3372,6 +3396,7 @@ class ExecutionRepository:
                 or capacity["running_matches"] != 0
                 or capacity["untracked_running_matches"] != 0
             ):
+                self.last_claim_denial = "auto_idle_gate"
                 return None
             claim_sources = (
                 frozenset({EXECUTION_SOURCE_AUTO})
@@ -3931,6 +3956,7 @@ class ExecutionRepository:
                 if selected is not None:
                     break
             if selected is None:
+                self.last_claim_denial = "no_eligible_job"
                 return None
 
             match_id = _new_match_id()

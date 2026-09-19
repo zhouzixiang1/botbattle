@@ -1169,6 +1169,7 @@ class MatchOrchestrator:
             job_public_id=public_id,
             attempt_no=attempt_no,
             supervisor=supervisor,
+            source=str(job.get("source") or ""),
             attempt_check=lambda: self.store.executions.assert_active_attempt(
                 public_id, attempt_no
             ),
@@ -1349,6 +1350,13 @@ class MatchOrchestrator:
                 # cannot perform its own cleanup while _admin_aborting is set;
                 # the handoff in finally therefore becomes mandatory.
                 handoff_required = True
+                # admin 中止 / auto-yield 让位 / 维护回收共用此路径：终态
+                # 落库后留痕。只在行确为 aborted 时记录——completed 竞态下
+                # 绝不留下与 DB 相反的虚假 aborted 事件。
+                logger.info(
+                    "match aborted id=%s reason=%s",
+                    match_id, reason,
+                )
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -2224,11 +2232,14 @@ class MatchOrchestrator:
                     _extras["extra_volumes"] = tuple(volumes)
             logger.info(
                 "match start id=%s game=%s type=%s a=%s(%s,%s) "
-                "b=%s(%s,%s) duplicate=%s",
+                "b=%s(%s,%s) duplicate=%s job=%s attempt=%s source=%s",
                 match_id, gid, m.get("match_type"),
                 m["bot_a_id"], bot_a.get("name"), environments[0],
                 m["bot_b_id"], bot_b.get("name"), environments[1],
                 want_duplicate,
+                execution_scope.job_public_id if execution_scope else "-",
+                execution_scope.attempt_no if execution_scope else "-",
+                execution_scope.source if execution_scope else "-",
             )
             self._update_match_owned(
                 match_id, status=STATUS_RUNNING, started_at=_now()
@@ -2320,9 +2331,12 @@ class MatchOrchestrator:
             self._broadcast(match_id, terminal_event)
             logger.info(
                 "match done id=%s winner=%s rounds=%s ea=%s eb=%s "
-                "rating_eligible=%s",
+                "rating_eligible=%s job=%s attempt=%s source=%s",
                 match_id, winner, result.rounds_played, ea, eb,
                 bool(m.get("rated")),
+                execution_scope.job_public_id if execution_scope else "-",
+                execution_scope.attempt_no if execution_scope else "-",
+                execution_scope.source if execution_scope else "-",
             )
         except BotVersionContractError as exc:
             logger.error("match %s has invalid frozen Bot contract: %s", match_id, exc)
@@ -2429,7 +2443,14 @@ class MatchOrchestrator:
                 self._safe_flush_terminal_replay(match_id, events, terminal_event)
                 self._broadcast(match_id, terminal_event)
         except BotCrashedError as exc:
-            logger.warning("match %s bot crashed — %s", match_id, exc)
+            logger.warning(
+                "match %s bot crashed job=%s attempt=%s source=%s — %s",
+                match_id,
+                execution_scope.job_public_id if execution_scope else "-",
+                execution_scope.attempt_no if execution_scope else "-",
+                execution_scope.source if execution_scope else "-",
+                exc,
+            )
             # Bot 启动崩溃 → 技术判负（completed + winner=对手 + technical_loss=1）。
             # 统一所有对局类型（原仅 contest 走 completed，challenge/ladder/table 走 aborted
             # 无结果无胜者——这是「游戏结束显示已取消而非已完成」的根因）。
