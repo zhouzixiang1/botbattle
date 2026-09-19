@@ -28,6 +28,13 @@ LOCAL_AI_WEBSOCKET_SUBPROTOCOL = "botbattle.local-ai.v2"
 INITIAL_RECONNECT_DELAY = 1.0
 MAX_RECONNECT_DELAY = 30.0
 STABLE_CONNECTION_SECONDS = 30.0
+# 服务器把「未 accept 即 close」映射为裸 HTTP 403（close reason 不随响应
+# 下发）。凭证无效/子协议过旧是永久性拒绝；握手限速也是 403 但为暂时性
+# （60s 窗口）。连续 REJECTION_EXIT_THRESHOLD 次 403 判定永久拒绝并熔断：
+# 3 次退避重连覆盖 1+2+4=7s 与 30s 封顶节奏，被限速者会在计数内恢复，
+# 不会误杀。
+REJECTION_EXIT_THRESHOLD = 3
+EXIT_CODE_REJECTED = 2
 CLIENT_FAILURE_REASONS = frozenset(
     {
         "bot_start_failed",
@@ -741,6 +748,29 @@ async def handle_connection(websocket: Any, command: Sequence[str]) -> None:
             await _stop_process(process)
 
 
+def _websocket_rejection_status(exc: BaseException) -> int | None:
+    """从 websockets 握手异常中提取 HTTP 状态码；非握手拒绝返回 None。
+
+    兼容 websockets>=10.4：新版 ``InvalidStatus`` 携带 ``response``，
+    旧版 ``InvalidStatusCode`` 直接暴露 ``status_code``。
+    """
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status = getattr(response, "status_code", None)
+        return int(status) if status is not None else None
+    status = getattr(exc, "status_code", None)
+    return int(status) if status is not None else None
+
+
+def rejection_exit_message(consecutive_403: int) -> str:
+    return (
+        f"服务器连续 {consecutive_403} 次拒绝连接（HTTP 403），已停止重连。"
+        "常见原因：连接令牌已失效，或本脚本版本过旧。"
+        "请到平台「我的 Bot → 本地对战」页重新下载 local_ai_client.py、"
+        "重新生成令牌后再试；也请核对服务器地址是否正确。"
+    )
+
+
 async def run_forever(url: str, command: Sequence[str], token: str) -> None:
     try:
         import websockets
@@ -750,6 +780,7 @@ async def run_forever(url: str, command: Sequence[str], token: str) -> None:
         ) from exc
 
     delay = INITIAL_RECONNECT_DELAY
+    consecutive_rejections = 0
     while True:
         connected_at = time.monotonic()
         try:
@@ -760,7 +791,28 @@ async def run_forever(url: str, command: Sequence[str], token: str) -> None:
         except Exception as exc:
             # Deliberately omit exception text: some HTTP stacks echo request
             # headers, and the Authorization token must never enter logs.
-            LOG.warning("连接中断（%s），%.0f 秒后重连", type(exc).__name__, delay)
+            status = _websocket_rejection_status(exc)
+            if status == 403:
+                consecutive_rejections += 1
+                if consecutive_rejections >= REJECTION_EXIT_THRESHOLD:
+                    LOG.error(
+                        "%s", rejection_exit_message(consecutive_rejections)
+                    )
+                    raise SystemExit(EXIT_CODE_REJECTED)
+                LOG.warning(
+                    "连接被拒绝（HTTP 403，第 %d/%d 次），%.0f 秒后重试",
+                    consecutive_rejections,
+                    REJECTION_EXIT_THRESHOLD,
+                    delay,
+                )
+            else:
+                LOG.warning(
+                    "连接中断（%s），%.0f 秒后重连",
+                    type(exc).__name__,
+                    delay,
+                )
+        else:
+            consecutive_rejections = 0
 
         lifetime = time.monotonic() - connected_at
         if lifetime >= STABLE_CONNECTION_SECONDS:
