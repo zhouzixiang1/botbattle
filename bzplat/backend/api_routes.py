@@ -3619,11 +3619,30 @@ def delete_comment(comment_id: int, request: Request, user=Depends(require_user)
     # 存在但非作者→admin 可强删 / 非 admin 403。用只读 exists 区分（不破坏性删除）。
     exists = store.comment_exists(comment_id)
     if not exists:
+        if user.get("role") == "admin":
+            # admin 对不存在目标的特权写尝试同样留痕（普通用户的 404 不审计）。
+            audit_log(request, "admin_comment_delete", result="fail",
+                      user=user.get("username"), target=comment_id,
+                      detail="not_found")
         raise HTTPException(404, "评论不存在")
     if user.get("role") != "admin":
         raise HTTPException(403, "无权删除该评论")
-    # admin 强删（无视作者）
-    store.delete_comment_admin(comment_id)
+    # admin 强删（无视作者）。这是隐藏在非 /api/admin 前缀下的特权破坏性写，
+    # 与其余 admin 写端点同标准：成功与失败都审计。exists 与删除之间的
+    # 竞态（返回 False）同样落 fail 审计，绝不记与事实相反的 ok。
+    try:
+        deleted = store.delete_comment_admin(comment_id)
+    except Exception:
+        audit_log(request, "admin_comment_delete", result="fail",
+                  user=user.get("username"), target=comment_id)
+        raise
+    if not deleted:
+        audit_log(request, "admin_comment_delete", result="fail",
+                  user=user.get("username"), target=comment_id,
+                  detail="not_found")
+        raise HTTPException(404, "评论不存在")
+    audit_log(request, "admin_comment_delete", result="ok",
+              user=user.get("username"), target=comment_id)
     return {"ok": True}
 
 
@@ -6621,9 +6640,13 @@ def admin_set_role(
 ):
     _set_admin_private_headers(response)
     if role not in ("user", "organizer", "admin"):
+        audit_log(request, "admin_set_role", result="fail",
+                  user=admin.get("username"), target=user_id, detail="invalid_role")
         raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, role=role)
     if not u:
+        audit_log(request, "admin_set_role", result="fail",
+                  user=admin.get("username"), target=user_id, detail="not_found")
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
     audit_log(request, "admin_set_role", result="ok", user=admin.get("username"), target=user_id, detail=f"role={role}")
     return {"user": _admin_user_for_api(u)}
@@ -6660,7 +6683,7 @@ async def admin_patch_user(
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
     # 审计紧跟写成功：随后的 transport 收敛若抛错，已提交的写不缺审计。
     audit_log(
-        request, "admin_patch_user",
+        request, "admin_patch_user", result="ok",
         user=admin.get("username"), target=user_id,
         detail=",".join(f"{k}={v}" for k, v in fields.items()),
     )
@@ -6671,11 +6694,17 @@ async def admin_patch_user(
 @router.delete("/api/admin/users/{user_id}")
 def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admin)):
     if admin["id"] == user_id:
+        audit_log(request, "admin_delete_user", result="fail",
+                  user=admin.get("username"), target=user_id, detail="self_delete")
         raise HTTPException(400, "不能删除自己")
     result = _store(request).delete_user_if_safe(user_id)
     if not result["found"]:
+        audit_log(request, "admin_delete_user", result="fail",
+                  user=admin.get("username"), target=user_id, detail="not_found")
         raise HTTPException(404, "用户不存在")
     if not result["deleted"]:
+        audit_log(request, "admin_delete_user", result="fail",
+                  user=admin.get("username"), target=user_id, detail="referenced")
         raise HTTPException(
             409,
             "用户存在历史或活跃对局/赛事引用、退役规则版本审计证据，"
@@ -6708,7 +6737,7 @@ def admin_revoke_sessions(
 ):
     _set_admin_private_headers(response)
     n = _store(request).delete_sessions_for_user(user_id)
-    audit_log(request, "admin_revoke_sessions", user=admin.get("username"), target=user_id, detail=f"revoked={n}")
+    audit_log(request, "admin_revoke_sessions", result="ok", user=admin.get("username"), target=user_id, detail=f"revoked={n}")
     return {"ok": True, "revoked": n}
 
 
@@ -6902,7 +6931,7 @@ async def admin_patch_bot(
         ) from exc
     # 布尔字段记 k=v（启用/停用方向是审计重点）；自由文本仅记键名。
     audit_log(
-        request, "admin_patch_bot",
+        request, "admin_patch_bot", result="ok",
         user=admin.get("username"), target=bot_id,
         detail=",".join(
             f"{k}={v}" if k in ("is_active", "is_builtin") else k
@@ -6922,9 +6951,13 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     # “哪个用户的哪个 Bot”这一公开历史身份；已有任何对局或赛事记录时必须改用停用。
     result = store.delete_bot_if_safe(bot_id)
     if not result["found"]:
+        audit_log(request, "admin_delete_bot", result="fail",
+                  user=admin.get("username"), target=bot_id, detail="not_found")
         raise HTTPException(404, "bot 不存在")
     refs = result["references"]
     if not result["deleted"]:
+        audit_log(request, "admin_delete_bot", result="fail",
+                  user=admin.get("username"), target=bot_id, detail="referenced")
         raise HTTPException(
             409,
             f"bot 存在历史或活跃引用、退役规则版本审计证据，不能硬删：{refs}"
@@ -7875,20 +7908,28 @@ def admin_patch_site(
     )
     store = _store(request)
     changed: list[str] = []
-    if body.name is not None:
-        store.set_setting(SETTING_SITE_NAME, body.name)
-        changed.append("name")
-    if body.logo is not None:
-        store.set_setting(SETTING_SITE_LOGO, body.logo)
-        changed.append("logo")
-    if body.announcement is not None:
-        store.set_setting(SETTING_SITE_ANNOUNCEMENT, body.announcement)
-        changed.append("announcement")
-    if body.about is not None:
-        store.set_setting(SETTING_SITE_ABOUT, body.about)
-        changed.append("about")
+    try:
+        if body.name is not None:
+            store.set_setting(SETTING_SITE_NAME, body.name)
+            changed.append("name")
+        if body.logo is not None:
+            store.set_setting(SETTING_SITE_LOGO, body.logo)
+            changed.append("logo")
+        if body.announcement is not None:
+            store.set_setting(SETTING_SITE_ANNOUNCEMENT, body.announcement)
+            changed.append("announcement")
+        if body.about is not None:
+            store.set_setting(SETTING_SITE_ABOUT, body.about)
+            changed.append("about")
+    except Exception:
+        # set_setting 逐键独立提交：中途失败时前面键已落库。部分提交必须
+        # 留痕（只记已变更键名），否则会出现“改了一半且无审计”的静默状态。
+        audit_log(request, "admin_patch_site", result="fail",
+                  user=admin.get("username"),
+                  detail=("partial:" + ",".join(changed)) if changed else "none")
+        raise
     # 只记变更键名：公告/简介正文可能很长，值不进审计日志。
-    audit_log(request, "admin_patch_site", user=admin.get("username"), detail=",".join(changed) or "noop")
+    audit_log(request, "admin_patch_site", result="ok", user=admin.get("username"), detail=",".join(changed) or "noop")
     s = store.get_settings([
         SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     ])
