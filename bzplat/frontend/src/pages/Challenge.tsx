@@ -240,26 +240,50 @@ export default function Challenge() {
     }
   }, [executionStorageKey, isLoggedIn])
 
+  const applyLocalAgents = useCallback((items: LocalAIAgent[] | undefined) => {
+    setLocalAgents((items || []).filter((agent) => agent.status !== 'revoked'))
+    setAgentError('')
+  }, [])
+
+  // 初次进入：带 Loading 态的加载；轮询的静默刷新不回拨 loading。
   const loadLocalAgents = useCallback(async () => {
     if (!isLoggedIn) return
     setAgentsLoading(true)
     try {
       const data = await apiGet<{ items: LocalAIAgent[] }>('/api/local-ai/agents')
-      setLocalAgents((data.items || []).filter((agent) => agent.status !== 'revoked'))
-      setAgentError('')
+      applyLocalAgents(data.items)
     } catch (err) {
       setAgentError(errMsg(err, '本地 Bot 连接状态加载失败'))
     } finally {
       setAgentsLoading(false)
     }
-  }, [isLoggedIn])
+  }, [isLoggedIn, applyLocalAgents])
 
   useEffect(() => {
     if (!isLoggedIn) return
     void loadLocalAgents()
-    const timer = window.setInterval(() => void loadLocalAgents(), 5_000)
-    return () => window.clearInterval(timer)
   }, [isLoggedIn, loadLocalAgents])
+
+  // 周期静默刷新本地连接在线状态：单飞不重叠、页面隐藏自动暂停、
+  // 失败指数退避（5s 起、20s 封顶），替代原先无可见性暂停的裸 setInterval。
+  const pollLocalAgents = useCallback(async (signal: AbortSignal) => {
+    try {
+      const data = await apiGet<{ items: LocalAIAgent[] }>('/api/local-ai/agents', { signal })
+      applyLocalAgents(data.items)
+    } catch (err) {
+      // 轮询器主动中止（隐藏/卸载/手动刷新）不当作错误展示。
+      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      setAgentError(errMsg(err, '本地 Bot 连接状态加载失败'))
+    }
+  }, [applyLocalAgents])
+
+  useSingleFlightPolling({
+    task: pollLocalAgents,
+    enabled: isLoggedIn,
+    intervalMs: 5_000,
+    initialDelayMs: 5_000,
+    maxIntervalMs: 20_000,
+  })
 
   useEffect(() => {
     if (!error) return

@@ -44,6 +44,7 @@ import {
   type SourceUploadMode,
 } from '@/components/source-upload-fields'
 import { useConfirm } from '@/hooks/use-confirm'
+import { useSubmitCooldown } from '@/hooks/use-submit-cooldown'
 import { apiFormWithProgress, apiGet, apiJson, errMsg } from '@/api'
 import { runtimeModeLabel } from '@/lib/labels'
 import { toast } from 'sonner'
@@ -114,6 +115,8 @@ export default function BotVersionManager({
   const [sourceCode, setSourceCode] = useState('')
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
+  // 429/503 繁忙导致的提交冷却：按钮禁用 + 倒计时，到期自动解除。
+  const submitCooldown = useSubmitCooldown()
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
   const activeBotIdRef = useRef<number | null>(botId)
   const activeIdentityKeyRef = useRef<number | null>(identityKey)
@@ -193,6 +196,7 @@ export default function BotVersionManager({
     setUploadPercent(0)
     setLoadError('')
     setMutationError('')
+    submitCooldown.clearCooldown()
     if (botId !== null) void load()
     return () => {
       requestGenerationRef.current += 1
@@ -218,6 +222,8 @@ export default function BotVersionManager({
 
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
+    // 冷却期内禁止连发重试（按钮禁用之外，Enter 提交也在此拦截）。
+    if (submitCooldown.active) return
     const editorActive = sourceFormat !== 'elf' && sourceUploadMode === 'editor'
     // 超限错误已由编辑器内联展示，这里只负责阻止提交。
     if (editorActive && sourceEditorSizeError(sourceCode)) return
@@ -270,6 +276,7 @@ export default function BotVersionManager({
     } catch (err) {
       if (isCurrentUpload()) {
         setMutationError(errMsg(err, '上传失败'))
+        submitCooldown.beginCooldown(err)
       }
     } finally {
       const isCurrent = isCurrentUpload()
@@ -479,12 +486,26 @@ export default function BotVersionManager({
                   verifyingHint: '平台正在编译源码并运行标准首回合协议；通过后才会发布版本。',
                 })}
           />
-          <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
+          <Button
+            type="submit"
+            disabled={busy || submitCooldown.active}
+            aria-busy={busy}
+            className="w-full gap-1.5"
+          >
             <Upload className="size-4" />
             {uploadStage === 'preflight'
               ? sourceFormat === 'elf' ? '服务端检查中…' : '服务端编译校验中…'
-              : busy ? '上传中…' : '上传新版本'}
+              : busy
+                ? '上传中…'
+                : submitCooldown.active
+                  ? `${submitCooldown.remainingSeconds} 秒后可重试`
+                  : '上传新版本'}
           </Button>
+          {submitCooldown.active && (
+            <p data-testid="upload-cooldown" role="status" className="text-xs text-destructive">
+              请求过于频繁，请在 {submitCooldown.remainingSeconds} 秒后重试
+            </p>
+          )}
         </form>
         </DataRegion>
 
