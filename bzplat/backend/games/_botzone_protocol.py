@@ -148,20 +148,26 @@ async def preflight_exchange(
     image: str = "",
     extra_volumes: tuple[tuple[str, str], ...] = (),
     allow_script_entry: bool = False,
+    profile: Any | None = None,
 ) -> Any:
     """按所选运行模式执行与正式对局一致的首回合交换。
 
     两种模式的首回合都发送完整历史信封；LongRunning 还必须在响应后输出
     精确握手。返回已经过信封和游戏 payload 双重校验的 ``response`` 值。
+    ``profile`` 为空时沿用 runner 默认低配档，避免给历史调用方隐式换规格。
     """
     if runtime_mode not in VALID_RUNTIME_MODES:
         raise ValueError(f"未知运行模式: {runtime_mode}")
+    session_kwargs: dict[str, Any] = {}
+    if profile is not None:
+        session_kwargs["profile"] = profile
     sid = await binary_runner.start_session(
         binary_path,
         runtime_mode=runtime_mode,
         image=image,
         extra_volumes=extra_volumes,
         allow_script_entry=allow_script_entry,
+        **session_kwargs,
     )
     try:
         response_line = await binary_runner.send(

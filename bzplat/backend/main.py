@@ -191,14 +191,17 @@ def create_app(
         logger.warning("SMTP 未配置：邮件会排队并按退避策略失败，不阻断业务请求")
     auth = AuthManager(store, mailer=mailer, communications=communications)
     captcha = CaptchaStore()
-    bot_manager = BotManager(store, upload_root=upload_root)
-    # 启动兜底：清掉上次进程崩溃遗留的 .incoming-* 流式暂存与
-    # .v{N}-* 版本构建暂存（源码构建中断即永久残留）；正常路径由
-    # finally 清理，这里只按 mtime 年龄匹配，不影响活跃上传。
-    bot_manager._purge_stale_staging(min_age_seconds=3600.0)
     from bzplat.backend.user_storage import UserStorageManager
 
     user_storage = UserStorageManager(store, root=user_assets_dir)
+    # BotManager 预检需要与正式对局一致的云盘挂载（/mnt/data、/app/data）。
+    bot_manager = BotManager(
+        store, upload_root=upload_root, user_storage=user_storage
+    )
+    # 启动兜底：清掉上次进程崩溃遗留的 .incoming-* 流式暂存与
+    # .v{N}-* 版本构建暂存（源码构建中断即永久残留）；正常路径由
+    # finally 清理，这里只按目录名前缀与 mtime 年龄匹配，不影响活跃上传。
+    bot_manager._purge_stale_staging(min_age_seconds=3600.0)
     # 启动时回收无清单引用且空闲超宽限期的实体与崩溃暂存残留。
     user_storage.sweep_unreferenced()
     execution_dispatcher: ExecutionDispatcher | None = None

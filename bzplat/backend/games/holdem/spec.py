@@ -109,6 +109,7 @@ async def _preflight_check(
     image: str = "",
     extra_volumes: tuple[tuple[str, str], ...] = (),
     allow_script_entry: bool = False,
+    profile: Any | None = None,
 ) -> tuple[bool, str]:
     """按所选模式发送 canonical 首回合并验证德州响应。"""
     from bzplat.backend.games.holdem.protocol import build_act_request
@@ -133,6 +134,7 @@ async def _preflight_check(
             image=image,
             extra_volumes=extra_volumes,
             allow_script_entry=allow_script_entry,
+            profile=profile,
         )
         return True, "响应合法"
     except PlatformRunnerError:

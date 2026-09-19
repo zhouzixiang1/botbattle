@@ -76,6 +76,7 @@ async def _preflight_check(
     image: str = "",
     extra_volumes: tuple[tuple[str, str], ...] = (),
     allow_script_entry: bool = False,
+    profile: Any | None = None,
 ) -> tuple[bool, str]:
     """按所选模式发送 canonical 首回合并验证五子棋坐标。"""
     from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
@@ -101,6 +102,7 @@ async def _preflight_check(
             image=image,
             extra_volumes=extra_volumes,
             allow_script_entry=allow_script_entry,
+            profile=profile,
         )
         if payload.get("action") != proto.ACTION_OPENING:
             return False, "首回合必须提交 opening 动作"

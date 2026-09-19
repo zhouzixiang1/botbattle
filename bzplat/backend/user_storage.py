@@ -109,6 +109,44 @@ class UserStorageManager:
     def drop_staging(staging_dir: Path) -> None:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
+    def build_drive_snapshot(
+        self,
+        owner_id: int,
+        files: list[dict],
+        root: Path,
+    ) -> None:
+        """把清单文件硬链接进快照目录（对局挂载与上传预检共用）。
+
+        快照目录会被 bind mount 进非特权容器（65534）：root 必须显式
+        chmod 0755（mkdtemp/mkdir 的 mode 被 umask 0077 掩码），叶子文件
+        复用 blob 的 0644。名字独立复核，手改 DB 的带路径名字不得借
+        硬链接逃逸快照目录；blob 缺失视为数据不一致，直接失败。
+        """
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o755)
+        for entry in files:
+            name = str(entry["name"])
+            sha256 = str(entry["sha256"])
+            try:
+                validate_storage_name(name)
+            except UserStorageError as exc:
+                raise UserStorageError(
+                    "invalid_manifest_name", "用户云盘清单包含非法文件名"
+                ) from exc
+            blob = self.blob_path(int(owner_id), sha256)
+            if not blob.is_file():
+                raise UserStorageError(
+                    "missing_blob", "用户云盘文件缺失，不能挂载"
+                )
+            try:
+                (root / name).hardlink_to(blob)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise UserStorageError(
+                    "snapshot_failed", "用户云盘快照失败"
+                ) from exc
+
     # ---- 延迟回收 ----
 
     def sweep_unreferenced(self, *, min_age_seconds: float = 3600.0) -> dict:

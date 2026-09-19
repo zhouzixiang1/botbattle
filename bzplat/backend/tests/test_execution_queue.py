@@ -71,6 +71,7 @@ from bzplat.backend.store.public_contract import sanitize_public_match
 from bzplat.backend.store.schema import (
     AUTO_IDLE_POLICY_CUTOVER_REASON,
     AUTO_YIELD_FOREGROUND_REASON,
+    EXECUTION_PROFILE_VERSION,
     EXECUTION_SOURCE_AUTO,
     EXECUTION_SOURCE_CONTEST,
     EXECUTION_SOURCE_HUMAN,
@@ -9559,7 +9560,14 @@ def test_execution_environment_snapshots_are_source_owned(queue_store):
         manual["host_cpu_millis"],
         manual["host_memory_mb"],
         manual["profile_version"],
-    ) == ("platform_low", "platform_low", 2, 2000, 1024, 1)
+    ) == (
+        "platform_low",
+        "platform_low",
+        2,
+        2000,
+        1024,
+        EXECUTION_PROFILE_VERSION,
+    )
 
     automatic = _enqueue_pair(store, pair, source=EXECUTION_SOURCE_AUTO)
     assert (
@@ -10082,7 +10090,10 @@ def test_official_profile_waits_on_undersized_host_without_downgrade(
         claimed["bot_b_environment"],
     ) == ("platform_high", "platform_high")
     match = store.get_match(str(claimed["current_match_id"]))
-    assert match["match_config"]["_execution_profile_version"] == 1
+    assert (
+        match["match_config"]["_execution_profile_version"]
+        == EXECUTION_PROFILE_VERSION
+    )
 
 
 def test_claim_rejects_unknown_or_tampered_resource_profile_snapshot(queue_store):
@@ -10279,7 +10290,7 @@ def test_remote_claim_skips_binary_check_and_lease_releases_with_cleanup(queue_s
     match = store.get_match(str(claimed["current_match_id"]))
     assert match["match_config"] == {
         **match["match_config"],
-        "_execution_profile_version": 1,
+        "_execution_profile_version": EXECUTION_PROFILE_VERSION,
         "_bot_a_environment": "remote_local",
         "_bot_b_environment": "platform_low",
         "_bot_a_local_agent_id": agent["id"],

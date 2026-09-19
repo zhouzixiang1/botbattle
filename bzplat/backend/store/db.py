@@ -4492,6 +4492,113 @@ def _schema_create_table_sql(table: str, *, as_name: str | None = None) -> str:
     return statement
 
 
+def _ensure_execution_ml_environment_schema(conn: sqlite3.Connection) -> None:
+    """Relax the durable queue CHECKs to admit the derived ``platform_ml`` tier.
+
+    SQLite cannot widen a CHECK in place.  Rebuild the parent and its sole FK
+    child in one Store transaction, preserving every id, attempt and column
+    value.  Existing rows only ever hold the legacy environment values, which
+    remain valid under the widened constraints, so the copy is verbatim.
+    Legacy columns that the fresh template does not declare (contract
+    backfills added via ``_add_col``) are re-added before the copy so no data
+    is dropped.  Idempotent: tables whose CREATE SQL already mentions
+    ``platform_ml`` are left untouched.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_jobs'"
+    ).fetchone()
+    if row is None:
+        return
+    if "platform_ml" in (row[0] or ""):
+        return
+
+    tables = {
+        r[0]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    attempts_exist = "execution_job_attempts" in tables
+    if attempts_exist:
+        conn.execute(
+            "CREATE TEMP TABLE execution_job_attempts_ml_backup AS "
+            "SELECT * FROM execution_job_attempts"
+        )
+        conn.execute("DROP TABLE execution_job_attempts")
+
+    conn.execute(
+        _schema_create_table_sql(
+            "execution_jobs", as_name="execution_jobs_ml_new"
+        )
+    )
+    # 旧表可能有模板未声明的追加列（契约回填等）：先补列再按交集复制。
+    new_cols = _table_cols(conn, "execution_jobs_ml_new")
+    old_info = {
+        r[1]: r for r in conn.execute("PRAGMA table_info(execution_jobs)")
+    }
+    for name, info in old_info.items():
+        if name in new_cols or name == "id":
+            continue
+        decl = str(info[2] or "TEXT")
+        if int(info[3] or 0):
+            decl += " NOT NULL"
+        if info[4] is not None:
+            decl += f" DEFAULT {info[4]}"
+        conn.execute(
+            f'ALTER TABLE execution_jobs_ml_new ADD COLUMN "{name}" {decl}'
+        )
+        new_cols.append(name)
+    carry = [name for name in new_cols if name in old_info]
+    conn.execute(
+        f'INSERT INTO execution_jobs_ml_new({",".join(carry)}) '
+        f'SELECT {",".join(carry)} FROM execution_jobs'
+    )
+    conn.execute("DROP TABLE execution_jobs")
+    conn.execute(
+        "ALTER TABLE execution_jobs_ml_new RENAME TO execution_jobs"
+    )
+
+    if attempts_exist:
+        conn.execute(_schema_create_table_sql("execution_job_attempts"))
+        conn.execute(
+            "INSERT INTO execution_job_attempts("
+            "id,job_id,attempt_no,match_id,status,events_observed,created_at,"
+            "started_at,terminal_at,terminal_reason) "
+            "SELECT id,job_id,attempt_no,match_id,status,events_observed,created_at,"
+            "started_at,terminal_at,terminal_reason "
+            "FROM execution_job_attempts_ml_backup"
+        )
+        conn.execute("DROP TABLE execution_job_attempts_ml_backup")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_jobs_dispatch "
+        "ON execution_jobs(status,priority,created_at,id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_jobs_owner "
+        "ON execution_jobs(owner_user_id,status,created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_jobs_source "
+        "ON execution_jobs(source,status,created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_jobs_source_terminal "
+        "ON execution_jobs(source,status,terminal_at,id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_jobs_contest_claim_history "
+        "ON execution_jobs(source,contest_id,claimed_at,id)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_current_match "
+        "ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_active_contest_pairing "
+        "ON execution_jobs(contest_pairing_id) WHERE contest_pairing_id IS NOT NULL "
+        "AND status IN ('queued','starting','running','settling')"
+    )
+
+
 def _ensure_execution_environment_schema(conn: sqlite3.Connection) -> None:
     """Upgrade the durable queue to frozen per-seat execution environments.
 
@@ -6387,6 +6494,7 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
     }
     if "execution_jobs" in tables_now:
         _ensure_execution_environment_schema(conn)
+        _ensure_execution_ml_environment_schema(conn)
         _add_col(
             conn,
             "execution_jobs",

@@ -50,6 +50,15 @@ PLATFORM_HIGH_PROFILE = DockerResourceProfile(
     cpus=2,
     memory_mb=2048,
 )
+# ML 运行库（python 源码 Bot 的 source_runtime=ml 变体）专用档位：CPU 与
+# 低配一致，内存升至 2 GiB。实测 torch 导入 ~400 MiB 叠加云盘模型（常见
+# 100-220 MiB）在 512 MiB 无 swap 硬顶下必被 cgroup OOM 杀（exit 137）。
+# 该档不开放显式选择：入队时由版本冻结的 runtime_image 派生，只升不降。
+PLATFORM_ML_PROFILE = DockerResourceProfile(
+    name="platform_ml",
+    cpus=1,
+    memory_mb=2048,
+)
 # 源码构建容器专用档位：不进入 execution 档位注册表，仅上传构建通道使用。
 BOT_BUILD_PROFILE = DockerResourceProfile(
     name="bot_build",
@@ -74,16 +83,25 @@ _EXECUTION_RESOURCE_PROFILE_V1: Mapping[str, DockerResourceProfile] = MappingPro
         PLATFORM_HIGH_PROFILE.name: PLATFORM_HIGH_PROFILE,
     }
 )
+_EXECUTION_RESOURCE_PROFILE_V2: Mapping[str, DockerResourceProfile] = MappingProxyType(
+    {
+        PLATFORM_LOW_PROFILE.name: PLATFORM_LOW_PROFILE,
+        PLATFORM_HIGH_PROFILE.name: PLATFORM_HIGH_PROFILE,
+        PLATFORM_ML_PROFILE.name: PLATFORM_ML_PROFILE,
+    }
+)
 
 # execution job 会长期跨版本排队/恢复，因此 profile_version 必须解析到创建
 # job 时的历史规格，而不是部署时“当前”的同名常量。只允许追加新版本；旧映射
-# 一旦发布不得修改或删除。v0 是迁移前仅有节能沙箱的历史契约，v1 增加赛事档。
+# 一旦发布不得修改或删除。v0 是迁移前仅有节能沙箱的历史契约，v1 增加赛事档，
+# v2 追加 ML 运行库档（低配内存翻倍到 2 GiB，CPU 与单位记账不变）。
 EXECUTION_RESOURCE_PROFILE_REGISTRY: Mapping[
     int, Mapping[str, DockerResourceProfile]
 ] = MappingProxyType(
     {
         0: _EXECUTION_RESOURCE_PROFILE_V0,
         1: _EXECUTION_RESOURCE_PROFILE_V1,
+        2: _EXECUTION_RESOURCE_PROFILE_V2,
     }
 )
 LATEST_EXECUTION_RESOURCE_PROFILE_VERSION = max(

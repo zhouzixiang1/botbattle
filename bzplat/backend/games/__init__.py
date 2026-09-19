@@ -148,11 +148,13 @@ async def preflight_bot(
     image: str = "",
     extra_volumes: tuple[tuple[str, str], ...] = (),
     allow_script_entry: bool = False,
+    profile: Any | None = None,
 ) -> tuple[bool, str]:
     """Bot 预检：按用户选择的运行模式执行正式协议首回合。
 
     经该游戏必备的 spec.preflight_check 执行，不存在“未定义即放行”路径。
-    返回 (ok, detail)。ok=False 时上传/API 应拒绝该 bot。
+    返回 (ok, detail)。ok=False 时上传/API 应拒绝该 bot。``profile``
+    为空用低配档；ML 运行库变体必须传 2 GiB 档保证与正式对局一致。
     """
     spec = registry.get(game_id)
     return await spec.preflight_check(
@@ -163,6 +165,7 @@ async def preflight_bot(
         image=image,
         extra_volumes=extra_volumes,
         allow_script_entry=allow_script_entry,
+        profile=profile,
     )
 
 
