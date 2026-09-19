@@ -560,12 +560,10 @@ class ExecutionDispatcher:
     @staticmethod
     def _claim_wait_seconds(job: dict) -> int:
         """claimed_at - created_at（秒）；解析失败返回 -1 供排障辨认。"""
-        from datetime import datetime as _dt
-
         try:
-            created = _dt.fromisoformat(str(job.get("created_at") or ""))
-            claimed = _dt.fromisoformat(str(job.get("claimed_at") or ""))
-        except ValueError:
+            created = datetime.fromisoformat(str(job.get("created_at") or ""))
+            claimed = datetime.fromisoformat(str(job.get("claimed_at") or ""))
+        except (ValueError, TypeError):
             return -1
         return max(0, int((claimed - created).total_seconds()))
 
@@ -637,6 +635,7 @@ class ExecutionDispatcher:
             return {"outcome": "recovering"}
         finalized = self.repo.finalize_ready()
         claimed = 0
+        claim_idle = False
         while True:
             job = self.repo.claim_next(
                 max_match_slots=self.max_match_slots,
@@ -650,6 +649,9 @@ class ExecutionDispatcher:
                 inherited_contest_cutoff=self.qa_inherited_contest_cutoff,
             )
             if job is None:
+                # 只有 claim 真返回 None 才算空转；start 失败补偿的 break
+                # 不能误报 idle（此时 claim 已发生）。
+                claim_idle = True
                 break
             try:
                 self.orch.start_execution_job(job)
@@ -671,7 +673,7 @@ class ExecutionDispatcher:
                 break
             self._log_claim(job, "foreground")
             claimed += 1
-        if claimed == 0:
+        if claim_idle:
             self._note_claim_denial("foreground")
         refill: dict = {"outcome": "capability_disabled", "inserted": 0}
         if self.auto_capability_enabled:

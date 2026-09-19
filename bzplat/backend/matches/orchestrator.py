@@ -1337,12 +1337,6 @@ class MatchOrchestrator:
             updated = self.store.abort_match_if_active(match_id, reason=reason)
             if not updated:
                 raise ValueError("对局不存在")
-            # admin 中止 / auto-yield 让位 / 维护回收共用此路径：终态落库
-            # 后必须留痕，否则对局「无声消失」只能查 DB reason。
-            logger.info(
-                "match aborted id=%s reason=%s",
-                match_id, reason,
-            )
             if updated.get("status") == STATUS_COMPLETED:
                 # runner 在取消到达前已经完成；以真实 completed 为准，绝不倒退。
                 terminal_error = ValueError("对局已完成，不能中止")
@@ -1356,6 +1350,13 @@ class MatchOrchestrator:
                 # cannot perform its own cleanup while _admin_aborting is set;
                 # the handoff in finally therefore becomes mandatory.
                 handoff_required = True
+                # admin 中止 / auto-yield 让位 / 维护回收共用此路径：终态
+                # 落库后留痕。只在行确为 aborted 时记录——completed 竞态下
+                # 绝不留下与 DB 相反的虚假 aborted 事件。
+                logger.info(
+                    "match aborted id=%s reason=%s",
+                    match_id, reason,
+                )
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
