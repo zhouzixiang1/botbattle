@@ -342,7 +342,11 @@ async function reconcileCurrentIdentity(): Promise<IdentityReconciliation> {
           }
           nextUser = body.user
         } else {
-          throw new ApiError('/api/auth/me', response.status, await readErrorDetail(response))
+          const body = await readErrorBody(response)
+          throw new ApiError('/api/auth/me', response.status, body.detail, body.rawDetail, {
+            headers: body.headers,
+            code: body.code,
+          })
         }
       } catch (cause) {
         const changedWhileReadingBody = (
@@ -491,19 +495,60 @@ export function humanizeDetail(raw: string): string {
   return raw
 }
 
-async function readErrorDetail(r: Response): Promise<string> {
-  let detail = `${r.status} ${r.statusText}`
+/** 响应头小写键快照：Retry-After 等错误消费方可直接读取。 */
+function responseHeaderSnapshot(headers: Headers): Record<string, string> {
+  const snapshot: Record<string, string> = {}
+  headers.forEach((value, key) => {
+    snapshot[key.toLowerCase()] = value
+  })
+  return snapshot
+}
+
+/** XHR 路径的同款快照：getAllResponseHeaders 是 CRLF 拼接串。 */
+function xhrHeaderSnapshot(xhr: XMLHttpRequest): Record<string, string> {
+  const snapshot: Record<string, string> = {}
+  for (const line of xhr.getAllResponseHeaders().split(/\r?\n/)) {
+    const separator = line.indexOf(':')
+    if (separator <= 0) continue
+    snapshot[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim()
+  }
+  return snapshot
+}
+
+/** JSON 错误体顶层的机器码（如 429 限流的 rate_limit_exceeded）；缺失为 null。 */
+function topLevelErrorCode(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== 'object' || !('code' in parsed)) return null
+  const code = (parsed as { code?: unknown }).code
+  return typeof code === 'string' && code.trim() ? code : null
+}
+
+interface ApiErrorBody {
+  detail: string
+  rawDetail: string
+  code: string | null
+  headers: Record<string, string>
+}
+
+async function readErrorBody(r: Response): Promise<ApiErrorBody> {
+  const fallback = `${r.status} ${r.statusText}`
+  let rawDetail = ''
+  let code: string | null = null
   try {
-    const j = (await r.clone().json()) as { detail?: unknown }
+    const j = (await r.clone().json()) as { detail?: unknown; code?: unknown }
+    code = topLevelErrorCode(j)
     if (j?.detail) {
-      detail = humanizeDetail(
-        typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail),
-      )
+      rawDetail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
     }
   } catch {
     /* 非 JSON */
   }
-  return detail
+  if (!rawDetail) rawDetail = fallback
+  return {
+    detail: humanizeDetail(rawDetail),
+    rawDetail,
+    code,
+    headers: responseHeaderSnapshot(r.headers),
+  }
 }
 
 export async function apiFetch<T = unknown>(
@@ -563,12 +608,12 @@ export async function apiFetch<T = unknown>(
   )
 
   if (r.status === 401) {
-    const detail = await readIdentityBoundBody(
+    const body = await readIdentityBoundBody(
       path,
       options,
       responseIdentity,
       responseBindingMode,
-      () => readErrorDetail(r),
+      () => readErrorBody(r),
     )
     // /me 探测与凭据接口：不跳登录页（避免未登录打开页面就刷错）
     // Caller-isolated requests may carry a deliberately frozen identity.  A
@@ -584,16 +629,19 @@ export async function apiFetch<T = unknown>(
     } else if (path.includes('/api/auth/me') && mayMutateCurrentAuth) {
       currentUserStore.clear()
     }
-    throw new UnauthorizedError(path, detail)
+    throw new UnauthorizedError(path, body.detail, {
+      headers: body.headers,
+      code: body.code,
+    })
   }
 
   if (!r.ok) {
-    const detail = await readIdentityBoundBody(
+    const body = await readIdentityBoundBody(
       path,
       options,
       responseIdentity,
       responseBindingMode,
-      () => readErrorDetail(r),
+      () => readErrorBody(r),
     )
     const template = safeApiTemplate(path)
     if (template) {
@@ -603,7 +651,10 @@ export async function apiFetch<T = unknown>(
         trace_id: (r.headers.get('x-trace-id') || '').slice(0, 64),
       }))
     }
-    throw new ApiError(path, r.status, detail)
+    throw new ApiError(path, r.status, body.detail, body.rawDetail, {
+      headers: body.headers,
+      code: body.code,
+    })
   }
 
   if (r.status === 204) return undefined as unknown as T
@@ -633,17 +684,33 @@ export class ApiError extends Error {
   detail: string
   /** 物化 detail 前的原始串（{code,message} 字典 stringify 等），仅调试用。 */
   rawDetail: string
-  constructor(path: string, status: number, detail: string, rawDetail = detail) {
+  /** 响应头小写键快照（Retry-After / X-RateLimit-* 等），无则为空对象。 */
+  headers: Record<string, string>
+  /** JSON 错误体顶层 code（429 限流的 rate_limit_exceeded）；缺失为 null。 */
+  serverCode: string | null
+  constructor(
+    path: string,
+    status: number,
+    detail: string,
+    rawDetail = detail,
+    meta: { headers?: Record<string, string>; code?: string | null } = {},
+  ) {
     super(`${path}: ${detail}`)
     this.status = status
     this.detail = detail
     this.rawDetail = rawDetail
+    this.headers = meta.headers ? { ...meta.headers } : {}
+    this.serverCode = typeof meta.code === 'string' ? meta.code : null
   }
 }
 
 export class UnauthorizedError extends ApiError {
-  constructor(path: string, detail = '未登录或会话过期') {
-    super(path, 401, detail)
+  constructor(
+    path: string,
+    detail = '未登录或会话过期',
+    meta: { headers?: Record<string, string>; code?: string | null } = {},
+  ) {
+    super(path, 401, detail, detail, meta)
     this.name = 'UnauthorizedError'
   }
 }
@@ -801,14 +868,17 @@ export function apiFormWithProgress<T = unknown>(
       }
 
       let detail = `${status} ${statusText}`
+      let rawDetail = ''
+      const errorCode = topLevelErrorCode(parsed)
       if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
-        const rawDetail = (parsed as { detail?: unknown }).detail
-        if (rawDetail) {
-          detail = humanizeDetail(
-            typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail),
-          )
+        const parsedDetail = (parsed as { detail?: unknown }).detail
+        if (parsedDetail) {
+          rawDetail = typeof parsedDetail === 'string' ? parsedDetail : JSON.stringify(parsedDetail)
+          detail = humanizeDetail(rawDetail)
         }
       }
+      if (!rawDetail) rawDetail = detail
+      const responseHeaders = xhrHeaderSnapshot(xhr)
 
       try {
         await guardIdentityAfterResponse(path, {
@@ -836,7 +906,10 @@ export function apiFormWithProgress<T = unknown>(
         } else if (path.includes('/api/auth/me') && mayMutateCurrentAuth) {
           currentUserStore.clear()
         }
-        finish(() => reject(new UnauthorizedError(path, detail)))
+        finish(() => reject(new UnauthorizedError(path, detail, {
+          headers: responseHeaders,
+          code: errorCode,
+        })))
         return
       }
 
@@ -849,7 +922,10 @@ export function apiFormWithProgress<T = unknown>(
             trace_id: (xhr.getResponseHeader('x-trace-id') || '').slice(0, 64),
           }))
         }
-        finish(() => reject(new ApiError(path, status, detail)))
+        finish(() => reject(new ApiError(path, status, detail, rawDetail, {
+          headers: responseHeaders,
+          code: errorCode,
+        })))
         return
       }
 
@@ -895,6 +971,27 @@ export function errMsg(e: unknown, fallback = '操作失败'): string {
 
 export function isUnauthorized(e: unknown): boolean {
   return e instanceof UnauthorizedError || (e instanceof ApiError && e.status === 401)
+}
+
+/** 从 ApiError 的响应头快照读 Retry-After（秒，可能带小数）换算毫秒；
+ * 头缺失、非数字或非正值时回退 fallbackMs。 */
+export function retryAfterMs(err: unknown, fallbackMs = 5000): number {
+  if (err instanceof ApiError) {
+    const raw = err.headers['retry-after']
+    if (raw !== undefined) {
+      const seconds = Number.parseFloat(String(raw).trim())
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.round(seconds * 1000)
+      }
+    }
+  }
+  return fallbackMs
+}
+
+/** 429 限流错误判定：状态码为准；顶层 code 在 detail 之外，需读 serverCode。 */
+export function isRateLimitError(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false
+  return err.status === 429 || err.serverCode === 'rate_limit_exceeded'
 }
 
 /** 构造人类对战 WebSocket URL。

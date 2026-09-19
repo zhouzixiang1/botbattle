@@ -33,6 +33,8 @@ import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConfirm } from '@/hooks/use-confirm'
+import { useSubmitCooldown } from '@/hooks/use-submit-cooldown'
+import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { toast } from 'sonner'
 import {
   apiFormWithProgress,
@@ -128,6 +130,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [file, setFile] = useState<File | null>(null)
   // 选错文件类型/大小等文件字段级错误就近显示在文件选择框下方，不占用页面级 error。
   const [fileError, setFileError] = useState('')
+  // 429/503 繁忙导致的提交冷却：按钮禁用 + 倒计时，到期自动解除。
+  const submitCooldown = useSubmitCooldown()
   const [sourceFormat, setSourceFormat] = useState('elf')
   const [sourceEntry, setSourceEntry] = useState('')
   const [sourceRuntime, setSourceRuntime] = useState('')
@@ -192,6 +196,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
 
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
+    // 冷却期内禁止连发重试（按钮禁用之外，Enter 提交也在此拦截）。
+    if (submitCooldown.active) return
     const editorActive = sourceFormat !== 'elf' && sourceUploadMode === 'editor'
     // 超限错误已由编辑器内联展示，这里只负责阻止提交。
     if (editorActive && sourceEditorSizeError(sourceCode)) return
@@ -245,7 +251,10 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
       if (!isCurrentUpload()) return
       toast.success('Bot 上传成功')
     } catch (err) {
-      if (isCurrentUpload()) setError(errMsg(err, '上传失败'))
+      if (isCurrentUpload()) {
+        setError(errMsg(err, '上传失败'))
+        submitCooldown.beginCooldown(err)
+      }
     } finally {
       const isCurrent = isCurrentUpload()
       if (uploadControllerRef.current === controller) {
@@ -639,10 +648,26 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                     verifyingHint: '平台正在编译源码并运行标准首回合协议；通过后才会发布版本。',
                   })}
             />
-            <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
+            <Button
+              type="submit"
+              disabled={busy || submitCooldown.active}
+              aria-busy={busy}
+              className="w-full gap-1.5"
+            >
               <Upload className="size-4" />
-              {uploadStage === 'preflight' ? '服务端检查中…' : busy ? '上传中…' : '上传'}
+              {uploadStage === 'preflight'
+                ? '服务端检查中…'
+                : busy
+                  ? '上传中…'
+                  : submitCooldown.active
+                    ? `${submitCooldown.remainingSeconds} 秒后可重试`
+                    : '上传'}
             </Button>
+            {submitCooldown.active && (
+              <p data-testid="upload-cooldown" role="status" className="text-xs text-destructive">
+                请求过于频繁，请在 {submitCooldown.remainingSeconds} 秒后重试
+              </p>
+            )}
           </form>
       </DataRegion>
 
@@ -927,11 +952,34 @@ function LocalBotConnections({ identityKey }: { identityKey: number | null }) {
     }
   }, [identityKey])
 
+  // 面板展开（挂载）时先做一次带 Loading 的完整加载（连接列表 + 可选 Bot）。
   useEffect(() => {
     void load()
-    const timer = window.setInterval(() => void load(true), 5_000)
-    return () => window.clearInterval(timer)
   }, [load])
+
+  // 之后仅静默轮询连接列表：单飞不重叠、页面隐藏自动暂停、失败指数退避
+  // （5s 起、20s 封顶），替代原先无可见性暂停的裸 setInterval。
+  const pollAgents = useCallback(async (signal: AbortSignal) => {
+    if (identityKey == null) return
+    try {
+      const agentData = await apiGet<{ items: LocalAIAgent[] }>('/api/local-ai/agents', { signal })
+      setAgents((agentData.items || []).filter((agent) => agent.status !== 'revoked'))
+      setError('')
+    } catch (err) {
+      // 轮询器主动中止（隐藏/卸载/手动刷新）不当作错误展示。
+      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      setError(errMsg(err, '本地连接加载失败'))
+    }
+  }, [identityKey])
+
+  useSingleFlightPolling({
+    task: pollAgents,
+    enabled: identityKey != null,
+    intervalMs: 5_000,
+    initialDelayMs: 5_000,
+    maxIntervalMs: 20_000,
+    scopeKey: identityKey,
+  })
 
   // Radix mirrors Select state through a hidden native select.  Firefox and
   // WebKit can briefly write the empty sentinel back while async options are
