@@ -110,13 +110,57 @@ def test_claim_denial_reason_is_exposed(obs_store):
     assert store.executions.last_claim_denial == "match_slots_full"
 
 
+def test_dispatcher_denial_memo_is_per_claim_class(caplog):
+    """foreground 与 auto 每 tick 各判一次空转：memo 必须按类分槽。
+    v1.7 上线实证的回归——共用单槽时两类互相顶掉，每秒双行刷屏。"""
+    caplog.set_level(
+        logging.INFO, logger="bzplat.backend.matches.execution_queue"
+    )
+    fake = SimpleNamespace(
+        repo=SimpleNamespace(last_claim_denial=None),
+        _last_claim_denial={},
+        _claim_wait_seconds=ExecutionDispatcher._claim_wait_seconds,
+    )
+    for _ in range(3):
+        fake.repo.last_claim_denial = "no_eligible_job"
+        ExecutionDispatcher._note_claim_denial(fake, "foreground")
+        fake.repo.last_claim_denial = "auto_gate"
+        ExecutionDispatcher._note_claim_denial(fake, "auto")
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "execution claim idle" in r.getMessage()
+    ]
+    assert lines == [
+        "execution claim idle class=foreground reason=no_eligible_job",
+        "execution claim idle class=auto reason=auto_gate",
+    ]
+    # 该类拿到一单后只复位自己的槽。
+    ExecutionDispatcher._log_claim(
+        fake, {"public_id": "req_x", "source": "manual",
+               "current_match_id": "m", "attempt_count": 1,
+               "created_at": "2026-09-19T16:00:00",
+               "claimed_at": "2026-09-19T16:00:05"},
+        "foreground",
+    )
+    fake.repo.last_claim_denial = "no_eligible_job"
+    ExecutionDispatcher._note_claim_denial(fake, "foreground")
+    fake.repo.last_claim_denial = "auto_gate"
+    ExecutionDispatcher._note_claim_denial(fake, "auto")
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "execution claim idle" in r.getMessage()
+    ]
+    assert len(lines) == 3  # 只有 foreground 复位后重记，auto 仍被抑制
+    assert lines[-1].startswith("execution claim idle class=foreground")
+
+
 def test_dispatcher_denial_memo_logs_on_change_only(obs_store, caplog):
     caplog.set_level(
         logging.INFO, logger="bzplat.backend.matches.execution_queue"
     )
     fake = SimpleNamespace(
         repo=SimpleNamespace(last_claim_denial="match_slots_full"),
-        _last_claim_denial=None,
+        _last_claim_denial={},
     )
     ExecutionDispatcher._note_claim_denial(fake, "foreground")
     ExecutionDispatcher._note_claim_denial(fake, "foreground")
@@ -127,7 +171,7 @@ def test_dispatcher_denial_memo_logs_on_change_only(obs_store, caplog):
     assert lines == [
         "execution claim idle class=foreground reason=match_slots_full"
     ]
-    # 拿到下一单后 memo 复位，再空转会重新记一次。
+    # 原因变化后重记一次。
     fake.repo.last_claim_denial = "no_eligible_job"
     ExecutionDispatcher._note_claim_denial(fake, "foreground")
     lines = [
