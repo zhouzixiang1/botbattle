@@ -42,6 +42,7 @@ from bzplat.backend.auth.dependencies import (
 from bzplat.backend.security import (
     BOT_UPLOAD_BODY_MAX_BYTES,
     audit_log,
+    _single_line_log_field,
     client_ip,
     websocket_origin_allowed,
 )
@@ -92,17 +93,38 @@ class _ResponseScopeCleanupStreamingResponse(StreamingResponse):
             self._cleanup()
 
 
-def _ws_peer_ip(websocket: WebSocket) -> str:
-    client = getattr(websocket, "client", None)
-    host = getattr(client, "host", "") if client else ""
-    host = str(host or "").strip()
-    return host[:64] if host else "unknown"
+def _ws_client_ip(websocket: WebSocket) -> str:
+    """与 access.log/audit/握手 gate 同口径的可信 peer IP（client_ip）。"""
+    trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    try:
+        proxy_hops = max(1, int(os.environ.get("BZ_TRUSTED_PROXY_HOPS", "1")))
+    except ValueError:
+        proxy_hops = 1
+    ip = client_ip(
+        websocket,
+        trust_proxy=trust_proxy,
+        hops=proxy_hops,
+        trusted_proxy_cidrs=getattr(
+            websocket.app.state, "trusted_proxy_cidrs", None
+        ),
+    )
+    ip = str(ip or "").strip()
+    return ip[:64] if ip else "unknown"
 
 
 def _ws_origin_field(websocket: WebSocket) -> str:
-    """Origin 头是公开的站点声明：归一化截断后可入日志（区分配置错 vs 恶意）。"""
-    origin = str(websocket.headers.get("origin") or "").strip()
-    return origin[:128] if origin else "-"
+    """Origin 头是公开的站点声明：消毒+截断后入日志（区分配置错 vs 恶意）。"""
+    origin = _single_line_log_field(
+        str(websocket.headers.get("origin") or "").strip()
+    )
+    return (origin or "-")[:128]
+
+
+def _ws_match_field(match_id: str) -> str:
+    """match_id 来自 URL path（会被百分号解码）：消毒防 %0A 伪造日志行。"""
+    return _single_line_log_field(str(match_id or ""))[:96] or "-"
 
 
 async def _deny_local_ai_websocket(
@@ -115,7 +137,7 @@ async def _deny_local_ai_websocket(
     # 稳定协议码、stage 是调用点标签；绝不记 token/query 内容。
     logger.warning(
         "ws local-ai denied stage=%s reason=%s ip=%s origin=%s",
-        stage or "unknown", reason, _ws_peer_ip(websocket),
+        stage or "unknown", reason, _ws_client_ip(websocket),
         _ws_origin_field(websocket),
     )
     # Keep the rejection on the baseline ASGI WebSocket contract.  Uvicorn's
@@ -133,8 +155,8 @@ async def _deny_human_play_websocket(
 
     logger.warning(
         "ws play denied stage=%s match=%s ip=%s origin=%s",
-        stage or "unknown", match_id or "-", _ws_peer_ip(websocket),
-        _ws_origin_field(websocket),
+        stage or "unknown", _ws_match_field(match_id),
+        _ws_client_ip(websocket), _ws_origin_field(websocket),
     )
     await websocket.accept()
     await websocket.send_json({

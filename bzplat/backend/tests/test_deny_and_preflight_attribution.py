@@ -73,8 +73,6 @@ def test_preflight_rejection_is_attributed(tmp_path, caplog, monkeypatch):
         async def stop_session(self, sid):
             return None
 
-    real_run = manager._run_preflight
-
     def fake_run(*args, **kwargs):
         return False, "Bot 进程异常退出：exit 255\nstderr 第二行"
 
@@ -132,7 +130,19 @@ def test_reset_password_fail_audit_uses_username_not_raw_input(
     assert r.status_code in (400, 404, 422)
     hit = [c for c in calls if c["action"] == "reset_password"]
     assert len(hit) == 1
-    # target 是已解析的用户名（或 None），绝不落原始输入（可能是邮箱 PII）。
-    assert hit[0].get("target") in ("resetattr", None)
+    # target 是已解析的用户名（确定性解析出该用户），绝不落原始输入。
+    assert hit[0].get("target") == "resetattr"
     assert "secret-email" not in str(hit[0])
     assert "secret-email" not in str(calls)
+
+    # no_user：解析不到账号时 target 省略（不落原始输入），仍有 ip+detail。
+    r2 = client.post("/api/auth/reset-password", json={
+        "email_or_username": "nobody-secret@example.test",
+        "code": "x",
+        "new_password": "newpass123",
+    })
+    assert r2.status_code in (400, 404)
+    hit2 = [c for c in calls if c["action"] == "reset_password"]
+    assert len(hit2) == 2
+    assert hit2[1].get("target") is None
+    assert "nobody-secret" not in str(hit2[1])

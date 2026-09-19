@@ -107,6 +107,14 @@ class ResendVerifyReq(BaseModel):
     captcha_answer: str = Field(..., max_length=_MAX_CAPTCHA_ANSWER_CHARS)
 
 
+def _login_audit_target(raw: str) -> str | None:
+    """登录失败审计 target：用户名照记；邮箱形态（用户敲错框）不落 PII。"""
+    value = str(raw or "").strip()
+    if not value or "@" in value:
+        return None
+    return value[:64]
+
+
 def _secure_cookie() -> bool:
     return os.environ.get("BZ_SECURE_COOKIE", "").strip().lower() in {
         "1",
@@ -219,7 +227,13 @@ async def verify_email(req: VerifyEmailReq, request: Request) -> dict:
     try:
         user = auth.verify_email(req.email_or_username, req.code)
     except AuthError as exc:
-        audit_log(request, "verify_email", result="fail", target=req.email_or_username, detail=exc.code)
+        audit_log(
+            request, "verify_email", result="fail",
+            # 与 reset_password 同规：target 用已解析账号名，原始输入（可能
+            # 是邮箱）不落审计。
+            target=getattr(exc, "username", "") or None,
+            detail=exc.code,
+        )
         raise _err(exc) from exc
     audit_log(request, "verify_email", result="ok", user=user.get("username"))
     return {"ok": True, "user": user, "message": "邮箱已验证,请登录"}
@@ -253,7 +267,7 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
         _require_captcha(request, req.captcha_id, req.captcha_answer)
     except HTTPException as exc:
         # 验证码失败也要审计（暴力试探的早期信号）
-        audit_log(request, "login", result="fail", target=req.username, detail="captcha_failed")
+        audit_log(request, "login", result="fail", target=_login_audit_target(req.username), detail="captcha_failed")
         raise _credential_error(exc)
     auth: AuthManager = request.app.state.auth
     # 只有命中 trusted-proxy CIDR 的原始 socket peer 才可提交代理身份头。
@@ -272,7 +286,7 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
             user_agent=request.headers.get("user-agent", ""),
         )
     except AuthError as exc:
-        audit_log(request, "login", result="fail", target=req.username, detail=exc.code)
+        audit_log(request, "login", result="fail", target=_login_audit_target(req.username), detail=exc.code)
         raise _credential_error(_err(exc)) from exc
     audit_log(request, "login", result="ok", user=user.get("username") or user.get("id"))
     _set_session_cookie(response, token)
