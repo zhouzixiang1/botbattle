@@ -107,7 +107,7 @@ def test_spa_fallback_404s_unknown_top_level_paths(tmp_path):
     if not dist.is_dir():
         import pytest
 
-        pytest.skip("source tree has no frontend/dist; e2e covers behavior")
+        pytest.skip("需要已构建的 frontend/dist；行为由带 dist 的本地门禁与防漂移子集测试钉住")
     app = main_mod.create_app(db_path=str(tmp_path / "spa404.db"))
     client = TestClient(app)
     assert client.get("/wp-login.php").status_code == 404
@@ -119,3 +119,38 @@ def test_spa_fallback_404s_unknown_top_level_paths(tmp_path):
     assert client.get("/match/20260919-x").status_code == 200
     assert client.get("/login").status_code == 200
     assert client.get("/favicon.svg").status_code == 200
+    robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert "User-agent" in robots.text
+
+
+def test_spa_whitelist_covers_frontend_top_level_routes():
+    """防漂移（无需 dist）：app-shell.tsx 的全部顶层路由段必须在白名单内。
+
+    main.py 的 _SPA_PATH_TOP_LEVEL_SEGMENTS 定义在 create_app 内部，这里
+    以正则从源码直接提取，保证前端新增顶层路由而忘同步时测试变红。
+    """
+    import bzplat.backend.main as main_mod
+    import re as _re
+
+    source = (
+        main_mod.Path(main_mod.__file__).resolve().parents[2]
+        / "bzplat" / "frontend" / "src" / "components" / "shell"
+        / "app-shell.tsx"
+    ).read_text(encoding="utf-8")
+    segments = {
+        m.group(1)
+        for m in _re.finditer(r'path="(/[a-z0-9-]+)', source)
+    }
+    assert segments, "app-shell.tsx 路由提取失败（文件结构变化？）"
+    text = main_mod.__file__
+    main_src = main_mod.Path(text).read_text(encoding="utf-8")
+    whitelist = _re.search(
+        r"_SPA_PATH_TOP_LEVEL_SEGMENTS = frozenset\(\{(.*?)\}\)",
+        main_src, _re.S,
+    )
+    assert whitelist, "白名单常量提取失败"
+    allowed = set(_re.findall(r'"([a-z0-9-]+)"', whitelist.group(1)))
+    missing = {s.lstrip("/") for s in segments} - allowed
+    # arena 是已删除旧路由的书签兼容项，允许出现在差集中。
+    assert missing <= {"arena"}, f"前端顶层路由未入白名单: {missing}"

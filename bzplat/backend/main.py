@@ -668,8 +668,10 @@ def create_app(
         raise HTTPException(404, "Not Found")
 
     # SPA 顶层路径段白名单（HashRouter 下的历史书签兼容入口）。
-    # 来源：bzplat/frontend/src/components/shell/nav-config.ts 与
-    # app-shell.tsx 的全部顶层路由；新增前端顶层路由需同步追加。
+    # 当前路由段来源：bzplat/frontend/src/components/shell/app-shell.tsx
+    # 的全部顶层 Route（防漂移由 test_api_not_found 的正则子集测试钉住）。
+    # arena 是已删除的旧路由，仅为历史书签兼容保留
+    # （test_security_http_boundaries 深链用例钉住 /arena → index）。
     _SPA_PATH_TOP_LEVEL_SEGMENTS = frozenset({
         "admin", "arena", "bot", "challenge", "contests", "feedback",
         "history", "judges", "leaderboard", "login", "match", "messages",
@@ -720,7 +722,7 @@ def create_app(
             # 其余未知路径（扫描器探测的 /wp-login.php、/.env、/blog 等）
             # 一律 404——此前 catch-all 兜底 200+HTML 会让 WordPress 扫描器
             # 误判命中并持续回访。
-            top = full_path.split("/", 1)[0].strip().lower()
+            top = full_path.split("/", 1)[0].lower()
             if top and top in _SPA_PATH_TOP_LEVEL_SEGMENTS:
                 return FileResponse(dist_root / "index.html")
             raise HTTPException(404, "Not Found")
