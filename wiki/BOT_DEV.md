@@ -27,7 +27,7 @@ ELF 路线不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF�
 | 默认入口 | C 为 `main.c`；C++ 为 `main.cpp` / `main.cc` / `main.cxx`；Go 为 `main.go`；Python 为 zip 根目录的 `__main__.py` 或 `main.py`。单文件直传不需要填入口；zip 入口不在候选里时，在上传表单显式填写 |
 | C / C++ | 服务端以 `gcc/g++ -O2 -static` 编译，自动定义 `_BOTZONE_ONLINE=1` 与 `BOTARENA_ONLINE=1`；可用库为 nlohmann/json 与 Eigen（g++ 12.2 / Go 1.19 / Python 3.11 环境） |
 | Go | 以 `CGO_ENABLED=0` 纯 Go 编译（禁 cgo）；产物必须是静态链接 ELF，动态链接产物会被拒绝 |
-| Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行。默认**仅标准库**；上传时「运行库」选 **ML 库** 可用 numpy/scipy/onnxruntime 与 torch 2.1.2（CPU 版），import 后内存占用约 220 MiB（沙箱总内存 512 MiB），模型权重请转存为 npz/onnx 上传云存储、对局中从 `data/` 读取 |
+| Python | 不编译：平台保存 `src/` 并生成 launcher 直接运行。默认**仅标准库**；上传时「运行库」选 **ML 库** 可用 numpy/scipy/onnxruntime 与 torch 2.1.2（CPU 版）。选 ML 库的 Bot 自动使用 2 GiB 内存档（其余 Bot 仍为 512 MiB），`.pth/npz/onnx` 权重请上传云存储，对局与预检都会把你的云盘只读挂载到 `/mnt/data` 与 `/app/data`，代码里直接从这两个路径读 |
 | 构建时限 | 服务端编译 120 秒超时；源码先编译，再进入与 ELF 相同的上传预检 |
 
 本章之后的示例源码（`bot.c` / `bot.py`）两条路线通用：源码上传可以直接把单个示例文件传上去，或打进 zip；ELF 路线按后续章节在本地构建。
@@ -321,7 +321,8 @@ docker run --rm -i --platform linux/amd64 \
 
 - 日常挑战、自动排位、人机 Bot 侧与上传预检使用节能沙箱：每个 Bot 1 核、512 MiB、无网络、只读根文件系统，仅 `/tmp` 可写。
 - `/tmp` 是 256 MB tmpfs、可执行，且计入 512 MiB 内存上限（不是额外预算）。PyInstaller onefile 等运行期解压捆绑库的程序，解压后总体积超过它就会启动失败。
-- Python 源码 Bot 选「ML 库」运行库时，numpy/scipy/onnxruntime/torch 由平台镜像提供，无需打包；import torch 后约占 220 MiB，剩余内存与 /tmp 需容纳你的模型与推理。
+- Python 源码 Bot 选「ML 库」运行库时，numpy/scipy/onnxruntime/torch 由平台镜像提供，无需打包；该类 Bot 的沙箱内存上限为 2 GiB（含 /tmp tmpfs 与模型加载），import torch 约占 400 MiB，大模型请从云盘挂载路径读取而不是打包进 zip。
+- 预检环境与正式对局一致：同样挂载你的云盘、使用同样的内存档。预检阶段就要真实完成一次首回合决策——依赖云盘模型的 Bot 不需要也不应该写「无模型回退」来绕过预检。
 - 锦标赛统一使用赛事沙箱：每个 Bot 2 核、2 GiB；参赛者不能在日常挑战中选择该档位，主机资源不足时赛事会等待，不会自动降档。
 - 本地 Bot 在用户自己的电脑运行，不占平台 Docker 资源；平台只负责裁判、排队、回放与技术判定。本地 Bot 对局不计排行榜，也不能参加锦标赛。
 - Holdem 使用单步 60 秒；Gomoku 可选每方累计 900/300 秒；Pencil 可选每方累计 900 秒或单步 1 秒。普通挑战只有游戏默认档计入 Rating，替代档属于不计分练习。

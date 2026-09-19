@@ -31,6 +31,7 @@ from ..store import (
 from ..runtime.limits import (
     ML_PY_RUNTIME_IMAGE,
     MAX_BOT_UPLOAD_BYTES,
+    PLATFORM_ML_PROFILE,
     PYTHON_RUNTIME_IMAGE,
     SOURCE_UPLOAD_MAX_BYTES,
 )
@@ -202,10 +203,14 @@ class BotManager:
         *,
         upload_root: Path | str = UPLOAD_ROOT,
         create_upload_root: bool = True,
+        user_storage: "Any | None" = None,
     ) -> None:
         self.store = store
         self.upload_root = Path(upload_root)
         self._create_upload_root = bool(create_upload_root)
+        # 用户云盘：预检时为 owner 构建与对局一致的 /mnt/data、/app/data
+        # 快照挂载（环境平权——依赖云盘模型的 Bot 不能只在预检时“看不见”）。
+        self.user_storage = user_storage
         self._upload_root_created = False
         self._upload_root_identity: tuple[int, int] | None = None
         self._bot_locks_guard = Lock()
@@ -251,6 +256,7 @@ class BotManager:
                         in_root = root is self.upload_root
                         matches = (
                             entry.name.startswith(".incoming-")
+                            or entry.name.startswith(".preflight-drive-")
                             if in_root
                             else bool(version_staging.match(entry.name))
                         )
@@ -430,6 +436,59 @@ class BotManager:
                 source_builder=source_builder,
             )
 
+    def _build_preflight_drive_snapshot(
+        self, stored_bot: Any | None
+    ) -> Path | None:
+        """为上传预检构建 owner 云盘的临时硬链接快照（对局同款挂载点）。
+
+        返回待挂载的 seat 目录；未装配云盘或 owner 无文件时返回 None。
+        目录位于 canonical 上传根的 ``.preflight-drive-*`` 前缀目录内，
+        由调用方在预检结束后整目录回收；进程崩溃残留由启动兜底清扫。
+        """
+        if self.user_storage is None or not stored_bot:
+            return None
+        owner_id = int(stored_bot.get("owner_id") or 0)
+        if owner_id <= 0:
+            return None
+        files = self.store.list_user_storage_files(owner_id)
+        if not files:
+            return None
+        from bzplat.backend.user_storage import UserStorageError
+
+        try:
+            self.upload_root.mkdir(parents=True, exist_ok=True)
+            root = Path(
+                tempfile.mkdtemp(
+                    prefix=".preflight-drive-", dir=self.upload_root
+                )
+            )
+        except OSError as exc:
+            logger.warning(
+                "preflight drive staging failed owner=%s: %s", owner_id, exc
+            )
+            raise BotError(
+                "drive_snapshot_unavailable",
+                "用户云盘暂不可用，请稍后重试或联系管理员",
+            ) from exc
+        seat = root / "seat0"
+        try:
+            self.user_storage.build_drive_snapshot(owner_id, files, seat)
+        except (UserStorageError, OSError) as exc:
+            shutil.rmtree(root, ignore_errors=True)
+            code = getattr(exc, "code", type(exc).__name__)
+            logger.warning(
+                "preflight drive snapshot failed owner=%s code=%s",
+                owner_id, code,
+            )
+            # missing_blob/非法清单名是服务侧存储不一致，不是用户 Bot 的
+            # 协议问题：独立错误码走 503 可重试，避免用户把平台故障当成
+            # 自己预检失败反复重传。
+            raise BotError(
+                "drive_snapshot_unavailable",
+                "用户云盘暂不可用，请稍后重试或联系管理员",
+            ) from exc
+        return seat
+
     def _run_preflight(
         self,
         bot_id: int,
@@ -441,8 +500,13 @@ class BotManager:
         image: str = "",
         extra_volumes: tuple[tuple[str, str], ...] = (),
         allow_script_entry: bool = False,
+        profile: Any | None = None,
     ) -> tuple[bool, str]:
-        """按待发布版本所选模式试跑 canonical 首回合协议。"""
+        """按待发布版本所选模式试跑 canonical 首回合协议。
+
+        ``profile`` 为空时用 runner 默认低配档；ML 运行库变体传
+        ``PLATFORM_ML_PROFILE``，保证预检内存上限与正式对局一致。
+        """
         import asyncio
         from bzplat.backend.games import preflight_bot
         from bzplat.backend.runtime.binary_runner import PlatformRunnerError
@@ -464,41 +528,34 @@ class BotManager:
             return False, "预检失败：无法读取上传产物"
         except BinaryRejectError as exc:
             return False, f"预检失败：{exc}"
+
+        def _invoke() -> tuple[bool, str]:
+            return asyncio.run(
+                preflight_bot(
+                    game_id,
+                    path,
+                    binary_runner,
+                    runtime_mode=runtime_mode,
+                    image=image,
+                    extra_volumes=extra_volumes,
+                    allow_script_entry=allow_script_entry,
+                    profile=profile,
+                )
+            )
+
         try:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 # Normal API path: BotManager itself runs via asyncio.to_thread,
                 # so this worker owns a fresh event loop and a fresh BinaryRunner.
-                return asyncio.run(
-                    preflight_bot(
-                        game_id,
-                        path,
-                        binary_runner,
-                        runtime_mode=runtime_mode,
-                        image=image,
-                        extra_volumes=extra_volumes,
-                        allow_script_entry=allow_script_entry,
-                    )
-                )
+                return _invoke()
             else:
                 # Defensive compatibility for direct synchronous calls made from
                 # an already-running loop: isolate the nested asyncio.run in a worker.
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    return pool.submit(
-                        lambda: asyncio.run(
-                            preflight_bot(
-                                game_id,
-                                path,
-                                binary_runner,
-                                runtime_mode=runtime_mode,
-                                image=image,
-                                extra_volumes=extra_volumes,
-                                allow_script_entry=allow_script_entry,
-                            )
-                        )
-                    ).result()
+                    return pool.submit(_invoke).result()
         except PlatformRunnerError:
             raise
         except Exception as e:
@@ -727,14 +784,54 @@ class BotManager:
                             ),
                             "allow_script_entry": True,
                         }
-                    ok, detail = self._run_preflight(
-                        bot_id,
-                        effective_game_id,
-                        binary_runner,
-                        binary_path=str(temp_dest),
-                        runtime_mode=runtime_mode,
-                        **preflight_kwargs,
+                    # 预检环境平权：与正式对局一致挂载 owner 云盘快照与
+                    # ML 内存档——否则依赖 /mnt/data 模型的 Bot 只能靠
+                    # “无模型回退”骗过预检，正式对局才暴露 OOM/缺模型。
+                    drive_root = self._build_preflight_drive_snapshot(
+                        stored_bot
                     )
+                    if drive_root is not None:
+                        volumes = list(preflight_kwargs.get("extra_volumes", ()))
+                        volumes.append((str(drive_root), "/mnt/data"))
+                        volumes.append((str(drive_root), "/app/data"))
+                        preflight_kwargs["extra_volumes"] = tuple(volumes)
+                    if runtime_image == ML_PY_RUNTIME_IMAGE:
+                        preflight_kwargs["profile"] = PLATFORM_ML_PROFILE
+                        # ML 预检容器占 2 GiB，与源码构建通道同一主机内存
+                        # 预算做 advisory 准入（不足时保守拒绝而非超卖），
+                        # 与 claim 的严格准入口径一致。
+                        from bzplat.backend.runtime.limits import (
+                            effective_host_resource_budget,
+                        )
+
+                        budget_mb = (
+                            effective_host_resource_budget().memory_mb
+                        )
+                        used_mb = (
+                            self.store.executions.execution_memory_in_use_mb()
+                        )
+                        if (
+                            used_mb + PLATFORM_ML_PROFILE.memory_mb
+                            > budget_mb
+                        ):
+                            raise BotError(
+                                "upload_busy",
+                                "平台内存资源紧张，Bot 上传预检繁忙，请稍后重试",
+                            )
+                    try:
+                        ok, detail = self._run_preflight(
+                            bot_id,
+                            effective_game_id,
+                            binary_runner,
+                            binary_path=str(temp_dest),
+                            runtime_mode=runtime_mode,
+                            **preflight_kwargs,
+                        )
+                    finally:
+                        if drive_root is not None:
+                            shutil.rmtree(
+                                drive_root.parent, ignore_errors=True
+                            )
                     if not ok:
                         raise BotError(
                             "preflight_failed", f"Bot 预检失败：{detail}"

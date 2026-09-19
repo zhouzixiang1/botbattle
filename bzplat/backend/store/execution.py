@@ -61,6 +61,7 @@ from .schema import (
     EXECUTION_ENV_HUMAN,
     EXECUTION_ENV_PLATFORM_HIGH,
     EXECUTION_ENV_PLATFORM_LOW,
+    EXECUTION_ENV_PLATFORM_ML,
     EXECUTION_ENV_REMOTE_LOCAL,
     EXECUTION_PROFILE_VERSION,
     STATUS_ABORTED,
@@ -95,7 +96,7 @@ CONTEST_FAIRNESS_POLICY = "round_robin_v1"
 BOT_EXCLUSIVITY_POLICY = "active_execution_v1"
 
 _PLATFORM_ENVIRONMENTS = frozenset(
-    {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_PLATFORM_HIGH}
+    {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_PLATFORM_HIGH, EXECUTION_ENV_PLATFORM_ML}
 )
 _MANUAL_ENVIRONMENTS = frozenset(
     {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_REMOTE_LOCAL}
@@ -1845,6 +1846,29 @@ class ExecutionRepository:
             agent_ids = (bot_a_local_agent_id, bot_b_local_agent_id)
         else:  # guarded by the caller, retained as a fail-closed boundary
             raise ValueError(f"unknown execution source: {source}")
+
+        # ML 运行库变体（版本冻结 runtime_image=botbattle-ml-py3）在 512 MiB
+        # 无 swap 档跑不完 torch 导入 + 云盘模型加载，会以 cgroup OOM
+        # （exit 137）技术负收场。低配 Docker 座位按版本派生升档
+        # platform_ml（CPU 与单位记账不变，内存 2 GiB）；只升不降——
+        # 赛事 platform_high、本地/人类座位不受影响，也不开放显式选择。
+        from bzplat.backend.runtime.limits import ML_PY_RUNTIME_IMAGE
+
+        for seat, version_id in enumerate(
+            (bot_a_version_id, bot_b_version_id)
+        ):
+            if version_id is None or environments[seat] != EXECUTION_ENV_PLATFORM_LOW:
+                continue
+            version_row = conn.execute(
+                "SELECT runtime_image FROM bot_versions WHERE id=?",
+                (int(version_id),),
+            ).fetchone()
+            if version_row is None:
+                raise ValueError(f"座位 {seat} 引用的 Bot 版本不存在")
+            if str(version_row["runtime_image"] or "") == ML_PY_RUNTIME_IMAGE:
+                upgraded = list(environments)
+                upgraded[seat] = EXECUTION_ENV_PLATFORM_ML
+                environments = (upgraded[0], upgraded[1])
 
         versions: list[int | None] = [bot_a_version_id, bot_b_version_id]
         bots = (int(bot_a_id), int(bot_b_id))

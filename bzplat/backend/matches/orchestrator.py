@@ -735,53 +735,29 @@ class MatchOrchestrator:
 
         硬链接指向内容寻址 blob：上传替换/删除只改清单与新建文件，
         快照内的友好名指向的 inode 在本场对局内恒定，天然保证单场一致。
-        无文件或未配置时不挂载。
+        无文件或未配置时不挂载。链接构建与名字复核在
+        ``UserStorageManager.build_drive_snapshot``，与上传预检共用。
         """
         if self.user_storage is None or self.mount_root is None:
             return None
         files = self.store.list_user_storage_files(owner_id)
         if not files:
             return None
-        from bzplat.backend.user_storage import (
-            UserStorageError,
-            validate_storage_name,
-        )
+        from bzplat.backend.user_storage import UserStorageError
 
         root = self.mount_root / str(match_id) / f"seat{seat}"
-        root.mkdir(parents=True, exist_ok=True)
-        # seat 快照目录会被目录 bind mount 进 65534 容器；mkdir 的 mode 会被
-        # 进程 umask 0077 掩码，必须显式 chmod 放宽到 0755（父目录维持 0700）。
-        root.chmod(0o755)
-        for entry in files:
-            # 清单行的名字合法性由上传 API 保证；快照侧独立复核一次，
-            # 手改 DB 的带路径名字不得借硬链接逃逸 seat 目录。
-            try:
-                validate_storage_name(entry["name"])
-            except UserStorageError as exc:
-                logger.error(
-                    "user drive snapshot invalid name match=%s owner=%s",
-                    match_id, owner_id,
-                )
-                raise BotVersionContractError(
-                    "用户云盘清单包含非法文件名，不能开赛"
-                ) from exc
-            blob = self.user_storage.blob_path(owner_id, str(entry["sha256"]))
-            if not blob.is_file():
-                logger.error(
-                    "user drive snapshot missing blob match=%s owner=%s name=%s",
-                    match_id, owner_id, entry["name"],
-                )
-                raise BotVersionContractError("用户云盘文件缺失，不能开赛")
-            try:
-                (root / entry["name"]).hardlink_to(blob)
-            except FileExistsError:
-                continue
-            except OSError as exc:
-                logger.error(
-                    "user drive snapshot link failed match=%s owner=%s: %s",
-                    match_id, owner_id, exc,
-                )
-                raise BotVersionContractError("用户云盘快照失败，不能开赛") from exc
+        try:
+            self.user_storage.build_drive_snapshot(owner_id, files, root)
+        except UserStorageError as exc:
+            logger.error(
+                "user drive snapshot failed match=%s owner=%s code=%s",
+                match_id, owner_id, exc.code,
+            )
+            message = {
+                "invalid_manifest_name": "用户云盘清单包含非法文件名，不能开赛",
+                "missing_blob": "用户云盘文件缺失，不能开赛",
+            }.get(str(exc.code), "用户云盘快照失败，不能开赛")
+            raise BotVersionContractError(message) from exc
         return root
 
     def _drop_match_mounts(self, match_id: str) -> None:

@@ -51,7 +51,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 | `--entrypoint /app/bot` | 忽略基础镜像自带 Entrypoint/CMD，直接执行已校验 ELF |
 | `--platform linux/amd64` | 运行目标固定为 Linux amd64 |
 
-平台管理两种 Docker 档位：`platform_low` 每 Bot 1 CPU / 512 MiB，用于日常节能挑战、自动排位、人机 Bot 侧与上传预检；`platform_high` 每 Bot 2 CPU / 2 GiB，仅由锦标赛使用。用户端 `remote_local` 和真人座位不创建平台容器。所有参数均为**只读硬限制**，admin 面板不可抬高。容器名由
+平台管理三种 Docker 档位：`platform_low` 每 Bot 1 CPU / 512 MiB，用于日常节能挑战、自动排位、人机 Bot 侧与上传预检；`platform_high` 每 Bot 2 CPU / 2 GiB，仅由锦标赛使用；`platform_ml` 每 Bot 1 CPU / 2 GiB，不可显式选择——入队时由版本冻结的 `runtime_image=botbattle-ml-py3` 从 `platform_low` 座位自动派生（torch 导入 ~400 MiB 叠加云盘模型在 512 MiB 无 swap 档必被 cgroup OOM 杀），只升不降，赛事档与本地/人类座位不受影响。用户端 `remote_local` 和真人座位不创建平台容器。所有参数均为**只读硬限制**，admin 面板不可抬高。容器名由
 `instance namespace + request public_id hash + attempt + slot` 确定；容器同时带
 `io.botbattle.instance/job/attempt/slot` 四个执行 label；容器创建阶段另带唯一
 `io.botbattle.launch` token。namespace 优先取显式
@@ -68,7 +68,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
   串行覆盖 create + start 与 job/instance cleanup；create 请求发给 daemon 前必须先把 journal 从 `idle`
   写为 `creating`，精确 name/token/label inspect 后才可写 `created`，StartedAt 或精确清场后才回 `idle`。
 - 上传预检不伪装成对局 job，但所有 worker 共用一个进程级单槽 admission；因此任意时刻最多额外运行
-  1 个 512 MiB/1 CPU 的预检容器，平台物理上界为执行队列 `max_sandbox_units + 1`。取消、失败或返回都会
+  1 个预检容器（标准版 512 MiB；ML 运行库变体 2 GiB 且与正式对局同样挂载 owner 云盘快照，保证预检与对局环境一致），平台物理上界为执行队列 `max_sandbox_units + 1`。取消、失败或返回都会
   释放该槽；若 Docker 结果不确定，journal/paused 门禁仍会阻止释放后出现新的 create。
 - 每次服务启动先停止并删除**本 instance namespace** 的所有容器，并连续两次查询 label/name/token 为 0；
   只有 journal 也闭合后才恢复持久请求。不会跨 namespace 清理，也没有多 leader 热接管或远端 Docker 证明。
@@ -106,6 +106,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 |----------------------|---------------|----------------------|
 | 日常挑战或自动排位：节能 + 节能 | 2 | 2000 毫核 / 1024 MiB |
 | 日常挑战：节能 + 本地 Bot | 1 | 1000 毫核 / 512 MiB |
+| ML 运行库 Bot 座位（派生 platform_ml） | 1 | 1000 毫核 / 2048 MiB |
 | 日常挑战：本地 Bot + 本地 Bot | 0 | 0 / 0；平台只运行裁判 |
 | 人机：节能 + 真人 | 1 | 1000 毫核 / 512 MiB |
 | 锦标赛：赛事 + 赛事 | 2 | 4000 毫核 / 4096 MiB |

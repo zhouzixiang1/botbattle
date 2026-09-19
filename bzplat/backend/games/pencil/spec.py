@@ -79,6 +79,7 @@ async def _preflight_check(
     image: str = "",
     extra_volumes: tuple[tuple[str, str], ...] = (),
     allow_script_entry: bool = False,
+    profile: Any | None = None,
 ) -> tuple[bool, str]:
     """按所选模式发送 canonical 首回合并验证点格棋坐标。"""
     from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
@@ -96,6 +97,7 @@ async def _preflight_check(
             image=image,
             extra_volumes=extra_volumes,
             allow_script_entry=allow_script_entry,
+            profile=profile,
         )
         x, y = payload["x"], payload["y"]
         return True, f"响应合法: ({x},{y})"

@@ -101,15 +101,19 @@ EXECUTION_ENV_PLATFORM_LOW = "platform_low"
 EXECUTION_ENV_PLATFORM_HIGH = "platform_high"
 EXECUTION_ENV_REMOTE_LOCAL = "remote_local"
 EXECUTION_ENV_HUMAN = "human"
+# ML 运行库档：不可由 API 显式选择，入队时按版本冻结的 runtime_image 从
+# platform_low 派生（见 store/execution._execution_environment_tx）。
+EXECUTION_ENV_PLATFORM_ML = "platform_ml"
 EXECUTION_ENVIRONMENTS = frozenset(
     {
         EXECUTION_ENV_PLATFORM_LOW,
         EXECUTION_ENV_PLATFORM_HIGH,
+        EXECUTION_ENV_PLATFORM_ML,
         EXECUTION_ENV_REMOTE_LOCAL,
         EXECUTION_ENV_HUMAN,
     }
 )
-EXECUTION_PROFILE_VERSION = 1
+EXECUTION_PROFILE_VERSION = 2
 
 # User-hosted Bot identities and sockets are intentionally small, fixed
 # product capacities.  A participant needs two simultaneous connections for a
@@ -576,10 +580,10 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     bot_a_version_id    INTEGER,
     bot_b_version_id    INTEGER,
     bot_a_environment   TEXT    NOT NULL DEFAULT 'platform_low' CHECK (
-        bot_a_environment IN ('platform_low','platform_high','remote_local','human')
+        bot_a_environment IN ('platform_low','platform_high','platform_ml','remote_local','human')
     ),
     bot_b_environment   TEXT    NOT NULL DEFAULT 'platform_low' CHECK (
-        bot_b_environment IN ('platform_low','platform_high','remote_local','human')
+        bot_b_environment IN ('platform_low','platform_high','platform_ml','remote_local','human')
     ),
     bot_a_local_agent_id INTEGER,
     bot_b_local_agent_id INTEGER,
@@ -616,9 +620,9 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
         (source='human' AND match_type='human' AND sandbox_units=1
          AND human_user_id IS NOT NULL AND human_seat IS NOT NULL
          AND ((human_seat=0 AND bot_a_environment='human'
-               AND bot_b_environment='platform_low')
+               AND bot_b_environment IN ('platform_low','platform_ml'))
               OR (human_seat=1 AND bot_b_environment='human'
-                  AND bot_a_environment='platform_low'))) OR
+                  AND bot_a_environment IN ('platform_low','platform_ml')))) OR
         (source<>'human' AND match_type<>'human'
          AND human_user_id IS NULL AND human_seat IS NULL
          AND bot_a_environment<>'human' AND bot_b_environment<>'human')
@@ -627,10 +631,10 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
         profile_version=0 OR
         (source='contest' AND bot_a_environment='platform_high'
                           AND bot_b_environment='platform_high') OR
-        (source='auto' AND bot_a_environment='platform_low'
-                       AND bot_b_environment='platform_low') OR
-        (source='manual' AND bot_a_environment IN ('platform_low','remote_local')
-                         AND bot_b_environment IN ('platform_low','remote_local')) OR
+        (source='auto' AND bot_a_environment IN ('platform_low','platform_ml')
+                       AND bot_b_environment IN ('platform_low','platform_ml')) OR
+        (source='manual' AND bot_a_environment IN ('platform_low','remote_local','platform_ml')
+                         AND bot_b_environment IN ('platform_low','remote_local','platform_ml')) OR
         source='human'
     ),
     CONSTRAINT chk_execution_job_local_agents CHECK (
@@ -641,8 +645,8 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     ),
     CONSTRAINT chk_execution_job_resource_snapshot CHECK (
         sandbox_units =
-            (CASE WHEN bot_a_environment IN ('platform_low','platform_high') THEN 1 ELSE 0 END)
-          + (CASE WHEN bot_b_environment IN ('platform_low','platform_high') THEN 1 ELSE 0 END)
+            (CASE WHEN bot_a_environment IN ('platform_low','platform_high','platform_ml') THEN 1 ELSE 0 END)
+          + (CASE WHEN bot_b_environment IN ('platform_low','platform_high','platform_ml') THEN 1 ELSE 0 END)
         AND (profile_version<>1 OR host_cpu_millis =
             (CASE WHEN bot_a_environment='platform_low' THEN 1000
                   WHEN bot_a_environment='platform_high' THEN 2000 ELSE 0 END)
@@ -653,6 +657,20 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
                   WHEN bot_a_environment='platform_high' THEN 2048 ELSE 0 END)
           + (CASE WHEN bot_b_environment='platform_low' THEN 512
                   WHEN bot_b_environment='platform_high' THEN 2048 ELSE 0 END))
+        AND (profile_version<>2 OR host_cpu_millis =
+            (CASE WHEN bot_a_environment='platform_low' THEN 1000
+                  WHEN bot_a_environment='platform_high' THEN 2000
+                  WHEN bot_a_environment='platform_ml' THEN 1000 ELSE 0 END)
+          + (CASE WHEN bot_b_environment='platform_low' THEN 1000
+                  WHEN bot_b_environment='platform_high' THEN 2000
+                  WHEN bot_b_environment='platform_ml' THEN 1000 ELSE 0 END))
+        AND (profile_version<>2 OR host_memory_mb =
+            (CASE WHEN bot_a_environment='platform_low' THEN 512
+                  WHEN bot_a_environment='platform_high' THEN 2048
+                  WHEN bot_a_environment='platform_ml' THEN 2048 ELSE 0 END)
+          + (CASE WHEN bot_b_environment='platform_low' THEN 512
+                  WHEN bot_b_environment='platform_high' THEN 2048
+                  WHEN bot_b_environment='platform_ml' THEN 2048 ELSE 0 END))
     ),
     CONSTRAINT chk_execution_job_contest_ref CHECK (
         (source='contest' AND contest_id IS NOT NULL

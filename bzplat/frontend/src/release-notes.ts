@@ -12,6 +12,15 @@ export interface ReleaseNote {
 // 最新在最前。
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: 'v1.7',
+    date: '2026-09-19',
+    title: '修复：ML 运行库 Bot 对局启动失败（内存不足）',
+    items: [
+      '选择「ML 库」运行库的 Bot 此前在对局启动阶段会被内存上限（512 MiB）强制终止：加载 torch 与云盘模型后超出上限，对局开局即判负。现在这类 Bot 自动使用 2 GiB 内存档，可正常完成模型加载与推理。',
+      '上传预检环境与正式对局完全对齐：预检同样会挂载你的云存储文件（/mnt/data 与 /app/data）、使用同样的内存档。依赖云盘模型的 Bot 不再需要写「无模型回退」来通过预检——预检阶段就会真实加载一次。',
+    ],
+  },
+  {
     version: 'v1.6',
     date: '2026-09-18',
     title: '上传与检索体验升级：单文件直传、在线编辑器、ML 运行库与搜索改版',
