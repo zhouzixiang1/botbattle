@@ -84,8 +84,10 @@ class ExecutionDispatcher:
             if max_sandbox_units is None
             else int(max_sandbox_units)
         )
-        # claim 空转原因的翻转 memo：同原因不重复记，拿下一单即复位。
-        self._last_claim_denial: str | None = None
+        # claim 空转原因的翻转 memo（按 claim_class 分槽）：同原因不重复
+        # 记，该类拿到下一单即复位。必须分槽——foreground/auto 每 tick 各
+        # 判一次空转，共用单槽会互相顶掉导致每秒双行刷屏（v1.7 上线实证）。
+        self._last_claim_denial: dict[str, str | None] = {}
         self.max_sandbox_units = max(
             1,
             min(
@@ -577,14 +579,13 @@ class ExecutionDispatcher:
             job.get("current_match_id"), job.get("attempt_count"),
             self._claim_wait_seconds(job), claim_class,
         )
-        self._last_claim_denial = None
+        self._last_claim_denial[claim_class] = None
 
     def _note_claim_denial(self, claim_class: str) -> None:
         reason = getattr(self.repo, "last_claim_denial", None)
-        key = f"{claim_class}:{reason}"
-        if key == self._last_claim_denial:
+        if self._last_claim_denial.get(claim_class) == reason:
             return
-        self._last_claim_denial = key
+        self._last_claim_denial[claim_class] = reason
         logger.info(
             "execution claim idle class=%s reason=%s",
             claim_class, reason or "unknown",
