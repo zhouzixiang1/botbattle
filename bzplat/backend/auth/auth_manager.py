@@ -33,10 +33,13 @@ _MIN_PASSWORD_LEN = 8
 
 
 class AuthError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, username: str = "") -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        # 已解析出的账号名（无则空）：供审计侧替代原始输入，避免把
+        # 用户提交的邮箱原文写进日志。
+        self.username = str(username or "")
 
 
 def _validate_username(username: str) -> None:
@@ -224,16 +227,24 @@ class AuthManager:
         user = self.store.get_user_by_email(
             email_or_username or ""
         ) or self.store.get_user_by_username(email_or_username or "")
+        resolved = str(user["username"]) if user else ""
         if not user:
             raise AuthError("no_user", "用户不存在")
         row = self.store.get_latest_email_code(user["id"], CODE_VERIFY)
         if not row or row["code"] != (code or "").strip():
-            raise AuthError("invalid_code", "验证码无效")
+            raise AuthError(
+                "invalid_code", "验证码无效", username=resolved
+            )
         try:
             if datetime.fromisoformat(row["expires_at"]) < datetime.now():
-                raise AuthError("expired_code", "验证码已过期,请重新获取")
+                raise AuthError(
+                    "expired_code", "验证码已过期,请重新获取",
+                    username=resolved,
+                )
         except ValueError as exc:
-            raise AuthError("invalid_code", "验证码无效") from exc
+            raise AuthError(
+                "invalid_code", "验证码无效", username=resolved
+            ) from exc
         self.store.mark_email_code_used(row["id"])
         self.store.update_user(user["id"], email_verified=1)
         # Welcome is also queued; verification success is never rolled back by SMTP.
@@ -261,6 +272,7 @@ class AuthManager:
         user = self.store.get_user_by_email(
             email_or_username or ""
         ) or self.store.get_user_by_username(email_or_username or "")
+        resolved_username = str(user["username"]) if user else ""
         if not user:
             raise AuthError("no_user", "用户不存在")
         result = self.store.reset_password_with_credential(
@@ -269,9 +281,15 @@ class AuthManager:
             email_code=(code or "").strip(),
         )
         if result == "expired":
-            raise AuthError("expired_code", "验证码已过期,请重新获取")
+            raise AuthError(
+                "expired_code", "验证码已过期,请重新获取",
+                username=resolved_username,
+            )
         if result != "ok":
-            raise AuthError("invalid_code", "验证码无效或已使用")
+            raise AuthError(
+                "invalid_code", "验证码无效或已使用",
+                username=resolved_username,
+            )
         return _safe_user(self.store.get_user(user["id"]))
 
     reset_password_with_code = reset_password
