@@ -455,21 +455,37 @@ class BotManager:
             return None
         from bzplat.backend.user_storage import UserStorageError
 
-        self.upload_root.mkdir(parents=True, exist_ok=True)
-        root = Path(
-            tempfile.mkdtemp(
-                prefix=".preflight-drive-", dir=self.upload_root
+        try:
+            self.upload_root.mkdir(parents=True, exist_ok=True)
+            root = Path(
+                tempfile.mkdtemp(
+                    prefix=".preflight-drive-", dir=self.upload_root
+                )
             )
-        )
+        except OSError as exc:
+            logger.warning(
+                "preflight drive staging failed owner=%s: %s", owner_id, exc
+            )
+            raise BotError(
+                "drive_snapshot_unavailable",
+                "用户云盘暂不可用，请稍后重试或联系管理员",
+            ) from exc
         seat = root / "seat0"
         try:
             self.user_storage.build_drive_snapshot(owner_id, files, seat)
         except (UserStorageError, OSError) as exc:
             shutil.rmtree(root, ignore_errors=True)
             code = getattr(exc, "code", type(exc).__name__)
+            logger.warning(
+                "preflight drive snapshot failed owner=%s code=%s",
+                owner_id, code,
+            )
+            # missing_blob/非法清单名是服务侧存储不一致，不是用户 Bot 的
+            # 协议问题：独立错误码走 503 可重试，避免用户把平台故障当成
+            # 自己预检失败反复重传。
             raise BotError(
-                "preflight_failed",
-                f"Bot 预检失败：用户云盘快照不可用（{code}）",
+                "drive_snapshot_unavailable",
+                "用户云盘暂不可用，请稍后重试或联系管理员",
             ) from exc
         return seat
 
@@ -781,6 +797,27 @@ class BotManager:
                         preflight_kwargs["extra_volumes"] = tuple(volumes)
                     if runtime_image == ML_PY_RUNTIME_IMAGE:
                         preflight_kwargs["profile"] = PLATFORM_ML_PROFILE
+                        # ML 预检容器占 2 GiB，与源码构建通道同一主机内存
+                        # 预算做 advisory 准入（不足时保守拒绝而非超卖），
+                        # 与 claim 的严格准入口径一致。
+                        from bzplat.backend.runtime.limits import (
+                            effective_host_resource_budget,
+                        )
+
+                        budget_mb = (
+                            effective_host_resource_budget().memory_mb
+                        )
+                        used_mb = (
+                            self.store.executions.execution_memory_in_use_mb()
+                        )
+                        if (
+                            used_mb + PLATFORM_ML_PROFILE.memory_mb
+                            > budget_mb
+                        ):
+                            raise BotError(
+                                "upload_busy",
+                                "平台内存资源紧张，Bot 上传预检繁忙，请稍后重试",
+                            )
                     try:
                         ok, detail = self._run_preflight(
                             bot_id,

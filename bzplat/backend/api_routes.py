@@ -1531,6 +1531,8 @@ async def upload_bot(
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
+        if e.code in ("upload_busy", "drive_snapshot_unavailable"):
+            raise _upload_busy_error()
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
     except PlatformRunnerError:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
@@ -1617,6 +1619,8 @@ async def upload_bot_version(
         )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
+        if e.code in ("upload_busy", "drive_snapshot_unavailable"):
+            raise _upload_busy_error()
         raise HTTPException(
             404 if e.code == "not_found"
             else 409 if e.code == "bot_deleted"

@@ -4492,6 +4492,59 @@ def _schema_create_table_sql(table: str, *, as_name: str | None = None) -> str:
     return statement
 
 
+def _table_column_decls(ddl: str) -> dict[str, str]:
+    """从 CREATE TABLE 原文提取 ``列名 -> 完整列声明``（含列级 CHECK）。
+
+    只切顶层逗号：括号（CHECK/子查询）与引号内的逗号不属于分隔符；
+    表级约束段（以 CONSTRAINT/PRIMARY/UNIQUE/CHECK/FOREIGN 开头，大小写
+    不敏感）跳过。解析失败时返回空映射，调用方回退 PRAGMA 重建。
+    """
+    start = ddl.find("(")
+    end = ddl.rfind(")")
+    if start < 0 or end <= start:
+        return {}
+    depth = 0
+    quote: str | None = None
+    segments: list[str] = []
+    current: list[str] = []
+    for ch in ddl[start + 1 : end]:
+        if quote is not None:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            current.append(ch)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            segments.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        segments.append(tail)
+
+    table_keywords = (
+        "constraint", "primary", "unique", "check", "foreign",
+    )
+    decls: dict[str, str] = {}
+    for segment in segments:
+        named = segment.split(None, 1)
+        if len(named) < 2:
+            continue
+        first = named[0].strip('"`[]')
+        if first.lower() in table_keywords:
+            continue
+        decls[first] = named[1].strip()
+    return decls
+
+
 def _ensure_execution_ml_environment_schema(conn: sqlite3.Connection) -> None:
     """Relax the durable queue CHECKs to admit the derived ``platform_ml`` tier.
 
@@ -4530,18 +4583,24 @@ def _ensure_execution_ml_environment_schema(conn: sqlite3.Connection) -> None:
         )
     )
     # 旧表可能有模板未声明的追加列（契约回填等）：先补列再按交集复制。
-    new_cols = _table_cols(conn, "execution_jobs_ml_new")
+    # 列声明从旧表 CREATE DDL 原文提取（顶层逗号切分，括号内的 CHECK/子查询
+    # 不切），完整保留列级 CHECK——PRAGMA table_info 拿不到 CHECK 子句。
+    new_cols = list(_table_cols(conn, "execution_jobs_ml_new"))
+    old_ddl = str(row[0] or "")
+    old_decls = _table_column_decls(old_ddl)
     old_info = {
         r[1]: r for r in conn.execute("PRAGMA table_info(execution_jobs)")
     }
     for name, info in old_info.items():
         if name in new_cols or name == "id":
             continue
-        decl = str(info[2] or "TEXT")
-        if int(info[3] or 0):
-            decl += " NOT NULL"
-        if info[4] is not None:
-            decl += f" DEFAULT {info[4]}"
+        decl = old_decls.get(name)
+        if decl is None:
+            decl = str(info[2] or "TEXT")
+            if int(info[3] or 0):
+                decl += " NOT NULL"
+            if info[4] is not None:
+                decl += f" DEFAULT {info[4]}"
         conn.execute(
             f'ALTER TABLE execution_jobs_ml_new ADD COLUMN "{name}" {decl}'
         )
@@ -4582,8 +4641,11 @@ def _ensure_execution_ml_environment_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_execution_jobs_source_terminal "
-        "ON execution_jobs(source,status,terminal_at,id)"
+        "ON execution_jobs(source,status,terminal_at)"
     )
+    # 注：三条 claim-order 索引（claim_source_order/claim_contest_order/
+    # contest_dispatch_gap）不在此重建——_migrate 在本函数返回后于定义
+    # 认证段统一重建并校验；本函数不得单独挪用。
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_execution_jobs_contest_claim_history "
         "ON execution_jobs(source,contest_id,claimed_at,id)"
